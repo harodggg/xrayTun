@@ -101,8 +101,19 @@ pub fn run() {
             commands::diagnostics,
             commands::open_data_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("Tauri 应用启动失败");
+        .build(tauri::generate_context!())
+        .expect("Tauri 应用启动失败")
+        .run(|app, event| {
+            // ⌘Q 与菜单里的退出都会走到这里，而它们**不经过**托盘那个
+            // 「退出 XrayTun」菜单项 —— 不在这里接一手的话，退出时既不会
+            // 回滚路由，也不会杀掉核心：隧道留在系统上、核心变成孤儿并继续
+            // 占着入站端口，用户下次点连接会直接失败。
+            //
+            // `sync_cleanup` 是幂等的，所以托盘那条路已经清理过也没关系。
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                crate::tray::sync_cleanup(app);
+            }
+        });
 }
 
 /// 启动后的自检。

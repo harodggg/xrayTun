@@ -144,29 +144,60 @@ fn show_main_window(app: &AppHandle) {
 /// 即使这一步也失败，helper 下次启动时会读快照再回滚一次，
 /// 这就是快照要落盘的原因。
 fn shutdown_and_exit(app: &AppHandle) {
-    if let Some(state) = app.try_state::<AppState>() {
-        let running = state.with(|i| i.runtime.running).unwrap_or(false);
-        let pid = state.with(|i| i.runtime.pid).flatten();
-
-        if running {
-            // 这里**必须**用 try_lock：我们在一个同步的菜单回调里，
-            // 拿不到锁就直接放弃 —— helper 下次启动时会按磁盘快照再回滚一次，
-            // 那才是最终保障。绝不要在这里阻塞等待（可能死锁）。
-            match state.helper.try_lock() {
-                Ok(mut helper) => match helper.call(&xt_proto::Request::Restore) {
-                    Ok(_) => tracing::info!("退出前已回滚网络配置"),
-                    Err(e) => tracing::error!(
-                        error = %e.message,
-                        "退出前回滚失败；helper 会在下次启动时按磁盘快照重试"
-                    ),
-                },
-                Err(_) => tracing::warn!("helper 正忙，跳过退出前回滚；下次启动会自动修复"),
-            }
-            if let Some(pid) = pid {
-                // SAFETY: kill 只读 pid；进程可能已退出，失败无害。
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            }
-        }
-    }
+    sync_cleanup(app);
     app.exit(0);
+}
+
+/// 退出前**同步**回滚网络并停掉核心。可重复调用（第二次起都是空操作）。
+///
+/// 为什么必须同步：清理是「改系统路由 + 杀进程」，而调用方紧接着就要让
+/// 进程消失。任何还没被 poll 到的 async 清理都不会执行。
+///
+/// 为什么托盘退出和 `RunEvent::ExitRequested` 都要调它：**`app.exit()`
+/// 不会运行析构函数**，所以 `XrayProcess` 上那个 `kill_on_drop(true)`
+/// 在退出路径上根本不生效 —— 它注释里承诺的「即便上层忘了 shutdown，
+/// 进程也不会变成孤儿」只在正常作用域结束时成立。后果是核心变成孤儿，
+/// 继续占着 10808 / 10809 / 10085，**下一次点连接会直接因为端口被占而失败**
+/// （实测踩到过：核心被留在后台，入站端口全部仍被监听）。
+///
+/// 而 ⌘Q 必须单独接：菜单里的退出走 Tauri 的默认流程，
+/// 完全绕过托盘那个「退出 XrayTun」菜单项。
+pub fn sync_cleanup(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let running = state.with(|i| i.runtime.running).unwrap_or(false);
+    let pid = state.with(|i| i.runtime.pid).flatten();
+    if !running && pid.is_none() {
+        return;
+    }
+
+    // 这里**必须**用 try_lock：我们在一个同步回调里，拿不到锁就直接放弃
+    // —— helper 下次启动时会按磁盘快照再回滚一次，那才是最终保障。
+    // 绝不要在这里阻塞等待（可能死锁）。
+    match state.helper.try_lock() {
+        Ok(mut helper) => match helper.call(&xt_proto::Request::Restore) {
+            Ok(_) => tracing::info!("退出前已回滚网络配置"),
+            Err(e) => tracing::error!(
+                error = %e.message,
+                "退出前回滚失败；helper 会在下次启动时按磁盘快照重试"
+            ),
+        },
+        Err(_) => tracing::warn!("helper 正忙，跳过退出前回滚；下次启动会自动修复"),
+    }
+
+    if let Some(pid) = pid {
+        tracing::info!(pid, "退出前终止核心进程");
+        // SAFETY: kill 只读 pid；进程可能已退出，失败无害。
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        // 给核心一点时间释放端口。等太久会拖慢退出，但端口冲突的代价更大
+        // —— 用户下次点连接会直接失败，且看不出原因。
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+
+    // 标记为已停止：ExitRequested 再跑一遍时直接返回，不会重复处理。
+    state.with(|i| {
+        i.runtime.running = false;
+        i.runtime.pid = None;
+    });
 }
