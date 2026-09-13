@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  XrayTun 主 App 的 entitlements。
+
+  这几条不是可选的，每一条都对应一个真实的失败模式：
+
+  * disable-library-validation
+      我们要在 Helper 之外再拉起一个**独立签名**的 Xray 二进制。
+      开启 Hardened Runtime 后，进程默认只能加载同 Team ID 且同证书的库/可执行文件，
+      否则会被 dyld 直接杀掉。Xray 是第三方（MPL-2.0）产物，签名主体不同，必须放行。
+
+  * allow-unsigned-executable-memory
+      Go 运行时的某些路径（以及 JIT 型的 TLS 指纹库）会申请可写可执行内存。
+      不放行会在启动核心时崩溃。
+
+  * allow-jit
+      uTLS 指纹伪装相关的代码路径需要。
+
+  * network.client
+      即使是未沙箱化的 App，声明它也有助于未来迁移到 App Sandbox。
+
+  注意：**主 App 本身不需要任何特权**。建 utun、改路由、改 DNS 全部由
+  com.xraytun.helper 这个 root LaunchDaemon 完成，两者通过
+  /var/run/com.xraytun.helper.sock 通信，helper 侧会校验本 App 的代码签名。
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

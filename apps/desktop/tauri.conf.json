@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "XrayTun",
+  "version": "0.1.0",
+  "identifier": "com.xraytun.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ../ui run dev",
+    "beforeBuildCommand": "npm --prefix ../ui run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "XrayTun",
+        "width": 1080,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 580,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "category": "Utility",
+    "shortDescription": "基于 Xray 内核、支持 TUN 模式的 macOS 代理客户端",
+    "longDescription": "XrayTun 使用 Xray-core 原生 TUN 入站接管系统流量，通过特权 helper 完成 utun 创建、路由与 DNS 配置，并保证任何时刻都能完整回滚。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "entitlements.plist",
+      "frameworks": []
+    }
+  }
+}

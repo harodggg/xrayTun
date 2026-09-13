@@ -1,0 +1,30 @@
+[package]
+name = "xraytun-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "XrayTun 桌面端（Tauri 2 外壳）"
+default-run = "xraytun-desktop"
+
+[lib]
+name = "xraytun_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+xt-proto.workspace = true
+xt-core.workspace = true
+xt-tun.workspace = true
+
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+libc.workspace = true
+url.workspace = true

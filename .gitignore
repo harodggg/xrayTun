@@ -1,0 +1,39 @@
+# ---- Rust / Tauri 构建产物 ----
+/target
+/.cargo
+/.cargo-target
+/apps/desktop/gen
+/apps/ui/node_modules
+/apps/ui/dist
+/.npm-cache
+
+# ---- Xray 核心与规则集 ----
+# 用 scripts/fetch-xray.sh 获取：体积大（xray 34MB + geo 28MB），
+# 而且是第三方发行物，不该进本仓库的历史。
+/apps/desktop/binaries/xray
+/apps/desktop/binaries/geoip.dat
+/apps/desktop/binaries/geosite.dat
+/apps/desktop/binaries/LICENSE-xray
+
+# ---- 用户数据（**绝对不能入库**）----
+# 里面有节点地址、UUID、REALITY 公钥、订阅链接，
+# 以及 helper 记录的系统改动快照。
+.xraytun-data/
+**/helper-session.json
+
+# ---- 打包产物 ----
+*.dmg
+*.app
+/apps/desktop/target
+
+# ---- iOS ----
+/ios/build
+/ios/DerivedData
+/ios/Pods
+*.xcframework
+*.xcworkspace/xcuserdata
+*.xcodeproj/xcuserdata
+
+# ---- 杂项 ----
+*.log
+.DS_Store

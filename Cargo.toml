@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/xt-proto",
+    "crates/xt-core",
+    "crates/xt-tun",
+    "crates/xt-helper",
+    "apps/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+repository = "https://example.invalid/xray-tun"
+
+[workspace.dependencies]
+# 通用
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+
+# 异步运行时（进程管理 / 探针并发）
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "net",
+    "io-util",
+    "sync",
+    "time",
+    "signal",
+    "fs",
+] }
+
+# 订阅解析
+base64 = "0.22"
+url = "2"
+percent-encoding = "2"
+serde_yaml = "0.9"
+
+# macOS 系统调用
+libc = "0.2"
+
+# Xray 的 StatsService：gRPC（明文 h2c），用来读流量计数器。
+# 只为了这一个一元 RPC 引入 h2，比引入整套 tonic/prost 小得多 ——
+# 我们只需要手写两条消息的 protobuf，见 crates/xt-core/src/xray/stats.rs。
+h2 = "0.4"
+http = "1"
+bytes = "1"
+
+# CLI（helper / 开发工具）
+clap = { version = "4", features = ["derive"] }
+
+# 内部 crate
+xt-proto = { path = "crates/xt-proto" }
+xt-core = { path = "crates/xt-core" }
+xt-tun = { path = "crates/xt-tun" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# 开发期把依赖也编译成 release 级别的优化，TUN 数据面性能更接近真实
+[profile.dev.package."*"]
+opt-level = 2
