@@ -108,6 +108,25 @@ xattr -dr com.apple.quarantine /Applications/XrayTun.app
 
 正式分发需要付费开发者账号，用 Developer ID 重签并 `notarytool` 公证。
 
+## CI 与发版
+
+| 工作流 | 触发 | 做什么 |
+|---|---|---|
+| `ci.yml` | push 到 main / PR | clippy（warning 视为错误）、227 个单元测试、前后端构建 |
+| `release.yml` | 打 tag `v*` | 出 **universal** 包并创建 GitHub Release |
+
+发版只需要推一个 tag：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+为什么发版必须交给 CI，而不是本地跑上面那个脚本：本机是 Homebrew 装的
+rust，没有 rustup、加不了 target，所以**本地只能出主机架构的包**（实测是
+x86_64 的 App + arm64 的核心）；而且核心上游按架构分发，要出通用包得分别
+下载再 lipo 合成。CI 上这两件事都是确定的。发布用的 `contents: write`
+令牌也由 CI 提供，本地没有。
+
 ## 文档
 
 | 文档 | 内容 |

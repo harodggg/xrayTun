@@ -45,6 +45,22 @@ export CARGO_HOME="${CARGO_HOME:-$ROOT/../.cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/../.cargo-target}"
 export npm_config_cache="${npm_config_cache:-$ROOT/../.npm-cache}"
 
+# 可选：交叉/通用构建的目标三元组。
+#
+# 设成 `universal-apple-darwin` 就出一个同时含 x86_64 与 arm64 的包
+# （CI 里就是这么用的，见 .github/workflows/release.yml）。前提是
+# 两个 target 都装了：`rustup target add x86_64-apple-darwin aarch64-apple-darwin`。
+# Homebrew 装的 rust 没有 rustup，加不了 target，只能用默认主机架构。
+TARGET_TRIPLE="${XRAYTUN_TARGET:-}"
+if [ -n "$TARGET_TRIPLE" ]; then
+  TARGET_FLAG="--target $TARGET_TRIPLE"
+  # cargo 会把产物写进 <target-dir>/<triple>/release
+  RELEASE_DIR="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
+else
+  TARGET_FLAG=""
+  RELEASE_DIR="$CARGO_TARGET_DIR/release"
+fi
+
 TAURI="$ROOT/apps/ui/node_modules/.bin/tauri"
 if [ ! -x "$TAURI" ]; then
   echo "缺少 Tauri CLI。先执行：" >&2
@@ -61,7 +77,7 @@ for f in xray geoip.dat geosite.dat; do
 done
 
 echo "==> 1/4 构建 release 版 Rust（含 helper）"
-cargo build --release --workspace
+cargo build --release --workspace $TARGET_FLAG
 
 # 前端单独构建一次。
 #
@@ -85,16 +101,16 @@ echo "==> 3/4 打包 .app"
 # （CI、被沙箱限制的终端）它必定失败，报错只有一句
 # "error running bundle_dmg.sh"，看不出是权限问题。
 # 我们随后用 hdiutil 直接打 dmg：功能上少一个漂亮的背景图，但到处都能跑。
-(cd "$ROOT/apps/desktop" && "$TAURI" build --bundles app)
+(cd "$ROOT/apps/desktop" && "$TAURI" build --bundles app $TARGET_FLAG)
 
-APP="$CARGO_TARGET_DIR/release/bundle/macos/XrayTun.app"
+APP="$RELEASE_DIR/bundle/macos/XrayTun.app"
 if [ ! -d "$APP" ]; then
   echo "打包完成但没找到 $APP" >&2
   exit 1
 fi
 
 echo "==> 4/4 把 helper 放进 Contents/MacOS/ 并校验"
-HELPER_SRC="$CARGO_TARGET_DIR/release/xraytun-helper"
+HELPER_SRC="$RELEASE_DIR/xraytun-helper"
 if [ ! -f "$HELPER_SRC" ]; then
   echo "找不到 release 版 helper：$HELPER_SRC" >&2
   exit 1
@@ -152,7 +168,7 @@ echo "  · App 架构 $APP_ARCH / 核心架构 ${CORE_ARCH:-未知}"
 # 改成两步，全程不挂载：
 #   1. makehybrid 直接从目录生成 HFS 镜像
 #   2. convert 把它压成 UDZO
-DMG_DIR="$CARGO_TARGET_DIR/release/bundle/dmg"
+DMG_DIR="$RELEASE_DIR/bundle/dmg"
 mkdir -p "$DMG_DIR"
 DMG="$DMG_DIR/XrayTun_0.1.0_$APP_ARCH.dmg"
 RAW="$DMG_DIR/.xraytun-raw.dmg"
@@ -194,11 +210,11 @@ cat <<EOF
 
   xattr -dr com.apple.quarantine /Applications/XrayTun.app
 
-架构：App 是 $APP_ARCH，核心是 ${CORE_ARCH:-未知}。
+架构：App 是 ${APP_ARCH}，核心是 ${CORE_ARCH:-未知}。
 两者不一致时（本机就是：x86_64 的 App + arm64 的核心），
 App 经由 Rosetta 运行，核心仍是原生的。
 
-要出真正的 universal 包，需要 arm64 的 Rust 工具链
-（用 rustup 装的 rust，而不是 Homebrew 的 /usr/local 那份），
-再加 `--target universal-apple-darwin`。
+要出真正的 universal 包，需要 rustup 装的 rust（而不是 Homebrew
+/usr/local 那份），然后设 XRAYTUN_TARGET=universal-apple-darwin 再跑一次；
+或者直接打 tag 交给 .github/workflows/release.yml 出包。
 EOF

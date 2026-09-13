@@ -1,0 +1,68 @@
+name: CI
+
+# 这个项目的代码**只能在 macOS 上跑**：utun 走 PF_SYSTEM 内核控制接口、
+# 路由是 `route(8)`、对端校验用 Security.framework，都不是可移植代码。
+# 所以没有 Linux job —— 在 ubuntu 上能过的只有纯解析部分，那覆盖不了
+# 真正会坏的地方，反而会给人一种「CI 绿了就没问题」的错觉。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 依赖缓存放进工作区，和 scripts/dev.sh 的约定一致。
+  CARGO_HOME: ${{ github.workspace }}/.cargo
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+
+jobs:
+  check:
+    name: 构建 / lint / 测试
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV
+
+      - name: 缓存 cargo 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo/registry
+            .cargo/git
+            .cargo-target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: 缓存 npm
+        uses: actions/cache@v4
+        with:
+          path: .npm-cache
+          key: ${{ runner.os }}-npm-${{ hashFiles('apps/ui/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
+
+      - name: 取 Xray 核心
+        run: ./scripts/fetch-xray.sh
+
+      - name: 前端依赖
+        run: npm --prefix apps/ui ci --no-audit --no-fund --cache "$GITHUB_WORKSPACE/.npm-cache"
+
+      - name: TypeScript 类型检查
+        run: npm --prefix apps/ui exec tsc -- --noEmit
+
+      - name: 前端构建
+        run: npm --prefix apps/ui run build
+
+      - name: clippy（warning 视为错误）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 单元测试
+        run: cargo test --workspace
+
+      - name: release 构建（打包路径也要能编过）
+        run: cargo build --release --workspace

@@ -1,0 +1,178 @@
+name: Release
+
+# 打 tag 即发布：
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 为什么发版要放在 CI 而不是本地跑 `scripts/package-macos.sh`：
+#
+# 1. **universal 包**。本机是 Homebrew 装的 rust，它没有 rustup、加不了
+#    target，所以本地只能出主机架构的包（实测：x86_64 的 App + arm64 的核心）。
+#    runner 上的 rustup 能同时装两个 target，出一个真正的通用包。
+# 2. **核心也要 universal**。上游按架构分发，得分别下载再用 lipo 合成 ——
+#    这一步只有 CI 做才不依赖「我这台机器是什么架构」。
+# 3. 发布动作需要 `contents: write` 令牌，CI 自带，本地没有。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（如 v0.1.0）"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: ${{ github.workspace }}/.cargo
+  CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+
+jobs:
+  release:
+    name: 构建并发布 universal 包
+    # macos-14 是 Apple Silicon。包是 universal 的，所以用哪个架构的 runner
+    # 都行，选 arm64 只是因为它更快。
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 与两个 target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          rustup target list --installed
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo/registry
+            .cargo/git
+            .cargo-target
+          key: ${{ runner.os }}-universal-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-universal-cargo-
+
+      - name: 缓存 npm
+        uses: actions/cache@v4
+        with:
+          path: .npm-cache
+          key: ${{ runner.os }}-npm-${{ hashFiles('apps/ui/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
+
+      - name: 分别取两种架构的核心并合成 universal
+        run: |
+          set -eu
+          # 交叉架构那份本机执行不了，用 XRAY_SKIP_VERSION_CHECK 跳过校验；
+          # 合成之后统一验一次。
+          XRAY_ARCH=arm64  XRAY_SKIP_VERSION_CHECK=1 XRAY_DEST="$PWD/bins/arm64"  ./scripts/fetch-xray.sh
+          XRAY_ARCH=x86_64 XRAY_SKIP_VERSION_CHECK=1 XRAY_DEST="$PWD/bins/x86_64" ./scripts/fetch-xray.sh
+
+          mkdir -p apps/desktop/binaries
+          lipo -create bins/arm64/xray bins/x86_64/xray -output apps/desktop/binaries/xray
+          chmod +x apps/desktop/binaries/xray
+
+          # geo 数据两份是一样的，取其一即可。
+          cp bins/arm64/geoip.dat bins/arm64/geosite.dat apps/desktop/binaries/
+          cp bins/arm64/LICENSE-xray apps/desktop/binaries/ 2>/dev/null || true
+
+          echo "核心架构：$(lipo -archs apps/desktop/binaries/xray)"
+          # 到这里核心一定能在本机执行（含本机架构的 slice），
+          # 所以版本下限校验放在这里做。
+          apps/desktop/binaries/xray version | head -1
+
+      - name: 前端依赖
+        run: npm --prefix apps/ui ci --no-audit --no-fund --cache "$GITHUB_WORKSPACE/.npm-cache"
+
+      - name: 测试（发版前必须全绿）
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: 打包（universal）
+        env:
+          XRAYTUN_TARGET: universal-apple-darwin
+        run: ./scripts/package-macos.sh
+
+      - name: 校验产物确实是 universal，且是自洽的
+        run: |
+          set -eu
+          D="$CARGO_TARGET_DIR/universal-apple-darwin/release/bundle"
+          APP="$D/macos/XrayTun.app"
+          echo "App : $(lipo -archs "$APP/Contents/MacOS/xraytun-desktop")"
+          echo "核心: $(lipo -archs "$APP/Contents/Resources/xray")"
+          echo "helper: $(lipo -archs "$APP/Contents/MacOS/xraytun-helper")"
+
+          for f in Contents/MacOS/xraytun-desktop Contents/MacOS/xraytun-helper \
+                   Contents/Resources/xray Contents/Resources/geoip.dat \
+                   Contents/Resources/geosite.dat; do
+            [ -e "$APP/$f" ] || { echo "缺少 $f" >&2; exit 1; }
+          done
+
+          # 三个可执行文件都必须是 universal，否则这个包就名不副实。
+          for f in Contents/MacOS/xraytun-desktop Contents/MacOS/xraytun-helper \
+                   Contents/Resources/xray; do
+            archs="$(lipo -archs "$APP/$f")"
+            case "$archs" in
+              *x86_64*arm64*|*arm64*x86_64*) ;;
+              *) echo "$f 不是 universal（$archs）" >&2; exit 1 ;;
+            esac
+          done
+
+          codesign --verify --verbose=1 "$APP"
+
+      - name: 收集产物
+        id: collect
+        run: |
+          set -eu
+          D="$CARGO_TARGET_DIR/universal-apple-darwin/release/bundle/dmg"
+          mkdir -p dist
+          cp "$D"/*.dmg "$D"/*.zip dist/ 2>/dev/null || true
+          # 校验和：下载的人至少能自己核对一下完整性。
+          (cd dist && shasum -a 256 ./* > SHA256SUMS.txt)
+          ls -lh dist/
+          cat dist/SHA256SUMS.txt
+
+      - name: 发布到 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          # 说明写在文件里，避免在 YAML 里塞大段中文。
+          cat > NOTES.md <<'EOF'
+          ## 安装
+
+          1. 下载 `.dmg` 或 `.zip`，把 `XrayTun.app` 拖进「应用程序」
+          2. 首次打开会被 Gatekeeper 拦下（见下），右键 →「打开」，或：
+             ```bash
+             xattr -dr com.apple.quarantine /Applications/XrayTun.app
+             ```
+          3. 打开后到「设置」里安装特权 helper（需要一次管理员密码），TUN 模式才能用
+
+          ## 关于 Gatekeeper
+
+          这个包是 **ad-hoc 签名、未公证**的，因为仓库里没有 Developer ID 证书。
+          要免打扰分发，需要付费开发者账号，然后在 CI 里加签名与公证步骤。
+
+          ## 架构
+
+          universal（x86_64 + arm64），App / helper / 核心三者都是。
+
+          ## 这个 App 会改你的系统网络配置
+
+          TUN 模式会创建 utun 网卡、接管默认路由并修改 DNS。它通过一个
+          特权 helper 完成这些改动，**每一条改动都先落盘成快照**，
+          退出或崩溃后可按快照完整回滚。详见 `docs/02-tun-and-privileges.md`。
+          EOF
+
+          # Tag 已经存在 Release 时用 upload --clobber 覆盖，避免重跑失败。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "XrayTun ${TAG}" \
+              --notes-file NOTES.md
+          fi

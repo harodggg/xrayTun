@@ -8,14 +8,18 @@
 set -eu
 
 VERSION="${XRAY_VERSION:-v26.9.9}"
-DEST="$(cd "$(dirname "$0")/.." && pwd)/apps/desktop/binaries"
+DEST="${XRAY_DEST:-$(cd "$(dirname "$0")/.." && pwd)/apps/desktop/binaries}"
 MIN_VERSION="26.1.31"
 
-case "$(uname -m)" in
+# 允许指定架构。存在的理由是 **universal 打包**：CI 上要分别取
+# arm64 与 x86_64 两份核心，再用 lipo 合成一个，所以必须能脱离
+# `uname -m` 单独下载某一种。
+ARCH="${XRAY_ARCH:-$(uname -m)}"
+case "$ARCH" in
   arm64) ASSET="Xray-macos-arm64-v8a.zip" ;;
   x86_64) ASSET="Xray-macos-64.zip" ;;
   *)
-    echo "不支持的架构：$(uname -m)" >&2
+    echo "不支持的架构：$ARCH" >&2
     exit 1
     ;;
 esac
@@ -55,6 +59,14 @@ done
 [ -f "$TMP/extracted/LICENSE" ] && cp "$TMP/extracted/LICENSE" "$DEST/LICENSE-xray" || true
 
 chmod +x "$DEST/xray"
+
+# 交叉架构下载时不能在本机执行它（例如在 arm64 机器上取 x86_64 那份），
+# 而下面的版本校验必须运行 `xray version` —— 所以给 CI 留一个跳过开关。
+# 跳过的校验由 lipo 合成之后那一次补上。
+if [ "${XRAY_SKIP_VERSION_CHECK:-0}" = "1" ]; then
+  echo "已下载 ${ARCH} 版核心，跳过版本校验（交叉架构，本机无法执行）"
+  exit 0
+fi
 
 # 校验版本下限。
 ACTUAL="$("$DEST/xray" version 2>/dev/null | head -1 || echo "")"
