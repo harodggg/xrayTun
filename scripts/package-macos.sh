@@ -183,14 +183,56 @@ mkdir -p "$DMG_DIR"
 DMG="$DMG_DIR/XrayTun_${APP_VERSION}_$APP_ARCH.dmg"
 RAW="$DMG_DIR/.xraytun-raw.dmg"
 rm -f "$DMG" "$RAW"
-if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$APP" \
+# 必须先搭一个**暂存目录**，且这个目录里要放 .app 本身。
+#
+# `makehybrid -srcfolder <dir>` 是把 dir 的**内容**当作镜像根目录。
+# 早先直接写 `-srcfolder "$APP"` 时，镜像根目录变成了 .app 内部的
+# `Contents/` —— 打开 dmg 看到的是一个裸的 Contents 文件夹，
+# 没有可拖拽的 App。用户只能自己去别处找 .app 再手动拷。
+STAGE="$DMG_DIR/.dmg-stage"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/XrayTun.app"
+# /Applications 快捷方式：有它才能「拖进去就装完」。
+# 没有它，用户面对一个孤零零的 .app 只能自己猜该放哪。
+ln -s /Applications "$STAGE/Applications"
+
+if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$STAGE" \
    && hdiutil convert -quiet "$RAW" -format UDZO -o "$DMG"; then
   rm -f "$RAW"
-  echo "  ✓ 已生成 dmg（含 helper）"
+  echo "  ✓ 已生成 dmg（含 helper 与 /Applications 快捷方式）"
 else
   rm -f "$RAW"
   DMG=""
   echo "  ⚠ 打 dmg 失败（本环境可能禁止挂载镜像），.app 仍然可用" >&2
+fi
+rm -rf "$STAGE"
+
+# 挂载镜像实检一次。
+#
+# 这一条是补出来的：`-srcfolder` 的语义写错时，**退出码、产物大小、
+# 签名校验全都正常**，只有用户双击打开 dmg 才会发现里面是一堆散文件。
+# 唯一能在交付前发现它的办法就是把镜像挂起来看内容。
+if [ -n "$DMG" ] && [ -f "$DMG" ]; then
+  MP="$(mktemp -d)"
+  if hdiutil attach -nobrowse -readonly -mountpoint "$MP" "$DMG" >/dev/null 2>&1; then
+    if [ -d "$MP/XrayTun.app" ]; then
+      echo "  ✓ 镜像根目录里有 XrayTun.app"
+    else
+      echo "  ✗ 镜像根目录里没有 XrayTun.app（用户会看到一堆散文件）" >&2
+      fail=1
+    fi
+    if [ -L "$MP/Applications" ]; then
+      echo "  ✓ 有 /Applications 快捷方式"
+    else
+      echo "  ✗ 缺 /Applications 快捷方式（用户不知道往哪拖）" >&2
+      fail=1
+    fi
+    hdiutil detach "$MP" >/dev/null 2>&1 || hdiutil detach "$MP" -force >/dev/null 2>&1 || true
+  else
+    echo "  · 本环境无法挂载镜像做校验，已跳过（不影响产物）"
+  fi
+  rmdir "$MP" 2>/dev/null || true
 fi
 
 # 再给一个 zip：dmg 打不出来时它是唯一能直接分发的形态，
