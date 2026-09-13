@@ -423,6 +423,39 @@ export default function Settings() {
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
           <input
             type="checkbox"
+            // 勾选状态来自**系统**（snapshot.login_item），不是 settings 字段。
+            // 用户可以在「系统设置 → 通用 → 登录项」里直接删掉这一项，
+            // 那种情况下 settings 说「开着」而现实是「不会自启」。
+            checked={snapshot.login_item.status === "enabled" ||
+              snapshot.login_item.status === "requires_approval"}
+            disabled={busy === "login-item"}
+            onChange={(e) =>
+              void run("login-item", () => api.setLaunchAtLogin(e.target.checked))
+            }
+          />
+          开机自启动
+          <span className="field__hint" style={{ marginLeft: 6 }}>
+            {snapshot.login_item.detail}
+          </span>
+        </label>
+        {snapshot.login_item.needs_approval && (
+          <div className="banner banner--warn" style={{ marginBottom: 10 }}>
+            <span>⚠︎</span>
+            <div style={{ flex: 1 }}>
+              系统已登记，但还需要你在「系统设置 → 通用 → 登录项与扩展」里允许它。
+            </div>
+            <button
+              className="btn btn--ghost"
+              onClick={() => void runVoid("open-login-items", () => api.openLoginItemSettings())}
+            >
+              打开设置
+            </button>
+          </div>
+        )}
+
+        <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
+          <input
+            type="checkbox"
             checked={settings.show_speed_in_title}
             onChange={(e) => patch({ show_speed_in_title: e.target.checked })}
           />

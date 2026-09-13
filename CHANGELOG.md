@@ -71,6 +71,30 @@
 `bootstrap` 里是 `app.emit(RUNTIME_CHANGED, ())`，而前端会直接读
 `payload.runtime` —— 在 webview 里抛 TypeError，运行时与流量都拿不到更新。
 
+### 新增：开机自启动
+
+「设置 → 其他 → 开机自启动」。用 `SMAppService`（macOS 13+ 的系统登录项），
+而不是写 `~/Library/LaunchAgents` plist —— 后者会落在
+「系统设置 → 通用 → 登录项与扩展 → **允许在后台**」里，而用户会去
+「**登录时打开**」那个列表确认，找不到就认为功能没生效。
+
+两个实现细节值得记下来：
+
+* ObjC 选择子是 **`mainAppService`**，不是 `mainApp` —— 后者只是
+  `NS_SWIFT_NAME` 给 Swift 用的名字，从 ObjC 发消息必须用前者，
+  写错没有编译错误、只有运行时 unrecognized selector。
+* 界面开关读的是**系统的 `status`**，不是回显 `settings.launch_at_login`。
+  用户能直接在系统设置里删掉这一项，回显设置字段会显示「已开启」
+  而实际不会自启。`RequiresApproval`（已登记但待批准）与 `Enabled` 分开呈现，
+  并提供一键跳转到系统设置的按钮。
+
+另加了排障入口（`SMAppService` 操作的是调用方所在的 bundle，
+所以必须从 App 自己的二进制里跑）：
+
+```bash
+XrayTun.app/Contents/MacOS/xraytun-desktop --login-item status|enable|disable
+```
+
 ### 新增：实时网速
 
 * 从核心的 `StatsService` 读累计字节（gRPC over h2c，手写 protobuf）。

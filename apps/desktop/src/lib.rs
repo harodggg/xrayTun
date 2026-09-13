@@ -22,6 +22,7 @@ pub mod commands;
 pub mod events;
 pub mod helper_client;
 pub mod helper_install;
+pub mod login_item;
 pub mod state;
 pub mod supervisor;
 pub mod traffic;
@@ -100,6 +101,8 @@ pub fn run() {
             commands::clear_logs,
             commands::diagnostics,
             commands::open_data_dir,
+            commands::set_launch_at_login,
+            commands::open_login_item_settings,
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -114,6 +117,42 @@ pub fn run() {
                 crate::tray::sync_cleanup(app);
             }
         });
+}
+
+/// 排障用的命令行入口。返回 `Some(退出码)` 表示「已处理，别启动 GUI」。
+///
+/// 为什么把它放进 App 自己的二进制，而不是单独的排障工具：
+/// `SMAppService.mainAppService` 操作的是**调用方所在的 bundle**。
+/// 换个二进制来跑，注册的就是那个二进制，而不是这个 App ——
+/// 所以只有从 `XrayTun.app/Contents/MacOS/` 里执行才有意义。
+///
+/// ```bash
+/// XrayTun.app/Contents/MacOS/xraytun-desktop --login-item status
+/// XrayTun.app/Contents/MacOS/xraytun-desktop --login-item enable
+/// XrayTun.app/Contents/MacOS/xraytun-desktop --login-item disable
+/// ```
+pub fn login_item_cli(args: &[String]) -> Option<i32> {
+    if args.first().map(String::as_str) != Some("--login-item") {
+        return None;
+    }
+    let op = args.get(1).map(String::as_str).unwrap_or("status");
+    let result = match op {
+        "status" => login_item::status().map(|s| println!("{}（{}）", s.describe(), s.as_str())),
+        "enable" => login_item::apply(true).map(|s| println!("{}（{}）", s.describe(), s.as_str())),
+        "disable" => login_item::apply(false).map(|s| println!("{}（{}）", s.describe(), s.as_str())),
+        "settings" => login_item::open_system_settings().map(|()| println!("已打开系统设置的登录项页面")),
+        other => {
+            eprintln!("未知操作：{other}（可用：status / enable / disable / settings）");
+            return Some(2);
+        }
+    };
+    Some(match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            1
+        }
+    })
 }
 
 /// 启动后的自检。

@@ -165,6 +165,13 @@ export interface AppSettings {
   show_speed_in_title: boolean;
 }
 
+/** 开机自启动的**真实**状态，来自系统的 SMAppService，不是回显设置字段。 */
+export interface LoginItemState {
+  status: "not_registered" | "enabled" | "requires_approval" | "not_found" | "error";
+  detail: string;
+  needs_approval: boolean;
+}
+
 export interface CoreRuntime {
   running: boolean;
   pid: number | null;
@@ -237,6 +244,7 @@ export interface AppSnapshot {
   notice: string | null;
   helper: HelperAvailability;
   core: CoreAvailability;
+  login_item: LoginItemState;
   app_version: string;
 }
 

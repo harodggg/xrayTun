@@ -26,5 +26,11 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+
+# 登录项（SMAppService）。objc2 本来就在 Tauri 的依赖树里，
+# 这里只是把它变成直接依赖，用消息发送调 ServiceManagement 框架 ——
+# 那个框架没有 Rust 绑定。
+objc2 = "0.6"
+
 libc.workspace = true
 url.workspace = true

@@ -148,7 +148,7 @@
 | 4 | ~~utun / 路由 / DNS 的 root 集成测试~~ **代码已写**（`apps/desktop/examples/tun_smoke.rs`），待实际运行 | — |
 | 5 | 流量统计的定时采样推送 | `TrafficSample::rx_rate` 当前恒为 0 | 小 |
 | 6 | 系统代理模式的实际生效 | `ProxyMode::SystemProxy` 目前只生成 SOCKS/HTTP 入站，**没有改系统代理设置**（实测不需要 root，见 §2.2） | 小 |
-| 7 | 开机自启 | `launch_at_login` 字段存在但未接线 | 小 |
+| 7 | ~~开机自启~~ | 已在 0.2.0 实现（`SMAppService`，见 docs/02 §6.5） | — |
 | 8 | 规则的界面编辑 | 见 R6 | 大 |
 | 9 | 连接列表 | 需要 gRPC | 大 |
 | 10 | 切换到 `SMAppService` | 发行版必需 | 中 |

@@ -163,7 +163,24 @@ pub struct AppSnapshot {
     pub notice: Option<String>,
     pub helper: HelperAvailability,
     pub core: CoreAvailability,
+    /// 开机自启动的**真实**状态（来自系统，不是回显设置字段）。
+    pub login_item: LoginItemState,
     pub app_version: String,
+}
+
+/// 登录项状态。
+///
+/// 之所以要从系统读而不是直接回显 `settings.launch_at_login`：
+/// 用户可以在「系统设置 → 通用 → 登录项」里把这一项删掉。回显设置字段的话，
+/// 界面会显示「已开启」，而实际根本不会自启 —— 一个没人会怀疑的谎。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LoginItemState {
+    /// `not_registered` / `enabled` / `requires_approval` / `not_found` / `error`
+    pub status: String,
+    /// 给用户看的一句话。
+    pub detail: String,
+    /// 是否需要用户去系统设置里点一下。
+    pub needs_approval: bool,
 }
 
 /// helper 的可用性。

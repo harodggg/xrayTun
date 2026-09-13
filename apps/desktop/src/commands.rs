@@ -54,9 +54,56 @@ async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot
             notice: inner.last_notice.clone(),
             helper,
             core,
+            login_item: login_item_state(),
             app_version: app.package_info().version.to_string(),
         })
         .ok_or_else(|| "应用状态不可用".to_string())
+}
+
+/// 读系统的登录项状态。读失败不是致命错误 —— 界面照常可用，
+/// 只是那一栏显示「读取失败」，并把原因写出来。
+fn login_item_state() -> crate::state::LoginItemState {
+    match crate::login_item::status() {
+        Ok(s) => crate::state::LoginItemState {
+            status: s.as_str().to_string(),
+            detail: s.describe().to_string(),
+            needs_approval: s == crate::login_item::LoginItem::RequiresApproval,
+        },
+        Err(e) => crate::state::LoginItemState {
+            status: "error".into(),
+            detail: e,
+            needs_approval: false,
+        },
+    }
+}
+
+/// 开关开机自启动。
+#[tauri::command]
+pub async fn set_launch_at_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppSnapshot, String> {
+    crate::login_item::apply(enabled)?;
+
+    // 设置字段跟着系统的真实结果走，而不是跟着请求走 ——
+    // 注册成功了但需要用户批准时，字段要不要置 true？
+    // 由 status() 决定，避免又造出一个「字段和现实不一致」的状态。
+    let actual = crate::login_item::status()?;
+    let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+    settings.launch_at_login = actual.is_on();
+    persist_settings(&state, &settings)?;
+
+    state.with(|i| {
+        i.push_log("app", "info", format!("开机自启动：{}", actual.describe()));
+    });
+    build_snapshot(&app, &state).await
+}
+
+/// 打开系统设置的登录项页面（`RequiresApproval` 时用）。
+#[tauri::command]
+pub async fn open_login_item_settings() -> Result<(), String> {
+    crate::login_item::open_system_settings()
 }
 
 fn core_availability(app: &AppHandle, state: &AppState) -> CoreAvailability {
@@ -103,6 +150,19 @@ pub async fn save_settings(
     state: State<'_, AppState>,
     settings: AppSettings,
 ) -> Result<AppSnapshot, String> {
+    // 登录项要对齐到设置里的期望值。
+    //
+    // 放在 persist 之前：apply 是幂等的（已经是目标状态就什么都不做），
+    // 所以每保存一次设置都会走到这里，不会有副作用。
+    // 失败不阻断保存 —— 其余设置该存还是要存，登录项的问题单独报给用户。
+    if let Err(e) = crate::login_item::apply(settings.launch_at_login) {
+        tracing::warn!(error = %e, "同步开机自启动设置失败");
+        state.with(|i| {
+            i.push_log("app", "warn", format!("设置开机自启动失败：{e}"));
+            i.last_notice = Some(format!("设置开机自启动失败：{e}"));
+        });
+    }
+
     persist_settings(&state, &settings)?;
 
     // 「显示网速」是个纯展示开关，不该为了它重启核心。这里立刻按新设置

@@ -56,6 +56,9 @@ export const api = {
   clearLogs: () => invoke<void>("clear_logs"),
   diagnostics: () => invoke<string>("diagnostics"),
   openDataDir: () => invoke<void>("open_data_dir"),
+  setLaunchAtLogin: (enabled: boolean) =>
+    invoke<AppSnapshot>("set_launch_at_login", { enabled }),
+  openLoginItemSettings: () => invoke<void>("open_login_item_settings"),
 };
 
 // ---------------------------------------------------------------------------

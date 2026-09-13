@@ -305,6 +305,53 @@ macOS 没有 Linux 的 policy routing：没有 `ip rule`、没有 fwmark、
 
 ---
 
+## 6.5 开机自启动：为什么用 `SMAppService`（而不是登录项 plist）
+
+「登录后自动启动」有两条路，都能跑通，但**落点完全不同**：
+
+| | 写 `~/Library/LaunchAgents/*.plist` | `SMAppService.mainAppService` |
+|---|---|---|
+| 用户在哪看到它 | 系统设置 → 通用 → 登录项与扩展 → **允许在后台** | 系统设置 → 通用 → 登录项与扩展 → **登录时打开** |
+| 需要什么权限 | 无 | 无 |
+| 出现在「登录时打开」 | ❌ | ✅ |
+
+差别看着只是位置，实际影响很大：用户想确认「到底开没开」，一定会去
+「**登录时打开**」那个列表看。而 LaunchAgent 不在那里 —— 它躺在
+「允许在后台」里，用户找不到，就会认为功能没生效。
+
+项目最低支持 macOS 13.0，正好是 `SMAppService` 的引入版本
+（`API_AVAILABLE(macos(13.0))`），所以不必为老系统留退路。
+这与 docs/06 §8 里 helper 的取舍是**不同**的问题：helper 要 root，
+用 `SMAppService.daemon` 需要真实 Developer ID，所以那边暂时留在 launchd。
+
+### 两个实现上的坑
+
+1. **ObjC 选择子是 `mainAppService`，不是 `mainApp`。**
+   头文件写的是
+   `@property (class, readonly) SMAppService *mainAppService NS_SWIFT_NAME(mainApp)`。
+   `mainApp` 只是 Swift 侧名字，从 ObjC 发消息必须用 `mainAppService`。
+   写错不会有编译错误 —— 只有运行时 unrecognized selector。
+
+2. **`status` 才是事实来源。**
+   用户能在系统设置里直接把这项删掉。界面若回显
+   `settings.launch_at_login`，就会显示「已开启」而实际不会自启 ——
+   一个没人会怀疑的谎。所以开关读的是 `SMAppService.status`，
+   并且 `RequiresApproval`（已登记但待用户批准）与 `Enabled` 分开呈现。
+
+### 排障入口
+
+`SMAppService` 操作的是**调用方所在的 bundle**，所以排障必须从 App 自己的
+二进制里跑 —— 换个独立工具注册的就是那个工具：
+
+```bash
+XrayTun.app/Contents/MacOS/xraytun-desktop --login-item status
+XrayTun.app/Contents/MacOS/xraytun-desktop --login-item enable
+XrayTun.app/Contents/MacOS/xraytun-desktop --login-item disable
+```
+
+在非 bundle 环境（例如 `cargo run` 的裸二进制）里它会报
+`not_found`，而不是崩溃或谎报成功。
+
 ## 7. 必须补的集成测试
 
 单元测试覆盖了解析、顺序、回滚逻辑，但**下面这些只能在真实 root 环境验证**：
