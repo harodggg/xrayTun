@@ -103,6 +103,16 @@ echo "==> 3/4 打包 .app"
 # 我们随后用 hdiutil 直接打 dmg：功能上少一个漂亮的背景图，但到处都能跑。
 (cd "$ROOT/apps/desktop" && "$TAURI" build --bundles app $TARGET_FLAG)
 
+# 版本号从 tauri.conf.json 读，**不要硬编码**。
+# 之前这里写死了 0.1.0，改版本时忘了同步就会打出一个名字对、内容错的包，
+# 而且产物名还会和上一版撞车（下载页面上分不清哪个是哪个）。
+APP_VERSION="$(python3 -c "import json,sys;print(json.load(open('$ROOT/apps/desktop/tauri.conf.json'))['version'])")"
+if [ -z "$APP_VERSION" ]; then
+  echo "无法从 tauri.conf.json 读出版本号" >&2
+  exit 1
+fi
+echo "  · 版本 ${APP_VERSION}"
+
 APP="$RELEASE_DIR/bundle/macos/XrayTun.app"
 if [ ! -d "$APP" ]; then
   echo "打包完成但没找到 $APP" >&2
@@ -170,7 +180,7 @@ echo "  · App 架构 $APP_ARCH / 核心架构 ${CORE_ARCH:-未知}"
 #   2. convert 把它压成 UDZO
 DMG_DIR="$RELEASE_DIR/bundle/dmg"
 mkdir -p "$DMG_DIR"
-DMG="$DMG_DIR/XrayTun_0.1.0_$APP_ARCH.dmg"
+DMG="$DMG_DIR/XrayTun_${APP_VERSION}_$APP_ARCH.dmg"
 RAW="$DMG_DIR/.xraytun-raw.dmg"
 rm -f "$DMG" "$RAW"
 if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$APP" \
@@ -185,7 +195,7 @@ fi
 
 # 再给一个 zip：dmg 打不出来时它是唯一能直接分发的形态，
 # 而且它天然保留符号链接与可执行位（用 ditto，不要用 zip 命令）。
-ZIP="$DMG_DIR/XrayTun_0.1.0_$APP_ARCH.zip"
+ZIP="$DMG_DIR/XrayTun_${APP_VERSION}_$APP_ARCH.zip"
 rm -f "$ZIP"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP" \
   && echo "  ✓ 已生成 zip" \

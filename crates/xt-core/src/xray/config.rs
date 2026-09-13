@@ -223,16 +223,34 @@ fn build_dns(s: &AppSettings) -> Value {
             // 关键点：用 `domains` 让内核按域名选解析器。
             // 大陆域名用国内 DNS 直连解析（拿到就近 CDN IP），
             // 其余域名走远端加密 DNS（抗污染，且解析结果与出口位置一致）。
+            // **刻意不写 `expectIPs`。**
+            //
+            // 最初这里给两个解析器都加了 `expectIPs`（大陆域名要求返回
+            // `geoip:cn` 的地址，反之亦然），本意是挡掉明显不合理的答案。
+            // 实测它造成的伤害远大于收益：
+            //
+            //     UDP:223.5.5.5:53 got answer: api.deepseek.com TypeA -> [3.173.21.63], rtt: 1.19ms
+            //     failed to lookup ip for domain api.deepseek.com at server UDP:223.5.5.5:53
+            //       > features/dns: empty response
+            //     DOH//1.1.1.1 querying: api.deepseek.com.
+            //
+            // 国内的解析器 **1.2ms 就给出了正确答案**，只因为
+            // `3.173.21.63`（AWS）不在 `geoip:cn` 里就被丢弃，然后串行回退到
+            // DoH —— 一次查询从 1ms 变成 450ms 起步。而「国内域名解析到
+            // 海外 IP」是常态：Apple、DeepSeek 这类都在用海外云。
+            //
+            // 回退链一长，再叠上节点抖动，查询就会超过内核的 DNS 超时，
+            // 日志里刷 `context canceled`，用户看到的是「什么都打不开」。
+            //
+            // 去掉之后：谁被 `domains` 选中就用谁的答案，不再事后否定它。
             let mut out = vec![
                 json!({
                     "address": first_or(&d.remote_servers, "https://1.1.1.1/dns-query"),
-                    "domains": ["geosite:geolocation-!cn"],
-                    "expectIPs": ["geoip:!cn"]
+                    "domains": ["geosite:geolocation-!cn"]
                 }),
                 json!({
                     "address": first_or(&d.direct_servers, "223.5.5.5"),
-                    "domains": ["geosite:cn"],
-                    "expectIPs": ["geoip:cn"]
+                    "domains": ["geosite:cn"]
                 }),
             ];
             // 兜底：与前两条同源，保证任何域名都有解析器。
@@ -976,6 +994,43 @@ mod tests {
                 .unwrap_or(false)
         });
         assert!(has_cn && has_non_cn, "按规则分流时必须有大陆/非大陆两条解析器");
+    }
+
+    /// 分流的解析器**不能**带 `expectIPs`。
+    ///
+    /// 钉住一个实测到的故障：给大陆解析器加 `expectIPs: ["geoip:cn"]` 之后，
+    /// 223.5.5.5 在 1.2ms 内返回了正确答案，却因为地址不在 `geoip:cn`
+    /// （`api.deepseek.com` → AWS 的 3.173.21.63）被判为
+    /// `features/dns: empty response` 丢弃，随后串行回退到 DoH。
+    /// 一次查询从 1ms 变成 450ms 起步，回退链叠上节点抖动就成了
+    /// 满屏的 `context canceled`。
+    #[test]
+    fn split_dns_servers_have_no_expect_ips() {
+        let mut s = settings();
+        s.dns.mode = DnsHandling::SplitByRule;
+        let cfg = build(&CoreConfigInput {
+            settings: &s,
+            nodes: &[],
+            selected: None,
+            rules: &[],
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        });
+        for server in cfg["dns"]["servers"].as_array().unwrap() {
+            assert!(
+                server.get("expectIPs").is_none(),
+                "分流解析器不能写 expectIPs，否则会把正确的答案丢掉：{server}"
+            );
+        }
+    }
+
+    /// 默认 DNS 模式必须是按规则分流。
+    ///
+    /// 0.1.0 的默认是「全部走代理解析」，实测每个查询经节点约 450ms，
+    /// 且完全依赖节点可用性。旧设置由 `AppSettings::migrate` 一次性改过来。
+    #[test]
+    fn default_dns_mode_is_split_by_rule() {
+        assert_eq!(AppSettings::default().dns.mode, DnsHandling::SplitByRule);
     }
 
     #[test]

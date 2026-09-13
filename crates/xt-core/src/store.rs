@@ -84,7 +84,22 @@ impl Store {
     pub fn load_settings(&self) -> AppSettings {
         // 读不到或解析失败都退回默认值：一个坏掉的 settings.json
         // 不应该让用户连界面都打不开。
-        self.read_json::<AppSettings>(&self.settings_path()).unwrap_or_default()
+        let mut settings = self.read_json::<AppSettings>(&self.settings_path()).unwrap_or_default();
+
+        // 旧版本的设置在这里就地升级，并立刻落盘 —— 只在内存里改的话，
+        // 每次启动都会重新迁移一遍，用户永远看不到「已经改过了」。
+        let changes = settings.migrate();
+        if !changes.is_empty() {
+            for c in &changes {
+                tracing::info!(change = %c, "设置已迁移");
+            }
+            if let Err(e) = self.save_settings(&settings) {
+                // 迁移结果写不回去不是致命错误：内存里已经是新值，
+                // 下次启动会再迁一次，行为一致。
+                tracing::warn!(error = %e, "迁移后的设置写盘失败，下次启动会重试");
+            }
+        }
+        settings
     }
 
     pub fn save_settings(&self, settings: &AppSettings) -> Result<()> {

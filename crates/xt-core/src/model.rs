@@ -489,10 +489,19 @@ pub enum RoutingPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DnsHandling {
-    /// DNS 查询交给远端解析（走代理解析，抗污染但可能拿到 CDN 远端节点）。
-    #[default]
+    /// DNS 查询**全部**交给远端解析（走代理）。
+    ///
+    /// 实测代价很大：每个查询要经节点往返约 **450ms**（本机实测
+    /// 440–520ms），而国内 DNS 直连只要 **1ms**。更要命的是它把
+    /// 「域名能不能解析」和「节点快不快」绑在了一起 —— 节点一忙或
+    /// 一抖，查询就超过内核的 DNS 超时，日志里刷
+    /// `Post "https://1.1.1.1/dns-query": context canceled`，
+    /// 而用户看到的是「什么都打不开」。
+    ///
+    /// 仍然保留这个选项：它对「宁可慢也不要污染」的场景是合理的。
     Proxy,
-    /// 国内域名本地直连解析，其余走代理。
+    /// 国内域名本地直连解析，其余走代理。**[默认]**
+    #[default]
     SplitByRule,
     /// 全部本地直连解析。
     Direct,
@@ -524,7 +533,12 @@ pub struct DnsSettings {
 }
 
 fn default_remote_dns() -> Vec<String> {
-    vec!["https://1.1.1.1/dns-query".into(), "https://dns.google/dns-query".into()]
+    // 两个都用 **IP 形式**的 DoH 端点，刻意不用 `https://dns.google/dns-query`。
+    //
+    // 后者的主机名本身要先被解析一次，而解析它用的还是这套 DNS ——
+    // 一个自举依赖。内核能处理，代价是多一次串行查询，而且失败时
+    // 报错会指向一个和用户无关的域名。IP 端点没有这个问题。
+    vec!["https://1.1.1.1/dns-query".into(), "https://8.8.8.8/dns-query".into()]
 }
 
 fn default_direct_dns() -> Vec<String> {
@@ -690,8 +704,16 @@ impl Default for FakeDnsSettings {
     }
 }
 
+/// 设置文件的版本号。用来做**一次性迁移**。
+///
+/// 0 表示 0.1.0 时代写下的文件（那时还没有这个字段）。
+pub const SETTINGS_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSettings {
+    /// 见 [`SETTINGS_VERSION`]。缺失时按 0 处理，走迁移。
+    #[serde(default)]
+    pub settings_version: u32,
     #[serde(default)]
     pub mode: ProxyMode,
     #[serde(default = "default_socks_port")]
@@ -748,6 +770,7 @@ fn default_log_level() -> String {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            settings_version: SETTINGS_VERSION,
             mode: ProxyMode::default(),
             socks_port: default_socks_port(),
             http_port: default_http_port(),
@@ -768,6 +791,40 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// 把旧版本的设置升级到当前版本，返回**人类可读的改动列表**（没有改动就是空）。
+    ///
+    /// 返回列表而不是只打日志：迁移是替用户做决定，必须让他在界面上
+    /// 看得到「什么被改了」，否则就成了暗中改配置。
+    pub fn migrate(&mut self) -> Vec<String> {
+        let mut changes = Vec::new();
+
+        if self.settings_version < 1 {
+            // 0.1.0 的默认 DNS 模式是 `proxy`（全部走远端解析）。实测每个
+            // 查询要 450ms 上下，而且节点一抖就整片解析失败 —— 日志里刷
+            // `context canceled`，用户看到的是「上不了网」。
+            //
+            // 这里只改**默认值留下的痕迹**，改不动用户的显式选择是没法区分的
+            // （JSON 里看不出哪个值是默认填的），所以统一迁移，并在界面上说明。
+            if self.dns.mode == DnsHandling::Proxy {
+                self.dns.mode = DnsHandling::SplitByRule;
+                changes.push("DNS 改为「按规则分流」（原来全部走代理解析）".into());
+            }
+            // 域名形式的 DoH 端点要先解析自己，属于自举依赖。
+            if let Some(pos) = self
+                .dns
+                .remote_servers
+                .iter()
+                .position(|s| s.contains("dns.google"))
+            {
+                self.dns.remote_servers[pos] = "https://8.8.8.8/dns-query".into();
+                changes.push("远端 DNS 去掉需要自举解析的 dns.google，换成 8.8.8.8".into());
+            }
+            self.settings_version = 1;
+        }
+
+        changes
+    }
+
     /// 做一次边界校验，避免把非法值送进核心或 helper。
     pub fn validate(&self) -> Result<(), crate::Error> {
         for (name, port) in [("socks_port", self.socks_port), ("http_port", self.http_port)] {
@@ -847,6 +904,46 @@ mod tests {
 
         let unlimited = SubscriptionUsage::parse_header("upload=1; download=2; total=0");
         assert_eq!(unlimited.ratio(), None);
+    }
+
+    /// 迁移必须把 0.1.0 的默认 DNS 模式改掉 —— 那正是「DNS 频繁
+    /// context canceled」的根因（每个查询经节点约 450ms）。
+    #[test]
+    fn migrate_moves_proxy_dns_to_split_by_rule() {
+        let mut s = AppSettings { settings_version: 0, ..Default::default() };
+        s.dns.mode = DnsHandling::Proxy;
+        s.dns.remote_servers = vec![
+            "https://1.1.1.1/dns-query".into(),
+            "https://dns.google/dns-query".into(),
+        ];
+
+        let changes = s.migrate();
+        assert_eq!(s.dns.mode, DnsHandling::SplitByRule);
+        assert!(
+            !s.dns.remote_servers.iter().any(|x| x.contains("dns.google")),
+            "需要自举解析的 DoH 端点必须被换掉"
+        );
+        assert_eq!(s.settings_version, SETTINGS_VERSION);
+        assert_eq!(changes.len(), 2, "两处改动都要报告给用户：{changes:?}");
+    }
+
+    /// 迁移是幂等的：已经是当前的设置不该被动。
+    #[test]
+    fn migrate_is_idempotent_and_respects_new_files() {
+        let mut s = AppSettings::default();
+        assert_eq!(s.dns.mode, DnsHandling::SplitByRule, "新装的默认值就是分流");
+        assert!(s.migrate().is_empty(), "当前版本的文件不该产生任何改动");
+        assert!(s.migrate().is_empty(), "再跑一次仍然什么都不做");
+    }
+
+    /// 用户显式选了「全部直连 DNS」时，迁移不该把它改成按规则分流。
+    #[test]
+    fn migrate_leaves_explicit_direct_dns_alone() {
+        let mut s = AppSettings { settings_version: 0, ..Default::default() };
+        s.dns.mode = DnsHandling::Direct;
+        let changes = s.migrate();
+        assert_eq!(s.dns.mode, DnsHandling::Direct);
+        assert!(changes.is_empty(), "只迁移旧的默认值，不动别的选择");
     }
 
     #[test]

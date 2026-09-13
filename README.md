@@ -118,7 +118,7 @@ xattr -dr com.apple.quarantine /Applications/XrayTun.app
 发版只需要推一个 tag：
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 为什么发版必须交给 CI，而不是本地跑上面那个脚本：本机是 Homebrew 装的
@@ -126,6 +126,10 @@ rust，没有 rustup、加不了 target，所以**本地只能出主机架构的
 x86_64 的 App + arm64 的核心）；而且核心上游按架构分发，要出通用包得分别
 下载再 lipo 合成。CI 上这两件事都是确定的。发布用的 `contents: write`
 令牌也由 CI 提供，本地没有。
+
+## 更新记录
+
+见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 文档
 

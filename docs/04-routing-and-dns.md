@@ -146,34 +146,93 @@ Fake-IP 是唯一的解法（见 [03](03-xray-integration.md#2-fake-ipxray-原�
 pub enum DnsHandling { Proxy, SplitByRule, Direct, Custom }
 ```
 
+**默认是 `SplitByRule`。** 0.1.0 的默认是 `Proxy`，0.2.0 改掉了 ——
+原因见 §6.1 与 §6.2 末尾的两次实测。旧设置由 `AppSettings::migrate`
+一次性迁移过来（0.1.0 写下的 settings.json 里 `proxy` 会被改成
+`split_by_rule`，并在日志里说明改了什么）。
+
 ### 6.1 `Proxy` —— 全部走代理解析
 
 ```jsonc
-"servers": ["https://1.1.1.1/dns-query", "https://dns.google/dns-query", "localhost"]
+"servers": ["https://1.1.1.1/dns-query", "https://8.8.8.8/dns-query"]
 ```
 
 抗污染，解析结果与出口位置一致（访问 Google 会拿到就近的海外节点）。
-缺点是国内 CDN 会解析到很远的地方 —— 看国内视频可能变慢。
 
-### 6.2 `SplitByRule` —— 按规则分流解析
+**但实测代价很大**（0.2.0 把它从默认值上撤下来的原因）：
+
+```console
+$ curl -w '%{time_total}' https://1.1.1.1/dns-query?name=api.deepseek.com   # 经节点
+0.517s / 0.469s / 0.438s
+
+$ # 同一时刻，国内 DNS 直连
+223.5.5.5 → 0.001s
+```
+
+每个查询 ~450ms，国内 DNS 只要 **1ms** —— 相差约 450 倍。更要命的是
+**它把「域名能不能解析」绑在了「节点快不快」上**：节点一忙或一抖，
+查询就超过内核的 DNS 超时，日志里开始刷
+
+```
+[Error] app/dns: failed to retrieve response for api.deepseek.com.
+        > Post "https://1.1.1.1/dns-query": context canceled
+```
+
+而用户看到的是「什么都打不开」—— 一个和 DNS 毫无字面关联的现象。
+
+> `dns.google` 这种**域名形式**的 DoH 端点也不再用作默认值：
+> 它的主机名本身要先被解析一次，而解析它用的还是这套 DNS，属于自举依赖。
+
+### 6.2 `SplitByRule` —— 按规则分流解析（默认）
 
 ```jsonc
 "servers": [
   { "address": "https://1.1.1.1/dns-query",
-    "domains": ["geosite:geolocation-!cn"], "expectIPs": ["geoip:!cn"] },
+    "domains": ["geosite:geolocation-!cn"] },
   { "address": "223.5.5.5",
-    "domains": ["geosite:cn"], "expectIPs": ["geoip:cn"] },
+    "domains": ["geosite:cn"] },
   { "address": "223.5.5.5" },                        // 兜底
-  { "address": "https://1.1.1.1/dns-query" },        // 兜底
-  "localhost"
+  { "address": "https://1.1.1.1/dns-query" }         // 兜底
 ]
 ```
 
 关键在于 `domains` 字段让**内核按域名选解析器**：
 大陆域名用国内 DNS 直连解析（拿到就近 CDN），其余走远端加密 DNS。
 
-`expectIPs` 是第二道校验：如果解析结果不落在期望的 IP 段内，
-就认为这次解析不可信（可能是 DNS 投毒），改用后面的解析器重试。
+#### 为什么**没有** `expectIPs`
+
+早期这里给两个解析器都写了 `expectIPs`（大陆域名要求返回 `geoip:cn`
+的地址，反之亦然），本意是挡掉明显不可信的答案 —— 也就是「防投毒」。
+实测它造成的伤害远大于收益：
+
+```
+UDP:223.5.5.5:53 got answer: api.deepseek.com. TypeA -> [3.173.21.63], rtt: 1.19ms
+failed to lookup ip for domain api.deepseek.com at server UDP:223.5.5.5:53
+  > features/dns: empty response
+DOH//1.1.1.1 querying: api.deepseek.com.
+```
+
+国内的解析器 **1.2ms 就给出了正确答案**，只因为 `3.173.21.63`（AWS）
+不在 `geoip:cn` 里就被判为「空响应」丢弃，然后**串行回退**到 DoH。
+一次查询从 1ms 变成 450ms 起步。
+
+而「国内域名解析到海外 IP」是常态：Apple、DeepSeek 这类都在用海外云。
+`expectIPs` 等于在惩罚这种正常情况。回退链再叠上节点抖动，就会演变成
+§6.1 里那种满屏 `context canceled`。
+
+去掉之后重测，同一个核心、同一份数据：
+
+```
+empty response  次数: 0
+context canceled 次数: 0
+api.deepseek.com      → UDP:223.5.5.5:53
+weatherkit.apple.com  → UDP:223.5.5.5:53
+```
+
+> 教训：`expectIPs` 看起来是「多一道校验更安全」，实际是把
+> **「解析结果不符合我的预期」和「解析失败」当成了同一件事**。
+> 而前者在 CDN 时代是常态。校验机制一旦会**丢弃正确结果**，
+> 它的代价就是串行回退，而这恰恰会触发它本想避免的超时。
 
 ### 6.3 `Direct` / `Custom`
 
@@ -185,6 +244,24 @@ pub enum DnsHandling { Proxy, SplitByRule, Direct, Custom }
 * `queryStrategy`: `UseIP` / `UseIPv4` / `UseIPv6`。默认 `UseIP`
   （双栈时按系统偏好）。纯 IPv6 环境下需要改。
 * `disableCache`: 默认 `false`。诊断「DNS 结果是不是被缓存住了」时临时打开。
+
+### 6.5 刻意不加 `localhost` 兜底
+
+`localhost` 在 Xray 里表示「用操作系统的解析器」。而 TUN 模式下我们把
+系统 DNS 指向了隧道内的哨兵地址（`198.18.0.2`）—— 于是这个兜底会变成：
+
+```
+内核 DNS 模块 → 系统解析器 → 哨兵地址 → 进隧道 → 又回到内核 DNS 模块
+```
+
+一个自指的死循环。实测症状：
+
+```
+lookup xxx on 198.18.0.2:53: dial udp 198.18.0.2:53: connect: network is unreachable
+```
+
+去掉它没有损失：上面两组显式解析器各自都是完整可用的，
+不需要再兜一层必然会绕回自己的东西。
 
 ---
 
@@ -453,6 +530,11 @@ RouteVia::ScopedInterface { name, gateway }   // gateway 必填
 | `port_matcher_matches` | `80,443` / `1000-2000` 两种写法的解析 |
 | `dns_hijack_is_the_first_rule` | DNS 劫持排在规则数组第 0 位 |
 | `dns_split_by_rule_uses_domain_scoped_servers` | 分流解析生成了大陆 / 非大陆两条带 `domains` 的解析器 |
+| `split_dns_servers_have_no_expect_ips` | 分流解析器**不带** `expectIPs`（它会丢弃正确结果，见 §6.2） |
+| `default_dns_mode_is_split_by_rule` | 默认 DNS 模式是按规则分流 |
+| `migrate_moves_proxy_dns_to_split_by_rule` | 0.1.0 的 `proxy` 设置会被迁移，且报告改了什么 |
+| `migrate_leaves_explicit_direct_dns_alone` | 迁移只动旧默认值，不改用户显式选择 |
+| `bypass_mainland_proxies_google_between_ads_and_cn` | Google 规则必须夹在广告拦截与大陆直连之间 |
 | `native_tun_inbound_is_emitted_for_tun_profile` | TUN 入站字段与 `/1` 拆分路由 |
 | `fakedns_pool_and_first_dns_server_when_enabled` | Fake-IP 在 DNS 列表第一位 + `destOverride` 生效 |
 | `unsupported_type_is_named_in_the_warning` | 被跳过的节点告警里带**实际收到的 `type`**（防静默丢弃） |
