@@ -7,7 +7,7 @@
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build"
+    "beforeBuildCommand": "npm --prefix ui run build"
   },
   "app": {
     "windows": [
@@ -43,6 +43,11 @@
       "icons/128x128@2x.png",
       "icons/icon.png"
     ],
+    "resources": {
+      "binaries/xray": "xray",
+      "binaries/geoip.dat": "geoip.dat",
+      "binaries/geosite.dat": "geosite.dat"
+    },
     "macOS": {
       "minimumSystemVersion": "13.0",
       "entitlements": "entitlements.plist",

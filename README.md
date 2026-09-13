@@ -70,7 +70,7 @@ docs/          设计文档（先读 docs/01-architecture.md）
 cargo build                      # 或 cargo build --release
 (cd apps/ui && npm install && npm run build)
 
-# 3) 跑测试（175 个单元测试，不需要 root）
+# 3) 跑测试（227 个单元测试，不需要 root）
 cargo test
 
 # 4) 只测 helper 的协议层（不需要 root，TUN 功能不可用）
@@ -81,6 +81,32 @@ cargo run -p xt-helper -- status --socket /tmp/xraytun-helper.sock
 npm --prefix apps/ui run dev     # 另开一个终端
 cargo run -p xraytun-desktop
 ```
+
+## 打包 macOS 发行版
+
+```bash
+./scripts/package-macos.sh
+```
+
+产出 `XrayTun.app`、`XrayTun_<版本>_<架构>.dmg` 与同名 `.zip`
+（都在 `.cargo-target/release/bundle/` 下）。
+
+脚本除了调 `tauri build`，还补了两件 Tauri 不会做的事：
+
+* **把 helper 放进 `Contents/MacOS/`** —— `helper_binary_path` 只在自己
+  可执行文件的同级目录找它，而 `bundle.resources` 放不进 `Contents/MacOS/`。
+  少这一步的表现是点「安装 helper」时报「找不到 helper 二进制」。
+* **校验 geoip.dat / geosite.dat 与核心同级** —— `XRAY_LOCATION_ASSET`
+  取的是核心二进制的父目录。放错位置不会报错，只会让 `geoip:cn` /
+  `geosite:cn` 规则**静默不命中**，「绕过大陆」预设看起来完全没生效。
+
+包是 **ad-hoc 签名**、未公证的，别人下载后 Gatekeeper 会拦，需要右键「打开」：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/XrayTun.app
+```
+
+正式分发需要付费开发者账号，用 Developer ID 重签并 `notarytool` 公证。
 
 ## 文档
 
