@@ -133,7 +133,10 @@ textarea {
   align-items: center;
   gap: 12px;
   padding: 34px 20px 12px;
-  border-bottom: 1px solid var(--border);
+  /* 顶栏底边 = 绿色状态条。
+     原来是 1px 的 --border（#263148），那个颜色在深色背景上几乎看不见，
+     所以这里同时加粗到 2px：否则「变成绿色」和「没变」在观感上差不多。 */
+  border-bottom: 2px solid var(--ok);
   -webkit-app-region: drag;
 }
 
