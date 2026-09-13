@@ -207,6 +207,35 @@ pub fn preset_rules(preset: RoutingPreset) -> Vec<RoutingRule> {
                 },
                 RuleAction::Block,
             ),
+            // 这条是**从数据里挖出来的**，不是拍脑袋加的。
+            //
+            // `geosite:cn` 收了大约 130 个 Google 域名：`www.gstatic.com`、
+            // `fonts.gstatic.com`、`g0-g3.gstatic.com`、`dl.google.com`、
+            // `fonts.googleapis.com`、`update.googleapis.com`、
+            // `safebrowsing.googleapis.com`，还有一整套 `pki.goog`
+            // （OCSP / CRL，证书吊销检查）。它们在列表里被当作「国内可达」，
+            // 实际早就被墙 —— 于是被判去直连，连接直接超时。
+            //
+            // 症状很有迷惑性：`google.com`、`youtube.com` 都正常（不在 CN
+            // 列表里，走的是兜底代理），只有 `www.gstatic.com`、`dl.google.com`
+            // 这类挂掉。用户看到的是「Google 有的能开、有的不能开」。
+            //
+            // 顺序很关键：必须排在 `preset-cn-domain` **之前**才覆盖得住它；
+            // 又必须排在 `preset-ads` **之后**，否则 `google-analytics.com`、
+            // `doubleclick.net` 这些本就属于广告拦截目标的域名会被放去代理。
+            //
+            // 为什么不用 `geosite:gfw`：CN 与 GFW 的交集只有 40 条，
+            // 而且**一条 Google 域名都没有**（实测）。用 gfw 看着合理，
+            // 实际什么都不会变。`geosite:google` 则完整覆盖上面这些。
+            RoutingRule::new(
+                "preset-proxy-google",
+                "Google 系域名走代理（被大陆列表误收录）",
+                MatchCondition {
+                    domains: vec!["geosite:google".into()],
+                    ..Default::default()
+                },
+                RuleAction::Proxy { outbound: None },
+            ),
             RoutingRule::new(
                 "preset-cn-domain",
                 "大陆域名直连",
@@ -433,5 +462,37 @@ mod tests {
         let ads = ids.iter().position(|x| *x == "preset-ads").unwrap();
         let cn = ids.iter().position(|x| *x == "preset-cn-domain").unwrap();
         assert!(ads < cn, "广告拦截必须先于大陆直连，否则会被直连规则吃掉");
+    }
+
+    /// Google 必须夹在「广告拦截」与「大陆直连」之间。
+    ///
+    /// 钉住的是一个真实故障：`geosite:cn` 里收了约 130 个 Google 域名
+    /// （`www.gstatic.com`、`dl.google.com`、`fonts.googleapis.com`、
+    /// `pki.goog` 等），它们被判去直连、然后被墙掉，表现为
+    /// 「Google 有的能开有的不能开」。
+    ///
+    /// 两侧的顺序都不能动：
+    /// * 跑到 `preset-cn-domain` 后面 → 被直连规则吃掉，修复失效；
+    /// * 跑到 `preset-ads` 前面 → `google-analytics.com` / `doubleclick.net`
+    ///   这些本该被拦的广告域名会被放去代理。
+    #[test]
+    fn bypass_mainland_proxies_google_between_ads_and_cn() {
+        let rules = preset_rules(RoutingPreset::BypassMainland);
+        let ids: Vec<_> = rules.iter().map(|r| r.id.as_str()).collect();
+        let ads = ids.iter().position(|x| *x == "preset-ads").unwrap();
+        let google = ids.iter().position(|x| *x == "preset-proxy-google").unwrap();
+        let cn = ids.iter().position(|x| *x == "preset-cn-domain").unwrap();
+        assert!(ads < google, "Google 规则必须在广告拦截之后");
+        assert!(google < cn, "Google 规则必须在大陆直连之前，否则形同虚设");
+
+        let rule = &rules[google];
+        assert!(
+            matches!(rule.then, RuleAction::Proxy { outbound: None }),
+            "Google 规则必须走当前节点（outbound: None 表示由调用方替换为选中节点）"
+        );
+        assert!(
+            rule.when.domains.iter().any(|d| d == "geosite:google"),
+            "必须用 geosite:google；用 geosite:gfw 无效 —— 它与 CN 的交集里没有任何 Google 域名"
+        );
     }
 }
