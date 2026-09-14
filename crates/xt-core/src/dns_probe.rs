@@ -27,6 +27,22 @@
 //! 第一版用了固定域名，结果 `114.114.115.115` 报出 **1ms** —— 公网 DNS 不可能
 //! 1ms，那是**核心自己的 DNS 缓存**答的（TUN 模式下所有 :53 都被接管）。
 //! 每次换一个不存在的随机域名，任何缓存都答不上来，只能真的去问。
+//!
+//! # 两组，两条测量路径
+//!
+//! 国内解析器和国外解析器**不能用同一条路径测**，否则测出来的根本不是它：
+//!
+//! | 组 | 谁在用 | 怎么测 | 为什么这么测 |
+//! |---|---|---|---|
+//! | 国内 | `geosite:cn` → `direct_servers[0]` | 明文 UDP，绑 en0 直连 | 它本来就是直连用的 |
+//! | 国外 | `geosite:geolocation-!cn` → `remote_servers[0]` | DoH，经本地 SOCKS 入站 | 直连**连不上** |
+//!
+//! 本机实测：直连 `https://1.1.1.1/dns-query` 用 8 秒超时都拿不到连接；
+//! 经节点 0.23–0.39 秒就有答案。所以国外那一组在节点未连接时标成
+//! **「未探测」**，而不是硬走直连测一遍、再把超时谎报成「这台解析器不通」。
+//!
+//! 排序的意义只在第一位：`build_dns` 在分流模式下对每个列表只取**第一个**
+//! 元素（`first_or`），所以「把最快的排到最前」就等于「换掉正在用的那台」。
 
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -35,14 +51,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// 候选池里的类别。
+/// 候选池里的类别。**同时就是界面上的分组。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DnsKind {
-    /// 国内明文解析器：用于 `geosite:cn`，走直连。
+    /// 国内明文解析器：用于 `geosite:cn` 那一条分流规则。
     Domestic,
-    /// 国外明文解析器：**不建议**用于分流解析 —— 明文入墙会被投毒。
-    ForeignPlain,
+    /// 国外解析器：用于 `geosite:geolocation-!cn` 那一条。
+    Foreign,
+}
+
+/// 探测走的传输方式。
+///
+/// 分组不是随便分的 —— 它直接决定**怎么测才测得到真东西**：
+///
+/// * 国内解析器是明文 UDP，绑物理网卡直连测。那就是它被使用时的路径。
+/// * 国外解析器**只有经节点才连得上**：本机实测直连 `https://1.1.1.1/dns-query`
+///   用 8 秒超时都拿不到连接，经节点 0.26–0.37 秒就有答案。而它在配置里本来
+///   也是经节点用的（`remote_servers` 配 `geosite:geolocation-!cn`），
+///   所以「经节点测」既不是偷懒，也不是近似，就是它的真实成本。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsTransport {
+    /// 明文 UDP，53 端口。
+    PlainUdp,
+    /// DoH（RFC 8484），`application/dns-message`。
+    Doh,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -50,31 +84,47 @@ pub struct DnsCandidate {
     pub server: &'static str,
     pub label: &'static str,
     pub kind: DnsKind,
+    pub transport: DnsTransport,
 }
 
 /// 候选池。**每一项都在本机实测过可用性与延迟**，不是抄来的清单。
 ///
 /// 括号里是实测中位延迟，可作为「这台机器上大概什么水平」的参考。
-/// 换网络环境（换 ISP、换城市）后这些数字会变，所以运行时仍要重新探测。
+/// 换网络环境（换 ISP、换城市、换节点）后这些数字会变，所以运行时仍要重新探测。
 pub const DNS_POOL: &[DnsCandidate] = &[
-    DnsCandidate { server: "223.5.5.5", label: "阿里 AliDNS", kind: DnsKind::Domestic },        // 32ms
-    DnsCandidate { server: "223.6.6.6", label: "阿里 AliDNS 备", kind: DnsKind::Domestic },     // 34ms
-    DnsCandidate { server: "180.76.76.76", label: "百度 DNS", kind: DnsKind::Domestic },        // 46ms
-    DnsCandidate { server: "180.184.1.1", label: "字节 DNS", kind: DnsKind::Domestic },         // 47ms
-    DnsCandidate { server: "119.29.29.29", label: "腾讯 DNSPod", kind: DnsKind::Domestic },     // 50ms
-    DnsCandidate { server: "114.114.114.114", label: "114DNS", kind: DnsKind::Domestic },       // 51ms
-    DnsCandidate { server: "101.226.4.6", label: "电信 上海", kind: DnsKind::Domestic },         // 54ms
-    DnsCandidate { server: "1.2.4.8", label: "CNNIC", kind: DnsKind::Domestic },                // 54ms
-    DnsCandidate { server: "218.30.118.6", label: "电信 北京", kind: DnsKind::Domestic },        // 58ms
-    DnsCandidate { server: "119.28.28.28", label: "腾讯 DNSPod 备", kind: DnsKind::Domestic },  // 59ms
-    DnsCandidate { server: "123.125.81.6", label: "联通", kind: DnsKind::Domestic },             // 60ms
-    DnsCandidate { server: "52.80.66.66", label: "OneDNS 备", kind: DnsKind::Domestic },        // 69ms
-    DnsCandidate { server: "117.50.10.10", label: "OneDNS", kind: DnsKind::Domestic },          // 129ms
-    DnsCandidate { server: "210.2.4.8", label: "CNNIC 备", kind: DnsKind::Domestic },           // 353ms（慢）
-    // 国外明文：列出来是为了让界面能显示「这些不适合放国内解析位」，
-    // 而不是推荐使用。
-    DnsCandidate { server: "8.8.8.8", label: "Google（明文，易被抢答）", kind: DnsKind::ForeignPlain },
-    DnsCandidate { server: "9.9.9.9", label: "Quad9（明文）", kind: DnsKind::ForeignPlain },
+    // ---------------- 国内：明文 UDP，直连测量 ----------------
+    DnsCandidate { server: "223.5.5.5", label: "阿里 AliDNS", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },        // 32ms
+    DnsCandidate { server: "223.6.6.6", label: "阿里 AliDNS 备", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },     // 34ms
+    DnsCandidate { server: "180.76.76.76", label: "百度 DNS", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },        // 46ms
+    DnsCandidate { server: "180.184.1.1", label: "字节 DNS", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },         // 47ms
+    DnsCandidate { server: "119.29.29.29", label: "腾讯 DNSPod", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },     // 50ms
+    DnsCandidate { server: "114.114.114.114", label: "114DNS", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },       // 51ms
+    DnsCandidate { server: "101.226.4.6", label: "电信 上海", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },         // 54ms
+    DnsCandidate { server: "1.2.4.8", label: "CNNIC", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },                // 54ms
+    DnsCandidate { server: "218.30.118.6", label: "电信 北京", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },        // 58ms
+    DnsCandidate { server: "119.28.28.28", label: "腾讯 DNSPod 备", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },  // 59ms
+    DnsCandidate { server: "123.125.81.6", label: "联通", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },             // 60ms
+    DnsCandidate { server: "52.80.66.66", label: "OneDNS 备", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },        // 69ms
+    DnsCandidate { server: "117.50.10.10", label: "OneDNS", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },          // 129ms
+    DnsCandidate { server: "210.2.4.8", label: "CNNIC 备", kind: DnsKind::Domestic, transport: DnsTransport::PlainUdp },           // 353ms（慢）
+
+    // ---------------- 国外：DoH，经节点测量 ----------------
+    //
+    // 全部写成 **IP 形式的 DoH 端点**。写成域名（`https://dns.google/dns-query`）
+    // 会引入一个自举依赖：解析这个域名本身还要先问一次 DNS，而那时隧道可能还没
+    // 建立。IP 端点没有这个问题。
+    //
+    // 实测（经节点，本机，各 3 次取中位）：AdGuard 234ms、Cloudflare 备 250ms、
+    // Cloudflare 255ms、Google 321ms、Quad9 390ms（Quad9 抖动大，有一次 1.39s，
+    // 所以取样次数的中位数比单次结果可靠）。
+    //
+    // 这几台都是加密传输，**不存在被抢答/投毒的可能**，所以它们几乎不会被
+    // 多数派投票标成可疑 —— 这一组真正要比的就是「经这个节点谁快、谁通」。
+    DnsCandidate { server: "https://94.140.14.14/dns-query", label: "AdGuard", kind: DnsKind::Foreign, transport: DnsTransport::Doh },   // 234ms
+    DnsCandidate { server: "https://1.0.0.1/dns-query", label: "Cloudflare 备", kind: DnsKind::Foreign, transport: DnsTransport::Doh },  // 250ms
+    DnsCandidate { server: "https://1.1.1.1/dns-query", label: "Cloudflare", kind: DnsKind::Foreign, transport: DnsTransport::Doh },     // 255ms
+    DnsCandidate { server: "https://8.8.8.8/dns-query", label: "Google", kind: DnsKind::Foreign, transport: DnsTransport::Doh },         // 321ms
+    DnsCandidate { server: "https://9.9.9.9/dns-query", label: "Quad9", kind: DnsKind::Foreign, transport: DnsTransport::Doh },          // 390ms
 ];
 
 /// 探测结果。
@@ -83,18 +133,37 @@ pub struct DnsProbe {
     pub server: String,
     pub label: String,
     pub kind: DnsKind,
+    pub transport: DnsTransport,
     /// 中位延迟。全失败为 `None`。
     pub latency_ms: Option<u32>,
     /// 是否给出了答案（通了没）。
     pub answered: bool,
-    /// 答案与多数派不一致 —— 大概率被抢答/投毒。
+    /// 答案与**同组**多数派不一致 —— 大概率被抢答/投毒。
     pub suspect: bool,
+    /// 「没测」的原因。有值时界面要显示它，**不能把 `None` 一律当成「不通」**：
+    /// 节点没连接时国外那一组根本没测，报「不通」是假话。
+    pub note: Option<String>,
 }
 
 impl DnsProbe {
     pub fn usable(&self) -> bool {
         self.answered && self.latency_ms.is_some() && !self.suspect
     }
+}
+
+/// 一次探测的上下文：用哪条路径、测多久、测几次。
+#[derive(Debug, Clone)]
+pub struct ProbeSpec {
+    pub timeout: Duration,
+    pub samples: usize,
+    /// 直连测量时绑定的物理网卡（`IP_BOUND_IF`）。
+    pub interface: Option<String>,
+    /// 经节点测量用的 SOCKS5 地址，如 `127.0.0.1:10808`。
+    ///
+    /// 传 `None` 时国外那一组**不会退化成直连去测** —— 直连测国外 DoH 只会
+    /// 得到超时，把「没连节点」误报成「这台解析器不通」。这种情况统一标成
+    /// `note = "节点未连接"`。
+    pub socks: Option<String>,
 }
 
 /// 用来做「答得对不对」比对的参照域名。
@@ -279,36 +348,125 @@ async fn udp_query(
     parse_a_records(&buf[..n]).ok_or_else(|| Error::Probe("应答无法解析".into()))
 }
 
-/// 探测一个解析器：先测延迟（用随机名），再用参照域名取答案。
-pub async fn probe_one(
-    server: &str,
-    label: &str,
-    kind: DnsKind,
+/// 经 SOCKS5 发一次 DoH 查询（RFC 8484 的 POST 形式），返回 A 记录。
+///
+/// 响应体就是**和明文 DNS 完全相同的线格式**，所以 [`parse_a_records`] 直接能用，
+/// 不必为了探测再引入一个 DoH 客户端。
+///
+/// 走 `curl` 而不是 HTTP 客户端：它自带 `--socks5-hostname`（本地已有 SOCKS
+/// 入站在跑）和 `--max-time`，macOS 也自带，和 `update.rs` 的选择一致。
+async fn doh_query(
+    url: &str,
+    name: &str,
     timeout: Duration,
-    samples: usize,
-    interface: Option<&str>,
-) -> DnsProbe {
+    socks: Option<&str>,
+) -> Result<Vec<IpAddr>> {
+    let socks = socks.ok_or_else(|| Error::Probe("节点未连接".into()))?;
+    let packet = build_query(name, (std::process::id() & 0xffff) as u16);
+
+    let mut cmd = tokio::process::Command::new("/usr/bin/curl");
+    cmd.args(curl_doh_args(url, socks, timeout))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| Error::Probe(format!("执行 curl 失败：{e}")))?;
+    if let Some(mut input) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        input
+            .write_all(&packet)
+            .await
+            .map_err(|e| Error::Probe(format!("写入查询报文失败：{e}")))?;
+        // 必须显式关掉：`--data-binary @-` 要读到 EOF 才认为请求体结束。
+        drop(input);
+    }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| Error::Probe(format!("等待 curl 失败：{e}")))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(Error::Probe(format!(
+            "DoH 请求失败：{}",
+            err.trim().chars().take(120).collect::<String>()
+        )));
+    }
+    parse_a_records(&out.stdout).ok_or_else(|| Error::Probe("DoH 应答无法解析".into()))
+}
+
+/// curl 的 DoH 参数。纯函数，方便断言「确实带了代理和超时」。
+fn curl_doh_args(url: &str, socks: &str, timeout: Duration) -> Vec<String> {
+    vec![
+        "-s".into(),
+        "--max-time".into(),
+        timeout.as_secs().max(1).to_string(),
+        "--socks5-hostname".into(),
+        socks.to_string(),
+        "-H".into(),
+        "content-type: application/dns-message".into(),
+        "--data-binary".into(),
+        "@-".into(),
+        url.into(),
+    ]
+}
+
+/// 按候选自己的传输方式测一次。
+async fn measure(
+    server: &str,
+    transport: DnsTransport,
+    name: &str,
+    spec: &ProbeSpec,
+) -> Result<Vec<IpAddr>> {
+    match transport {
+        DnsTransport::PlainUdp => udp_query(server, name, spec.timeout, spec.interface.as_deref()).await,
+        DnsTransport::Doh => doh_query(server, name, spec.timeout, spec.socks.as_deref()).await,
+    }
+}
+
+/// 探测一个解析器：先测延迟，再用参照域名取答案（供多数派投票）。
+///
+/// 返回的第二个值是参照答案，交给 [`probe_pool`] 做组内投票 —— 不在这里判，
+/// 因为「多数派」只有在整池测完之后才存在。
+async fn probe_one(c: &DnsCandidate, spec: &ProbeSpec) -> (DnsProbe, Option<Vec<IpAddr>>) {
+    let mut probe = DnsProbe {
+        server: c.server.to_string(),
+        label: c.label.to_string(),
+        kind: c.kind,
+        transport: c.transport,
+        latency_ms: None,
+        answered: false,
+        suspect: false,
+        note: None,
+    };
+
+    // 国外那一组在节点没起来时是**测不了**，不是「不通」。
+    if c.transport == DnsTransport::Doh && spec.socks.is_none() {
+        probe.note = Some("节点未连接，未探测".into());
+        return (probe, None);
+    }
+
     let mut latencies = Vec::new();
-    for i in 0..samples.max(1) {
+    for i in 0..spec.samples.max(1) {
         let start = Instant::now();
-        if udp_query(server, probe_name(i), timeout, interface).await.is_ok() {
+        if measure(c.server, c.transport, probe_name(i), spec).await.is_ok() {
             // 空答案也算通：我们量的是往返，不是解析结果。
+            //
+            // DoH 这条路径上的计时包含一次 `curl` 进程启动（约 5–10ms），
+            // 相对 250ms 量级的 DoH 往返是 2–4% 的固定偏置，且对所有候选
+            // 完全一致，不影响排序。
             latencies.push(start.elapsed().as_millis().min(u32::MAX as u128) as u32);
         }
     }
 
     // 参照域名：能答出来才有资格参与「答得对不对」的比对。
-    let reference = udp_query(server, REFERENCE_DOMAIN, timeout, interface).await.ok();
+    let reference = measure(c.server, c.transport, REFERENCE_DOMAIN, spec).await.ok();
 
-    DnsProbe {
-        server: server.to_string(),
-        label: label.to_string(),
-        kind,
-        latency_ms: median(&mut latencies),
-        answered: reference.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
-            || !latencies.is_empty(),
-        suspect: false, // 由 majority_suspects 统一判定
-    }
+    probe.latency_ms = median(&mut latencies);
+    probe.answered = reference.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
+        || !latencies.is_empty();
+    (probe, reference)
 }
 
 fn median(v: &mut [u32]) -> Option<u32> {
@@ -355,50 +513,78 @@ pub fn majority_suspects(answers: &[(String, Vec<IpAddr>)]) -> Vec<String> {
     out
 }
 
-/// 并发探测整池，按「可用 + 快」排序。
+/// 国外组的并发度：**固定 1（串行）**。
+///
+/// 这五台全都要经**同一个节点**出去，并发测等于在测**节点的排队**，而不是
+/// 在测「这台解析器离我有多远」—— 和国内组「不绑网卡就测到核心排队」是
+/// 同一类错误，而且后果更严重：**名次会变**。
+///
+/// 实测同一批候选（同一个节点）：
+///
+/// ```text
+/// 并发 4： AdGuard 450ms   Cloudflare备 306ms   Cloudflare 277ms   Google 697ms   Quad9 898ms
+/// 串行：  AdGuard 234ms   Cloudflare备 250ms   Cloudflare 255ms   Google 321ms   Quad9 390ms
+/// ```
+///
+/// 并发那组的名次被压成了「谁先抢到节点」，串行才是解析器本身的远近。
+/// 代价是国外组总耗时变成串行的 5 台 × 4 次请求 ≈ 4–5 秒 —— 这是启动时的
+/// 后台任务，值得。
+const FOREIGN_CONCURRENCY: usize = 1;
+
+/// 并发探测整池。顺序是「国内组在前、国外组在后，组内按可用 + 快排」。
 pub async fn probe_pool(
     candidates: &[DnsCandidate],
-    timeout: Duration,
-    samples: usize,
+    spec: &ProbeSpec,
     concurrency: usize,
-    interface: Option<&str>,
 ) -> Vec<DnsProbe> {
-    use tokio::sync::Semaphore;
     use std::sync::Arc;
-    let sem = Arc::new(Semaphore::new(concurrency.max(1)));
+    use tokio::sync::Semaphore;
+    // 两组各用一个信号量：国内是快而多的明文 UDP，放开并发；
+    // 国外共享同一个节点，必须串行（见 `FOREIGN_CONCURRENCY`）。
+    let dom_sem = Arc::new(Semaphore::new(concurrency.max(1)));
+    let foreign_sem = Arc::new(Semaphore::new(FOREIGN_CONCURRENCY));
     let mut handles = Vec::new();
     for c in candidates {
-        let sem = sem.clone();
-        // 把字段拷成 owned 再 move 进任务：`DnsCandidate` 借用自入参，
-        // 而 `tokio::spawn` 要求 'static。
-        let (server, label, kind) = (c.server.to_string(), c.label.to_string(), c.kind);
-        let iface = interface.map(str::to_string);
+        let sem = if c.kind == DnsKind::Foreign {
+            foreign_sem.clone()
+        } else {
+            dom_sem.clone()
+        };
+        // `DnsCandidate` 的所有字段都是 `&'static str` / 无数据枚举，是 `Copy`，
+        // 直接拷一份 move 进任务即可满足 `tokio::spawn` 的 'static 要求。
+        let c = *c;
+        let spec = spec.clone();
         handles.push(tokio::spawn(async move {
             let _p = sem.acquire_owned().await.expect("信号量不会关闭");
-            probe_one(&server, &label, kind, timeout, samples, iface.as_deref()).await
+            probe_one(&c, &spec).await
         }));
     }
-    let mut out = Vec::new();
+    let mut measured = Vec::new();
     for h in handles {
         if let Ok(r) = h.await {
-            out.push(r);
+            measured.push(r);
         }
     }
 
-    // 取参照答案做多数派投票。
-    let mut answers = Vec::new();
-    for r in &out {
-        if let Ok(ips) = udp_query(&r.server, REFERENCE_DOMAIN, timeout, interface).await {
-            answers.push((r.server.clone(), ips));
+    // 多数派投票**按组分开做**。跨组混投会把正常答案判成异常：国外解析器经
+    // 节点出去，看到的 CDN 边缘和国内直连本来就可能不是同一批地址 —— 实测
+    // `example.com` 两边这次恰好一致（都是 Cloudflare 的 104.20.23.154 /
+    // 172.66.147.243），但那是运气，不是保证。
+    for kind in [DnsKind::Domestic, DnsKind::Foreign] {
+        let answers: Vec<(String, Vec<IpAddr>)> = measured
+            .iter()
+            .filter(|(p, _)| p.kind == kind)
+            .filter_map(|(p, a)| a.clone().map(|ips| (p.server.clone(), ips)))
+            .collect();
+        let suspects = majority_suspects(&answers);
+        for (p, _) in measured.iter_mut().filter(|(p, _)| p.kind == kind) {
+            p.suspect = suspects.contains(&p.server);
         }
     }
-    let suspects = majority_suspects(&answers);
-    for r in &mut out {
-        r.suspect = suspects.contains(&r.server);
-    }
 
-    // 排前面的是「可用」的，同组内按延迟升序。
-    out.sort_by_key(|r| (!r.usable(), r.latency_ms.unwrap_or(u32::MAX)));
+    let mut out: Vec<DnsProbe> = measured.into_iter().map(|(p, _)| p).collect();
+    // 国内在前、国外在后（`Domestic` = 0），组内可用的在前、按延迟升序。
+    out.sort_by_key(|r| (r.kind as u8, !r.usable(), r.latency_ms.unwrap_or(u32::MAX)));
     out
 }
 
@@ -505,7 +691,15 @@ mod tests {
         for c in DNS_POOL {
             assert!(seen.insert(c.server), "池子里有重复：{}", c.server);
             assert!(!c.label.is_empty(), "{} 没有名称", c.server);
-            assert!(c.server.parse::<IpAddr>().is_ok(), "池子里应只放 IP（域名会引入自举依赖）：{}", c.server);
+            // 只允许 IP、或 **IP 形式的** DoH 端点。写域名（`dns.google`）会
+            // 引入自举依赖：解析它本身还要先问一次 DNS，而那时隧道可能还没建立。
+            let host = c.server.strip_prefix("https://").unwrap_or(c.server);
+            let host = host.split('/').next().unwrap_or(host);
+            assert!(
+                host.parse::<IpAddr>().is_ok(),
+                "池子里应只放 IP（域名会引入自举依赖）：{}",
+                c.server
+            );
         }
     }
 
@@ -514,6 +708,86 @@ mod tests {
     fn pool_has_enough_domestic_candidates() {
         let n = DNS_POOL.iter().filter(|c| c.kind == DnsKind::Domestic).count();
         assert!(n >= 6, "国内候选只有 {n} 个，不够挑");
+    }
+
+    /// 国外池至少要 3 个：`majority_suspects` 少于 3 份答案就不下结论，
+    /// 候选太少的话「答得对不对」这一半判据等于没有。
+    #[test]
+    fn pool_has_enough_foreign_candidates() {
+        let n = DNS_POOL.iter().filter(|c| c.kind == DnsKind::Foreign).count();
+        assert!(n >= 3, "国外候选只有 {n} 个，不够多数派投票");
+    }
+
+    /// 国内走明文直连、国外走 DoH 经节点。这是一条**语义约束**：写反了会
+    /// 得到一组看起来正常、实际毫无意义的数字。
+    #[test]
+    fn transport_matches_kind() {
+        for c in DNS_POOL {
+            match c.kind {
+                DnsKind::Domestic => {
+                    assert_eq!(c.transport, DnsTransport::PlainUdp, "{} 应走明文直连", c.server)
+                }
+                DnsKind::Foreign => {
+                    assert_eq!(c.transport, DnsTransport::Doh, "{} 应走 DoH 经节点", c.server)
+                }
+            }
+        }
+    }
+
+    /// DoH 参数必须带上代理和超时，否则要么连不上、要么挂死。
+    #[test]
+    fn curl_doh_args_carry_proxy_and_timeout() {
+        let args = curl_doh_args(
+            "https://1.1.1.1/dns-query",
+            "127.0.0.1:10808",
+            Duration::from_secs(2),
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("--socks5-hostname 127.0.0.1:10808"), "{joined}");
+        assert!(joined.contains("--max-time 2"), "{joined}");
+        assert!(joined.contains("--data-binary @-"), "报文要从 stdin 进：{joined}");
+        assert_eq!(
+            args.last().unwrap(),
+            "https://1.1.1.1/dns-query",
+            "URL 必须在最后：{joined}"
+        );
+    }
+
+    /// 国外组必须串行：并发测等于测节点的排队而不是解析器的远近，
+    /// 而且**名次会变**。这不是性能取舍，是正确性要求。
+    #[test]
+    fn foreign_group_is_probed_serially() {
+        assert_eq!(
+            FOREIGN_CONCURRENCY, 1,
+            "国外候选共享同一个节点，并发会扭曲名次"
+        );
+    }
+
+    /// 节点没连接时，国外那一组必须标「未探测」——不能直连测一遍，
+    /// 再把必然的超时报成「这台解析器不通」。
+    #[tokio::test]
+    async fn foreign_group_is_not_probed_without_node() {
+        let spec = ProbeSpec {
+            timeout: Duration::from_millis(200),
+            samples: 1,
+            interface: None,
+            socks: None,
+        };
+        let foreign = DNS_POOL
+            .iter()
+            .find(|c| c.kind == DnsKind::Foreign)
+            .expect("池子里应有国外候选");
+        let (probe, reference) = probe_one(foreign, &spec).await;
+        assert!(reference.is_none(), "没连节点就不该有参照答案");
+        assert!(probe.latency_ms.is_none());
+        assert!(!probe.answered);
+        assert!(!probe.usable());
+        assert!(
+            probe.note.as_deref().unwrap_or_default().contains("未探测"),
+            "note = {:?}",
+            probe.note
+        );
+        assert_eq!(probe.transport, DnsTransport::Doh);
     }
 
     /// 参照域名必须是个正常域名，否则每次查询都会失败。

@@ -76,13 +76,19 @@ pub struct Inner {
 /// DNS 探测状态。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DnsStatus {
-    /// 探测结果（已按「可用 + 快」排序）。
+    /// 探测结果。国内组在前、国外组在后，各自已按「可用 + 快」排序；
+    /// 界面按 `kind` 分成两块显示。
     pub probes: Vec<xt_core::dns_probe::DnsProbe>,
-    /// 自动选中的那台。
+    /// 国内组自动选中的那台（写进 `direct_servers[0]`）。
     pub chosen: Option<String>,
+    /// 国外组自动选中的那台（写进 `remote_servers[0]`）。
+    pub chosen_foreign: Option<String>,
     pub probed_at: Option<u64>,
-    /// 探测失败/跳过的原因。
+    /// 国内组探测失败的原因。
     pub error: Option<String>,
+    /// 国外组探测失败/跳过的原因。**单独一条**：国外组要经节点才测得了，
+    /// 它的失败和「国内解析器都不通」是两码事，混在一起会误导。
+    pub foreign_error: Option<String>,
 }
 
 /// 更新相关的状态。

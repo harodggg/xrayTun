@@ -242,17 +242,24 @@ export interface AvailableUpdate {
 export interface DnsProbe {
   server: string;
   label: string;
-  kind: "domestic" | "foreign_plain";
+  kind: "domestic" | "foreign";
+  transport: "plain_udp" | "doh";
   latency_ms: number | null;
   answered: boolean;
   suspect: boolean;
+  /** 有值时表示「没测」（例如节点未连接），不能当成「不通」。 */
+  note: string | null;
 }
 
 export interface DnsStatus {
   probes: DnsProbe[];
+  /** 国内组首选（direct_servers[0]）。 */
   chosen: string | null;
+  /** 国外组首选（remote_servers[0]）。 */
+  chosen_foreign: string | null;
   probed_at: number | null;
   error: string | null;
+  foreign_error: string | null;
 }
 
 export interface UpdateStatus {

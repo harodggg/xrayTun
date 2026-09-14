@@ -703,3 +703,21 @@ input[type="checkbox"] {
 .probe-table__row > :nth-child(2) {
   flex: 1;
 }
+
+/* DNS 探测结果按「国内直连 / 国外经节点」分组。两组是两条不同的测量路径，
+   放一张表里会被误读成同一把尺子量出来的数字。 */
+.probe-group {
+  margin-top: 14px;
+}
+
+.probe-group__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.probe-group__title .field__hint {
+  font-weight: 400;
+}

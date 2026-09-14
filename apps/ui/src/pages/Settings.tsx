@@ -435,43 +435,68 @@ export default function Settings() {
                   onClick={() => void run("probe-dns", () => api.probeDns())}>
             立即检测
           </button>
-          {snapshot.dns.chosen && (
-            <span className="field__hint" style={{ alignSelf: "center" }}>
-              当前首选 <span className="mono">{snapshot.dns.chosen}</span>
-            </span>
-          )}
         </div>
 
-        {snapshot.dns.error && (
-          <div className="banner banner--warn" style={{ marginTop: 10 }}>
-            <span>⚠︎</span><div>{snapshot.dns.error}</div>
-          </div>
-        )}
-
-        {snapshot.dns.probes.length > 0 && (
-          <div className="probe-table">
-            {snapshot.dns.probes.map((p) => (
-              <div key={p.server} className="probe-table__row">
-                <span className="mono">{p.server}</span>
-                <span className="field__hint">{p.label}</span>
-                <span className={`badge badge--${p.suspect || !p.answered ? "slow" : "fast"}`}>
-                  {p.latency_ms !== null ? `${p.latency_ms} ms` : "不通"}
+        {/* 两组分开显示：它们是两条**不同的测量路径**，混在一张表里会被误读成
+            同一把尺子量出来的数字。 */}
+        {(["domestic", "foreign"] as const).map((kind) => {
+          const rows = snapshot.dns.probes.filter((p) => p.kind === kind);
+          if (rows.length === 0) return null;
+          const isCn = kind === "domestic";
+          const chosen = isCn ? snapshot.dns.chosen : snapshot.dns.chosen_foreign;
+          const err = isCn ? snapshot.dns.error : snapshot.dns.foreign_error;
+          return (
+            <div key={kind} className="probe-group">
+              <div className="probe-group__title">
+                {isCn ? "国内解析器 · 直连测量" : "国外解析器 · 经节点测量"}
+                <span className="field__hint">
+                  {isCn ? "用于 geosite:cn → direct_servers" : "用于 geosite:geolocation-!cn → remote_servers"}
                 </span>
-                {p.suspect && <span className="field__hint">与多数派不一致</span>}
               </div>
-            ))}
-          </div>
-        )}
 
-        <div className="field__hint" style={{ marginTop: 10 }}>
-          检测的两个判据：**能不能通、多快**，以及**答得对不对**。
-          只看延迟是不行的 —— 实测 <span className="mono">8.8.8.8</span> 直连只要
-          69ms（而它经节点是 200ms），说明有中间设备在 53 端口抢答；
-          抢答的解析器延迟一定漂亮，答案却可能是错的。
+              {err && (
+                <div className="banner banner--warn" style={{ marginTop: 6 }}>
+                  <span>⚠︎</span><div>{err}</div>
+                </div>
+              )}
+
+              {chosen && (
+                <div className="field__hint" style={{ margin: "6px 0 0" }}>
+                  当前首选 <span className="mono">{chosen}</span>
+                </div>
+              )}
+
+              <div className="probe-table">
+                {rows.map((p) => (
+                  <div key={p.server} className="probe-table__row">
+                    <span className="mono">{p.server}</span>
+                    <span className="field__hint">{p.label}</span>
+                    <span className={`badge badge--${p.suspect || !p.answered ? "slow" : "fast"}`}>
+                      {p.latency_ms !== null ? `${p.latency_ms} ms` : p.note ? "未探测" : "不通"}
+                    </span>
+                    {p.suspect && <span className="field__hint">与同组多数派不一致</span>}
+                    {p.note && <span className="field__hint">{p.note}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        <div className="field__hint" style={{ marginTop: 12 }}>
+          两组走两条不同的路径，因为在配置里它们本来就用得不一样：
           <br />
-          检测时会把查询 socket 绑到物理网卡绕过隧道，否则并发探测测到的是
-          核心的排队而不是解析器的延迟。远端 DoH 不参与排序：它的耗时由节点
-          主导，换哪台差别很小。
+          <span className="mono">国内</span> 是明文 UDP，测的时候把 socket 绑到物理网卡
+          绕过隧道 —— 不绑的话并发探测测到的是核心排队而不是解析器延迟。
+          <br />
+          <span className="mono">国外</span> 只有经节点才连得上（直连
+          <span className="mono"> 1.1.1.1:443 </span>实测 8 秒超时），所以经本地 SOCKS
+          入站去测 —— 那也正是它在分流规则里被使用时的路径。没连接节点时这一组显示
+          「未探测」，而不是拿直连的超时冒充「都不通」。
+          <br />
+          两组各自还要判「答得对不对」：让同组所有解析器查同一个域名，答案跟组内多数派
+          不一致的标为可疑（明文入墙会被抢答，抢答者延迟一定漂亮、答案却可能是错的）。
+          国外那组走的是加密 DoH，基本不可能被抢答。
         </div>
       </section>
 

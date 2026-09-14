@@ -77,66 +77,105 @@ async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot
 
 /// 探测 DNS 解析器，并按需把最快的排到前面。
 ///
-/// **绑物理网卡**是关键：不绑的话查询会经 TUN → 核心的 gVisor 栈 → 解析器，
-/// 并发时测到的是核心排队。实测同一台阿里 DNS：绑 en0 是 32ms，
-/// 不绑（并发 6）是 155ms —— 差 5 倍，而且会把快的排到后面。
+/// 两组走**两条不同的路径**，因为它们在配置里的用法本来就不同：
+///
+/// * **国内组**（`geosite:cn` → `direct_servers`）绑物理网卡直连测。
+///   不绑的话查询会经 TUN → 核心的 gVisor 栈 → 解析器，并发时测到的是核心
+///   排队：实测同一台阿里 DNS，绑 en0 是 32ms，不绑（并发 6）是 155ms。
+/// * **国外组**（`geosite:geolocation-!cn` → `remote_servers`）经本地 SOCKS
+///   入站测（也就是经节点）。直连根本连不上国外 DoH —— 实测 8 秒超时。
 async fn run_dns_probe(app: &AppHandle, state: &AppState, apply: bool) -> Result<(), String> {
     let interface = xt_tun::macos::route::default_route()
         .ok()
         .map(|r| r.interface);
 
-    let pool = xt_core::dns_probe::DNS_POOL;
-    let probes = xt_core::dns_probe::probe_pool(
-        pool,
-        std::time::Duration::from_secs(2),
-        3,
-        4,
-        interface.as_deref(),
-    )
-    .await;
+    // 核心没跑时传 `None`：探测会把国外组标成「未探测」，而不是硬走直连
+    // 测一遍、再把必然的超时报成「这台解析器不通」。
+    let (running, socks_port) = state
+        .with(|i| (i.runtime.running, i.settings.socks_port))
+        .unwrap_or((false, 10808));
+    let socks = running.then(|| format!("127.0.0.1:{socks_port}"));
 
-    // 只拿国内解析器去改 `direct_servers`：远端 DoH 的耗时由节点主导，
-    // 换哪台差别很小，动它没有意义。
-    let usable: Vec<String> = probes
-        .iter()
-        .filter(|p| p.usable() && p.kind == xt_core::dns_probe::DnsKind::Domestic)
-        .map(|p| p.server.clone())
-        .collect();
-    let chosen = usable.first().cloned();
+    let spec = xt_core::dns_probe::ProbeSpec {
+        timeout: std::time::Duration::from_secs(2),
+        samples: 3,
+        interface,
+        socks,
+    };
+
+    let pool = xt_core::dns_probe::DNS_POOL;
+    let probes = xt_core::dns_probe::probe_pool(pool, &spec, 4).await;
+
+    let usable = |kind: xt_core::dns_probe::DnsKind| -> Vec<String> {
+        probes
+            .iter()
+            .filter(|p| p.usable() && p.kind == kind)
+            .map(|p| p.server.clone())
+            .collect()
+    };
+    let domestic = usable(xt_core::dns_probe::DnsKind::Domestic);
+    let foreign = usable(xt_core::dns_probe::DnsKind::Foreign);
+    let chosen = domestic.first().cloned();
+    let chosen_foreign = foreign.first().cloned();
+
+    let foreign_error = if spec.socks.is_none() {
+        Some("节点未连接，国外解析器未探测".to_string())
+    } else if foreign.is_empty() {
+        Some("没有任何国外解析器可用".to_string())
+    } else {
+        None
+    };
 
     state.with(|i| {
         i.dns.probes = probes.clone();
         i.dns.chosen = chosen.clone();
+        i.dns.chosen_foreign = chosen_foreign.clone();
         i.dns.probed_at = Some(crate::state::now_unix());
-        i.dns.error = if usable.is_empty() {
+        i.dns.error = if domestic.is_empty() {
             Some("没有任何国内解析器可用".into())
         } else {
             None
         };
+        i.dns.foreign_error = foreign_error.clone();
     });
 
-    if apply && !usable.is_empty() {
+    if apply {
         let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
         if settings.dns.auto_select {
-            // 保留用户自己加的、不在候选池里的服务器，接在后面 ——
-            // 自动排序不应该把用户手填的东西删掉。
-            let extra: Vec<String> = settings
-                .dns
-                .direct_servers
-                .iter()
-                .filter(|s| !pool.iter().any(|c| c.server == s.as_str()))
-                .cloned()
-                .collect();
-            let mut next = usable.clone();
-            next.extend(extra);
-            if next != settings.dns.direct_servers {
-                settings.dns.direct_servers = next;
+            let mut changes = Vec::new();
+
+            if !domestic.is_empty() {
+                let next = merge_ranked(
+                    &settings.dns.direct_servers,
+                    &domestic,
+                    xt_core::dns_probe::DnsKind::Domestic,
+                    pool,
+                );
+                if next != settings.dns.direct_servers {
+                    settings.dns.direct_servers = next;
+                    changes.push(format!("国内首选 {}", chosen.clone().unwrap_or_default()));
+                }
+            }
+            if !foreign.is_empty() {
+                let next = merge_ranked(
+                    &settings.dns.remote_servers,
+                    &foreign,
+                    xt_core::dns_probe::DnsKind::Foreign,
+                    pool,
+                );
+                if next != settings.dns.remote_servers {
+                    settings.dns.remote_servers = next;
+                    changes.push(format!("国外首选 {}", chosen_foreign.clone().unwrap_or_default()));
+                }
+            }
+
+            if !changes.is_empty() {
                 persist_settings(state, &settings)?;
                 state.with(|i| {
                     i.push_log(
                         "app",
                         "info",
-                        format!("DNS 已自动选优，首选 {}", chosen.clone().unwrap_or_default()),
+                        format!("DNS 已自动选优：{}", changes.join("，")),
                     )
                 });
             }
@@ -145,6 +184,28 @@ async fn run_dns_probe(app: &AppHandle, state: &AppState, apply: bool) -> Result
 
     let _ = app;
     Ok(())
+}
+
+/// 把探测出来的排序放到前面，用户手填的（不在候选池里的）留在后面。
+///
+/// 自动排序**只调池内项的相对顺序**，不删用户自己加的东西 —— 那些是用户
+/// 明确想要的结果，探测器没资格替他把它们丢掉。
+fn merge_ranked(
+    current: &[String],
+    ranked: &[String],
+    kind: xt_core::dns_probe::DnsKind,
+    pool: &[xt_core::dns_probe::DnsCandidate],
+) -> Vec<String> {
+    let in_pool =
+        |s: &String| pool.iter().any(|c| c.server == s.as_str() && c.kind == kind);
+    let mut out = ranked.to_vec();
+    let extra: Vec<String> = current
+        .iter()
+        .filter(|s| !in_pool(s) && !out.contains(s))
+        .cloned()
+        .collect();
+    out.extend(extra);
+    out
 }
 
 /// 启动流程调用的包装：与手动探测同一条代码路径，只是不需要返回快照。
@@ -1250,5 +1311,49 @@ mod tests {
     #[test]
     fn display_path_handles_none() {
         assert_eq!(display_path(&None), "<未找到>");
+    }
+
+    /// 自动排序要把测出来的顺序放前面，**但不能删掉用户手填的解析器**。
+    #[test]
+    fn merge_ranked_keeps_user_servers_after_probed_ones() {
+        let pool = xt_core::dns_probe::DNS_POOL;
+        let current = vec!["210.2.4.8".to_string(), "1.1.1.1".to_string()];
+        let ranked = vec!["223.5.5.5".to_string(), "119.29.29.29".to_string()];
+        let out = merge_ranked(
+            &current,
+            &ranked,
+            xt_core::dns_probe::DnsKind::Domestic,
+            pool,
+        );
+        assert_eq!(
+            out,
+            vec!["223.5.5.5", "119.29.29.29", "1.1.1.1"],
+            "池内项被换成新顺序，用户手填的 1.1.1.1 保留在后面"
+        );
+    }
+
+    /// 国外组只动 `remote_servers`：池里的国内 IP 出现在这一列时算「用户自己
+    /// 加的」，不该被国外候选顶掉。
+    #[test]
+    fn merge_ranked_is_scoped_to_its_own_kind() {
+        let pool = xt_core::dns_probe::DNS_POOL;
+        let current = vec!["https://8.8.8.8/dns-query".to_string(), "223.5.5.5".to_string()];
+        let ranked = vec!["https://1.1.1.1/dns-query".to_string()];
+        let out = merge_ranked(
+            &current,
+            &ranked,
+            xt_core::dns_probe::DnsKind::Foreign,
+            pool,
+        );
+        assert_eq!(out, vec!["https://1.1.1.1/dns-query", "223.5.5.5"]);
+    }
+
+    /// 排名为空时不能把列表清掉 —— 那是「没测出来」，不是「都不要了」。
+    #[test]
+    fn merge_ranked_with_empty_ranking_keeps_current() {
+        let pool = xt_core::dns_probe::DNS_POOL;
+        let current = vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()];
+        let out = merge_ranked(&current, &[], xt_core::dns_probe::DnsKind::Domestic, pool);
+        assert_eq!(out, current);
     }
 }

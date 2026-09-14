@@ -302,6 +302,59 @@ lookup xxx on 198.18.0.2:53: dial udp 198.18.0.2:53: connect: network is unreach
 去掉它没有损失：上面两组显式解析器各自都是完整可用的，
 不需要再兜一层必然会绕回自己的东西。
 
+### 6.7 解析器优选：两组必须走两条不同的路径
+
+`auto_select`（默认开）会在启动时探测候选池，把最快的排到列表第一位 ——
+而 `build_dns` 在分流模式下对每个列表**只取第一个**元素（`first_or`），
+所以「排第一」就等于「换掉正在用的那台」。
+
+候选池分两组，**测量路径不同**，因为它们在配置里的用法本来就不同：
+
+| 组 | 谁在用 | 怎么测 | 为什么必须这么测 |
+|---|---|---|---|
+| 国内 | `geosite:cn` → `direct_servers[0]` | 明文 UDP，`IP_BOUND_IF` 绑物理网卡直连 | 它本来就是直连用的 |
+| 国外 | `geosite:geolocation-!cn` → `remote_servers[0]` | DoH（RFC 8484），经本地 SOCKS 入站 | 直连**根本连不上** |
+
+国外那组经节点测不是近似、也不是偷懒，那就是它的真实成本。本机实测：
+
+```
+直连  https://1.1.1.1/dns-query   → 8 秒超时，连不上
+经节点 https://1.1.1.1/dns-query   → 0.255s   （3 次中位）
+经节点 https://94.140.14.14/dns-query → 0.234s
+经节点 https://8.8.8.8/dns-query   → 0.321s
+经节点 https://9.9.9.9/dns-query   → 0.390s   （抖动大，有一次 1.39s）
+```
+
+国外这组**必须串行测**（`FOREIGN_CONCURRENCY = 1`）。它们共享同一个节点，
+并发测等于在测**节点的排队**，而不是解析器的远近 —— 和国内组「不绑网卡就
+测到核心排队」是同一类错误，而且后果更重：**名次会变**。实测同一批候选：
+
+```
+并发 4： AdGuard 450ms  Cloudflare备 306ms  Cloudflare 277ms  Google 697ms  Quad9 898ms
+串行：  AdGuard 234ms  Cloudflare备 250ms  Cloudflare 255ms  Google 321ms  Quad9 390ms
+```
+
+并发那组的名次被压成了「谁先抢到节点」，AdGuard 从第 1 掉到第 3。代价是
+国外组总耗时变成 5 台 × 4 次请求 ≈ 4–5 秒 —— 它跑在启动时的后台任务里，值得。
+
+因此**节点未连接时国外那组标成「未探测」**，而不是硬走直连测一遍、
+再把必然的超时谎报成「这台解析器不通」。界面也分两块显示 ——
+把两条路径的数字放进同一张表，会被误读成同一把尺子量出来的。
+
+国内那组绑 `IP_BOUND_IF` 仍然是必须的：不绑的话查询会经 TUN → 核心的
+gVisor 栈 → 解析器，并发时测到的是**核心排队**。实测同一台阿里 DNS，
+绑 en0 是 32ms，不绑（并发 6）是 155ms，而且会把快的排到后面。
+
+「答得对不对」的多数派投票**按组分开做**。跨组混投会把正常答案判成异常：
+国外解析器经节点出去，看到的 CDN 边缘和国内直连本来就可能不是同一批地址
+（实测 `example.com` 两边这次恰好都是 Cloudflare 的 `104.20.23.154` /
+`172.66.147.243`，但那是运气，不是保证）。另外国外那组走的是加密 DoH，
+**基本不可能被抢答或投毒**，所以这一组真正要比的只是「经这个节点谁快、谁通」。
+
+自动排序**只调池内项的相对顺序**，用户手填的服务器保留在列表后面 ——
+那是用户明确想要的东西，探测器没资格替他丢掉。反过来，池内项如果这次
+没测通，会被移出列表，避免一台已经不可用的解析器继续占着位置。
+
 ---
 
 ## 7. TUN 模式下的端到端 DNS 路径
@@ -577,6 +630,14 @@ RouteVia::ScopedInterface { name, gateway }   // gateway 必填
 | `native_tun_inbound_is_emitted_for_tun_profile` | TUN 入站字段与 `/1` 拆分路由 |
 | `fakedns_pool_and_first_dns_server_when_enabled` | Fake-IP 在 DNS 列表第一位 + `destOverride` 生效 |
 | `unsupported_type_is_named_in_the_warning` | 被跳过的节点告警里带**实际收到的 `type`**（防静默丢弃） |
+| `transport_matches_kind` | 国内候选走明文直连、国外候选走 DoH 经节点（写反了会得到一组看起来正常、实际无意义的数字，见 §6.7） |
+| `pool_has_enough_foreign_candidates` | 国外候选 ≥ 3，否则多数派投票这一半判据等于没有 |
+| `pool_is_clean` | 候选池只放 IP 或 **IP 形式的** DoH 端点（域名会引入自举依赖） |
+| `foreign_group_is_not_probed_without_node` | 节点未连接时国外组标「未探测」，**不谎报「不通」** |
+| `curl_doh_args_carry_proxy_and_timeout` | DoH 探测确实带上 `--socks5-hostname` 与 `--max-time` |
+| `merge_ranked_keeps_user_servers_after_probed_ones` | 自动排序保留用户手填的解析器（只调池内项顺序） |
+| `merge_ranked_is_scoped_to_its_own_kind` | 国内组只动 `direct_servers`、国外组只动 `remote_servers` |
+| `foreign_group_is_probed_serially` | 国外组串行探测（并发会测到节点排队并**改变名次**，见 §6.7） |
 
 ### 9.1 冒烟测试：唯一会真改系统网络的测试
 
