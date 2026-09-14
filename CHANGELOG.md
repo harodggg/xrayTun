@@ -2,6 +2,44 @@
 
 ## 0.5.1
 
+### 修复：发布流程的打包步骤**从来没成功过**（universal 包根本没出来）
+
+`package-macos.sh` 里有这么一句：
+
+```bash
+cargo build --release --workspace $TARGET_FLAG   # TARGET_FLAG="--target universal-apple-darwin"
+```
+
+**`universal-apple-darwin` 不是 rustc 的 target。** 它只是 Tauri CLI 的伪
+target（Tauri 内部把它展开成「分别编 x86_64 与 aarch64，再 lipo」）。
+直接交给 cargo 必失败：
+
+```
+error: could not find specification for target "universal-apple-darwin"
+```
+
+实测 rustc 1.98：`rustc --print target-list` 里没有它。
+
+后果是发版在「打包（universal）」这一步就死了，**Release 从来没有被创建过**；
+之前你拿到的 dmg 全是我在本机用默认宿主架构打的（文件名里的 `_x86_64` 就是
+这个意思）。报错藏在编译日志中段，看起来像普通编译失败，所以一直没被发现。
+
+**修法**：universal 时不再把伪 target 交给 cargo，而是照 Tauri 的做法自己做 ——
+分别编 `x86_64-apple-darwin` 与 `aarch64-apple-darwin`，再 `lipo` 合成 helper
+（helper 是我们自己的 crate，不在 Tauri 的构建范围内，Tauri 只管 .app 里的主程序）。
+
+顺带加了两个东西，让这类问题**下次自己暴露**：
+
+- 其它显式 target 会先过一遍 `rustc --print target-list` 预检，不认识就立刻
+  给出可读报错并列出本机已装 std，而不是让它变成编译日志中段一句 cargo 错误。
+- `tauri build` 之后断言 .app 确实在预期位置；否则**把实际找到的位置全部列出来**
+  （universal 的产物路径依赖 Tauri 的内部布局，猜错时这一步能自己交代清楚）。
+
+> 为什么本地测不出 universal：本机是 Homebrew 的 x86_64 Rust，只有
+> `x86_64-apple-darwin` 的 std，编 aarch64 会 `E0463`（找不到 `std`）。
+> 这条路只能在 CI 上验证。**所以「发版必须真的跑一次 CI 并确认产物存在」是
+> 发版的一部分，不能只看本地打出来的包。**
+
 ### 修复：「错误」页签里全是内核的**正常**信息
 
 **症状**：日志页的「错误」页签被这些刷满（调试等级下尤其明显）——

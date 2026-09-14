@@ -50,15 +50,35 @@ export npm_config_cache="${npm_config_cache:-$ROOT/../.npm-cache}"
 # 设成 `universal-apple-darwin` 就出一个同时含 x86_64 与 arm64 的包
 # （CI 里就是这么用的，见 .github/workflows/release.yml）。前提是
 # 两个 target 都装了：`rustup target add x86_64-apple-darwin aarch64-apple-darwin`。
-# Homebrew 装的 rust 没有 rustup，加不了 target，只能用默认主机架构。
+# Homebrew 装的 rust 没有 rustup、只有宿主架构的 std，所以本地一般用默认。
 TARGET_TRIPLE="${XRAYTUN_TARGET:-}"
-if [ -n "$TARGET_TRIPLE" ]; then
-  TARGET_FLAG="--target $TARGET_TRIPLE"
-  # cargo 会把产物写进 <target-dir>/<triple>/release
+TARGET_FLAG=""
+RELEASE_DIR="$CARGO_TARGET_DIR/release"
+# `universal-apple-darwin` 是 **Tauri CLI 的伪 target，不是 rustc 的 target**。
+# 直接 `cargo build --target universal-apple-darwin` 必失败：
+#
+#     error: could not find specification for target "universal-apple-darwin"
+#
+# （`rustc --print target-list` 里没有它，实测 rustc 1.98。）Tauri 内部会把这个
+# 伪 target 展开成「分别编 x86_64 与 aarch64，再 lipo」，但那只覆盖它自己构建
+# 的 .app —— helper 是我们自己的 crate，得我们自己做同样的事（见下面 1/4）。
+UNIVERSAL=0
+if [ "$TARGET_TRIPLE" = "universal-apple-darwin" ]; then
+  UNIVERSAL=1
+  TARGET_FLAG="--target $TARGET_TRIPLE" # 只给 tauri build 用
   RELEASE_DIR="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
-else
-  TARGET_FLAG=""
-  RELEASE_DIR="$CARGO_TARGET_DIR/release"
+elif [ -n "$TARGET_TRIPLE" ]; then
+  TARGET_FLAG="--target $TARGET_TRIPLE"
+  RELEASE_DIR="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
+  # 其余显式 target 必须是 rustc 真认识的，否则在这里就给出可读的报错，
+  # 而不是让它变成编译日志中段一句看不出所以然的 cargo 错误。
+  if ! rustc --print target-list 2>/dev/null | grep -qx "$TARGET_TRIPLE"; then
+    echo "rustc 不认识 target '$TARGET_TRIPLE'。" >&2
+    echo "  universal 请用 universal-apple-darwin（本脚本会自己处理）；" >&2
+    echo "  其它可用目标见 rustc --print target-list。本机已装 std：" >&2
+    ls "$(rustc --print sysroot)/lib/rustlib/" 2>/dev/null | grep -- "-apple-" | sed 's/^/    /' >&2
+    exit 1
+  fi
 fi
 
 TAURI="$ROOT/apps/ui/node_modules/.bin/tauri"
@@ -77,7 +97,22 @@ for f in xray geoip.dat geosite.dat; do
 done
 
 echo "==> 1/4 构建 release 版 Rust（含 helper）"
-cargo build --release --workspace $TARGET_FLAG
+if [ "$UNIVERSAL" -eq 1 ]; then
+  # helper 不在 Tauri 的构建范围内（它是我们自己的 crate），所以要自己做
+  # 「分别编 + lipo」。Tauri 稍后会为 .app 里的主程序做同样的事。
+  for t in x86_64-apple-darwin aarch64-apple-darwin; do
+    echo "    · cargo build --release --target $t"
+    cargo build --release --workspace --target "$t"
+  done
+  mkdir -p "$RELEASE_DIR"
+  lipo -create \
+    "$CARGO_TARGET_DIR/x86_64-apple-darwin/release/xraytun-helper" \
+    "$CARGO_TARGET_DIR/aarch64-apple-darwin/release/xraytun-helper" \
+    -output "$RELEASE_DIR/xraytun-helper"
+  echo "    helper 架构：$(lipo -archs "$RELEASE_DIR/xraytun-helper")"
+else
+  cargo build --release --workspace $TARGET_FLAG
+fi
 
 # 前端单独构建一次。
 #
@@ -103,6 +138,21 @@ echo "==> 3/4 打包 .app"
 # 我们随后用 hdiutil 直接打 dmg：功能上少一个漂亮的背景图，但到处都能跑。
 (cd "$ROOT/apps/desktop" && "$TAURI" build --bundles app $TARGET_FLAG)
 
+# Tauri 把 universal 的合并产物放在 <target-dir>/universal-apple-darwin/release/
+# （它自己处理的伪 target），非 universal 时就在对应 triple 目录下 —— 这两种
+# 我们都靠 `RELEASE_DIR` 猜。猜错时的表现是后面一句「找不到 XrayTun.app」，
+# 而真正的原因（Tauri 换了布局）被藏起来了。所以这里直接把**实际产出的位置**
+# 列出来，让 CI 日志自己交代。
+APP="$RELEASE_DIR/bundle/macos/XrayTun.app"
+if [ ! -d "$APP" ]; then
+  echo "Tauri 没有在预期位置产出 .app：" >&2
+  echo "  期望：$APP" >&2
+  echo "  实际找到的 XrayTun.app：" >&2
+  find "$CARGO_TARGET_DIR" -type d -name "XrayTun.app" 2>/dev/null | head -10 | sed 's/^/    /' >&2
+  echo "  TARGET_TRIPLE=${TARGET_TRIPLE:-<空>}  RELEASE_DIR=$RELEASE_DIR" >&2
+  exit 1
+fi
+
 # 版本号从 tauri.conf.json 读，**不要硬编码**。
 # 之前这里写死了 0.1.0，改版本时忘了同步就会打出一个名字对、内容错的包，
 # 而且产物名还会和上一版撞车（下载页面上分不清哪个是哪个）。
@@ -112,12 +162,6 @@ if [ -z "$APP_VERSION" ]; then
   exit 1
 fi
 echo "  · 版本 ${APP_VERSION}"
-
-APP="$RELEASE_DIR/bundle/macos/XrayTun.app"
-if [ ! -d "$APP" ]; then
-  echo "打包完成但没找到 $APP" >&2
-  exit 1
-fi
 
 echo "==> 4/4 把 helper 放进 Contents/MacOS/ 并校验"
 HELPER_SRC="$RELEASE_DIR/xraytun-helper"
