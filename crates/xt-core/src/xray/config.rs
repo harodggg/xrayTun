@@ -429,7 +429,22 @@ fn build_outbounds(nodes: &[Node], input: &CoreConfigInput<'_>) -> Value {
         "settings": { "response": { "type": "http" } }
     }));
 
-    // DNS 出站：被路由到这里的 DNS 查询由内核 DNS 模块直接答复。
+    // DNS 出站：被路由到这里的 DNS 查询交给内核 DNS 模块，它只答 A/AAAA。
+    //
+    // **刻意不给它加 `settings`。** 非 A/AAAA 的查询（PTR / SVCB / HTTPS RR）
+    // 因此走内核默认行为：立刻回一个**空 NOERROR**。隔离实例实测，TYPE65
+    // 查询 1ms 返回 `ANSWER: 0`，客户端随即回退去问 A 记录 —— 这是正常且最快的。
+    //
+    // 试过两条"更漂亮"的路，都不划算（实测见 docs/04 §6.8）：
+    //
+    //   nonIPQuery: "drop"  → 直接不回包，客户端一路等到超时；而且这个字段
+    //                         已被内核标为 deprecated，启动时会打警告。
+    //   rules + direct      → 把 1ms 的本地空应答换成一次真实上游往返，
+    //                         却仍然拿不到 HTTPS RR（223.5.5.5 也不提供）。
+    //
+    // 也就是说：日志里那条 `proxy/dns: rejected type ... query` 不是故障，
+    // 别再去"修"它。它是 [Info] 级 —— 之前它出现在「错误」页签，是因为我们
+    // 自己的日志分类器按关键字判级（见 apps/desktop/src/commands.rs）。
     out.push(json!({ "tag": "dns-out", "protocol": "dns" }));
 
     // API 出站：与 `api.tag` 同名，是内核内部约定的管理通道。
@@ -970,6 +985,34 @@ mod tests {
         for want in ["direct", "block", "dns-out", "api"] {
             assert!(tags.contains(&want.to_string()), "缺少 outbound: {want}");
         }
+    }
+
+    /// `dns-out` **刻意不带 `settings`**：非 A/AAAA 查询走内核默认的「快速空
+    /// NOERROR」，实测比任何显式配置都好。这条测试是为了防止以后有人看到
+    /// 日志里的 `rejected type ...` 就去给它加 `nonIPQuery` / `rules` ——
+    /// 那只会让 DNS 变慢或变卡（见 docs/04 §6.8）。
+    #[test]
+    fn dns_outbound_has_no_settings_on_purpose() {
+        let s = settings();
+        let cfg = build(&CoreConfigInput {
+            settings: &s,
+            nodes: &[],
+            selected: None,
+            rules: &[],
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        });
+        let dns_out = cfg["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "dns-out")
+            .expect("应有 dns-out 出站");
+        assert_eq!(dns_out["protocol"], "dns");
+        assert!(
+            dns_out.get("settings").is_none(),
+            "dns-out 不该有 settings — 默认行为已是最优，加 nonIPQuery 会把快速空应答变成超时，加 rules+direct 会多一次上游往返"
+        );
     }
 
     #[test]

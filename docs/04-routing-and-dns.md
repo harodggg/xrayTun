@@ -373,6 +373,38 @@ cargo run -p xraytun-desktop --example dns_probe              # 节点已连
 cargo run -p xraytun-desktop --example dns_probe -- --no-socks # 模拟未连
 ```
 
+### 6.8 `proxy/dns: rejected type ... query` 不是故障，别去"修"它
+
+调试等级下日志里会刷：
+
+```
+[Info] proxy/dns: rejected type TypeHTTPS query for domain x.com.
+[Info] proxy/dns: rejected type TypePTR query for domain 22.0.168.192.in-addr.arpa.
+[Info] proxy/dns: rejected type TypeSVCB query for domain _dns.resolver.arpa.
+```
+
+官方文档写得很清楚：内置 DNS **只支持 A / AAAA**（CNAME 会追到 A/AAAA 为止），
+其余查询类型交给 DNS 出站决定「丢弃还是透传」。
+
+**我们刻意不给 `dns-out` 加 `settings`**，于是走内核默认行为：立刻回一个
+**空 NOERROR**。用一个隔离实例（`dokodemo-door` 收 DNS → `dns-out`，不碰 TUN、
+不改系统网络）实测三种配法：
+
+| `dns-out` 的配置 | TYPE65 的响应 | 内核日志 | 结论 |
+|---|---|---|---|
+| **不配（当前）** | `NOERROR, ANSWER: 0`，**1ms** | `rejected type` ×1 | ✅ 客户端立刻回退去问 A |
+| `nonIPQuery: "drop"` | 不回包，客户端**等到超时** | 无 | ❌ 更卡；且该字段已 deprecated |
+| `rules` + `direct` 到 `223.5.5.5` | `NOERROR, ANSWER: 0` | 无 | ❌ 1ms 变一次真实上游往返，且 223.5.5.5 同样不提供 HTTPS RR |
+
+也就是说这条日志代表的是「这个类型我们不处理，你问 A 吧」——**正确且最快**。
+`nonIPQuery` 还会让内核在启动时打一条 `This feature ... is deprecated` 警告。
+
+它出现在界面「错误」页签里，是**我们自己的问题**，与 DNS 无关：
+`classify_log` 原先纯按关键字判级（消息里含 `rejected` / `failed` 就算错误），
+完全无视内核写在行首的 `[Info]`。已改为**先信 `[Level]` 标记**，没有标记才退回
+关键字。同类噪音还有 `[Info] ... write: broken pipe`（浏览器提前断开 keep-alive
+连接），也是正常 churn。
+
 ---
 
 ## 7. TUN 模式下的端到端 DNS 路径
@@ -656,6 +688,7 @@ RouteVia::ScopedInterface { name, gateway }   // gateway 必填
 | `merge_ranked_keeps_user_servers_after_probed_ones` | 自动排序保留用户手填的解析器（只调池内项顺序） |
 | `merge_ranked_is_scoped_to_its_own_kind` | 国内组只动 `direct_servers`、国外组只动 `remote_servers` |
 | `foreign_group_is_probed_serially` | 国外组串行探测（并发会测到节点排队并**改变名次**，见 §6.7） |
+| `dns_outbound_has_no_settings_on_purpose` | `dns-out` **刻意不配** `settings`：非 A/AAAA 的快速空 NOERROR 比任何显式配置都好（见 §6.8） |
 
 ### 9.1 冒烟测试：唯一会真改系统网络的测试
 

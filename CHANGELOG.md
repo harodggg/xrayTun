@@ -1,5 +1,54 @@
 # 更新记录
 
+## 0.5.1
+
+### 修复：「错误」页签里全是内核的**正常**信息
+
+**症状**：日志页的「错误」页签被这些刷满（调试等级下尤其明显）——
+
+```
+[Info] proxy/dns: rejected type TypeHTTPS query for domain x.com.
+[Info] proxy/dns: rejected type TypePTR query for domain 22.0.168.192.in-addr.arpa.
+[Info] ... app/proxyman/outbound: ... write tcp 127.0.0.1:10808->...: write: broken pipe
+```
+
+**根因**：`classify_log` **纯按关键字判级**，完全无视内核写在行首的 `[Level]`：
+
+```rust
+if lower.contains("failed") || lower.contains("error") || lower.contains("rejected") {
+    "error"
+}
+```
+
+于是消息里带 `rejected` / `failed` 的 `[Info]` 行全被升级成「错误」。更糟的是
+它**把真正的错误淹掉了**：错误页签里全是这两类噪音，用户翻不到真的；而且只要
+消息里出现 `failed`，连 `[Debug]` 行都会被算成错误。
+
+**修法**：先信内核自己写的 `[Error]` / `[Warning]` / `[Info]` / `[Debug]` 标记，
+没有标记（核心启动横幅、裸 stderr）才退回关键字判断。
+
+副作用：`[Warning] failed to dial` 从「错误」变成「警告」。这是对的 —— 内核说
+是 Warning 就是 Warning，不该由我们按消息里的词去升级它。
+
+### 顺带查清：`rejected type ... query` 不是故障，别去"修"它
+
+官方文档写明内置 DNS **只支持 A / AAAA**，其余类型交给 DNS 出站决定丢弃还是
+透传。用一个**隔离实例**（`dokodemo-door` 收 DNS → `dns-out`，不碰 TUN、不改
+系统网络）实测三种配法：
+
+| `dns-out` 的配置 | TYPE65 的响应 | 结论 |
+|---|---|---|
+| **不配（当前）** | `NOERROR, ANSWER: 0`，**1ms** | ✅ 客户端立刻回退去问 A |
+| `nonIPQuery: "drop"` | 不回包，客户端**等到超时** | ❌ 更卡；该字段还已被内核标为 deprecated |
+| `rules` + `direct` 到 `223.5.5.5` | `NOERROR, ANSWER: 0` | ❌ 1ms 变一次真实上游往返，仍拿不到 HTTPS RR |
+
+所以**刻意保持 `dns-out` 无 `settings`**，并加测试钉住这个决定
+（`dns_outbound_has_no_settings_on_purpose`）。详见 docs/04 §6.8。
+
+> **差点被 `dig` 骗**：macOS 的 `dig x.com HTTPS` 打印了一个 IP，看着像 HTTPS RR
+> 查询成功了。改用数字类型 `TYPE65` 重测，真实响应是 `ANSWER: 0` —— 那个 IP 是
+> dig 自己按别的类型答的。**校验查询类型要用数字，别信助记符。**
+
 ## 0.5.0
 
 ### 国外 DNS 也参与探测，并且和国内分开显示

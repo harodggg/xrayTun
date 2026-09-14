@@ -729,11 +729,45 @@ async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
 }
 
 /// 从 Xray 的日志行里粗分级别，让 UI 能做颜色区分。
+///
+/// **先信 Xray 自己写的等级标记**，只有在没有标记时才退回关键字判断。
+///
+/// 之前是纯关键字判断（含 `failed` / `error` / `rejected` 就算错误），结果把
+/// 内核的正常信息整片塞进了「错误」页签：
+///
+/// * `[Info] proxy/dns: rejected type TypeHTTPS query for domain x.com.`
+///   内核在说「这个查询类型我不处理」。实测它返回的是一个**快速的空
+///   NOERROR**（TYPE65 查询 1ms 返回 `ANSWER: 0`），客户端会立刻回退去问
+///   A 记录。这是正常行为，改配置只会更差（见 docs/04 §6.8）。
+/// * `[Info] ... write tcp 127.0.0.1:10808->...: write: broken pipe`
+///   客户端（浏览器）提前断开连接，keep-alive 连接的日常 churn。
+///
+/// 关键词判断还有个更隐蔽的坏处：**它把真正的错误淹掉了** —— 错误页签里
+/// 全是这两类噪音，用户翻不到真的。而且只要消息里出现 `failed`，连
+/// `[Debug]` 行都会被升级成「错误」。
 fn classify_log(line: &str) -> &'static str {
+    // Xray 的格式：`2026/09/14 17:45:47.320581 [Info] [755193655] 消息`。
+    // 这几个标记互不包含，顺序无关。
+    for (marker, level) in [
+        ("[Error]", "error"),
+        ("[Warning]", "warn"),
+        ("[Info]", "info"),
+        ("[Debug]", "debug"),
+    ] {
+        if line.contains(marker) {
+            return level;
+        }
+    }
+
+    // 没有等级标记的行（核心启动横幅、或核心写到裸 stderr 的东西）才用关键字。
     let lower = line.to_ascii_lowercase();
-    if lower.contains("failed") || lower.contains("error") || lower.contains("rejected") {
+    if lower.contains("failed")
+        || lower.contains("error")
+        || lower.contains("fatal")
+        || lower.contains("panic")
+    {
         "error"
-    } else if lower.contains("warning") || lower.contains("warn") {
+    } else if lower.contains("warn") {
         "warn"
     } else if lower.contains("debug") {
         "debug"
@@ -1312,11 +1346,39 @@ pub fn display_path(p: &Option<PathBuf>) -> String {
 mod tests {
     use super::*;
 
+    /// 日志分级要**先信内核自己写的 `[Level]` 标记**。
+    ///
+    /// 之前纯按关键字判，于是上面那些 `[Info] ... rejected type ...` 和
+    /// `[Info] ... broken pipe` 全被归类成「错误」，错误页签里翻不到真错误。
     #[test]
-    fn log_classification_covers_real_xray_lines() {
-        assert_eq!(classify_log("2026/01/01 00:00:00 [Warning] failed to dial"), "error");
-        assert_eq!(classify_log("[Info] Xray 26.9.9 started"), "info");
+    fn log_classification_trusts_the_level_marker() {
+        // 这两条是用户实际报上来的原文。
+        assert_eq!(
+            classify_log(
+                "2026/09/14 17:45:47.320581 [Info] [755193655] proxy/dns: rejected type TypeHTTPS query for domain x.com."
+            ),
+            "info",
+            "内核说的是 Info，消息里带 rejected 不该把它升级成错误",
+        );
+        assert_eq!(
+            classify_log(
+                "2026/09/14 17:45:50.210081 [Info] [4072004086] app/proxyman/outbound: failed to process outbound traffic > ... write: broken pipe"
+            ),
+            "info",
+            "消息里带 failed 也一样",
+        );
+        assert_eq!(
+            classify_log("2026/01/01 00:00:00 [Warning] failed to dial"),
+            "warn",
+            "内核说是 Warning 就是 Warning",
+        );
+        assert_eq!(classify_log("2026/01/01 00:00:00 [Error] something exploded"), "error");
+        assert_eq!(classify_log("2026/01/01 00:00:00 [Debug] dialing 1.2.3.4"), "debug");
+        // 没有标记才用关键字。
+        assert_eq!(classify_log("Xray 26.9.9 (Xray, Penetrates Everything.)"), "info");
         assert_eq!(classify_log("something debug level"), "debug");
+        assert_eq!(classify_log("failed to write config"), "error");
+        assert_eq!(classify_log("WARNING: %v"), "warn");
     }
 
     #[test]
