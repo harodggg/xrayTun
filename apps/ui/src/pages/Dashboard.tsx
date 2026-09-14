@@ -39,7 +39,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (view: string) =
           </div>
           <div className="stat__sub">
             {selected ? nodeSummary(selected) : "请在「节点」页添加或选择"}
-            {selectedLatency?.latency_ms ? ` · ${selectedLatency.latency_ms} ms` : ""}
+            {selectedLatency?.server_rtt_ms ? ` · ${selectedLatency.server_rtt_ms} ms` : ""}
           </div>
         </div>
         <div className="stat">

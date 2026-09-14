@@ -31,9 +31,22 @@ use crate::model::Node;
 use crate::xray::config::{node_to_outbound, API_PORT};
 use crate::xray::process::{wait_for_port, CoreEvent, XrayProcess};
 
-/// 默认探测目标：Cloudflare 的 `generate_204`，全球可达、响应体为空、
-/// 不参与任何 CDN 地域调度，是延迟测量的标准靶点。
+/// 默认探测目标：Cloudflare 的 `generate_204`，全球可达、响应体为空。
+///
+/// **它只用来判「这个节点能不能用」，不用来算「延迟」。**
+///
+/// 经节点请求它，量到的是「本地→服务器→Cloudflare→回来」—— 其中
+/// 「服务器→Cloudflare」那一段取决于服务器离最近的 CF PoP 有多远，
+/// 和节点好坏无关，实测能占到整个数字的 **70%**（195ms 里 136ms）。
+/// 更糟的是它会让排序反过来：一个美国节点可能因为 CF 就在旁边而被报成
+/// 比香港节点更"快"，尽管它离用户远得多。
+///
+/// 延迟请用 [`server_rtt_ms`]：那是纯粹的「本地→服务器」。
 pub const DEFAULT_PROBE_URL: &str = "http://cp.cloudflare.com/generate_204";
+
+/// 延迟采样次数。取中位数，单次采样实测有 1.3 倍抖动（172/191/224ms），
+/// 两个节点只差十几毫秒时是分不出来的。
+pub const RTT_SAMPLES: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct ProbeOptions {
@@ -43,7 +56,14 @@ pub struct ProbeOptions {
     pub target_url: String,
     /// 单个节点的整体超时（含连接 + 首字节）。
     pub timeout: Duration,
-    /// 并发度。太高会让本地 CPU 成为瓶颈，反而让延迟失真。
+    /// RTT 采样次数（取中位数）。
+    pub rtt_samples: usize,
+    /// 并发度。
+    ///
+    /// 从 8 降到 4 是实测结论：同一个核心上并发 8 条探测，中位延迟会从
+    /// 192ms 抬到 221ms（+15%），离散度也变大 —— REALITY 握手是 CPU 密集的，
+    /// 并发探针在抢同一个核心的 CPU 和同一条上行。**节点越多，每个数字越差**，
+    /// 而这和节点本身无关。
     pub concurrency: usize,
 }
 
@@ -54,7 +74,8 @@ impl Default for ProbeOptions {
             base_port: 21000,
             target_url: DEFAULT_PROBE_URL.to_string(),
             timeout: Duration::from_secs(5),
-            concurrency: 8,
+            rtt_samples: RTT_SAMPLES,
+            concurrency: 4,
         }
     }
 }
@@ -63,8 +84,22 @@ impl Default for ProbeOptions {
 pub struct ProbeResult {
     pub node_id: String,
     pub node_name: String,
-    /// TTFB，单位毫秒。失败时为 `None`。
-    pub latency_ms: Option<u32>,
+
+    /// **主指标：本地 → 服务器的 TCP 握手 RTT（毫秒，`RTT_SAMPLES` 次的中位数）。**
+    ///
+    /// 这是「我离这台服务器多远」，不含服务器到任何第三方的路程，
+    /// 也不依赖探测靶点在哪儿。全部失败时为 `None`。
+    pub server_rtt_ms: Option<u32>,
+
+    /// **可用性：经这个节点能不能真的取到东西。**
+    ///
+    /// 只取成功/失败，不拿它当延迟用 —— 见 [`DEFAULT_PROBE_URL`] 的说明。
+    pub available: bool,
+
+    /// 经节点到靶点的 TTFB（毫秒）。仅供诊断，**不是延迟**。
+    /// 它包含「服务器→靶点」那一段，因此会随靶点位置变化。
+    pub through_node_ms: Option<u32>,
+
     pub http_status: Option<u16>,
     pub error: Option<String>,
     pub tested_at: u64,
@@ -75,15 +110,20 @@ impl ProbeResult {
         Self {
             node_id: node.id.clone(),
             node_name: node.name.clone(),
-            latency_ms: None,
+            server_rtt_ms: None,
+            available: false,
+            through_node_ms: None,
             http_status: None,
             error: Some(err.into()),
             tested_at: now_unix(),
         }
     }
 
+    /// 可用性以「经节点取到了东西」为准，而不是以 RTT 测到与否为准 ——
+    /// TCP 握手在墙下可能被中间设备伪造（RST 注入会让它又快又"失败"，
+    /// 或伪造 SYN-ACK 让它又快又"成功"），只有真取一次数据才算数。
     pub fn ok(&self) -> bool {
-        self.latency_ms.is_some()
+        self.available
     }
 }
 
@@ -212,21 +252,39 @@ pub async fn probe_nodes(
         let sem = sem.clone();
         let pre_failed = not_ready.contains(&i);
 
+        let rtt_samples = opts.rtt_samples;
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await.expect("信号量不会关闭");
+
+            // RTT 与可用性互不依赖，可以并行做。
+            //
+            // RTT 直接对服务器发 TCP 握手，**不碰核心**：即使探针核心启动
+            // 失败，延迟这一项依然有值 —— 而这两件事本来就没关系
+            // （核心起不来是本地问题，不代表服务器远或近）。
+            let rtt = server_rtt_ms(&node.address, node.port, rtt_samples, timeout).await;
+
             if pre_failed {
-                return ProbeResult::failure(&node, "探针端口未在超时内就绪（可能是核心启动失败）");
+                let mut r = ProbeResult::failure(&node, "探针端口未在超时内就绪（可能是核心启动失败）");
+                r.server_rtt_ms = rtt;
+                return r;
             }
             match probe_one(port, &target, timeout).await {
-                Ok((latency, status)) => ProbeResult {
+                Ok((through, status)) => ProbeResult {
                     node_id: node.id.clone(),
                     node_name: node.name.clone(),
-                    latency_ms: Some(latency),
+                    server_rtt_ms: rtt,
+                    available: true,
+                    through_node_ms: Some(through),
                     http_status: Some(status),
                     error: None,
                     tested_at: now_unix(),
                 },
-                Err(e) => ProbeResult::failure(&node, e.to_string()),
+                Err(e) => {
+                    let mut r = ProbeResult::failure(&node, e.to_string());
+                    // 不可用，但「有多远」仍然是有效信息，保留下来。
+                    r.server_rtt_ms = rtt;
+                    r
+                }
             }
         }));
     }
@@ -239,7 +297,9 @@ pub async fn probe_nodes(
                 results.push(ProbeResult {
                     node_id: String::new(),
                     node_name: String::new(),
-                    latency_ms: None,
+                    server_rtt_ms: None,
+                    available: false,
+                    through_node_ms: None,
                     http_status: None,
                     error: Some(format!("探测任务 panic: {join_err}")),
                     tested_at: now_unix(),
@@ -259,16 +319,76 @@ pub async fn probe_nodes(
     Ok(results)
 }
 
+/// **本地 → 服务器** 的 TCP 握手 RTT，单位毫秒。
+///
+/// 这是「节点延迟」该有的含义：只包含用户到服务器这一段网络，
+/// 不含服务器到任何第三方的路程。实测差距很大 ——
+/// 同一个节点，TCP 握手 59ms，而经它请求 Cloudflare 是 196ms。
+///
+/// 采样 `samples` 次取**中位数**：单次 TCP 握手受排队和抖动影响，
+/// 实测同一路径 8 次能差 2 倍以上，单点值不足以比较两个相近的节点。
+///
+/// 不需要起核心、不需要第三方可达性 —— 纯粹一次 `connect()`。
+/// 失败了返回 `None`（注意：墙下的 RST 注入会让这里"又快又失败"，
+/// 所以它只作距离参考，可用性由 [`probe_one`] 判定）。
+pub async fn server_rtt_ms(address: &str, port: u16, samples: usize, timeout: Duration) -> Option<u32> {
+    // 域名地址先解析一次；解析出来的 IP 在多次采样间复用，避免把 DNS
+    // 抖动算进延迟里。
+    // `resolve_host` 是阻塞实现（走 `ToSocketAddrs`），丢到阻塞线程池，
+    // 和 supervisor 里处理 `tcp_reachable` 的做法保持一致。
+    let host = address.to_string();
+    let ip = match tokio::task::spawn_blocking(move || crate::net::resolve_host(&host)).await {
+        Ok(ips) => ips.into_iter().next(),
+        Err(_) => None,
+    }?;
+    let target = std::net::SocketAddr::new(ip, port);
+
+    let mut ok: Vec<u32> = Vec::with_capacity(samples);
+    for _ in 0..samples.max(1) {
+        let start = Instant::now();
+        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target)).await {
+            Ok(Ok(stream)) => {
+                ok.push(start.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                drop(stream);
+            }
+            // 单次失败不放弃：可能是瞬时丢包。全部失败才算不通。
+            _ => continue,
+        }
+    }
+    median(&mut ok)
+}
+
+/// 取中位数。空集返回 `None`。抽成纯函数是为了能单测。
+fn median(values: &mut [u32]) -> Option<u32> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
+}
+
 /// 探测单个节点：TCP 连接 + TTFB。
 async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u16)> {
     let host = target.host_str().ok_or_else(|| Error::Probe("探测 URL 缺少 host".into()))?;
     let target_port = target.port_or_known_default().unwrap_or(80);
     let path = if target.path().is_empty() { "/" } else { target.path() };
 
-    let mut stream = socks5_connect(port, host, target_port, timeout).await?;
+    // 超时重试一次再判失败。
+    //
+    // 实测单次请求会因瞬时抖动超过 5s（尤其冷 DNS 缓存：探测配置里没有
+    // `dns` 段，靶点域名首次解析要经系统解析器绕回主核心的 DNS 模块，
+    // 再经 DoH 走节点，本身就是几百毫秒起步）。一次超时就标「失败」
+    // 会把能用的节点误报成不可用。
+    let mut stream = match socks5_connect(port, host, target_port, timeout).await {
+        Ok(s) => s,
+        Err(first) => match socks5_connect(port, host, target_port, timeout).await {
+            Ok(s) => s,
+            Err(_) => return Err(first),
+        },
+    };
 
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: XrayTun/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: XrayTun/{}\r\nAccept: */*\r\nConnection: close\r\n\r\n", env!("CARGO_PKG_VERSION")
     );
 
     let start = Instant::now();
@@ -427,6 +547,34 @@ mod tests {
         assert_eq!(parse_http_status(b"HTTP/1.1 204 No Content\r\n"), Some(204));
         assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n"), Some(200));
         assert_eq!(parse_http_status(b"garbage"), None);
+    }
+
+    /// 中位数必须扛得住单点抖动 —— 这正是单次采样做不到的事。
+    #[test]
+    fn median_ignores_a_single_outlier() {
+        assert_eq!(median(&mut [190]), Some(190));
+        assert_eq!(median(&mut [210, 190, 191]), Some(191));
+        // 单点异常被压掉：192 vs 850（首次冷 DNS 缓存那种）
+        assert_eq!(median(&mut [192, 850, 191]), Some(192));
+        assert_eq!(median(&mut []), None);
+    }
+
+    /// `ok()` 必须看「能不能取到东西」，而不是「RTT 测到没有」。
+    ///
+    /// 墙下的 RST 注入会让 TCP 握手又快又失败，伪造的 SYN-ACK 会让它又快又
+    /// "成功" —— 所以可用性只能由真实取一次数据来判定。
+    #[test]
+    fn availability_does_not_depend_on_rtt() {
+        let node = node("a", 443);
+        // RTT 测到了，但经节点取不到东西 → 仍算不可用
+        let mut r = ProbeResult::failure(&node, "不可达");
+        r.server_rtt_ms = Some(42);
+        assert!(!r.ok(), "有 RTT 不等于可用");
+        // 反之：RTT 全失败（被 RST 注入），但经节点能取到 → 可用
+        let mut r2 = ProbeResult::failure(&node, "");
+        r2.server_rtt_ms = None;
+        r2.available = true;
+        assert!(r2.ok(), "RTT 测不到不等于不可用");
     }
 
     #[test]

@@ -221,7 +221,12 @@ export interface TrafficSample {
 export interface ProbeResult {
   node_id: string;
   node_name: string;
-  latency_ms: number | null;
+  /** **延迟：本地 → 服务器的 TCP 握手 RTT**（3 次中位数）。主指标。 */
+  server_rtt_ms: number | null;
+  /** 经这个节点能不能真的取到东西。只取成功/失败。 */
+  available: boolean;
+  /** 经节点到靶点的 TTFB。仅供诊断 —— 含「服务器→靶点」那段，不是延迟。 */
+  through_node_ms: number | null;
   http_status: number | null;
   error: string | null;
   tested_at: number;

@@ -112,7 +112,8 @@ export default function Nodes() {
               key={node.id}
               node={node}
               selected={node.id === selectedId}
-              latencyMs={latency[node.id]?.latency_ms ?? null}
+              latencyMs={latency[node.id]?.server_rtt_ms ?? null}
+              available={latency[node.id]?.available ?? null}
               latencyError={latency[node.id]?.error ?? null}
               busy={busy !== null}
               onSelect={() => void run("select", () => api.selectNode(node.id))}
@@ -129,6 +130,7 @@ function NodeRow({
   node,
   selected,
   latencyMs,
+  available,
   latencyError,
   busy,
   onSelect,
@@ -136,7 +138,10 @@ function NodeRow({
 }: {
   node: Node;
   selected: boolean;
+  /** 本地 → 服务器的 TCP 握手 RTT（中位数）。这是「延迟」。 */
   latencyMs: number | null;
+  /** 经该节点能不能取到东西。`null` 表示还没测过。 */
+  available: boolean | null;
   latencyError: string | null;
   busy: boolean;
   onSelect: () => void;
@@ -157,8 +162,25 @@ function NodeRow({
         </div>
       </div>
 
+      {/* 延迟与可用性分开显示，因为它们回答的是两个问题：
+          「离我多远」和「能不能用」。合成一个数字会让排序骗人 ——
+          经节点请求一个固定靶点量到的是「本地→服务器→靶点→回来」，
+          其中「服务器→靶点」那段取决于服务器离靶点有多远，
+          可能让一个很远的节点看起来比近的更快。 */}
       <span className={`badge badge--${tier}`} title={latencyError ?? ""}>
-        {latencyMs !== null ? `${latencyMs} ms` : latencyError ? "失败" : "未测"}
+        {latencyMs !== null ? `${latencyMs} ms` : latencyError ? "—" : "未测"}
+      </span>
+      <span
+        className={`badge badge--${available === null ? "unknown" : available ? "fast" : "slow"}`}
+        title={
+          available === null
+            ? "尚未测试"
+            : available
+              ? "经该节点可以正常取到数据"
+              : (latencyError ?? "经该节点取不到数据")
+        }
+      >
+        {available === null ? "可用性未测" : available ? "可用" : "不可用"}
       </span>
 
       <button
