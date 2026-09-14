@@ -575,6 +575,93 @@ pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<A
     build_snapshot(&app, &state).await
 }
 
+/// 物理出口的「身份」。隧道是照它建的，换网之后要拿它比对。
+#[derive(Debug, Clone, PartialEq)]
+struct Egress {
+    interface: String,
+    gateway: Option<std::net::IpAddr>,
+}
+
+impl Egress {
+    fn now() -> Option<Self> {
+        xt_tun::macos::route::default_route().ok().map(|d| Self {
+            interface: d.interface,
+            gateway: d.gateway,
+        })
+    }
+
+    fn describe(&self) -> String {
+        match self.gateway {
+            Some(g) => format!("{} ({g})", self.interface),
+            None => self.interface.clone(),
+        }
+    }
+}
+
+/// 物理出口换了吗。网卡换了、或者同一张网卡换了网关（换 WiFi、插网线、
+/// 开热点、路由器重发 DHCP），都算换网。
+fn network_moved(before: &Egress, after: &Egress) -> bool {
+    before != after
+}
+
+/// 连上之后盯着物理出口有没有变。
+///
+/// 隧道是**按连接那一刻的物理出口**建的：helper 装的路由指向当时的网关，
+/// `direct` 出站绑的是当时那张网卡（`sockopt.interface`），核心的 DoH 长连接
+/// 也建在那条路径上。换网之后这三样**一起失效**，而且内核不会因此报任何错，
+/// 表现就是满屏：
+///
+/// ```text
+/// app/dns: failed to retrieve response for query.ess.apple.com.
+///   > Post "https://1.1.1.1/dns-query": io: read/write on closed pipe
+/// ```
+///
+/// 那句 `read/write on closed pipe` 是「连接被人从脚下抽走了」，**不是超时** ——
+/// 这也是区分「换网」和「节点抖动」的关键：后者报的是
+/// `context deadline exceeded`。
+///
+/// 这里**只报警、不自动重连**。拆掉再重建 TUN 是全项目最危险的动作，而网络
+/// 切换时常常会抖几下（WiFi 掉一下再回来），自动重连会跟着来回拆建，
+/// 风险远大于收益。把「静默失效」变成一句能读的报错，让用户在网络稳定之后
+/// 自己点重连 —— 那样才真的有效。
+fn spawn_network_watch(app: &AppHandle, baseline: Option<Egress>, pid: Option<u32>) {
+    let Some(before) = baseline else {
+        return;
+    };
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            // 只认**自己那一次连接**：这个 watcher 是每次连接都会 spawn 的，
+            // 用户快速重连时旧的那些必须自己退出，否则会留一堆在跑、
+            // 同一次换网报出好几遍。pid 每次连接都不同，用它当身份。
+            let still_mine = state
+                .with(|i| i.runtime.running && i.runtime.pid == pid)
+                .unwrap_or(false);
+            if !still_mine {
+                return;
+            }
+            let Some(now) = Egress::now() else {
+                continue; // 查不到默认路由是暂时的，下一轮再看
+            };
+            if !network_moved(&before, &now) {
+                continue;
+            }
+            let msg = format!(
+                "物理出口已变化（{} → {}），隧道不再有效，请断开后重新连接",
+                before.describe(),
+                now.describe()
+            );
+            state.with(|i| i.push_log("app", "error", msg));
+            events::runtime_changed(&handle, &state);
+            return; // 只报一次，别刷屏
+        }
+    });
+}
+
 /// 连上之后在后台重探一次 DNS。
 ///
 /// 启动时探的那一次，国外组必然是「未探测」—— 那时节点还没连上，而国外 DNS
@@ -619,6 +706,11 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     if settings.mode == ProxyMode::Direct {
         return Err("当前是直连模式，请先切换到「系统代理」或「TUN」".into());
     }
+
+    // 记下**连接之前**的物理出口：隧道是照它建的（helper 的路由指向它的网关、
+    // direct 出站绑它的网卡、核心的 DoH 连接也建在它上面）。换网之后这三样
+    // 一起失效，所以要留着基线做比对，见 `spawn_network_watch`。
+    let egress_before = Egress::now();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<xray::CoreEvent>();
     let resource_dir = app.path().resource_dir().ok();
@@ -669,6 +761,10 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
         );
     });
     events::runtime_changed(app, state);
+
+    // 换网之后隧道不会自愈（路由/网卡绑定/长连接全指向旧出口），
+    // 盯着它，变了就报一句能读的话。带上 pid 是为了让旧 watcher 自己退出。
+    spawn_network_watch(app, egress_before, runtime.pid);
 
     // 日志转发任务：核心的 stdout/stderr → 状态环形缓冲 + UI 事件。
     let app_handle = app.clone();
@@ -1400,6 +1496,62 @@ mod tests {
     #[test]
     fn display_path_handles_none() {
         assert_eq!(display_path(&None), "<未找到>");
+    }
+
+    /// 换网必须能被识别出来：网卡换了、或同一张网卡换了网关（换 WiFi、
+    /// 插网线、开热点、路由器重发 DHCP）都算。
+    ///
+    /// 这条判据把「静默失效」变成一句报错。实测的判别特征：
+    /// 换网报的是 `io: read/write on closed pipe`（连接被抽走），
+    /// 节点抖动报的是 `context deadline exceeded`（超时）—— 两者的处置完全不同。
+    #[test]
+    fn egress_change_is_detected_by_interface_or_gateway() {
+        let gw = |s: &str| Some(s.parse().unwrap());
+        let base = Egress {
+            interface: "en0".into(),
+            gateway: gw("192.168.0.1"),
+        };
+        assert!(
+            network_moved(
+                &base,
+                &Egress {
+                    interface: "en0".into(),
+                    gateway: gw("192.168.100.1")
+                }
+            ),
+            "同一张网卡换了网关也算换网",
+        );
+        assert!(
+            network_moved(
+                &base,
+                &Egress {
+                    interface: "en1".into(),
+                    gateway: gw("192.168.0.1")
+                }
+            ),
+            "换了网卡也算换网",
+        );
+        assert!(
+            network_moved(
+                &base,
+                &Egress {
+                    interface: "en0".into(),
+                    gateway: None
+                }
+            ),
+            "网关从有到无（掉线）也算",
+        );
+        assert!(
+            !network_moved(
+                &base,
+                &Egress {
+                    interface: "en0".into(),
+                    gateway: gw("192.168.0.1")
+                }
+            ),
+            "没变就不该报",
+        );
+        assert_eq!(base.describe(), "en0 (192.168.0.1)");
     }
 
     /// 自动排序要把测出来的顺序放前面，**但不能删掉用户手填的解析器**。

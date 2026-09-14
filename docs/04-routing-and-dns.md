@@ -693,6 +693,40 @@ RouteVia::ScopedInterface { name, gateway }   // gateway 必填
 | 路由 | `default → <网关> -ifscope <物理网卡>` | ✅ `netstat -rn` 看得到网关 |
 | 核心 | 每个出站显式 `sockopt.interface` | ❌ 只能靠日志与拨号计数 |
 
+### 8.4 换网会让这三道防线**同时失效**
+
+上面三样全都是**按连接那一刻的物理出口**写死的：网关进路由、网卡进
+`sockopt.interface`、核心的 DoH 长连接建在那条路径上。所以换网
+（换 WiFi / 插网线 / 开热点 / 路由器重发 DHCP）之后：
+
+```
+旧网关的路由   → 指向一个已经不在的下一跳，包静默消失
+旧网卡的绑定   → 那张网卡已经不是出口（或名字变了）
+旧 DoH 连接    → 被从脚下抽走
+```
+
+内核不会因此报任何错（丢掉的路由条目不会报错，只会让包消失）。
+日志里能看到的唯一线索是：
+
+```
+app/dns: failed to retrieve response for query.ess.apple.com.
+  > Post "https://1.1.1.1/dns-query": io: read/write on closed pipe
+```
+
+**`io: read/write on closed pipe` 与 `context deadline exceeded` 必须区分开**：
+
+| 日志 | 含义 | 处置 |
+|---|---|---|
+| `context deadline exceeded` | 节点/网络抖动，某台解析器慢 | 等，或换解析器 |
+| `io: read/write on closed pipe` | 隧道脚下那层没了（换网） | **断开重连** |
+
+应用现在会在连接后每 5 秒比一次「网卡 + 网关」，变了就报一句
+`物理出口已变化（旧 → 新），隧道不再有效，请断开后重新连接`。
+
+**刻意不自动重连**：拆掉再重建 TUN 是全项目最危险的动作，而换网时网络
+常会抖几下，自动重连会跟着来回拆建 —— 风险大于收益。网络稳定后手动重连
+才真的有效。
+
 ---
 
 ## 9. 测试覆盖
@@ -724,6 +758,7 @@ RouteVia::ScopedInterface { name, gateway }   // gateway 必填
 | `dns_outbound_has_no_settings_on_purpose` | `dns-out` **刻意不配** `settings`：非 A/AAAA 的快速空 NOERROR 比任何显式配置都好（见 §6.8） |
 | `split_dns_keeps_every_candidate_as_same_tier_fallback` | 同一条 `domains` 下的候选**全部**进配置，国外超时后仍回退到国外（见 §6.2） |
 | `split_dns_falls_back_when_lists_are_empty` | 列表被清空时仍写出硬编码兜底 |
+| `egress_change_is_detected_by_interface_or_gateway` | 换网（换网卡或换网关）必须被识别出来（见 §8.4） |
 
 ### 9.1 冒烟测试：唯一会真改系统网络的测试
 
