@@ -16,6 +16,7 @@ pub mod error;
 pub mod model;
 pub mod net;
 pub mod routing;
+pub mod dns_probe;
 pub mod store;
 pub mod update;
 pub mod subscription;

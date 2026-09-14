@@ -67,8 +67,22 @@ pub struct Inner {
     pub traffic_task: Option<crate::traffic::TrafficMonitor>,
     /// 更新状态（检查结果缓存）。
     pub update: UpdateStatus,
+    /// DNS 探测状态。
+    pub dns: DnsStatus,
     /// 最近一次探测/更新的错误，用于 UI 顶部的提示条。
     pub last_notice: Option<String>,
+}
+
+/// DNS 探测状态。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DnsStatus {
+    /// 探测结果（已按「可用 + 快」排序）。
+    pub probes: Vec<xt_core::dns_probe::DnsProbe>,
+    /// 自动选中的那台。
+    pub chosen: Option<String>,
+    pub probed_at: Option<u64>,
+    /// 探测失败/跳过的原因。
+    pub error: Option<String>,
 }
 
 /// 更新相关的状态。
@@ -103,6 +117,7 @@ impl Inner {
             traffic: TrafficSample::default(),
             traffic_task: None,
             update: UpdateStatus::default(),
+            dns: DnsStatus::default(),
             last_notice: None,
         }
     }
@@ -189,6 +204,7 @@ pub struct AppSnapshot {
     /// 开机自启动的**真实**状态（来自系统，不是回显设置字段）。
     pub login_item: LoginItemState,
     pub update: UpdateStatus,
+    pub dns: DnsStatus,
     pub app_version: String,
 }
 

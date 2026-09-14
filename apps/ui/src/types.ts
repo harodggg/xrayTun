@@ -120,6 +120,8 @@ export interface RoutingRule {
 }
 
 export interface DnsSettings {
+  /** 启动时自动探测并把最快的解析器排到前面。 */
+  auto_select: boolean;
   mode: DnsHandling;
   remote_servers: string[];
   direct_servers: string[];
@@ -237,6 +239,22 @@ export interface AvailableUpdate {
   digest_url: string | null;
 }
 
+export interface DnsProbe {
+  server: string;
+  label: string;
+  kind: "domestic" | "foreign_plain";
+  latency_ms: number | null;
+  answered: boolean;
+  suspect: boolean;
+}
+
+export interface DnsStatus {
+  probes: DnsProbe[];
+  chosen: string | null;
+  probed_at: number | null;
+  error: string | null;
+}
+
 export interface UpdateStatus {
   core_version: string | null;
   core_managed: boolean;
@@ -282,6 +300,7 @@ export interface AppSnapshot {
   core: CoreAvailability;
   login_item: LoginItemState;
   update: UpdateStatus;
+  dns: DnsStatus;
   app_version: string;
 }
 

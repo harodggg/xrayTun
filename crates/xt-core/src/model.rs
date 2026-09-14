@@ -530,6 +530,12 @@ pub struct DnsSettings {
     /// 内核 DNS 查询是否也走嗅探后的域名（关闭时按 IP 查询）。
     #[serde(default = "yes")]
     pub sniffing: bool,
+    /// 是否在启动时自动探测各解析器、把最快的排到前面。
+    ///
+    /// 只影响 `direct_servers`（国内解析器）的顺序与取舍：那才是「哪台解析器
+    /// 快」有意义的部位。远端 DoH 的耗时由节点主导，换解析器差别很小。
+    #[serde(default = "yes")]
+    pub auto_select: bool,
 }
 
 fn default_remote_dns() -> Vec<String> {
@@ -559,6 +565,7 @@ impl Default for DnsSettings {
             query_strategy: default_query_strategy(),
             disable_cache: false,
             sniffing: true,
+            auto_select: true,
         }
     }
 }

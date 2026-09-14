@@ -56,9 +56,94 @@ async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot
             core,
             login_item: login_item_state(),
             update: update_status(app, state),
+            dns: state.with(|i| i.dns.clone()).unwrap_or_default(),
             app_version: app.package_info().version.to_string(),
         })
         .ok_or_else(|| "应用状态不可用".to_string())
+}
+
+/// 探测 DNS 解析器，并按需把最快的排到前面。
+///
+/// **绑物理网卡**是关键：不绑的话查询会经 TUN → 核心的 gVisor 栈 → 解析器，
+/// 并发时测到的是核心排队。实测同一台阿里 DNS：绑 en0 是 32ms，
+/// 不绑（并发 6）是 155ms —— 差 5 倍，而且会把快的排到后面。
+async fn run_dns_probe(app: &AppHandle, state: &AppState, apply: bool) -> Result<(), String> {
+    let interface = xt_tun::macos::route::default_route()
+        .ok()
+        .map(|r| r.interface);
+
+    let pool = xt_core::dns_probe::DNS_POOL;
+    let probes = xt_core::dns_probe::probe_pool(
+        pool,
+        std::time::Duration::from_secs(2),
+        3,
+        4,
+        interface.as_deref(),
+    )
+    .await;
+
+    // 只拿国内解析器去改 `direct_servers`：远端 DoH 的耗时由节点主导，
+    // 换哪台差别很小，动它没有意义。
+    let usable: Vec<String> = probes
+        .iter()
+        .filter(|p| p.usable() && p.kind == xt_core::dns_probe::DnsKind::Domestic)
+        .map(|p| p.server.clone())
+        .collect();
+    let chosen = usable.first().cloned();
+
+    state.with(|i| {
+        i.dns.probes = probes.clone();
+        i.dns.chosen = chosen.clone();
+        i.dns.probed_at = Some(crate::state::now_unix());
+        i.dns.error = if usable.is_empty() {
+            Some("没有任何国内解析器可用".into())
+        } else {
+            None
+        };
+    });
+
+    if apply && !usable.is_empty() {
+        let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+        if settings.dns.auto_select {
+            // 保留用户自己加的、不在候选池里的服务器，接在后面 ——
+            // 自动排序不应该把用户手填的东西删掉。
+            let extra: Vec<String> = settings
+                .dns
+                .direct_servers
+                .iter()
+                .filter(|s| !pool.iter().any(|c| c.server == s.as_str()))
+                .cloned()
+                .collect();
+            let mut next = usable.clone();
+            next.extend(extra);
+            if next != settings.dns.direct_servers {
+                settings.dns.direct_servers = next;
+                persist_settings(state, &settings)?;
+                state.with(|i| {
+                    i.push_log(
+                        "app",
+                        "info",
+                        format!("DNS 已自动选优，首选 {}", chosen.clone().unwrap_or_default()),
+                    )
+                });
+            }
+        }
+    }
+
+    let _ = app;
+    Ok(())
+}
+
+/// 启动流程调用的包装：与手动探测同一条代码路径，只是不需要返回快照。
+pub async fn run_dns_probe_bg(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    run_dns_probe(app, state, true).await
+}
+
+/// 手动触发一次 DNS 探测并应用结果。
+#[tauri::command]
+pub async fn probe_dns(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    run_dns_probe(&app, &state, true).await?;
+    build_snapshot(&app, &state).await
 }
 
 /// 组装更新状态：当前生效的版本 + 上次检查的缓存。

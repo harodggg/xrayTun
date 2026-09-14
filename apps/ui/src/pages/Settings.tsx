@@ -417,6 +417,64 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* ------------------------------------------------- DNS 解析器 */}
+      <section className="card">
+        <h2 className="card__title">DNS 解析器</h2>
+
+        <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={settings.dns.auto_select}
+            onChange={(e) => patchDns({ auto_select: e.target.checked } as Partial<typeof settings.dns>)}
+          />
+          启动时自动检测可用的解析器，把最快的排到前面
+        </label>
+
+        <div className="row row--wrap" style={{ gap: 8 }}>
+          <button className="btn" disabled={busy !== null}
+                  onClick={() => void run("probe-dns", () => api.probeDns())}>
+            立即检测
+          </button>
+          {snapshot.dns.chosen && (
+            <span className="field__hint" style={{ alignSelf: "center" }}>
+              当前首选 <span className="mono">{snapshot.dns.chosen}</span>
+            </span>
+          )}
+        </div>
+
+        {snapshot.dns.error && (
+          <div className="banner banner--warn" style={{ marginTop: 10 }}>
+            <span>⚠︎</span><div>{snapshot.dns.error}</div>
+          </div>
+        )}
+
+        {snapshot.dns.probes.length > 0 && (
+          <div className="probe-table">
+            {snapshot.dns.probes.map((p) => (
+              <div key={p.server} className="probe-table__row">
+                <span className="mono">{p.server}</span>
+                <span className="field__hint">{p.label}</span>
+                <span className={`badge badge--${p.suspect || !p.answered ? "slow" : "fast"}`}>
+                  {p.latency_ms !== null ? `${p.latency_ms} ms` : "不通"}
+                </span>
+                {p.suspect && <span className="field__hint">与多数派不一致</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="field__hint" style={{ marginTop: 10 }}>
+          检测的两个判据：**能不能通、多快**，以及**答得对不对**。
+          只看延迟是不行的 —— 实测 <span className="mono">8.8.8.8</span> 直连只要
+          69ms（而它经节点是 200ms），说明有中间设备在 53 端口抢答；
+          抢答的解析器延迟一定漂亮，答案却可能是错的。
+          <br />
+          检测时会把查询 socket 绑到物理网卡绕过隧道，否则并发探测测到的是
+          核心的排队而不是解析器的延迟。远端 DoH 不参与排序：它的耗时由节点
+          主导，换哪台差别很小。
+        </div>
+      </section>
+
       {/* --------------------------------------------- 核心与 geo 更新 */}
       <section className="card">
         <h2 className="card__title">核心与数据更新</h2>

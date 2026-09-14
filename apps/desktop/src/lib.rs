@@ -108,6 +108,7 @@ pub fn run() {
             commands::install_core_update,
             commands::install_geo_update,
             commands::revert_managed_update,
+            commands::probe_dns,
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -251,6 +252,23 @@ async fn bootstrap(app: tauri::AppHandle) {
                 }
             });
         }
+    }
+
+    // 启动时在后台探一次 DNS，把最快的排到前面。
+    //
+    // **不阻塞启动**：探测要联网、约 10 秒。启动流程里已经有「找核心 / 探 helper /
+    // 回滚遗留」三件事，再加一件同步的联网操作会让窗口迟迟不出来。
+    // 结果会在下一次连接时生效（配置是那时生成的）。
+    if state.with(|i| i.settings.dns.auto_select).unwrap_or(false) {
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Some(state) = handle.try_state::<AppState>() {
+                if let Err(e) = crate::commands::run_dns_probe_bg(&handle, &state).await {
+                    tracing::warn!(error = %e, "启动时探测 DNS 失败");
+                }
+                crate::events::runtime_changed(&handle, &state);
+            }
+        });
     }
 
     // 必须发**完整载荷**。这里曾经是 `app.emit(RUNTIME_CHANGED, ())`，
