@@ -177,6 +177,13 @@ impl Store {
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(|e| Error::Store(format!("写 {} 失败: {e}", tmp.display())))?;
+    // **0600**：这些文件里有订阅 URL（本身就是凭据）和 GitHub token。
+    // 默认 umask 会写成 0644，同机其他用户就能读到。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
     std::fs::rename(&tmp, path)
         .map_err(|e| Error::Store(format!("替换 {} 失败: {e}", path.display())))?;
     Ok(())

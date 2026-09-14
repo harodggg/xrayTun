@@ -65,6 +65,8 @@ export const api = {
   installCoreUpdate: () => invoke<AppSnapshot>("install_core_update"),
   installGeoUpdate: () => invoke<AppSnapshot>("install_geo_update"),
   revertManagedUpdate: () => invoke<AppSnapshot>("revert_managed_update"),
+  checkAppUpdate: () => invoke<AppSnapshot>("check_app_update"),
+  installAppUpdate: () => invoke<AppSnapshot>("install_app_update"),
   probeDns: () => invoke<AppSnapshot>("probe_dns"),
 };
 

@@ -107,7 +107,10 @@ pub struct UpdateStatus {
     pub geo_installed_at: Option<u64>,
     pub latest_core: Option<xt_core::update::Available>,
     pub latest_geo: Option<xt_core::update::Available>,
+    /// 客户端**自己**的最新版。仓库是私有的，所以这一步需要 token。
+    pub latest_app: Option<xt_core::update::Available>,
     pub checked_at: Option<u64>,
+    /// 检查更新时的错误（核心 / geo / 客户端共用一条）。
     pub check_error: Option<String>,
 }
 

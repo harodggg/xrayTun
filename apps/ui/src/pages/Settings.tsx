@@ -567,6 +567,58 @@ export default function Settings() {
           核心的新版本在 GitHub 上全部标为「预发布」，所以这里如实标出 ——
           按 GitHub 的 <span className="mono">latest</span> 判断会把你降到几个月前的旧版。
         </div>
+
+        {/* ------------------------------------- 客户端自身更新 */}
+        <div style={{ marginTop: 22, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+          <div className="kv" style={{ marginBottom: 10 }}>
+            <div>
+              <div className="kv__k">客户端</div>
+              <div className="kv__v mono">{snapshot.app_version}</div>
+            </div>
+            <div>
+              <div className="kv__k">GitHub 上的最新版</div>
+              <div className="kv__v mono">{snapshot.update.latest_app?.version ?? "—"}</div>
+            </div>
+          </div>
+
+          <div className="row row--wrap" style={{ gap: 8 }}>
+            <button className="btn" disabled={busy !== null}
+                    onClick={() => void run("check-app", () => api.checkAppUpdate())}>
+              检查客户端更新
+            </button>
+            {snapshot.update.latest_app && (
+              <button className="btn btn--primary" disabled={busy !== null}
+                      onClick={() => void run("install-app", () => api.installAppUpdate())}>
+                更新到 {snapshot.update.latest_app.version} 并重启
+              </button>
+            )}
+          </div>
+
+          <label className="field" style={{ marginTop: 12 }}>
+            <span className="field__label">GitHub token（只读）</span>
+            <input
+              className="input mono"
+              type="password"
+              placeholder="ghp_… 或 github_pat_…"
+              value={settings.github_token}
+              onChange={(e) => patch({ github_token: e.target.value } as Partial<typeof settings>)}
+            />
+          </label>
+
+          <div className="field__hint" style={{ marginTop: 8 }}>
+            客户端仓库是<span className="mono">私有</span>的，GitHub 对未认证的私有仓库
+            请求一律返回 404（实测），所以不给 token 就<b>永远收不到更新</b> ——
+            这一步不是可选项。填一个 fine-grained token、只勾这一个仓库的
+            <span className="mono"> Contents: Read </span>即可，不要给写权限。
+            仓库改成公开之后这里可以留空。
+            <br />
+            <b>安装会在替换 App 之后自动重启。</b>更新脚本先等你退出、再替换
+            <span className="mono"> /Applications/XrayTun.app</span>，所以安装前请先
+            断开隧道。校验只用 release 里的 <span className="mono">SHA256SUMS.txt</span>
+            （能防下载损坏，<b>防不了上游被换掉</b> —— 那需要签名，而这个包是 ad-hoc 签名），
+            日志在 <span className="mono">~/Library/Logs/XrayTun/app-update.log</span>。
+          </div>
+        </div>
       </section>
 
       {/* ------------------------------------------------------- 杂项 */}

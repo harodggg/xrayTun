@@ -108,6 +108,8 @@ pub fn run() {
             commands::install_core_update,
             commands::install_geo_update,
             commands::revert_managed_update,
+            commands::check_app_update,
+            commands::install_app_update,
             commands::probe_dns,
         ])
         .build(tauri::generate_context!())

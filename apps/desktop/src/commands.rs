@@ -220,6 +220,201 @@ pub async fn probe_dns(app: AppHandle, state: State<'_, AppState>) -> Result<App
     build_snapshot(&app, &state).await
 }
 
+/// 查客户端**自己**的最新版。
+///
+/// 和核心/geo 那两条不同：本仓库是**私有**的，GitHub 对未认证的私有仓库
+/// 请求一律 404（实测），所以必须带 token。没填 token 时不是「没有更新」，
+/// 而是明确报「拿不到」—— 这两件事用户必须能分清。
+#[tauri::command]
+pub async fn check_app_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
+    let (proxy, token) = state
+        .with(|i| {
+            (
+                i.runtime.running.then_some(i.settings.socks_port),
+                i.settings.github_token.clone(),
+            )
+        })
+        .ok_or("应用状态不可用")?;
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        xt_core::update::check_app(proxy, Some(token.as_str()))
+    })
+    .await
+    .map_err(|e| format!("检查任务失败：{e}"))?;
+
+    state.with(|i| {
+        i.update.checked_at = Some(crate::state::now_unix());
+        match result {
+            Ok(a) => {
+                i.push_log("app", "info", format!("客户端最新版 {}", a.version));
+                i.update.latest_app = Some(a);
+                i.update.check_error = None;
+            }
+            Err(e) => {
+                i.update.check_error = Some(e.to_string());
+            }
+        }
+    });
+    build_snapshot(&app, &state).await
+}
+
+/// 当前进程是不是从某个 `.app` 里跑起来的。是的话返回那个 bundle 的路径。
+///
+/// 开发构建（`cargo run`）不满足这个条件 —— 那种情况不自动更新，
+/// 因为「替换掉自己正在跑的那个目录」在开发场景下只会让人困惑。
+fn current_app_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // .../XrayTun.app/Contents/MacOS/xraytun-desktop
+    let bundle = exe.parent()?.parent()?.parent()?;
+    (bundle.extension().and_then(|e| e.to_str()) == Some("app")).then(|| bundle.to_path_buf())
+}
+
+/// 读一个 `.app` 的版本号。
+fn bundle_version(app: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleShortVersionString"])
+        .arg(app.join("Contents/Info.plist"))
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// 下载 + 校验 + 解开，返回暂存目录里那个 `.app`。
+///
+/// 三步都要做，缺一不可：
+/// * **下载**：私有仓库的资产要带 token；
+/// * **校验 sha256**：和 release 里的 `SHA256SUMS.txt` 比对。这只防「下载坏了/被截断」，
+///   防不了「上游被换掉」—— 那需要签名，而这个包是 ad-hoc 签名的，没有可验的根。
+///   这一点必须如实写进界面，不能假装验过了；
+/// * **版本核对**：解开之后读一下包里的版本号，和 release 声称的一致才继续。
+///   防止拿到一个名字对、内容错的包。
+fn stage_app_update(
+    latest: &xt_core::update::Available,
+    proxy: Option<u16>,
+    token: &str,
+    tmp: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let _ = std::fs::remove_dir_all(tmp);
+    std::fs::create_dir_all(tmp).map_err(|e| format!("建暂存目录失败：{e}"))?;
+
+    let zip_name = latest
+        .download_url
+        .rsplit('/')
+        .next()
+        .filter(|s| s.ends_with(".zip"))
+        .ok_or("更新地址不是一个 zip")?
+        .to_string();
+    let zip = tmp.join(&zip_name);
+
+    xt_core::update::download_auth(&latest.download_url, &zip, proxy, Some(token))
+        .map_err(|e| format!("下载 {zip_name} 失败：{e}"))?;
+
+    if let Some(url) = &latest.digest_url {
+        let text = xt_core::update::fetch_text_auth(url, proxy, Some(token))
+            .map_err(|e| format!("取校验和失败：{e}"))?;
+        let want = xt_core::update::parse_sha256sum_for(&text, &zip_name)
+            .ok_or_else(|| format!("校验文件里没有 {zip_name}"))?;
+        let got = xt_core::update::sha256_file(&zip).map_err(|e| e.to_string())?;
+        if want != got {
+            return Err(format!("校验和不匹配：期望 {want}，实际 {got}"));
+        }
+    } else {
+        return Err("这次 release 没有 SHA256SUMS.txt，拒绝安装".into());
+    }
+
+    let stage = tmp.join("stage");
+    xt_core::update::unzip_tree(&zip, &stage).map_err(|e| e.to_string())?;
+
+    let app = stage.join("XrayTun.app");
+    if !app.is_dir() {
+        return Err(format!("解压后没找到 {}", app.display()));
+    }
+    let got_version = bundle_version(&app).unwrap_or_default();
+    if got_version != latest.version {
+        return Err(format!(
+            "包内版本 {got_version} 与 release 声称的 {} 不一致",
+            latest.version
+        ));
+    }
+    Ok(app)
+}
+
+/// 安装客户端更新：下载 → 校验 → 交给独立脚本替换 → 退出应用。
+///
+/// **不能自己替换正在运行的 .app**，所以最后一步是把脚本 detached 地跑起来，
+/// 由它等我们退出再换、然后重新打开。见 `update::self_update_script`。
+#[tauri::command]
+pub async fn install_app_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
+    let target = current_app_bundle()
+        .ok_or("当前不是从 .app 里运行的（开发构建不支持自动更新）")?;
+    let (proxy, token, latest) = state
+        .with(|i| {
+            (
+                i.runtime.running.then_some(i.settings.socks_port),
+                i.settings.github_token.clone(),
+                i.update.latest_app.clone(),
+            )
+        })
+        .ok_or("应用状态不可用")?;
+    let latest = latest.ok_or("还没有检查过客户端更新")?;
+
+    let tmp = std::env::temp_dir().join(format!("xraytun-update-{}", std::process::id()));
+    let tmp2 = tmp.clone();
+    let token2 = token.clone();
+    let latest2 = latest.clone();
+    let staged = tauri::async_runtime::spawn_blocking(move || {
+        stage_app_update(&latest2, proxy, &token2, &tmp2)
+    })
+    .await
+    .map_err(|e| format!("更新任务失败：{e}"))?
+    .map_err(|e| {
+        state.with(|i| i.push_log("app", "error", format!("准备更新失败：{e}")));
+        e
+    })?;
+
+    // 把「等退出 → 替换 → 重启」写成脚本，脱离父子关系地跑起来。
+    let script_path = tmp.join("apply-update.sh");
+    let script = xt_core::update::self_update_script(std::process::id(), &staged, &target, &tmp);
+    std::fs::write(&script_path, script).map_err(|e| format!("写更新脚本失败：{e}"))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
+    }
+    std::process::Command::new("/bin/sh")
+        .arg(&script_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动更新脚本失败：{e}"))?;
+
+    state.with(|i| {
+        i.push_log(
+            "app",
+            "info",
+            format!("正在更新到 {}，应用即将退出并自动重启", latest.version),
+        )
+    });
+    events::runtime_changed(&app, &state);
+
+    // 让退出流程正常跑（回滚隧道、停核心），再结束进程。
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        handle.exit(0);
+    });
+
+    build_snapshot(&app, &state).await
+}
+
 /// 组装更新状态：当前生效的版本 + 上次检查的缓存。
 fn update_status(app: &AppHandle, state: &AppState) -> crate::state::UpdateStatus {
     let root = state.store.root();

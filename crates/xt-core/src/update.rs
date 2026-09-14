@@ -34,6 +34,12 @@ use crate::error::{Error, Result};
 pub const XRAY_REPO: &str = "XTLS/Xray-core";
 /// geo 数据的上游：每天更新，且每个文件都带 `.sha256sum`。
 pub const GEO_REPO: &str = "Loyalsoldier/v2ray-rules-dat";
+/// 客户端**自己**的仓库 —— 应用自身的更新也从这里的 release 拉。
+///
+/// ⚠️ 这个仓库目前是**私有的**，而 GitHub 对未认证的私有仓库请求一律返回
+/// 404（实测：`api/releases/latest` → 404，而同一条命令打 XTLS/Xray-core
+/// 正常返回）。所以要么把仓库改成公开，要么在设置里填一个只读 token。
+pub const APP_REPO: &str = "harodggg/xrayTun";
 
 /// 下载超时。核心约 20MB、geo 约 30MB，给宽一点。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -201,9 +207,24 @@ fn proxy_args(proxy: Option<u16>) -> Vec<String> {
     }
 }
 
-/// 取 GitHub release 列表。
-pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result<Vec<Available>> {
-    let url = format!("https://api.github.com/repos/{repo}/releases?per_page={per_page}");
+/// GitHub 认证参数。只读权限的 token 就够。
+///
+/// 为什么需要：本仓库（`APP_REPO`）是私有的，匿名请求一律 404，
+/// 不认证就永远收不到客户端更新。XTLS / Loyalsoldier 那两个是公开仓库，
+/// 传 `None` 即可。
+///
+/// 注意 token 会出现在 `curl` 的命令行里。macOS 上别的用户本来就看不到
+/// 你的进程参数（`ps` 对他人进程是受限的），而这是单用户桌面应用，
+/// 所以直接用 `-H` 而不额外折腾 header 文件。
+fn auth_args(token: Option<&str>) -> Vec<String> {
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => vec!["-H".into(), format!("Authorization: Bearer {t}")],
+        None => Vec::new(),
+    }
+}
+
+/// 取 GitHub API 的 JSON。三个上游共用一份 curl 参数。
+fn gh_get(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<String> {
     let mut args = vec![
         "-sSL".to_string(),
         "-f".to_string(),
@@ -214,11 +235,27 @@ pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result
         "-H".to_string(),
         "User-Agent: XrayTun".to_string(),
     ];
+    args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
-    args.push(url);
-    let body = run("/usr/bin/curl", &args, API_TIMEOUT)?;
-    let releases: Vec<GhRelease> = serde_json::from_str(&body)
-        .map_err(|e| Error::Update(format!("解析 GitHub 返回失败：{e}")))?;
+    args.push(url.to_string());
+    run("/usr/bin/curl", &args, API_TIMEOUT)
+}
+
+/// 取某个仓库的 release 列表（原始结构）。
+fn fetch_raw(
+    repo: &str,
+    per_page: usize,
+    proxy: Option<u16>,
+    token: Option<&str>,
+) -> Result<Vec<GhRelease>> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page={per_page}");
+    let body = gh_get(&url, proxy, token)?;
+    serde_json::from_str(&body).map_err(|e| Error::Update(format!("解析 GitHub 返回失败：{e}")))
+}
+
+/// 取 GitHub release 列表。
+pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result<Vec<Available>> {
+    let releases = fetch_raw(repo, per_page, proxy, None)?;
 
     // 把原始结构转成 Available 列表（保留全部条目，供调用方自己挑）。
     let mut out = Vec::new();
@@ -243,45 +280,56 @@ pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result
 
 /// 查核心的最新版。
 pub fn check_core(proxy: Option<u16>) -> Result<Available> {
-    let url = format!("https://api.github.com/repos/{XRAY_REPO}/releases?per_page=30");
-    let mut args = vec![
-        "-sSL".to_string(),
-        "-f".to_string(),
-        "--max-time".to_string(),
-        API_TIMEOUT.as_secs().to_string(),
-        "-H".to_string(),
-        "Accept: application/vnd.github+json".to_string(),
-        "-H".to_string(),
-        "User-Agent: XrayTun".to_string(),
-    ];
-    args.extend(proxy_args(proxy));
-    args.push(url);
-    let body = run("/usr/bin/curl", &args, API_TIMEOUT)?;
-    let releases: Vec<GhRelease> = serde_json::from_str(&body)
-        .map_err(|e| Error::Update(format!("解析 GitHub 返回失败：{e}")))?;
+    let releases = fetch_raw(XRAY_REPO, 30, proxy, None)?;
     let asset = macos_asset_name()?;
     pick_latest(&releases, |n| n == asset)
         .ok_or_else(|| Error::Update(format!("最近 30 个 release 里没有 {asset}")))
 }
 
+/// 客户端自己的 release 里，哪个资产是要装的。
+///
+/// 只认 `.zip`：CI 出的是 `XrayTun_<版本>_x86_64_arm64.zip`（通用包）。
+/// 用 zip 而不是 dmg —— 解压出来直接就是可以替换的 `.app`，
+/// 不用挂载磁盘映像（挂载在无图形会话/受限环境里会失败）。
+pub fn app_asset_matches(name: &str) -> bool {
+    name.starts_with("XrayTun_") && name.ends_with(".zip")
+}
+
+/// 查客户端自己的最新版。
+pub fn check_app(proxy: Option<u16>, token: Option<&str>) -> Result<Available> {
+    let releases = fetch_raw(APP_REPO, 30, proxy, token)?;
+    let latest = releases
+        .iter()
+        .filter(|r| r.assets.iter().any(|a| app_asset_matches(&a.name)))
+        .max_by(|a, b| compare_versions(&a.tag_name, &b.tag_name))
+        .ok_or_else(|| Error::Update("本仓库的 release 里没有客户端 zip".into()))?;
+    let asset = latest
+        .assets
+        .iter()
+        .find(|a| app_asset_matches(&a.name))
+        .ok_or_else(|| Error::Update("release 里没有客户端 zip".into()))?;
+    Ok(Available {
+        version: latest.tag_name.trim_start_matches('v').to_string(),
+        published_at: latest.published_at.clone(),
+        prerelease: latest.prerelease,
+        download_url: asset.browser_download_url.clone(),
+        // 校验和是**整包一份** `SHA256SUMS.txt`，装的是一行一行取，
+        // 所以这里只给出文件地址，真正的比对在 install_app_update 里做。
+        digest_url: digest_asset_name(&latest.assets),
+    })
+}
+
+/// `SHA256SUMS.txt` 的下载地址（如果这次 release 带了的话）。
+fn digest_asset_name(assets: &[GhAsset]) -> Option<String> {
+    assets
+        .iter()
+        .find(|a| a.name == "SHA256SUMS.txt")
+        .map(|a| a.browser_download_url.clone())
+}
+
 /// 查 geo 数据的最新版。
 pub fn check_geo(proxy: Option<u16>) -> Result<Available> {
-    let url = format!("https://api.github.com/repos/{GEO_REPO}/releases?per_page=5");
-    let mut args = vec![
-        "-sSL".to_string(),
-        "-f".to_string(),
-        "--max-time".to_string(),
-        API_TIMEOUT.as_secs().to_string(),
-        "-H".to_string(),
-        "Accept: application/vnd.github+json".to_string(),
-        "-H".to_string(),
-        "User-Agent: XrayTun".to_string(),
-    ];
-    args.extend(proxy_args(proxy));
-    args.push(url);
-    let body = run("/usr/bin/curl", &args, API_TIMEOUT)?;
-    let releases: Vec<GhRelease> = serde_json::from_str(&body)
-        .map_err(|e| Error::Update(format!("解析 GitHub 返回失败：{e}")))?;
+    let releases = fetch_raw(GEO_REPO, 5, proxy, None)?;
     let latest = releases
         .iter()
         .filter(|r| r.assets.iter().any(|a| a.name == "geosite.dat"))
@@ -308,6 +356,16 @@ pub fn check_geo(proxy: Option<u16>) -> Result<Available> {
 
 /// 下载到文件。
 pub fn download(url: &str, dest: &Path, proxy: Option<u16>) -> Result<()> {
+    download_auth(url, dest, proxy, None)
+}
+
+/// 下载到文件（带认证）。私有仓库的 release 资产必须走这条。
+pub fn download_auth(
+    url: &str,
+    dest: &Path,
+    proxy: Option<u16>,
+    token: Option<&str>,
+) -> Result<()> {
     let mut args = vec![
         "-sSL".to_string(),
         "-f".to_string(),
@@ -318,6 +376,7 @@ pub fn download(url: &str, dest: &Path, proxy: Option<u16>) -> Result<()> {
         "-o".to_string(),
         dest.display().to_string(),
     ];
+    args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
     args.push(url.to_string());
     run("/usr/bin/curl", &args, DOWNLOAD_TIMEOUT)?;
@@ -326,15 +385,118 @@ pub fn download(url: &str, dest: &Path, proxy: Option<u16>) -> Result<()> {
 
 /// 取一段文本（校验文件用）。
 pub fn fetch_text(url: &str, proxy: Option<u16>) -> Result<String> {
+    fetch_text_auth(url, proxy, None)
+}
+
+/// 取一段文本（带认证）。私有仓库的 `SHA256SUMS.txt` 走这条。
+pub fn fetch_text_auth(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<String> {
     let mut args = vec![
         "-sSL".to_string(),
         "-f".to_string(),
         "--max-time".to_string(),
         API_TIMEOUT.as_secs().to_string(),
     ];
+    args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
     args.push(url.to_string());
     run("/usr/bin/curl", &args, API_TIMEOUT)
+}
+
+/// 从整包一份的 `SHA256SUMS.txt` 里取**指定文件**那一行。
+///
+/// 和 [`parse_sha256sum`] 的区别：那个是「一个文件配一个 .sha256sum」，
+/// 取第一个 hex 就行；而我们自己的 release 把全部产物写在一份里：
+///
+/// ```text
+/// 45f9a6…1642  XrayTun_0.5.2_x86_64_arm64.dmg
+/// 9c1b2e…77aa  XrayTun_0.5.2_x86_64_arm64.zip
+/// ```
+///
+/// 所以必须**按文件名查行**，不能随手取第一行 —— 取错了就是拿 dmg 的摘要
+/// 去校验 zip，永远不通过。
+pub fn parse_sha256sum_for(text: &str, name: &str) -> Option<String> {
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(hex), Some(file)) = (it.next(), it.next()) else {
+            continue;
+        };
+        // 有些工具会写成 `*name`（二进制模式）。
+        if file.trim_start_matches('*') != name {
+            continue;
+        }
+        let hex = hex.trim().to_ascii_lowercase();
+        if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(hex);
+        }
+    }
+    None
+}
+
+/// 解压 zip 并**保留目录结构、符号链接与可执行位**。
+///
+/// 不能用 [`unzip_into`]：那个带 `-j`，会把路径拍平，而 `.app` 正是靠目录
+/// 结构和若干符号链接（Frameworks）才成立，拍平了就废了。
+/// `ditto -x -k` 是 macOS 上保留这些东西的标准做法。
+pub fn unzip_tree(zip: &Path, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest).map_err(|e| Error::Update(format!("建目录失败：{e}")))?;
+    run(
+        "/usr/bin/ditto",
+        &[
+            "-x".into(),
+            "-k".into(),
+            zip.display().to_string(),
+            dest.display().to_string(),
+        ],
+        Duration::from_secs(300),
+    )
+    .map_err(|e| Error::Update(format!("解压客户端 zip 失败：{e}")))?;
+    Ok(())
+}
+
+/// 生成「替换 .app 并重启」的脚本。
+///
+/// 为什么不能直接自己替换：**不能覆盖一个正在运行的 .app** —— 替换到一半
+/// 就会毁掉进程正在读的文件。所以必须交给一个**独立于本进程**的脚本来做，
+/// 它先等我们退出，再替换、再拉起。
+///
+/// 为什么用 `ditto` 而不是 `cp -R`：`.app` 里有符号链接和扩展属性，
+/// `ditto` 会原样保留，`cp -R` 不保证。
+///
+/// 抽成纯函数是为了能单测 —— 这段字符串会在用户机器上以他的权限跑，
+/// 里面每个 quoting 都值得钉住。
+pub fn self_update_script(pid: u32, src_app: &Path, target_app: &Path, tmp_root: &Path) -> String {
+    let q = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
+    format!(
+        r#"#!/bin/sh
+# 由 XrayTun 自动更新生成。等待旧进程退出 → 替换 .app → 重启。
+set -e
+# 日志单独留一份：脚本跑的时候应用已经退出了，出问题只能靠它回溯。
+mkdir -p "$HOME/Library/Logs/XrayTun"
+exec >>"$HOME/Library/Logs/XrayTun/app-update.log" 2>&1
+echo "=== $(date) 开始替换 {target}，等待 pid {pid} 退出 ==="
+# 1) 等旧进程真的退出（否则替换的是正在使用的 bundle）
+i=0
+while kill -0 {pid} 2>/dev/null; do
+  sleep 0.5
+  i=$((i+1))
+  [ "$i" -gt 120 ] && {{ echo "等待超时"; exit 1; }}
+done
+sleep 1
+# 2) 替换。先删后拷，不用 mv —— mv 跨卷会退化成 copy+delete，
+#    中途失败就只剩一个残缺的 bundle。
+rm -rf {target}
+/usr/bin/ditto {src} {target}
+# 3) 去掉隔离标记，否则新包第一次打开会被 Gatekeeper 拦
+/usr/bin/xattr -dr com.apple.quarantine {target} 2>/dev/null || true
+# 4) 清理暂存目录后重启
+rm -rf {tmp}
+/usr/bin/open {target}
+"#,
+        pid = pid,
+        target = q(target_app),
+        src = q(src_app),
+        tmp = q(tmp_root),
+    )
 }
 
 /// 算文件的 SHA-256。用系统的 `shasum`，省掉一个加密库依赖。
@@ -818,5 +980,99 @@ mod install_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("meta.json"), b"{ this is not json").unwrap();
         assert_eq!(InstalledMeta::load(&dir).core_version, None, "内容坏掉");
+    }
+
+    // ---------------- 客户端自更新 ----------------
+
+    /// 只认客户端自己的 zip，别把 dmg 或核心包当成更新。
+    #[test]
+    fn app_asset_matches_only_own_zip() {
+        assert!(app_asset_matches("XrayTun_0.5.2_x86_64_arm64.zip"));
+        assert!(!app_asset_matches("XrayTun_0.5.2_x86_64_arm64.dmg"));
+        assert!(!app_asset_matches("SHA256SUMS.txt"));
+        assert!(!app_asset_matches("Xray-macos-arm64-v8a.zip"), "别把核心当成客户端");
+        assert!(!app_asset_matches("geosite.dat"));
+    }
+
+    /// 整包一份的 `SHA256SUMS.txt` 必须**按文件名查行**。
+    ///
+    /// 取第一行是错的：里面 dmg 排在 zip 前面，取错了就是拿 dmg 的摘要
+    /// 去校验 zip，永远不通过 —— 而且看起来像「下载损坏」，极难查。
+    #[test]
+    fn checksums_are_looked_up_by_file_name() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let text =
+            format!("{a}  XrayTun_0.5.2_x86_64_arm64.dmg\n{b}  XrayTun_0.5.2_x86_64_arm64.zip\n");
+        assert_eq!(
+            parse_sha256sum_for(&text, "XrayTun_0.5.2_x86_64_arm64.zip").as_deref(),
+            Some(b.as_str()),
+            "要取 zip 那一行，不是第一行",
+        );
+        assert_eq!(
+            parse_sha256sum_for(&text, "XrayTun_0.5.2_x86_64_arm64.dmg").as_deref(),
+            Some(a.as_str()),
+        );
+        assert_eq!(parse_sha256sum_for(&text, "没有这个文件.zip"), None);
+        // 二进制模式写的 `*name` 也要认
+        assert_eq!(
+            parse_sha256sum_for(&format!("{b} *f.zip\n"), "f.zip").as_deref(),
+            Some(b.as_str()),
+        );
+        // 长度不对的 hex 不能认
+        assert_eq!(parse_sha256sum_for("deadbeef  f.zip\n", "f.zip"), None);
+    }
+
+    /// 自更新脚本：必须等旧进程退出、用 ditto、替换目标并重启。
+    ///
+    /// 这段字符串会以用户的权限在用户机器上跑，每个关键动作都钉住。
+    #[test]
+    fn self_update_script_waits_swaps_and_relaunches() {
+        let s = self_update_script(
+            4321,
+            Path::new("/tmp/stage/XrayTun.app"),
+            Path::new("/Applications/XrayTun.app"),
+            Path::new("/tmp/stage"),
+        );
+        assert!(s.contains("kill -0 4321"), "必须先等旧进程退出：{s}");
+        assert!(s.contains("/usr/bin/ditto"), "必须用 ditto 保留符号链接：{s}");
+        assert!(s.contains("'/Applications/XrayTun.app'"), "目标路径要引号包住：{s}");
+        assert!(s.contains("'/tmp/stage/XrayTun.app'"), "{s}");
+        assert!(
+            s.contains("/usr/bin/open '/Applications/XrayTun.app'"),
+            "最后要重启：{s}"
+        );
+        assert!(
+            s.contains("com.apple.quarantine"),
+            "新包要清隔离标记，否则首次打开被 Gatekeeper 拦：{s}",
+        );
+        // 删除目标在前、拷贝在后：中途失败不能只剩半个 bundle
+        let rm = s.find("rm -rf '/Applications/XrayTun.app'").expect("要有删除");
+        let cp = s.find("/usr/bin/ditto '/tmp/stage/XrayTun.app'").expect("要有拷贝");
+        assert!(rm < cp, "必须先删后拷：{s}");
+    }
+
+    /// 路径里有单引号也不能把脚本写坏（引号必须转义）。
+    #[test]
+    fn self_update_script_escapes_quotes() {
+        let s = self_update_script(
+            1,
+            Path::new("/tmp/a'b/XrayTun.app"),
+            Path::new("/Applications/XrayTun.app"),
+            Path::new("/tmp/a'b"),
+        );
+        assert!(s.contains(r"'/tmp/a'\''b/XrayTun.app'"), "单引号要转义：{s}");
+    }
+
+    /// token 为空等于不认证（公开仓库照常工作）。
+    #[test]
+    fn auth_args_are_optional() {
+        assert!(auth_args(None).is_empty());
+        assert!(auth_args(Some("")).is_empty(), "空串不算 token");
+        assert!(auth_args(Some("   ")).is_empty(), "空白也不算");
+        let a = auth_args(Some(" ghp_x "));
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0], "-H");
+        assert_eq!(a[1], "Authorization: Bearer ghp_x", "两头空白要去掉");
     }
 }

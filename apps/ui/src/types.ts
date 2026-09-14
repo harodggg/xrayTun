@@ -162,6 +162,8 @@ export interface AppSettings {
   core_path: string | null;
   launch_at_login: boolean;
   log_level: string;
+  /** GitHub 只读 token，只用于拉客户端自己的 release（私有仓库必需）。 */
+  github_token: string;
   restore_system_proxy_on_exit: boolean;
   /** 实时网速显示在窗口标题栏与菜单栏。 */
   show_speed_in_title: boolean;
@@ -270,6 +272,8 @@ export interface UpdateStatus {
   geo_installed_at: number | null;
   latest_core: AvailableUpdate | null;
   latest_geo: AvailableUpdate | null;
+  /** 客户端自己的最新版。仓库是私有的，所以这一步需要 token。 */
+  latest_app: AvailableUpdate | null;
   checked_at: number | null;
   check_error: string | null;
 }
