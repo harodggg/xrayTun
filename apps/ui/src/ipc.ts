@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  NodeExport,
   AppSnapshot,
   AppSettings,
   CoreRuntime,
@@ -59,6 +60,11 @@ export const api = {
   setLaunchAtLogin: (enabled: boolean) =>
     invoke<AppSnapshot>("set_launch_at_login", { enabled }),
   openLoginItemSettings: () => invoke<void>("open_login_item_settings"),
+  exportNode: (nodeId: string) => invoke<NodeExport>("export_node", { nodeId }),
+  checkUpdates: () => invoke<AppSnapshot>("check_updates"),
+  installCoreUpdate: () => invoke<AppSnapshot>("install_core_update"),
+  installGeoUpdate: () => invoke<AppSnapshot>("install_geo_update"),
+  revertManagedUpdate: () => invoke<AppSnapshot>("revert_managed_update"),
 };
 
 // ---------------------------------------------------------------------------

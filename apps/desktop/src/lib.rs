@@ -103,6 +103,11 @@ pub fn run() {
             commands::open_data_dir,
             commands::set_launch_at_login,
             commands::open_login_item_settings,
+            commands::export_node,
+            commands::check_updates,
+            commands::install_core_update,
+            commands::install_geo_update,
+            commands::revert_managed_update,
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -315,7 +320,7 @@ mod tests {
             eprintln!("跳过：{} 下没有 xray（先跑 scripts/fetch-xray.sh）", dir.display());
             return;
         }
-        let found = xt_core::xray::resolve_core_binary(None, None, Some(&dir))
+        let found = xt_core::xray::resolve_core_binary(None, None, None, Some(&dir))
             .expect("应当能在开发期目录里找到核心");
         assert_eq!(found, dir.join("xray"));
     }

@@ -65,8 +65,30 @@ pub struct Inner {
     pub traffic: TrafficSample,
     /// 流量采样任务。跟核心一起生灭，见 `traffic.rs`。
     pub traffic_task: Option<crate::traffic::TrafficMonitor>,
+    /// 更新状态（检查结果缓存）。
+    pub update: UpdateStatus,
     /// 最近一次探测/更新的错误，用于 UI 顶部的提示条。
     pub last_notice: Option<String>,
+}
+
+/// 更新相关的状态。
+///
+/// `latest_*` 是**上次检查的结果**，缓存起来是因为检查要联网（几秒），
+/// 而界面每次快照都读它不该触发网络请求。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateStatus {
+    /// 当前生效的核心版本（可能是包内的，也可能是更新来的）。
+    pub core_version: Option<String>,
+    /// 是否正在使用更新下来的核心。
+    pub core_managed: bool,
+    pub core_managed_version: Option<String>,
+    /// geo 数据来自哪次发布。包内自带的没有记录，为 `None`。
+    pub geo_tag: Option<String>,
+    pub geo_installed_at: Option<u64>,
+    pub latest_core: Option<xt_core::update::Available>,
+    pub latest_geo: Option<xt_core::update::Available>,
+    pub checked_at: Option<u64>,
+    pub check_error: Option<String>,
 }
 
 impl Inner {
@@ -80,6 +102,7 @@ impl Inner {
             logs: VecDeque::with_capacity(LOG_CAPACITY),
             traffic: TrafficSample::default(),
             traffic_task: None,
+            update: UpdateStatus::default(),
             last_notice: None,
         }
     }
@@ -165,6 +188,7 @@ pub struct AppSnapshot {
     pub core: CoreAvailability,
     /// 开机自启动的**真实**状态（来自系统，不是回显设置字段）。
     pub login_item: LoginItemState,
+    pub update: UpdateStatus,
     pub app_version: String,
 }
 

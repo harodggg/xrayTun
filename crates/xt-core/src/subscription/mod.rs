@@ -14,6 +14,7 @@
 //! 整个订阅因此失败会让用户完全无法使用。
 
 pub mod clash;
+pub mod share;
 pub mod uri;
 pub mod xray_json;
 

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { api, errorText } from "../ipc";
 import { useStore } from "../store";
-import { latencyTier, nodeSummary, type Node } from "../types";
+import { latencyTier, nodeSummary, type Node, type NodeExport } from "../types";
 
 export default function Nodes() {
   const { snapshot, busy, run, probing } = useStore();
@@ -9,6 +9,8 @@ export default function Nodes() {
   const [adding, setAdding] = useState(false);
   const [link, setLink] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
+  const [exported, setExported] = useState<NodeExport | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const nodes = snapshot?.nodes ?? [];
   const latency = snapshot?.latency ?? {};
@@ -24,6 +26,15 @@ export default function Nodes() {
         nodeSummary(n).toLowerCase().includes(q),
     );
   }, [nodes, query]);
+
+  const openExport = async (nodeId: string) => {
+    setExportError(null);
+    try {
+      setExported(await api.exportNode(nodeId));
+    } catch (e) {
+      setExportError(errorText(e));
+    }
+  };
 
   const submitManual = async () => {
     setAddError(null);
@@ -118,8 +129,55 @@ export default function Nodes() {
               busy={busy !== null}
               onSelect={() => void run("select", () => api.selectNode(node.id))}
               onDelete={() => void run("delete", () => api.deleteNode(node.id))}
+              onExport={() => void openExport(node.id)}
             />
           ))}
+        </div>
+      )}
+      {(exported || exportError) && (
+        <div className="modal" onClick={() => { setExported(null); setExportError(null); }}>
+          <div className="modal__box" onClick={(e) => e.stopPropagation()}>
+            <div className="modal__title">
+              {exported ? `导出「${exported.node_name}」` : "导出失败"}
+            </div>
+
+            {exportError && <div className="banner banner--error"><span>⚠︎</span><div>{exportError}</div></div>}
+
+            {exported && (
+              <>
+                {/* 二维码是内联 SVG（后端生成），不走 <img src>：
+                    离线可用，也没有额外的网络请求。 */}
+                <div className="qr" dangerouslySetInnerHTML={{ __html: exported.svg }} />
+
+                {/* 丢失字段必须显示。分享链接的表达能力比内部模型窄，
+                    静默丢弃会让目标端行为和本机不同，而用户无从察觉。 */}
+                {exported.lost.length > 0 && (
+                  <div className="banner banner--warn">
+                    <span>⚠︎</span>
+                    <div>
+                      以下设置无法写进分享链接，扫码后不会生效：
+                      <ul style={{ margin: "6px 0 0 16px" }}>
+                        {exported.lost.map((x) => <li key={x}>{x}</li>)}
+                      </ul>
+                    </div>
+                  </div>
+                )}
+
+                <div className="field__hint" style={{ marginTop: 8 }}>链接</div>
+                <textarea className="input mono" readOnly rows={4} value={exported.uri} />
+
+                <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                  <button
+                    className="btn btn--primary"
+                    onClick={() => void navigator.clipboard.writeText(exported.uri)}
+                  >
+                    复制链接
+                  </button>
+                  <button className="btn" onClick={() => setExported(null)}>关闭</button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
     </>
@@ -135,6 +193,7 @@ function NodeRow({
   busy,
   onSelect,
   onDelete,
+  onExport,
 }: {
   node: Node;
   selected: boolean;
@@ -146,6 +205,7 @@ function NodeRow({
   busy: boolean;
   onSelect: () => void;
   onDelete: () => void;
+  onExport: () => void;
 }) {
   const tier = latencyTier(latencyMs);
   const fromSubscription = node.source.kind === "subscription";
@@ -182,6 +242,18 @@ function NodeRow({
       >
         {available === null ? "可用性未测" : available ? "可用" : "不可用"}
       </span>
+
+      <button
+        className="btn btn--ghost"
+        disabled={busy}
+        title="导出为二维码 / 分享链接"
+        onClick={(e) => {
+          e.stopPropagation();
+          onExport();
+        }}
+      >
+        二维码
+      </button>
 
       <button
         className="btn btn--ghost btn--danger"

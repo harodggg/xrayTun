@@ -101,6 +101,11 @@ async fn tcp_reachable(addr: std::net::SocketAddr, timeout: Duration) -> bool {
 /// （见 docs/03 里 `CARGO_MANIFEST_DIR` 那次事故）。用具名结构体钉住。
 #[derive(Debug, Clone, Default)]
 pub struct CoreSearchPaths {
+    /// **更新下来的核心**（用户数据目录下的 `core/`）。
+    ///
+    /// 优先于包内那份。更新故意不写进 `.app`（会破坏签名），
+    /// 于是「回退到出厂版本」= 删掉这个目录。
+    pub managed_core_dir: Option<PathBuf>,
     /// 打包后的资源目录（生产环境）。
     pub app_resource_dir: Option<PathBuf>,
     /// 开发期的 `apps/desktop/binaries`（由应用侧提供，核心不能自己猜）。
@@ -157,6 +162,7 @@ impl Supervisor {
 
         let core_path = xray::resolve_core_binary(
             settings.core_path.as_deref(),
+            paths.managed_core_dir.as_deref(),
             paths.app_resource_dir.as_deref(),
             paths.dev_binaries_dir.as_deref(),
         )
@@ -237,7 +243,14 @@ impl Supervisor {
         }
 
         // ---- 4) 拉起核心 ----
-        let process = spawn_core(&core_path, &config_path, self.tun_fd, events).await?;
+        // geo 的退路：核心自己旁边没有就去包内资源目录 / 托管目录找。
+        // 顺序与核心解析一致（包内优先于托管），但这里更宽松：
+        // 只要哪个目录真的有 geo 文件就用哪个。
+        let geo_fallback: Vec<PathBuf> = [paths.app_resource_dir.clone(), paths.managed_core_dir.clone()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let process = spawn_core(&core_path, &config_path, self.tun_fd, events, &geo_fallback).await?;
 
         // ---- 5) 等待就绪 ----
         if let Err(e) = xray::wait_for_port(settings.socks_port, CORE_READY_TIMEOUT).await {
@@ -446,6 +459,8 @@ async fn spawn_core(
     config_path: &Path,
     tun_fd: Option<RawFd>,
     events: Option<tokio::sync::mpsc::UnboundedSender<CoreEvent>>,
+    // geo_fallback_dirs：核心自己旁边没有 geo 文件时，退到这些目录里找。
+    geo_fallback_dirs: &[PathBuf],
 ) -> Result<XrayProcess, String> {
     let mut envs: Vec<(&str, String)> = Vec::new();
 
@@ -455,15 +470,24 @@ async fn spawn_core(
     // 而它的工作目录是 runtime 目录（配置文件所在处），不是核心二进制所在处。
     // 不用这个环境变量的话，缺失时的行为是**规则静默不命中** ——
     // 日志里没有任何错误，用户只会看到「绕过大陆」预设完全没起作用。
-    if let Some(dir) = core_path.parent() {
-        if dir.join("geoip.dat").is_file() || dir.join("geosite.dat").is_file() {
+    //
+    // **注意 geo 和核心是两份独立的更新**：只更新了核心、托管目录里没有 geo
+    // 文件是完全正常的状态。这时如果直接把 ASSET 指向托管目录，规则就会
+    // 静默失效 —— 所以这里按「谁真的有 geo 文件」来选，而不是按「谁提供了核心」。
+    let has_geo = |d: &std::path::Path| d.join("geosite.dat").is_file() || d.join("geoip.dat").is_file();
+    let asset_dir = core_path
+        .parent()
+        .filter(|d| has_geo(d))
+        .map(|d| d.to_path_buf())
+        .or_else(|| geo_fallback_dirs.iter().find(|d| has_geo(d)).cloned());
+    match asset_dir {
+        Some(dir) => {
+            tracing::debug!(dir = %dir.display(), "geo 数据目录");
             envs.push(("XRAY_LOCATION_ASSET", dir.display().to_string()));
-        } else {
-            tracing::warn!(
-                dir = %dir.display(),
-                "核心旁边没有 geoip.dat / geosite.dat，geoip:/geosite: 规则将不会命中"
-            );
         }
+        None => tracing::warn!(
+            "找不到 geoip.dat / geosite.dat，geoip:/geosite: 规则将不会命中（分流会静默失效）"
+        ),
     }
 
     if let Some(fd) = tun_fd {

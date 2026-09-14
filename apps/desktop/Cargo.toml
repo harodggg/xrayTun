@@ -32,5 +32,9 @@ tokio.workspace = true
 # 那个框架没有 Rust 绑定。
 objc2 = "0.6"
 
+# 二维码导出。渲染属于展示层，所以放在 shell 而不是 xt-core ——
+# xt-core 只负责生成分享链接（那部分有往返测试），这里只负责画出来。
+qrcode = "0.14"
+
 libc.workspace = true
 url.workspace = true

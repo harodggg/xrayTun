@@ -227,6 +227,7 @@ async fn run(dry_run: bool) -> Result<bool, String> {
             &mut helper,
             Some(log_tx),
             xraytun_desktop_lib::supervisor::CoreSearchPaths {
+                managed_core_dir: None,
                 app_resource_dir: None,
                 dev_binaries_dir: xraytun_desktop_lib::dev_binaries_dir(),
             },
@@ -594,6 +595,7 @@ fn resolve_core() -> Result<PathBuf, String> {
     let settings = Store::with_default_root().load_settings();
     xt_core::xray::resolve_core_binary(
         settings.core_path.as_deref(),
+        None,
         None,
         xraytun_desktop_lib::dev_binaries_dir().as_deref(),
     )

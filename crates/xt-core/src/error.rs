@@ -57,6 +57,9 @@ pub enum Error {
     #[error("读取核心流量统计失败: {0}")]
     Stats(String),
 
+    #[error("更新失败: {0}")]
+    Update(String),
+
     #[error("配置读写失败: {0}")]
     Store(String),
 }

@@ -601,3 +601,80 @@ input[type="checkbox"] {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------------------------------------------------------------- 弹窗 */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 12, 22, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+}
+
+.modal__box {
+  background: var(--panel, #131a29);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 18px;
+  /* 二维码是固定 240px，加上链接文本框，这个宽度够用且不会太宽 */
+  width: min(440px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal__title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+/* 二维码容器：SVG 由后端生成，背景必须保持白色 ——
+   深色主题下把二维码画在深色背景上会扫不出来。 */
+.qr {
+  display: flex;
+  justify-content: center;
+  background: #ffffff;
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.qr svg {
+  width: 240px;
+  height: 240px;
+  display: block;
+}
+
+.input.mono {
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.sidebar__footer-sub {
+  color: var(--text-faint);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+/* 键值对展示（版本信息这类只读字段） */
+.kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.kv__k {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+
+.kv__v {
+  font-size: 12px;
+  color: var(--text);
+}

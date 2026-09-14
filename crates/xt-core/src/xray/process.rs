@@ -234,13 +234,22 @@ pub async fn wait_for_port(port: u16, timeout: Duration) -> Result<()> {
 /// 开发期的目录布局只有应用自己知道，所以这个知识必须由应用提供。
 pub fn resolve_core_binary(
     explicit: Option<&Path>,
+    managed_dir: Option<&Path>,
     app_resource_dir: Option<&Path>,
     dev_binaries_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
+    // 用户显式指定的路径优先级最高：那是他明确的选择。
     if let Some(p) = explicit {
         candidates.push(p.to_path_buf());
+    }
+    // 其次是**更新下来的**核心。
+    //
+    // 更新不写进 .app 包（会破坏签名），而是放用户数据目录，靠这里优先命中。
+    // 好处是回退变得极简单：删掉那个目录就回到包内版本，不需要备份。
+    if let Some(dir) = managed_dir {
+        candidates.push(dir.join("xray"));
     }
     if let Some(dir) = app_resource_dir {
         candidates.push(dir.join("xray"));
@@ -319,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_reports_not_found_for_bad_explicit_path() {
-        let err = resolve_core_binary(Some(Path::new("/nonexistent/xray")), None, None);
+        let err = resolve_core_binary(Some(Path::new("/nonexistent/xray")), None, None, None);
         assert!(err.is_err());
         // 错误信息里必须列出找过哪些位置 —— 否则用户只知道「找不到」，
         // 却不知道应该把文件放到哪里。
@@ -334,7 +343,7 @@ mod tests {
         let fake = dir.join("xray");
         std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
 
-        let found = resolve_core_binary(None, None, Some(&dir)).unwrap();
+        let found = resolve_core_binary(None, None, None, Some(&dir)).unwrap();
         assert_eq!(found, fake);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -349,7 +358,7 @@ mod tests {
         let explicit = dir.join("other-xray");
         std::fs::write(&explicit, b"#!/bin/sh\n").unwrap();
 
-        let found = resolve_core_binary(Some(&explicit), None, Some(&dir)).unwrap();
+        let found = resolve_core_binary(Some(&explicit), None, None, Some(&dir)).unwrap();
         assert_eq!(found, explicit, "用户显式指定的路径优先级必须最高");
 
         let _ = std::fs::remove_dir_all(&dir);

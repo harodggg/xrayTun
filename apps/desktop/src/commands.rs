@@ -55,9 +55,152 @@ async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot
             helper,
             core,
             login_item: login_item_state(),
+            update: update_status(app, state),
             app_version: app.package_info().version.to_string(),
         })
         .ok_or_else(|| "应用状态不可用".to_string())
+}
+
+/// 组装更新状态：当前生效的版本 + 上次检查的缓存。
+fn update_status(app: &AppHandle, state: &AppState) -> crate::state::UpdateStatus {
+    let root = state.store.root();
+    let managed_dir = xt_core::update::managed_core_dir(root);
+    let meta = xt_core::update::InstalledMeta::load(&managed_dir);
+    let core_version = core_availability(app, state).version;
+    let core_managed = managed_dir.join("xray").is_file();
+
+    state
+        .with(|i| {
+            let mut u = i.update.clone();
+            u.core_version = core_version;
+            u.core_managed = core_managed;
+            u.core_managed_version = meta.core_version;
+            u.geo_tag = meta.geo_tag;
+            u.geo_installed_at = meta.geo_installed_at;
+            u
+        })
+        .unwrap_or_default()
+}
+
+/// 检查更新（联网，几秒）。
+///
+/// 走本地 SOCKS 入站：GitHub 在国内直连经常不通，而用户的节点通常是通的。
+/// 核心没跑时退回直连，至少不会因为「没连接」而完全没法检查。
+#[tauri::command]
+pub async fn check_updates(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    let proxy = {
+        let running = state.with(|i| i.runtime.running).unwrap_or(false);
+        running.then(|| state.with(|i| i.settings.socks_port).unwrap_or(10808))
+    };
+    let (core, geo) = tauri::async_runtime::spawn_blocking(move || {
+        (xt_core::update::check_core(proxy), xt_core::update::check_geo(proxy))
+    })
+    .await
+    .map_err(|e| format!("检查任务失败：{e}"))?;
+
+    state.with(|i| {
+        i.update.checked_at = Some(crate::state::now_unix());
+        match core {
+            Ok(a) => {
+                i.update.latest_core = Some(a);
+                i.update.check_error = None;
+            }
+            Err(e) => {
+                i.push_log("app", "warn", format!("检查核心更新失败：{e}"));
+                i.update.check_error = Some(e.to_string());
+            }
+        }
+        if let Ok(a) = geo {
+            i.update.latest_geo = Some(a);
+        }
+    });
+    build_snapshot(&app, &state).await
+}
+
+/// 安装核心更新。
+///
+/// **不会自动重启核心**：换核心必然中断一次连接，用户应该在自己选的时候发生。
+/// 装完提示他重新连接即可（下次启动就是用新核心）。
+#[tauri::command]
+pub async fn install_core_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
+    let available = state
+        .with(|i| i.update.latest_core.clone())
+        .flatten()
+        .ok_or("请先检查更新")?;
+    let proxy = state.with(|i| i.settings.socks_port).unwrap_or(10808);
+    let dir = xt_core::update::managed_core_dir(state.store.root());
+
+    let meta = tauri::async_runtime::spawn_blocking(move || {
+        xt_core::update::install_core(&available, &dir, Some(proxy))
+    })
+    .await
+    .map_err(|e| format!("安装任务失败：{e}"))?
+    .map_err(|e| e.to_string())?;
+
+    state.with(|i| {
+        i.push_log(
+            "app",
+            "info",
+            format!(
+                "核心已更新到 {}（下次连接生效）",
+                meta.core_version.clone().unwrap_or_default()
+            ),
+        );
+        i.update.latest_core = None;
+    });
+    build_snapshot(&app, &state).await
+}
+
+/// 安装 geo 数据更新。
+#[tauri::command]
+pub async fn install_geo_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
+    let available = state
+        .with(|i| i.update.latest_geo.clone())
+        .flatten()
+        .ok_or("请先检查更新")?;
+    let proxy = state.with(|i| i.settings.socks_port).unwrap_or(10808);
+    let dir = xt_core::update::managed_core_dir(state.store.root());
+
+    let meta = tauri::async_runtime::spawn_blocking(move || {
+        xt_core::update::install_geo(&available, &dir, Some(proxy))
+    })
+    .await
+    .map_err(|e| format!("安装任务失败：{e}"))?
+    .map_err(|e| e.to_string())?;
+
+    state.with(|i| {
+        i.push_log(
+            "app",
+            "info",
+            format!("geo 数据已更新到 {}（下次连接生效）", meta.geo_tag.clone().unwrap_or_default()),
+        );
+        i.update.latest_geo = None;
+    });
+    build_snapshot(&app, &state).await
+}
+
+/// 回退到包内自带的版本。
+///
+/// 实现就是**删掉托管目录** —— 更新从来没碰过 `.app` 包，所以这就是完整的回退。
+#[tauri::command]
+pub async fn revert_managed_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppSnapshot, String> {
+    let dir = xt_core::update::managed_core_dir(state.store.root());
+    xt_core::update::revert_managed(&dir).map_err(|e| e.to_string())?;
+    state.with(|i| {
+        i.push_log("app", "info", "已回退到随包版本（核心与 geo）");
+        i.update.latest_core = None;
+        i.update.latest_geo = None;
+    });
+    build_snapshot(&app, &state).await
 }
 
 /// 读系统的登录项状态。读失败不是致命错误 —— 界面照常可用，
@@ -75,6 +218,58 @@ fn login_item_state() -> crate::state::LoginItemState {
             needs_approval: false,
         },
     }
+}
+
+/// 导出结果：分享链接 + 二维码 + 没能表达进链接的字段。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct NodeExport {
+    pub node_id: String,
+    pub node_name: String,
+    /// 分享链接。可以直接复制粘贴，也是二维码的内容。
+    pub uri: String,
+    /// 二维码（SVG 内联，前端直接塞进 DOM，不额外请求图片）。
+    pub svg: String,
+    /// 分享链接表达不了、因此**没能带出去**的字段。
+    /// 界面必须显示它 —— 静默丢弃是这类功能最容易犯的错。
+    pub lost: Vec<String>,
+}
+
+/// 导出节点为分享链接 + 二维码。
+///
+/// 链接由 `xt_core::subscription::share` 生成，那边对每种协议都有
+/// 「导出→解析必须回到同一个节点」的往返测试。这里只负责渲染二维码。
+#[tauri::command]
+pub async fn export_node(
+    state: State<'_, AppState>,
+    node_id: String,
+) -> Result<NodeExport, String> {
+    // `with` 自身返回 Option，闭包又返回 Option，所以要 flatten 一层。
+    let node = state
+        .with(|i| i.nodes.iter().find(|n| n.id == node_id).cloned())
+        .flatten()
+        .ok_or("找不到该节点")?;
+
+    let export = xt_core::subscription::share::export_uri(&node);
+
+    // 纠错级别用 M：二维码被手机扫时通常完整无遮挡，M 在容错和密度之间
+    // 比较平衡；低纠错会让长链接的码过密，高纠错会让码太大。
+    let code = qrcode::QrCode::with_error_correction_level(export.uri.as_bytes(), qrcode::EcLevel::M)
+        .map_err(|e| format!("生成二维码失败：{e}"))?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .quiet_zone(true)
+        .min_dimensions(240, 240)
+        .dark_color(qrcode::render::svg::Color("#0f172a"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .build();
+
+    Ok(NodeExport {
+        node_id: node.id.clone(),
+        node_name: node.name.clone(),
+        uri: export.uri,
+        svg,
+        lost: export.lost,
+    })
 }
 
 /// 开关开机自启动。
@@ -111,7 +306,13 @@ fn core_availability(app: &AppHandle, state: &AppState) -> CoreAvailability {
     let resource_dir = app.path().resource_dir().ok();
 
     let dev_dir = crate::dev_binaries_dir();
-    match xray::resolve_core_binary(explicit.as_deref(), resource_dir.as_deref(), dev_dir.as_deref()) {
+    let managed = xt_core::update::managed_core_dir(state.store.root());
+    match xray::resolve_core_binary(
+        explicit.as_deref(),
+        Some(&managed),
+        resource_dir.as_deref(),
+        dev_dir.as_deref(),
+    ) {
         Ok(path) => {
             let version = std::process::Command::new(&path)
                 .arg("version")
@@ -247,6 +448,7 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
             &mut helper,
             Some(tx),
             crate::supervisor::CoreSearchPaths {
+                managed_core_dir: Some(xt_core::update::managed_core_dir(state.store.root())),
                 app_resource_dir: resource_dir,
                 dev_binaries_dir: crate::dev_binaries_dir(),
             },
@@ -618,7 +820,12 @@ pub async fn test_latency(
 
     let resource_dir = app.path().resource_dir().ok();
     let dev_dir = crate::dev_binaries_dir();
-    let binary = xray::resolve_core_binary(core_path.as_deref(), resource_dir.as_deref(), dev_dir.as_deref())
+    let binary = xray::resolve_core_binary(
+        core_path.as_deref(),
+        Some(&xt_core::update::managed_core_dir(state.store.root())),
+        resource_dir.as_deref(),
+        dev_dir.as_deref(),
+    )
         .map_err(|e| e.to_string())?;
 
     state.with(|i| i.push_log("app", "info", format!("开始测试 {} 个节点的延迟", nodes.len())));

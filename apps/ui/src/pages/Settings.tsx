@@ -417,6 +417,75 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* --------------------------------------------- 核心与 geo 更新 */}
+      <section className="card">
+        <h2 className="card__title">核心与数据更新</h2>
+
+        <div className="kv">
+          <div>
+            <div className="kv__k">客户端</div>
+            <div className="kv__v mono">v{snapshot.app_version}</div>
+          </div>
+          <div>
+            <div className="kv__k">核心</div>
+            <div className="kv__v mono">
+              {snapshot.update.core_version ?? "未找到"}
+              {snapshot.update.core_managed && (
+                <span className="field__hint" style={{ marginLeft: 6 }}>（更新版）</span>
+              )}
+            </div>
+          </div>
+          <div>
+            <div className="kv__k">geo 数据</div>
+            <div className="kv__v mono">{snapshot.update.geo_tag ?? "随包附带"}</div>
+          </div>
+        </div>
+
+        {/* 两条通道分开：核心几个月一次，geo 数据上游每天更新。
+            合成一个「检查更新」会让用户以为必须一起升级。 */}
+        <div className="row row--wrap" style={{ marginTop: 12 }}>
+          <button className="btn" disabled={busy !== null}
+                  onClick={() => void run("check-updates", () => api.checkUpdates())}>
+            检查更新
+          </button>
+          {snapshot.update.latest_core && (
+            <button className="btn btn--primary" disabled={busy !== null}
+                    onClick={() => void run("install-core", () => api.installCoreUpdate())}>
+              更新核心到 {snapshot.update.latest_core.version}
+              {snapshot.update.latest_core.prerelease ? "（预发布）" : ""}
+            </button>
+          )}
+          {snapshot.update.latest_geo && (
+            <button className="btn btn--primary" disabled={busy !== null}
+                    onClick={() => void run("install-geo", () => api.installGeoUpdate())}>
+              更新 geo 到 {snapshot.update.latest_geo.version}
+            </button>
+          )}
+          {snapshot.update.core_managed && (
+            <button className="btn btn--ghost" disabled={busy !== null}
+                    onClick={() => void run("revert-update", () => api.revertManagedUpdate())}>
+              回退到随包版本
+            </button>
+          )}
+        </div>
+
+        {snapshot.update.check_error && (
+          <div className="banner banner--warn" style={{ marginTop: 10 }}>
+            <span>⚠︎</span>
+            <div>检查更新失败：{snapshot.update.check_error}</div>
+          </div>
+        )}
+
+        <div className="field__hint" style={{ marginTop: 10 }}>
+          更新装在数据目录里，**不会改动 App 包本身**（改包内文件会让签名失效），
+          所以「回退到随包版本」就是删掉那些文件，永远可用。
+          装上后需要重新连接才会生效。
+          <br />
+          核心的新版本在 GitHub 上全部标为「预发布」，所以这里如实标出 ——
+          按 GitHub 的 <span className="mono">latest</span> 判断会把你降到几个月前的旧版。
+        </div>
+      </section>
+
       {/* ------------------------------------------------------- 杂项 */}
       <section className="card">
         <h2 className="card__title">其他</h2>

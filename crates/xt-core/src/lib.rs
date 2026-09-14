@@ -17,6 +17,7 @@ pub mod model;
 pub mod net;
 pub mod routing;
 pub mod store;
+pub mod update;
 pub mod subscription;
 pub mod xray;
 

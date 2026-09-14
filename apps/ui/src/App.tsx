@@ -59,8 +59,29 @@ function Shell() {
             </button>
           ))}
         </nav>
-        <div className="sidebar__footer">
-          {snapshot ? `v${snapshot.app_version}` : "正在加载…"}
+        {/* 版本信息放在这里，一眼能看到「客户端 + 核心」两个版本。
+            分开列是必要的：升级客户端不等于升级核心，而两者都会影响行为
+            （核心版本决定支不支持原生 TUN）。 */}
+        <div
+          className="sidebar__footer"
+          title={
+            snapshot
+              ? `客户端 ${snapshot.app_version}\n核心 ${snapshot.core.version ?? "未找到"}\n${
+                  snapshot.core.path ?? ""
+                }`
+              : ""
+          }
+        >
+          {snapshot ? (
+            <>
+              <div>客户端 v{snapshot.app_version}</div>
+              <div className="sidebar__footer-sub">
+                核心 {snapshot.core.version ?? (snapshot.core.error ? "未找到" : "检测中…")}
+              </div>
+            </>
+          ) : (
+            "正在加载…"
+          )}
         </div>
       </aside>
 

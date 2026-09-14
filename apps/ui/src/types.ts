@@ -218,6 +218,37 @@ export interface TrafficSample {
   tx_rate: number;
 }
 
+/** 导出节点的结果：分享链接 + 二维码（内联 SVG）+ 丢失字段说明。 */
+export interface NodeExport {
+  node_id: string;
+  node_name: string;
+  uri: string;
+  svg: string;
+  /** 分享链接表达不了、因此没能带出去的字段。非空时必须显示给用户。 */
+  lost: string[];
+}
+
+/** 一次可用的更新。 */
+export interface AvailableUpdate {
+  version: string;
+  published_at: string;
+  prerelease: boolean;
+  download_url: string;
+  digest_url: string | null;
+}
+
+export interface UpdateStatus {
+  core_version: string | null;
+  core_managed: boolean;
+  core_managed_version: string | null;
+  geo_tag: string | null;
+  geo_installed_at: number | null;
+  latest_core: AvailableUpdate | null;
+  latest_geo: AvailableUpdate | null;
+  checked_at: number | null;
+  check_error: string | null;
+}
+
 export interface ProbeResult {
   node_id: string;
   node_name: string;
@@ -250,6 +281,7 @@ export interface AppSnapshot {
   helper: HelperAvailability;
   core: CoreAvailability;
   login_item: LoginItemState;
+  update: UpdateStatus;
   app_version: string;
 }
 
