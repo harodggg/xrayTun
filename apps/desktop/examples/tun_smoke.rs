@@ -298,6 +298,27 @@ async fn run(dry_run: bool) -> Result<bool, String> {
         println!("  发起出站拨号 : {dialing}");
         println!("  经节点(vless): {via_node}");
         println!("  直连(freedom): {via_direct}");
+        // 国内解析必须走国内解析器。
+        //
+        // 这一项是在一个真实故障之后补的：DNS 劫持规则原本只写了 `port: 53`，
+        // 会连**内核自己的上游查询**一起吞掉 —— 国内解析这条腿从未离开过
+        // 机器，所有解析都回退到走节点的 DoH，节点一慢就满屏超时。
+        // 只看「网页能不能打开」是发现不了的：能打开，只是全是慢的。
+        let domestic_dns = lines
+            .iter()
+            .filter(|l| l.contains("UDP:") && l.contains(":53 got answer"))
+            .count();
+        let hijacked_upstream = lines
+            .iter()
+            .filter(|l| l.contains("from DNS accepted") && l.contains("[dns-module -> dns-out]"))
+            .count();
+        println!("  国内解析应答 : {domestic_dns}   ← 0 表示国内解析没走出本机");
+        if domestic_dns == 0 {
+            println!("  ⚠ 没有任何国内解析器应答 —— 检查 DNS 劫持规则是否把内核自己的查询也吞了");
+        }
+        if hijacked_upstream > 0 {
+            println!("  ⚠ 内核自己的上游 DNS 被 dns-out 劫持了 {hijacked_upstream} 次（应当走 direct）");
+        }
         if via_node > 0 && via_direct == 0 {
             println!("  ⚠ 只有节点出站、没有直连出站 —— freedom 可能被路由抢走（见 docs/04 §8.2 / §8.3）");
         }

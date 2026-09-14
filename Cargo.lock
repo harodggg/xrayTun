@@ -4739,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "xraytun-desktop"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "objc2",
@@ -4759,7 +4759,7 @@ dependencies = [
 
 [[package]]
 name = "xt-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4779,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "xt-helper"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "libc",
@@ -4794,7 +4794,7 @@ dependencies = [
 
 [[package]]
 name = "xt-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "serde",
@@ -4804,7 +4804,7 @@ dependencies = [
 
 [[package]]
 name = "xt-tun"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "serde",

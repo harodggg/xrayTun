@@ -1,5 +1,62 @@
 # 更新记录
 
+## 0.2.1
+
+### 修复：TUN 模式下国内 DNS 完全失效（0.2.0 的回归）
+
+0.2.0 把 DNS 改成「按规则分流」之后，TUN 模式下的国内解析**从来没出过本机**：
+日志里全是
+
+```
+[Error] app/dns: failed to retrieve response for wx.qlogo.cn.
+        > Post "https://1.1.1.1/dns-query": context deadline exceeded
+```
+
+注意 `wx.qlogo.cn` 是**国内域名**，本该由 `223.5.5.5` 直连解析，却在走 DoH。
+
+根因是 DNS 劫持规则只写了 `"port": "53"` —— 匹配「任何来源、任何目的的
+53 端口流量」，于是**内核自己的上游查询也被它吞了**：
+
+```
+from DNS accepted udp:223.5.5.5:53 [dns-module -> dns-out]     ← 修复前
+```
+
+链路是：内核要查 223.5.5.5:53（国内域名走国内解析器）→ 这个 UDP 连接经
+dispatcher 派发 → 撞上 `port: 53` 规则 → 被塞回 `dns-out`，也就是回到 DNS
+模块自己 → TUN 模式下它按默认路由掉回 utun，再次进入 tun 入站，如此反复。
+结果是国内解析这条腿永远到不了网络，所有解析都回退到走节点的 DoH；
+节点一慢就是满屏 `context deadline exceeded` 与 `record not found`。
+
+**为什么 0.2.0 发布时没测出来**：验证是在系统代理模式下做的 —— 没有 tun，
+裸 UDP 包正常从 en0 出去，国内解析 1.19ms 就回来了，看起来完全正常。
+是「TUN 接管 + 宽泛的端口规则」两个条件凑齐才暴露的。
+
+修法是把劫持限定在**哨兵地址**上（客户端 DNS 都发给它）：
+
+```jsonc
+{ "ip": ["198.18.0.2"], "port": "53", "outboundTag": "dns-out" }
+```
+
+各归各位之后：
+
+| 流量 | 判给 | 结果 |
+|---|---|---|
+| 客户端的 DNS（发往哨兵） | `dns-out` | 照旧劫持进内核解析 |
+| 内核自己的 `223.5.5.5:53` | `preset-cn-ip` → `direct` | **direct 绑定了 en0，逃出隧道** |
+| 内核的 DoH `1.1.1.1:443` | `internal-fallback` → 节点 | 保持抗污染 |
+
+用真实核心验证（TUN 档位配置，把 tun 入站换成 socks 以便免 root 观察）：
+
+```
+修复前: from DNS accepted udp:223.5.5.5:53 [dns-module -> dns-out]
+修复后: from DNS accepted udp:223.5.5.5:53 [dns-module -> direct]
+        UDP:223.5.5.5:53 got answer: myssl.com TypeA -> [182.242.214.100]
+```
+
+冒烟测试（`tun_smoke`）也补了断言：国内解析应答数必须 > 0，且不得出现
+`[dns-module -> dns-out]`。这类「能上网但全是慢的」故障，只看网页打得开
+是发现不了的。
+
 ## 0.2.0
 
 ### 修复：Google 系域名无法访问

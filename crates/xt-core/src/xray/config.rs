@@ -152,7 +152,10 @@ pub fn build(input: &CoreConfigInput<'_>) -> Value {
     }
     root.insert("inbounds".into(), build_inbounds(s, &input.profile));
     root.insert("outbounds".into(), build_outbounds(input.nodes, input));
-    root.insert("routing".into(), build_routing(input.rules, &selected_tag));
+    root.insert(
+        "routing".into(),
+        build_routing(input.rules, &selected_tag, sentinel_dns_of(s, &input.profile)),
+    );
     root.insert("policy".into(), build_policy());
     root.insert("stats".into(), json!({}));
 
@@ -435,16 +438,56 @@ fn build_outbounds(nodes: &[Node], input: &CoreConfigInput<'_>) -> Value {
     Value::Array(out)
 }
 
-fn build_routing(rules: &[RoutingRule], selected_tag: &str) -> Value {
+/// TUN 档位下写入系统的那台「哨兵 DNS」。非 TUN 档位返回 `None`。
+fn sentinel_dns_of<'a>(s: &'a AppSettings, profile: &InboundProfile) -> Option<&'a str> {
+    if !matches!(profile, InboundProfile::Tun(_) | InboundProfile::TunExternalDatapath) {
+        return None;
+    }
+    let sentinel = s.tun.sentinel_dns.trim();
+    (!sentinel.is_empty()).then_some(sentinel)
+}
+
+fn build_routing(
+    rules: &[RoutingRule],
+    selected_tag: &str,
+    sentinel_dns: Option<&str>,
+) -> Value {
     let mut compiled: Vec<Value> = Vec::new();
 
-    // 1) DNS 劫持必须最先。
-    compiled.push(json!({
+    // 1) DNS 劫持必须最先，而且**必须限定在发往哨兵地址的查询上**。
+    //
+    // 早先这里只写了 `"port": "53"`，即「任何来源、任何目的的 53 端口」。
+    // 那条规则会连**内核自己的上游解析**一起吞掉：
+    //
+    //   内核 DNS 模块要查 223.5.5.5:53（国内域名走国内解析器）
+    //     → 它的 UDP 客户端用的是**裸 socket**，不走 dispatcher
+    //     → TUN 模式下这个包按默认路由又掉回 utun
+    //     → 重新进入 tun 入站，撞上这条 `port: 53` 规则
+    //     → 被塞回 dns-out，也就是回到 DNS 模块自己
+    //
+    // 结果是**国内解析这条腿从来没出过机器**：国内域名查不到 → 回退到 DoH
+    // → DoH 是走 dispatcher 的（日志里的 `[dns-module -> node-...]`）
+    // → 于是所有解析都压到节点上 → 节点一慢就是满屏
+    // `context deadline exceeded` / `record not found`。
+    //
+    // 这也解释了为什么它在系统代理模式下测不出来：没有 tun，裸 UDP 包
+    // 正常从 en0 出去，国内解析 1ms 就回来了。
+    //
+    // 限定成哨兵地址之后就各归各位：
+    //   * 客户端的 DNS 都发给哨兵（系统 DNS 被我们改成它）→ 照旧被劫持；
+    //   * 内核自己的 223.5.5.5:53 不被劫持 → 落到 `preset-cn-ip`
+    //     → `direct` 出站（绑定了物理网卡）→ **逃出隧道**；
+    //   * 内核的 DoH（1.1.1.1:443）→ 落到兜底 → 走节点（本来的意图）。
+    let mut hijack = json!({
         "type": "field",
         "port": "53",
         "outboundTag": "dns-out",
         "ruleTag": "internal-dns-hijack"
-    }));
+    });
+    if let Some(sentinel) = sentinel_dns {
+        hijack["ip"] = json!([sentinel]);
+    }
+    compiled.push(hijack);
 
     // 2) API 流量。
     compiled.push(json!({
@@ -773,6 +816,58 @@ mod tests {
         let last = r.as_array().unwrap().last().unwrap();
         assert_eq!(last["ruleTag"], "internal-fallback");
         assert_eq!(last["outboundTag"], nodes[0].outbound_tag());
+    }
+
+    /// DNS 劫持**必须**限定在哨兵地址上，不能是「任何来源、任何目的的 53」。
+    ///
+    /// 这条钉住的是一个把 DNS 彻底打死的真实故障：内核自己的上游解析
+    /// （国内域名 → 223.5.5.5:53）用的是裸 UDP socket，不走 dispatcher；
+    /// TUN 模式下这个包按默认路由掉回 utun，重新进入 tun 入站，然后被
+    /// 宽泛的 `port: 53` 规则塞回 dns-out —— 即回到 DNS 模块自己。
+    ///
+    /// 后果是国内解析这条腿从未离开过机器，所有解析都回退到走节点的 DoH，
+    /// 节点一慢就满屏 `context deadline exceeded`。
+    #[test]
+    fn dns_hijack_is_scoped_to_the_sentinel() {
+        let s = settings();
+        let nodes = vec![node()];
+        let rules = merge_rules(&s);
+        let cfg = build(&CoreConfigInput {
+            settings: &s,
+            nodes: &nodes,
+            selected: Some(&nodes[0].id),
+            rules: &rules,
+            profile: tun_profile(&s),
+            physical_interface: Some("en0"),
+        });
+        let hijack = &cfg["routing"]["rules"][0];
+        assert_eq!(
+            hijack["ip"],
+            json!([s.tun.sentinel_dns]),
+            "劫持规则必须限定在哨兵地址，否则内核自己的上游查询也会被吞掉"
+        );
+        assert_eq!(hijack["port"], "53");
+    }
+
+    /// 非 TUN 档位没有哨兵，这时也**不能**退化成「劫持一切 53 端口」。
+    #[test]
+    fn dns_hijack_has_no_blanket_port_match_in_proxy_mode() {
+        let s = settings();
+        let nodes = vec![node()];
+        let rules = merge_rules(&s);
+        let cfg = build(&CoreConfigInput {
+            settings: &s,
+            nodes: &nodes,
+            selected: Some(&nodes[0].id),
+            rules: &rules,
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        });
+        let hijack = &cfg["routing"]["rules"][0];
+        assert!(
+            hijack.get("ip").is_none(),
+            "系统代理模式下不该出现端口 53 的兜底劫持"
+        );
     }
 
     #[test]
