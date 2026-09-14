@@ -28,6 +28,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_HOME: ${{ github.workspace }}/.cargo
   CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+  # 见 ci.yml 里的说明：check.sh 的默认值在仓库隔壁，而 actions/cache
+  # 缓存的是工作区里面的 `.npm-cache`，必须显式对齐。
+  npm_config_cache: ${{ github.workspace }}/.npm-cache
 
 jobs:
   release:
@@ -86,10 +89,11 @@ jobs:
       - name: 前端依赖
         run: npm --prefix apps/ui ci --no-audit --no-fund --cache "$GITHUB_WORKSPACE/.npm-cache"
 
-      - name: 测试（发版前必须全绿）
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
+      - name: 测试（发版前必须全绿，与本地同一套）
+        # 和 ci.yml 调用同一个脚本，避免两边漂移。
+        # 跳过它最后那次 release 构建：下面 `package-macos.sh` 会用真正的
+        # universal target 再编一次，那才是这个包真正要走通的路径。
+        run: ./scripts/check.sh --no-release-build
 
       - name: 打包（universal）
         env:

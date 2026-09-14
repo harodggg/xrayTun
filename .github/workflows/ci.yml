@@ -15,6 +15,10 @@ env:
   # 依赖缓存放进工作区，和 scripts/dev.sh 的约定一致。
   CARGO_HOME: ${{ github.workspace }}/.cargo
   CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+  # 必须显式给：`scripts/check.sh` 的默认值是 `$ROOT/../.npm-cache`（本地
+  # 习惯把缓存放在仓库隔壁），而 actions/cache 缓存的是工作区**里面**的
+  # `.npm-cache`。不给这一行，缓存会永远写不进也读不到。
+  npm_config_cache: ${{ github.workspace }}/.npm-cache
 
 jobs:
   check:
@@ -46,23 +50,15 @@ jobs:
           key: ${{ runner.os }}-npm-${{ hashFiles('apps/ui/package-lock.json') }}
           restore-keys: ${{ runner.os }}-npm-
 
-      - name: 取 Xray 核心
-        run: ./scripts/fetch-xray.sh
-
-      - name: 前端依赖
-        run: npm --prefix apps/ui ci --no-audit --no-fund --cache "$GITHUB_WORKSPACE/.npm-cache"
-
-      - name: TypeScript 类型检查
-        run: npm --prefix apps/ui exec tsc -- --noEmit
-
-      - name: 前端构建
-        run: npm --prefix apps/ui run build
-
-      - name: clippy（warning 视为错误）
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: 单元测试
-        run: cargo test --workspace
-
-      - name: release 构建（打包路径也要能编过）
-        run: cargo build --release --workspace
+      # 全部检查都在 `scripts/check.sh` 里，CI 只负责调用它。
+      #
+      # 为什么不再把步骤摊在这里：这个文件曾经写成
+      # `npm --prefix apps/ui exec tsc -- --noEmit` —— 少了个 `-p`，
+      # 于是 tsc 在仓库根找不到 tsconfig.json、打印帮助并退出 1。
+      # 那条 CI 红了三个提交都没人发现，因为**本地没有任何一条命令会踩到它**。
+      # 现在本地和 CI 跑的是同一个脚本，不可能再漂移：
+      #
+      #     ./scripts/check.sh
+      #
+      - name: 构建 / lint / 测试（scripts/check.sh，与本地完全一致）
+        run: ./scripts/check.sh
