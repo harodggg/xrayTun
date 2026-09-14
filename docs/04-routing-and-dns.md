@@ -234,6 +234,39 @@ weatherkit.apple.com  → UDP:223.5.5.5:53
 > 而前者在 CDN 时代是常态。校验机制一旦会**丢弃正确结果**，
 > 它的代价就是串行回退，而这恰恰会触发它本想避免的超时。
 
+#### 同一条 `domains` 下的候选必须全部写进去
+
+`servers` 的回退是按「先命中 `domains` 的，再其余的」分两层。所以**同一条
+`domains` 下有几个候选，就决定了这一层有几个备选**。
+
+早期实现里每个列表只写第一个（`first_or`），于是这一层永远只有一个备选。
+真实后果（用户日志，v0.5.0）：
+
+```
+[Error] app/dns: failed to retrieve response for alive.github.com.
+        > Post "https://1.0.0.1/dns-query": context deadline exceeded
+```
+
+`1.0.0.1` 超时之后，回退链上**再没有别的国外解析器**了 —— 下一个是国内
+解析器。被墙域名被国内解析器接着答出来，拿到的就是被污染 / 错误的 IP。
+
+隔离实例实测（把一个国外候选指向必然超时的 `192.0.2.1`，开 `dnsLog`）：
+
+```
+只取第一个     DOH//192.0.2.1  → []  4.0s
+              UDP:223.5.5.5:53 → [162.159.140.229]  33ms   ← 国内顶上了
+
+全部写进去     DOH//192.0.2.1  → []  4.0s
+              DOH//1.1.1.1     → []  4.0s                   ← 仍是国外
+              UDP:223.5.5.5:53 → [162.159.140.229]  33ms   ← 最后才轮到国内
+```
+
+（那次 `1.1.1.1` 也超时，是因为隔离实例的出口受本机现有隧道影响，
+**延迟数字不可信，但顺序是可信的**。）
+
+这也让「解析器自动选优」（§6.7）的排序真正有意义：第 2..n 位不再是白排的，
+而是回退时真会用到的备选。
+
 ### 6.3 `Direct` / `Custom`
 
 `Direct` 全部用本地解析器；`Custom` 把两组列表拼起来交给用户自己负责。
@@ -689,6 +722,8 @@ RouteVia::ScopedInterface { name, gateway }   // gateway 必填
 | `merge_ranked_is_scoped_to_its_own_kind` | 国内组只动 `direct_servers`、国外组只动 `remote_servers` |
 | `foreign_group_is_probed_serially` | 国外组串行探测（并发会测到节点排队并**改变名次**，见 §6.7） |
 | `dns_outbound_has_no_settings_on_purpose` | `dns-out` **刻意不配** `settings`：非 A/AAAA 的快速空 NOERROR 比任何显式配置都好（见 §6.8） |
+| `split_dns_keeps_every_candidate_as_same_tier_fallback` | 同一条 `domains` 下的候选**全部**进配置，国外超时后仍回退到国外（见 §6.2） |
+| `split_dns_falls_back_when_lists_are_empty` | 列表被清空时仍写出硬编码兜底 |
 
 ### 9.1 冒烟测试：唯一会真改系统网络的测试
 

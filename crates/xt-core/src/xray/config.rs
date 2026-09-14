@@ -246,17 +246,35 @@ fn build_dns(s: &AppSettings) -> Value {
             // 日志里刷 `context canceled`，用户看到的是「什么都打不开」。
             //
             // 去掉之后：谁被 `domains` 选中就用谁的答案，不再事后否定它。
-            let mut out = vec![
-                json!({
-                    "address": first_or(&d.remote_servers, "https://1.1.1.1/dns-query"),
-                    "domains": ["geosite:geolocation-!cn"]
-                }),
-                json!({
-                    "address": first_or(&d.direct_servers, "223.5.5.5"),
-                    "domains": ["geosite:cn"]
-                }),
-            ];
-            // 兜底：与前两条同源，保证任何域名都有解析器。
+            // **同一条 `domains` 下的候选要全部写进去** —— 那才是同层回退链。
+            //
+            // 之前对每个列表只取第一个（`first_or`），后果在真实日志里露出来了：
+            // 国外 DoH 超时之后，回退链上**再没有别的国外解析器**了，于是被墙
+            // 域名被国内解析器接着答出来（污染 / 错误 IP）：
+            //
+            //     failed to retrieve response for alive.github.com.
+            //       > Post "https://1.0.0.1/dns-query": context deadline exceeded
+            //
+            // 隔离实例实测（把一个国外候选指向必然超时的 192.0.2.1）：
+            //
+            //   只取第一个     第二台被查的是 UDP:223.5.5.5:53（国内）
+            //   全部写进去     第二台被查的是 DOH//1.1.1.1（仍是国外）
+            //
+            // 这也让「自动选优」的排序真正有意义：第 2..n 位不再是白排的，
+            // 而是回退时真会用到的备选。
+            let remote = servers_or_default(&d.remote_servers, "https://1.1.1.1/dns-query");
+            let direct = servers_or_default(&d.direct_servers, "223.5.5.5");
+
+            let mut out = Vec::new();
+            for addr in &remote {
+                out.push(json!({ "address": addr, "domains": ["geosite:geolocation-!cn"] }));
+            }
+            for addr in &direct {
+                out.push(json!({ "address": addr, "domains": ["geosite:cn"] }));
+            }
+            // 兜底：一条 `domains` 都没匹配上的域名。这里保持原来的语义，只放
+            // 每组的**第一台** —— 走到这一步说明前面没命中，再列一遍同层候选
+            // 没有额外意义（Xray 自己的 fallback 会把它们排在后面）。
             out.push(json!({ "address": first_or(&d.direct_servers, "223.5.5.5") }));
             out.push(json!({ "address": first_or(&d.remote_servers, "https://1.1.1.1/dns-query") }));
             out
@@ -301,6 +319,19 @@ fn build_dns(s: &AppSettings) -> Value {
 
 fn first_or(list: &[String], fallback: &str) -> String {
     list.first().cloned().unwrap_or_else(|| fallback.to_string())
+}
+
+/// 列表为空时退回一个硬编码默认值（用户可能把列表清空）。
+///
+/// 非空时**原样返回整个列表** —— 不要在这里只取第一个：同一条 `domains` 下的
+/// 候选构成回退链，砍掉后面的会让「国外解析器挂了」直接回退到国内解析器
+/// （见 [`build_dns`] 里 `SplitByRule` 的说明）。
+fn servers_or_default(list: &[String], fallback: &str) -> Vec<String> {
+    if list.is_empty() {
+        vec![fallback.to_string()]
+    } else {
+        list.to_vec()
+    }
 }
 
 fn build_inbounds(s: &AppSettings, profile: &InboundProfile) -> Value {
@@ -1132,6 +1163,86 @@ mod tests {
                 .unwrap_or(false)
         });
         assert!(has_cn && has_non_cn, "按规则分流时必须有大陆/非大陆两条解析器");
+    }
+
+    /// 同一条 `domains` 下的候选必须**全部**写进配置 —— 那是同层回退链。
+    ///
+    /// 钉住一个真实故障：之前每个列表只取第一个，于是国外 DoH 超时后回退链
+    /// 上只剩国内解析器，被墙域名会被国内解析器接着答出来。隔离实例实测过
+    /// 「只取第一个 → 第二台查的是 UDP:223.5.5.5」。见 `build_dns` 的说明。
+    #[test]
+    fn split_dns_keeps_every_candidate_as_same_tier_fallback() {
+        let mut s = settings();
+        s.dns.mode = DnsHandling::SplitByRule;
+        s.dns.remote_servers = vec![
+            "https://1.0.0.1/dns-query".into(),
+            "https://1.1.1.1/dns-query".into(),
+            "https://8.8.8.8/dns-query".into(),
+        ];
+        s.dns.direct_servers = vec!["223.5.5.5".into(), "119.29.29.29".into()];
+        let cfg = build(&CoreConfigInput {
+            settings: &s,
+            nodes: &[],
+            selected: None,
+            rules: &[],
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        });
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+
+        let scoped = |tag: &str| -> Vec<String> {
+            servers
+                .iter()
+                .filter(|x| {
+                    x.get("domains")
+                        .and_then(|d| d.as_array())
+                        .map(|a| a.iter().any(|v| v == tag))
+                        .unwrap_or(false)
+                })
+                .filter_map(|x| x["address"].as_str().map(str::to_string))
+                .collect()
+        };
+
+        let remote = scoped("geosite:geolocation-!cn");
+        assert_eq!(
+            remote,
+            vec![
+                "https://1.0.0.1/dns-query",
+                "https://1.1.1.1/dns-query",
+                "https://8.8.8.8/dns-query"
+            ],
+            "国外候选必须按顺序全部进配置，否则超时后没有同层备选",
+        );
+        assert_eq!(
+            scoped("geosite:cn"),
+            vec!["223.5.5.5", "119.29.29.29"],
+            "国内候选同理",
+        );
+    }
+
+    /// 列表被清空时仍要有一条可用的解析器 —— 否则配置会没有任何 DNS。
+    #[test]
+    fn split_dns_falls_back_when_lists_are_empty() {
+        let mut s = settings();
+        s.dns.mode = DnsHandling::SplitByRule;
+        s.dns.remote_servers.clear();
+        s.dns.direct_servers.clear();
+        let cfg = build(&CoreConfigInput {
+            settings: &s,
+            nodes: &[],
+            selected: None,
+            rules: &[],
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        });
+        let servers = cfg["dns"]["servers"].as_array().unwrap();
+        assert!(!servers.is_empty(), "空列表也要写出硬编码兜底");
+        let addresses: Vec<&str> = servers.iter().filter_map(|x| x["address"].as_str()).collect();
+        assert!(addresses.contains(&"223.5.5.5"), "{addresses:?}");
+        assert!(
+            addresses.contains(&"https://1.1.1.1/dns-query"),
+            "{addresses:?}"
+        );
     }
 
     /// 分流的解析器**不能**带 `expectIPs`。
