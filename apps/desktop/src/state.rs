@@ -175,7 +175,36 @@ impl AppState {
     }
 
     /// 加锁并执行。锁中毒时返回 `None`，调用方给出可读错误。
+    ///
+    /// **不允许重入。** `std::sync::Mutex` 是非递归的：在已经持有锁的闭包里
+    /// 再调用 `self.with(...)` 会永久等待自己。这条规则真的被违反过 ——
+    /// `build_snapshot` 把一个内部要拿锁的 `update_status` 写进了快照闭包，
+    /// 结果进程活着、连得上 helper、日志一句错都没有，界面却什么都加载不出来。
+    ///
+    /// 所以这里显式检测重入并 **panic**：把「静默挂起」变成一句能读的报错。
+    /// 宁可炸响，也不要再让这种 bug 以「界面空白」的形式出现。
     pub fn with<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> Option<T> {
+        thread_local! {
+            static IN_WITH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        /// 保证任何退出路径（含 panic）都复位标志。
+        struct ResetGuard;
+        impl Drop for ResetGuard {
+            fn drop(&mut self) {
+                IN_WITH.with(|c| c.set(false));
+            }
+        }
+
+        if IN_WITH.with(|c| c.replace(true)) {
+            // 先复位再抛，避免后续调用被这个标志连坐。
+            IN_WITH.with(|c| c.set(false));
+            panic!(
+                "AppState::with 重入：不能在 with 闭包内部再调用 state.with —— \
+                 非递归互斥量会自死锁。请先在外面把值算好再传进闭包。"
+            );
+        }
+        let _reset = ResetGuard;
+
         match self.inner.lock() {
             Ok(mut guard) => Some(f(&mut guard)),
             Err(poisoned) => {
@@ -318,6 +347,44 @@ pub fn profile_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **重入 `state.with` 必须炸响，而不是静静地死锁。**
+    ///
+    /// 这条钉住的是一个真实事故：`build_snapshot` 把一个内部要拿锁的
+    /// `update_status` 写进了快照闭包，于是 `std::sync::Mutex` 自死锁。
+    /// 症状是「进程活着、连得上 helper、日志一句错都没有，界面什么都
+    /// 加载不出来」—— 我在发布前完全没发现，因为它不报任何错。
+    ///
+    /// 现在重入会 panic。这条测试保证那个 panic 一直存在：
+    /// 万一有人把守卫删了，这里会从「panic 被捕获」变成「测试挂死」，
+    /// 而挂死的测试在 CI 里是超时失败，同样能被发现。
+    #[test]
+    fn nested_with_panics_instead_of_deadlocking() {
+        let state = AppState::new(temp_store("nested-with"));
+        let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.with(|_| {
+                // 在持有锁的闭包里再拿一次锁 —— 真实事故就是长这样的
+                let _ = state.with(|_| ());
+            });
+        }));
+        assert!(hit.is_err(), "重入必须在 panic 里被发现，而不是死锁");
+        let _ = std::fs::remove_dir_all(state.store.root());
+    }
+
+    /// 守卫用完必须复位：一次 panic 不能把后续所有调用都连坐。
+    #[test]
+    fn with_still_works_after_a_reentrancy_panic() {
+        let state = AppState::new(temp_store("with-reset"));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.with(|_| {
+                let _ = state.with(|_| ());
+            });
+        }));
+        // 若标志没复位，这一次会直接 panic
+        let v = state.with(|i| i.settings.mode);
+        assert!(v.is_some(), "panic 之后 with 应当照常可用");
+        let _ = std::fs::remove_dir_all(state.store.root());
+    }
 
     fn temp_store(tag: &str) -> Store {
         let dir = std::env::temp_dir().join(format!("xt-state-{}-{tag}", std::process::id()));

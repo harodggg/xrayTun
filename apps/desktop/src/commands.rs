@@ -41,7 +41,20 @@ async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot
     let helper = guard.availability(socket_present);
     drop(guard);
 
+    // ⚠️ **这几项必须在 `state.with` 闭包外面算完。**
+    //
+    // `AppState::with` 用的是 `std::sync::Mutex`（非递归）。在已经持有锁的
+    // 闭包里再调用 `state.with(...)` 会**自死锁** —— 而症状是「进程活着、
+    // 但界面什么都加载不出来」，没有任何报错。这个坑真的踩了：
+    // `update_status` 内部要拿锁，却被写在了快照闭包里面。
+    //
+    // 顺带这也是正确的做法：这几项要做文件 IO、甚至起进程问核心版本，
+    // 不该握着状态锁去做。
     let core = core_availability(app, state);
+    let login_item = login_item_state();
+    let update = update_status(app, state);
+    let dns = state.with(|i| i.dns.clone()).unwrap_or_default();
+    let app_version = app.package_info().version.to_string();
 
     state
         .with(|inner| AppSnapshot {
@@ -54,10 +67,10 @@ async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<AppSnapshot
             notice: inner.last_notice.clone(),
             helper,
             core,
-            login_item: login_item_state(),
-            update: update_status(app, state),
-            dns: state.with(|i| i.dns.clone()).unwrap_or_default(),
-            app_version: app.package_info().version.to_string(),
+            login_item,
+            update,
+            dns,
+            app_version,
         })
         .ok_or_else(|| "应用状态不可用".to_string())
 }
