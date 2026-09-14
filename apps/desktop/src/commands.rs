@@ -571,7 +571,34 @@ pub async fn set_mode(
 #[tauri::command]
 pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     start_core(&app, &state).await?;
+    spawn_dns_reprobe(&app, &state);
     build_snapshot(&app, &state).await
+}
+
+/// 连上之后在后台重探一次 DNS。
+///
+/// 启动时探的那一次，国外组必然是「未探测」—— 那时节点还没连上，而国外 DNS
+/// **只有经节点才测得了**（见 docs/04 §6.7）。不补这一次，用户就得自己点
+/// 「立即检测」，等于这个功能默认不生效。
+///
+/// **不阻塞连接**（这轮探测要 5–8 秒，国外组是串行的），也**不重启核心**：
+/// DNS 配置只在生成配置时被读取，所以结果对**下一次连接**生效。为了几毫秒的
+/// 解析器差异，把刚建好的 TUN 拆掉重建，不划算。
+fn spawn_dns_reprobe(app: &AppHandle, state: &AppState) {
+    if !state.with(|i| i.settings.dns.auto_select).unwrap_or(false) {
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        if let Err(e) = run_dns_probe_bg(&handle, &state).await {
+            tracing::warn!(error = %e, "连接后重探 DNS 失败");
+        }
+        // 探测结果是状态的一部分，得主动推给前端 —— 它不会自己来问。
+        events::runtime_changed(&handle, &state);
+    });
 }
 
 #[tauri::command]
