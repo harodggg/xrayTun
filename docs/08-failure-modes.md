@@ -113,6 +113,25 @@
 | `brew` 什么都装不了 | macOS 26 只有 Xcode、没有 CLT，Homebrew 7 拒绝工作 | `xcode-select --install` |
 | 自更新必须填 token | 客户端仓库是**私有**的，匿名一律 404 | 已改公开，token 设置项已删 |
 | 本地只能打出单一架构的包 | 本机 rust 是 Homebrew 的 x86_64，只有宿主架构的 std | 通用包只能在 CI 出（`docs/07` §6） |
+| Release 里**只有 `SHA256SUMS.txt`**，dmg/zip 没了 | `gh release create dist/*` 一把梭上传；45MB 的 dmg 偶发 `connection reset`，而**前面传上去的资产会留下**，重跑撞「名字已存在」(422) | 先建 Release → 逐个上传 + 重试 5 次 + `--clobber` → 逐个核对资产 |
+| CI 全绿、资产齐全，**但客户端永远收不到这个版本** | 那个 Release 是 **draft** —— **匿名用户看不到草稿**，于是 `check_app` 认为最新版还是上一个 | 上传后 `gh release edit --draft=false`，并断言 `isDraft == false` |
+
+### E.1 一条贯穿这一整轮的元教训
+
+上面两行（还有 A 类的 CI 那两行）都属于同一件事：
+
+> **CI 的绿勾不等于产物可用。**
+
+那次失败里，所有步骤都绿、`gh release view` 也正常（它带认证），
+但客户端拿到的是**上一个版本**。要发现它，只能**以用户的方式去取一次**：
+
+```bash
+cargo run -p xraytun-desktop --example app_update_check   # 走真实 release 的完整链路
+```
+
+这也正是 `scripts/check.sh` 存在的理由 —— 本地和 CI 跑同一份东西，
+以及 `app_update_check` / `node_probe` / `dns_probe` 这些工具存在的理由：
+**凡是有"中间产物"的地方，都要有一步以最终消费者身份去验证的动作。**
 
 **共同教训**：**先量环境，再读代码。** 这一条我犯过：花了几轮读 DNS 代码路径，
 而真正的原因是磁盘满了。
