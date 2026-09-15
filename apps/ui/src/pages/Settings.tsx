@@ -595,7 +595,7 @@ export default function Settings() {
           </div>
 
           <label className="field" style={{ marginTop: 12 }}>
-            <span className="field__label">GitHub token（只读）</span>
+            <span className="field__label">GitHub token（只读，可选）</span>
             <input
               className="input mono"
               type="password"
@@ -606,11 +606,12 @@ export default function Settings() {
           </label>
 
           <div className="field__hint" style={{ marginTop: 8 }}>
-            客户端仓库是<span className="mono">私有</span>的，GitHub 对未认证的私有仓库
-            请求一律返回 404（实测），所以不给 token 就<b>永远收不到更新</b> ——
-            这一步不是可选项。填一个 fine-grained token、只勾这一个仓库的
-            <span className="mono"> Contents: Read </span>即可，不要给写权限。
-            仓库改成公开之后这里可以留空。
+            仓库现在是<span className="mono">公开</span>的，所以这里<b>可以留空</b>。
+            但匿名访问的配额只有 <b>60 次/小时</b>，而且 GitHub 是<b>按 IP</b> 算的 ——
+            我们的请求大多经节点出去，等于和整台节点的用户共用这个额度，别人刷满了
+            你这边就会报「限流」。填一个 fine-grained token、只勾这一个仓库的
+            <span className="mono"> Contents: Read </span>，配额提到 5000 次/小时。
+            不要给写权限。
             <br />
             <b>安装会在替换 App 之后自动重启。</b>更新脚本先等你退出、再替换
             <span className="mono"> /Applications/XrayTun.app</span>，所以安装前请先

@@ -222,9 +222,12 @@ pub async fn probe_dns(app: AppHandle, state: State<'_, AppState>) -> Result<App
 
 /// 查客户端**自己**的最新版。
 ///
-/// 和核心/geo 那两条不同：本仓库是**私有**的，GitHub 对未认证的私有仓库
-/// 请求一律 404（实测），所以必须带 token。没填 token 时不是「没有更新」，
-/// 而是明确报「拿不到」—— 这两件事用户必须能分清。
+/// 仓库现在**是公开的**，所以匿名就能查；token 变成可选 —— 但填了能把
+/// GitHub 的配额从 60 次/小时提到 5000，而那个配额是**按 IP** 算的，
+/// 我们的请求又多是经节点出去的，等于和整台节点的用户共用。
+///
+/// 无论哪种情况，「拿不到更新」和「已经是最新」都必须分开报 ——
+/// 这正是 `gh_status_error` 把 403/404 翻译成人话的原因。
 #[tauri::command]
 pub async fn check_app_update(
     app: AppHandle,

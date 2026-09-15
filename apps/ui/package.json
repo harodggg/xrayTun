@@ -1,7 +1,7 @@
 {
   "name": "xraytun-ui",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "description": "XrayTun 前端界面（React + TypeScript + Vite）",
   "scripts": {

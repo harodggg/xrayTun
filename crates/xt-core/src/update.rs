@@ -36,9 +36,12 @@ pub const XRAY_REPO: &str = "XTLS/Xray-core";
 pub const GEO_REPO: &str = "Loyalsoldier/v2ray-rules-dat";
 /// 客户端**自己**的仓库 —— 应用自身的更新也从这里的 release 拉。
 ///
-/// ⚠️ 这个仓库目前是**私有的**，而 GitHub 对未认证的私有仓库请求一律返回
-/// 404（实测：`api/releases/latest` → 404，而同一条命令打 XTLS/Xray-core
-/// 正常返回）。所以要么把仓库改成公开，要么在设置里填一个只读 token。
+/// 这个仓库**已经改成公开**了，所以匿名就能拉。token 现在是**可选**的，
+/// 但仍有意义：匿名走 GitHub 的 60 次/小时配额，而且是**按 IP**算的 ——
+/// 我们自己的请求大多是经节点出去的，于是整台节点的用户共用那 60 次。
+/// 填一个 token 可提到 5000 次/小时。
+///
+/// 如果哪天仓库又改回私有，就必须填 token，否则一律 404。
 pub const APP_REPO: &str = "harodggg/xrayTun";
 
 /// 下载超时。核心约 20MB、geo 约 30MB，给宽一点。
@@ -209,9 +212,10 @@ fn proxy_args(proxy: Option<u16>) -> Vec<String> {
 
 /// GitHub 认证参数。只读权限的 token 就够。
 ///
-/// 为什么需要：本仓库（`APP_REPO`）是私有的，匿名请求一律 404，
-/// 不认证就永远收不到客户端更新。XTLS / Loyalsoldier 那两个是公开仓库，
-/// 传 `None` 即可。
+/// 什么时候需要：`APP_REPO` 现在是公开的，匿名可用；但匿名只有 60 次/小时，
+/// 而且**按 IP** 算 —— 请求通常是经节点出去的，整台节点的用户共用这个额度。
+/// 填 token 可提到 5000 次/小时，也让「检查更新」不会因为别人刷满了而失败。
+/// 仓库若改回私有，则**必须**填。XTLS / Loyalsoldier 传 `None` 即可。
 ///
 /// 注意 token 会出现在 `curl` 的命令行里。macOS 上别的用户本来就看不到
 /// 你的进程参数（`ps` 对他人进程是受限的），而这是单用户桌面应用，
@@ -224,21 +228,50 @@ fn auth_args(token: Option<&str>) -> Vec<String> {
 }
 
 /// 取 GitHub API 的 JSON。三个上游共用一份 curl 参数。
-fn gh_get(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<String> {
+///
+/// 返回正文和 HTTP 状态码。**必须把状态码带出来**：匿名访问时
+/// 「403 限流」和「404 不存在」是完全不同的两回事，而 curl 的 `-f`
+/// 会把它们压成同一句「退出码 22」。
+fn gh_get(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<(String, u16)> {
     let mut args = vec![
         "-sSL".to_string(),
-        "-f".to_string(),
         "--max-time".to_string(),
         API_TIMEOUT.as_secs().to_string(),
         "-H".to_string(),
         "Accept: application/vnd.github+json".to_string(),
         "-H".to_string(),
         "User-Agent: XrayTun".to_string(),
+        // 把状态码附在正文后面，最后一行取出来。
+        "-w".to_string(),
+        "\n%{http_code}".to_string(),
     ];
     args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
     args.push(url.to_string());
-    run("/usr/bin/curl", &args, API_TIMEOUT)
+    let raw = run("/usr/bin/curl", &args, API_TIMEOUT)?;
+    let (body, code) = raw
+        .rsplit_once('\n')
+        .ok_or_else(|| Error::Update("GitHub 返回里没有状态码".into()))?;
+    let code: u16 = code
+        .trim()
+        .parse()
+        .map_err(|_| Error::Update(format!("无法解析 HTTP 状态码：{code:?}")))?;
+    Ok((body.to_string(), code))
+}
+
+/// 把非 2xx 状态码翻译成**能指向原因**的话。
+///
+/// 这里值得多花几行：本仓库曾经是私有的，那时匿名请求返回 404；
+/// 而**公开仓库被限流是 403**。两者都表现为「检查更新失败」，
+/// 但处置完全不同 —— 前者要去开权限或填 token，后者等一会儿或填 token 提额度。
+fn gh_status_error(what: &str, code: u16) -> Error {
+    let hint = match code {
+        401 => "token 无效或已过期",
+        403 => "GitHub 限流了（匿名每小时只有 60 次，填一个 token 可提到 5000 次）",
+        404 => "仓库或 release 不存在；如果仓库是私有的，需要填一个只读 token",
+        _ => "GitHub 返回了非预期状态",
+    };
+    Error::Update(format!("{what} 失败（HTTP {code}）：{hint}"))
 }
 
 /// 取某个仓库的 release 列表（原始结构）。
@@ -249,7 +282,13 @@ fn fetch_raw(
     token: Option<&str>,
 ) -> Result<Vec<GhRelease>> {
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page={per_page}");
-    let body = gh_get(&url, proxy, token)?;
+    let (body, code) = gh_get(&url, proxy, token)?;
+    if code != 200 {
+        return Err(gh_status_error(
+            &format!("取 {repo} 的 release 列表"),
+            code,
+        ));
+    }
     serde_json::from_str(&body).map_err(|e| Error::Update(format!("解析 GitHub 返回失败：{e}")))
 }
 
@@ -1062,6 +1101,20 @@ mod install_tests {
             Path::new("/tmp/a'b"),
         );
         assert!(s.contains(r"'/tmp/a'\''b/XrayTun.app'"), "单引号要转义：{s}");
+    }
+
+    /// 403 和 404 必须给出**不同的**指引。
+    ///
+    /// 仓库从私有改成公开之后这条尤其重要：私有期间报 404（要去开权限或填
+    /// token），公开之后被限流报 403（等一会儿，或填 token 提额度）。
+    /// 两者压成同一句「检查更新失败」，用户只会以为整个功能坏了。
+    #[test]
+    fn gh_status_errors_point_at_the_right_cause() {
+        let m = |c| gh_status_error("检查", c).to_string();
+        assert!(m(403).contains("限流"), "{}", m(403));
+        assert!(m(404).contains("token"), "{}", m(404));
+        assert!(m(401).contains("token 无效"), "{}", m(401));
+        assert_ne!(m(403), m(404), "限流和不存在的处置不同，不能是同一句话");
     }
 
     /// token 为空等于不认证（公开仓库照常工作）。

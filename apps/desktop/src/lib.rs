@@ -256,6 +256,34 @@ async fn bootstrap(app: tauri::AppHandle) {
         }
     }
 
+    // 兜底自查：**隧道已经不在，但系统 DNS 还指着隧道内的哨兵地址** ——
+    // 这个组合等于「所有域名都解析不了」，用户看到的就是「断网」。
+    //
+    // 放在回滚**之后**：回滚成功的话这里就查不到了。会走到这里的路径有几条，
+    // 重启是最容易撞上的那条 —— 内核把路由和 DNS 重置了，而磁盘上的快照还在、
+    // helper 进程也重启了（内存里的会话没了），两边对不上，回滚就无从下手。
+    // 崩溃、手工 kill helper、上一版留下的状态同理。
+    //
+    // 这里只**发现并说清楚**，不自己动手：改系统 DNS 需要 root，得走 helper，
+    // 而「在不确定的情况下自动改用户的 DNS」比不改更危险。把命令原样给出来，
+    // 用户一条粘贴就能修。
+    if !state.with(|i| i.runtime.running).unwrap_or(false) {
+        let sentinel = state
+            .with(|i| i.settings.tun.sentinel_dns.trim().to_string())
+            .unwrap_or_default();
+        if let Some(service) = sentinel_dns_without_tunnel(&sentinel) {
+            let msg = format!(
+                "系统 DNS 还指着隧道内的哨兵地址 {sentinel}（网络服务「{service}」），\
+                 但隧道已经不在了，所有域名都解析不了。点「修复网络」，或执行：\
+                 sudo networksetup -setdnsservers '{service}' Empty"
+            );
+            state.with(|i| {
+                i.push_log("app", "error", msg.clone());
+                i.last_notice = Some(msg);
+            });
+        }
+    }
+
     // 启动时在后台探一次 DNS，把最快的排到前面。
     //
     // **不阻塞启动**：探测要联网、约 10 秒。启动流程里已经有「找核心 / 探 helper /
@@ -277,6 +305,24 @@ async fn bootstrap(app: tauri::AppHandle) {
     // 而前端的处理函数会直接读 `payload.runtime` / `payload.traffic` ——
     // 于是这一发在 webview 里抛 TypeError，运行时与流量都拿不到更新。
     events::runtime_changed(&app, &state);
+}
+
+/// 找到第一个把 DNS 设成**哨兵地址**的网络服务。
+///
+/// 单独抽出来是为了让上面那段兜底逻辑读起来只剩「发现 + 报告」这一件事。
+/// 纯读操作：`networksetup -getdnsservers` 不需要管理员权限。
+fn sentinel_dns_without_tunnel(sentinel: &str) -> Option<String> {
+    if sentinel.is_empty() {
+        return None;
+    }
+    for service in xt_tun::macos::dns::list_services().ok()? {
+        if let Ok(servers) = xt_tun::macos::dns::get_dns(&service) {
+            if servers.iter().any(|s| s == sentinel) {
+                return Some(service);
+            }
+        }
+    }
+    None
 }
 
 fn init_tracing() {
