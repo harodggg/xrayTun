@@ -284,6 +284,12 @@ async fn bootstrap(app: tauri::AppHandle) {
         }
     }
 
+    // 上次是连着的话就连回来。
+    //
+    // 必须放在**遗留回滚之后**：先确保 helper 那边的旧会话清干净了，
+    // 再建新的，否则会撞上「已有活跃会话」。
+    crate::commands::reconnect_if_needed(&app, &state).await;
+
     // 启动时在后台探一次 DNS，把最快的排到前面。
     //
     // **不阻塞启动**：探测要联网、约 10 秒。启动流程里已经有「找核心 / 探 helper /

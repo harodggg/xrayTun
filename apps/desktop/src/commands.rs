@@ -776,6 +776,49 @@ pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<A
     build_snapshot(&app, &state).await
 }
 
+/// 启动时把上次的连接状态恢复回来。
+///
+/// **为什么需要它**：自更新会先退出 app（核心随之优雅关闭）、替换 `.app`、
+/// 再重启。如果不恢复，用户没关过的东西就断了 —— 表现就是「运行一段时间
+/// 网就停了」，而原因藏在一份 `app-update.log` 里。崩溃后被系统重启、
+/// 开机自启同理。
+///
+/// 只在**上次确实是连着的**（`was_connected`）且用户没禁止自动重连时才做。
+/// 用户主动点过「停止」的话这个标记是 false，所以「除非我关闭，否则不该断」
+/// 是成立的。
+pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
+    let (was, auto, mode) = state
+        .with(|i| {
+            (
+                i.settings.was_connected,
+                i.settings.auto_reconnect,
+                i.settings.mode,
+            )
+        })
+        .unwrap_or((false, false, ProxyMode::Direct));
+    if !was || !auto || mode == ProxyMode::Direct {
+        return;
+    }
+    if state.with(|i| i.runtime.running).unwrap_or(false) {
+        return;
+    }
+
+    state.with(|i| i.push_log("app", "info", "上次退出时是连接状态，正在自动重连…"));
+    match start_core(app, state).await {
+        Ok(()) => {
+            let _ = state.with(|i| i.push_log("app", "info", "已自动重连"));
+        }
+        Err(e) => {
+            let msg = format!("自动重连失败：{e}（可以手动点连接）");
+            let _ = state.with(|i| {
+                i.push_log("app", "warn", msg.clone());
+                i.last_notice = Some(msg);
+            });
+        }
+    }
+    events::runtime_changed(app, state);
+}
+
 /// 连上之后**真的发一个请求出去**，确认这条隧道能用。
 ///
 /// 为什么必须做：启动流程里那两次检查问的都是「**服务器** TCP 可达吗」，
@@ -795,6 +838,130 @@ pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<A
 /// 这个检查**经本地 SOCKS 入站**发一个 204 请求 —— 那是真实用户路径。
 /// 用 `--socks5-hostname`，域名由节点去解析，所以它同时覆盖了「转发」和
 /// 「节点侧解析」两件事。失败时直接点名是节点的问题。
+/// 经本地 SOCKS 入站发一个**真实请求**，返回 HTTP 状态码（失败时空串）。
+///
+/// 用 `--socks5-hostname` 让节点去解析域名，所以这一个检查同时覆盖
+/// 「能不能转发」和「节点侧能不能解析」两件事。抽出来是因为连接后的
+/// 一次性检查和看门狗都要用它。
+async fn tunnel_probe(port: u16, timeout_secs: u32) -> String {
+    let probe = xt_core::xray::DEFAULT_PROBE_URL.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("/usr/bin/curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--max-time",
+                &timeout_secs.to_string(),
+                "--socks5-hostname",
+                &format!("127.0.0.1:{port}"),
+                &probe,
+            ])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 隧道看门狗：**只要用户没主动断开，网络就不该是坏的。**
+///
+/// 熄屏/睡眠唤醒、换网、路由器重发 DHCP、节点抖动 —— 这些都会让一条看起来
+/// 「已连接」的隧道实际失效（路由指向旧网关、核心到节点的连接全断），
+/// 而界面不会变，用户能看到的只是「网断了」。换网那次我们只做到「报一句」，
+/// 那不够：**报一句不解决"任意时刻都不该断"的要求。**
+///
+/// 这个任务每 10 秒经本地 SOCKS 入站做一次真实请求；**连续两次**失败就
+/// 自动重建隧道（用当前的物理出口重新算路由与 DNS）。
+///
+/// 重建也失败时**退回直连**（拆掉隧道）而不是把用户留在断网状态 ——
+/// 「能上网但不走代理」永远好过「什么都上不了」。
+///
+/// 用户主动断开时 `runtime.running` 变 false，这个任务下一轮就自己退出；
+/// 重连会换 pid，旧的那个同样会退出 —— 所以不会出现多个看门狗打架。
+fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut failures = 0u32;
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            let (alive, port, node_name) = state
+                .with(|i| {
+                    let selected = i.settings.selected_node.clone();
+                    (
+                        i.runtime.running && i.runtime.pid == pid,
+                        i.settings.socks_port,
+                        i.nodes
+                            .iter()
+                            .find(|n| Some(&n.id) == selected.as_ref())
+                            .map(|n| n.name.clone())
+                            .unwrap_or_default(),
+                    )
+                })
+                .unwrap_or((false, 10808, String::new()));
+            // 用户断开了，或已经重连（换了 pid）—— 都该由新任务接手。
+            if !alive {
+                return;
+            }
+
+            let code = tunnel_probe(port, 6).await;
+            if !(code.is_empty() || code == "000") {
+                failures = 0;
+                continue;
+            }
+            failures += 1;
+            // 一次失败可能是节点抖了一下；**连续两次**才算隧道真的没了。
+            if failures < 2 {
+                continue;
+            }
+
+            state.with(|i| {
+                i.push_log(
+                    "app",
+                    "warn",
+                    format!(
+                        "隧道连续 {failures} 次不通（熄屏/换网/节点抖动，当前节点「{node_name}」），正在自动重建…"
+                    ),
+                );
+                i.last_notice = Some("网络中断，正在自动恢复…".into());
+            });
+            events::runtime_changed(&handle, &state);
+
+            // 重建：用**当前**的物理出口重新算路由与 DNS。熄屏唤醒后网关
+            // 变了也能对上，这正是"能自愈"的关键。
+            if stop_core(&handle, &state).await.is_ok()
+                && start_core(&handle, &state).await.is_ok()
+            {
+                state.with(|i| i.push_log("app", "info", "隧道已自动恢复"));
+                // start_core 会 spawn 新的看门狗，这里退出即可。
+                return;
+            }
+
+            // 重建也失败：退回直连。用户至少能上网 —— 这比死守一条
+            // 走不通的隧道更符合「除非我关闭，网络不该断」。
+            let _ = stop_core(&handle, &state).await;
+            state.with(|i| {
+                i.push_log(
+                    "app",
+                    "error",
+                    "自动重建失败，已退回直连：网络可用，但流量不再走代理",
+                );
+                i.last_notice = Some("自动恢复失败，已退回直连（不再走代理）".into());
+            });
+            events::runtime_changed(&handle, &state);
+            return;
+        }
+    });
+}
+
 fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
     let port = app
         .try_state::<AppState>()
@@ -827,28 +994,7 @@ fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
             return;
         }
 
-        let probe = xt_core::xray::DEFAULT_PROBE_URL.to_string();
-        let code = tauri::async_runtime::spawn_blocking(move || {
-            std::process::Command::new("/usr/bin/curl")
-                .args([
-                    "-sS",
-                    "-o",
-                    "/dev/null",
-                    "-w",
-                    "%{http_code}",
-                    "--max-time",
-                    "10",
-                    "--socks5-hostname",
-                    &format!("127.0.0.1:{port}"),
-                    &probe,
-                ])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default();
+        let code = tunnel_probe(port, 10).await;
 
         let Some(state) = handle.try_state::<AppState>() else {
             return;
@@ -1041,6 +1187,15 @@ fn spawn_dns_reprobe(app: &AppHandle, state: &AppState) {
 #[tauri::command]
 pub async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     stop_core(&app, &state).await?;
+    // **用户主动停止** —— 这是唯一会清掉「该连着」的地方。其它调用 `stop_core`
+    // 的路径（切换节点、看门狗重建）都不该清，它们只是过程，不是意图。
+    let settings = state.with(|i| {
+        i.settings.was_connected = false;
+        i.settings.clone()
+    });
+    if let Some(settings) = settings {
+        let _ = persist_settings(&state, &settings);
+    }
     state.with(|i| {
         i.runtime = CoreRuntime::default();
     });
@@ -1099,6 +1254,9 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
 
     state.with(|i| {
         i.runtime = runtime.clone();
+        // 记下「用户希望它连着」。自更新/重启之后要靠它自动连回来 ——
+        // 否则就是用户没关过、网却断了。
+        i.settings.was_connected = true;
         i.push_log(
             "app",
             "info",
@@ -1120,8 +1278,14 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // 这直接决定用户接下来会不会面对一屏看不懂的 DNS 超时。
     spawn_connectivity_check(app, runtime.pid);
 
+    // 一直盯着：熄屏唤醒、换网、节点抖动之后，隧道可能已经死了而界面还显示
+    // 「已连接」。**只要用户没主动断开，网络就不该是坏的** —— 所以这里不是
+    // 报警，而是自动重建（重建也失败就退回直连，至少能上网）。
+    spawn_tunnel_watchdog(app, runtime.pid);
+
     // 日志转发任务：核心的 stdout/stderr → 状态环形缓冲 + UI 事件。
     let app_handle = app.clone();
+    let forward_pid = runtime.pid;
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             let level = classify_log(&event.line);
@@ -1129,6 +1293,24 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
                 state.with(|i| i.push_log("core", level, event.line.clone()));
             }
             let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: event.line, level: level.into() });
+        }
+
+        // 循环结束 = 核心的 stdout 关了 = **核心已经不在了**。
+        //
+        // 这里以前什么都不做，于是界面继续显示「已连接」而隧道早就死了，
+        // 用户能看到的只有「网断了」而不知道为什么。现在至少把状态改对，
+        // 让界面别再骗人；真正的自愈由看门狗负责。
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            let stale = state
+                .with(|i| (i.runtime.running, i.runtime.pid))
+                .unwrap_or((false, None));
+            if stale.0 && stale.1 == forward_pid {
+                state.with(|i| {
+                    i.runtime.running = false;
+                    i.push_log("app", "error", "核心进程已退出，隧道不再有效");
+                });
+                events::runtime_changed(&app_handle, &state);
+            }
         }
     });
 

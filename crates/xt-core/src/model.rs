@@ -754,6 +754,16 @@ pub struct AppSettings {
     #[serde(default)]
     pub launch_at_login: bool,
     /// `silent` / `error` / `warning` / `info` / `debug`。
+    /// **重连意图**：上次退出时这条隧道是开着的吗。
+    ///
+    /// 自更新会先退出 app（核心随之关闭）、替换、再重启 —— 如果不记住这件事，
+    /// 重启之后就是「网断了」，而用户并没有关过它。用户主动点「停止」时
+    /// 这里会被清掉，所以「除非我关闭，否则不该断」是成立的。
+    #[serde(default)]
+    pub was_connected: bool,
+    /// 启动时如果上次是连着的，要不要自动连回去。
+    #[serde(default = "yes")]
+    pub auto_reconnect: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     /// 是否在切换模式时自动清理系统代理设置。
@@ -795,6 +805,8 @@ impl Default for AppSettings {
             fakedns: FakeDnsSettings::default(),
             core_path: None,
             launch_at_login: false,
+            was_connected: false,
+            auto_reconnect: true,
             log_level: default_log_level(),
             restore_system_proxy_on_exit: true,
             show_speed_in_title: true,
