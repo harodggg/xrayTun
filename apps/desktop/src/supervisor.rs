@@ -125,6 +125,11 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// 数据面进程还在不在。
+    ///
+    /// 调用方**必须和 `start` 用同一把锁**来判断 —— 在锁外检查的话，
+    /// 「检查完 → 真正 start」之间会被别人插进来，于是又变成
+    /// 「核心已经在运行」那个错误。
     pub fn is_running(&self) -> bool {
         self.process.is_some()
     }

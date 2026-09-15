@@ -935,6 +935,15 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
             });
             events::runtime_changed(&handle, &state);
 
+            // **用户可能就在刚才点了「关闭」。** 探测是异步的，等它回来时
+            // 意图可能已经变了 —— 那就什么都别做，否则就是
+            // 「点了关闭，几秒后它自己又连上了」。意图由 `was_connected`
+            // 承载，只有用户主动停止才会清掉它。
+            if !state.with(|i| i.settings.was_connected).unwrap_or(false) {
+                state.with(|i| i.push_log("app", "info", "用户已关闭，取消自动重建"));
+                return;
+            }
+
             // 重建：用**当前**的物理出口重新算路由与 DNS。熄屏唤醒后网关
             // 变了也能对上，这正是"能自愈"的关键。
             if stop_core(&handle, &state).await.is_ok()
@@ -1222,6 +1231,24 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
 
     let mut supervisor = state.supervisor.lock().await;
     let mut helper = state.helper.lock().await;
+
+    // **已经在跑就当作成功，不要报错。**
+    //
+    // 「启动」会被好几处并发调用：用户点按钮、看门狗重建、自动重连、
+    // 切换节点。对调用方来说「核心已经在运行」不是失败，而是
+    // 「你要的状态已经达成了」。
+    //
+    // 之前它返回错误，用户看到的就是最迷惑的那种：
+    // **点「关闭」没反应，再点一下却被告知「核心已经在运行」** ——
+    // 因为那几秒里快照的 running 和 supervisor 的真实状态对不上。
+    //
+    // 这个检查必须在**拿到 supervisor 锁之后**做：在锁外检查的话，
+    // 「检查完 → 真正 start」之间照样会被插进来。
+    if supervisor.is_running() {
+        drop(helper);
+        drop(supervisor);
+        return Ok(());
+    }
 
     let result = supervisor
         .start(
