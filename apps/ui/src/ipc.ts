@@ -83,6 +83,7 @@ export const EVENTS = {
   nodesChanged: "nodes://changed",
   subscriptionsChanged: "subscriptions://changed",
   settingsChanged: "settings://changed",
+  updateProgress: "update://progress",
 } as const;
 
 export interface RuntimePayload {
@@ -99,6 +100,13 @@ export interface ProbeStartedPayload {
   total: number;
 }
 
+/** 更新下载进度。`totalBytes` 为 null 表示上游没报，只能显示已下载多少。 */
+export interface UpdateProgressPayload {
+  label: string;
+  done_bytes: number;
+  total_bytes: number | null;
+}
+
 /** 批量注册监听并在卸载时统一清理。 */
 export function subscribe(handlers: {
   onRuntime?: (payload: RuntimePayload) => void;
@@ -108,6 +116,7 @@ export function subscribe(handlers: {
   onNodesChanged?: () => void;
   onSubscriptionsChanged?: () => void;
   onSettingsChanged?: () => void;
+  onUpdateProgress?: (payload: UpdateProgressPayload) => void;
 }): () => void {
   const unlisteners: UnlistenFn[] = [];
   let disposed = false;
@@ -137,6 +146,12 @@ export function subscribe(handlers: {
     }
     if (handlers.onSettingsChanged) {
       pairs.push([EVENTS.settingsChanged, () => handlers.onSettingsChanged!()]);
+    }
+    if (handlers.onUpdateProgress) {
+      pairs.push([
+        EVENTS.updateProgress,
+        (e) => handlers.onUpdateProgress!(e.payload as UpdateProgressPayload),
+      ]);
     }
 
     for (const [name, handler] of pairs) {

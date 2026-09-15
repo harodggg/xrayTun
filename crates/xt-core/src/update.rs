@@ -128,6 +128,9 @@ struct GhRelease {
 struct GhAsset {
     name: String,
     browser_download_url: String,
+    /// 字节数。GitHub 的 assets 里一直有，用来画下载进度条。
+    #[serde(default)]
+    size: u64,
 }
 
 /// 一个可用的更新。
@@ -140,6 +143,9 @@ pub struct Available {
     /// 校验文件地址。`None` 表示上游没提供 —— 那就只能做结构性校验，
     /// 界面应当如实说明「无上游校验」而不是假装验过了。
     pub digest_url: Option<String>,
+    /// 产物字节数。用来画下载进度条；`None` 表示上游没报（那就画不出百分比）。
+    #[serde(default)]
+    pub size: Option<u64>,
 }
 
 /// 在 release 列表里挑出版本号最大的那个。
@@ -170,6 +176,7 @@ fn pick_latest(releases: &[GhRelease], want_asset: impl Fn(&str) -> bool) -> Opt
                 prerelease: r.prerelease,
                 download_url: asset.browser_download_url.clone(),
                 digest_url,
+                size: Some(asset.size).filter(|n| *n > 0),
             })
         })
 }
@@ -210,29 +217,12 @@ fn proxy_args(proxy: Option<u16>) -> Vec<String> {
     }
 }
 
-/// GitHub 认证参数。只读权限的 token 就够。
-///
-/// 什么时候需要：`APP_REPO` 现在是公开的，匿名可用；但匿名只有 60 次/小时，
-/// 而且**按 IP** 算 —— 请求通常是经节点出去的，整台节点的用户共用这个额度。
-/// 填 token 可提到 5000 次/小时，也让「检查更新」不会因为别人刷满了而失败。
-/// 仓库若改回私有，则**必须**填。XTLS / Loyalsoldier 传 `None` 即可。
-///
-/// 注意 token 会出现在 `curl` 的命令行里。macOS 上别的用户本来就看不到
-/// 你的进程参数（`ps` 对他人进程是受限的），而这是单用户桌面应用，
-/// 所以直接用 `-H` 而不额外折腾 header 文件。
-fn auth_args(token: Option<&str>) -> Vec<String> {
-    match token.map(str::trim).filter(|t| !t.is_empty()) {
-        Some(t) => vec!["-H".into(), format!("Authorization: Bearer {t}")],
-        None => Vec::new(),
-    }
-}
-
 /// 取 GitHub API 的 JSON。三个上游共用一份 curl 参数。
 ///
 /// 返回正文和 HTTP 状态码。**必须把状态码带出来**：匿名访问时
 /// 「403 限流」和「404 不存在」是完全不同的两回事，而 curl 的 `-f`
 /// 会把它们压成同一句「退出码 22」。
-fn gh_get(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<(String, u16)> {
+fn gh_get(url: &str, proxy: Option<u16>) -> Result<(String, u16)> {
     let mut args = vec![
         "-sSL".to_string(),
         "--max-time".to_string(),
@@ -245,7 +235,6 @@ fn gh_get(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<(String,
         "-w".to_string(),
         "\n%{http_code}".to_string(),
     ];
-    args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
     args.push(url.to_string());
     let raw = run("/usr/bin/curl", &args, API_TIMEOUT)?;
@@ -267,22 +256,17 @@ fn gh_get(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<(String,
 fn gh_status_error(what: &str, code: u16) -> Error {
     let hint = match code {
         401 => "token 无效或已过期",
-        403 => "GitHub 限流了（匿名每小时只有 60 次，填一个 token 可提到 5000 次）",
-        404 => "仓库或 release 不存在；如果仓库是私有的，需要填一个只读 token",
+        403 => "GitHub 限流了（匿名每小时只有 60 次，且按 IP 算）—— 过一会儿再试",
+        404 => "仓库或 release 不存在",
         _ => "GitHub 返回了非预期状态",
     };
     Error::Update(format!("{what} 失败（HTTP {code}）：{hint}"))
 }
 
 /// 取某个仓库的 release 列表（原始结构）。
-fn fetch_raw(
-    repo: &str,
-    per_page: usize,
-    proxy: Option<u16>,
-    token: Option<&str>,
-) -> Result<Vec<GhRelease>> {
+fn fetch_raw(repo: &str, per_page: usize, proxy: Option<u16>) -> Result<Vec<GhRelease>> {
     let url = format!("https://api.github.com/repos/{repo}/releases?per_page={per_page}");
-    let (body, code) = gh_get(&url, proxy, token)?;
+    let (body, code) = gh_get(&url, proxy)?;
     if code != 200 {
         return Err(gh_status_error(
             &format!("取 {repo} 的 release 列表"),
@@ -294,7 +278,7 @@ fn fetch_raw(
 
 /// 取 GitHub release 列表。
 pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result<Vec<Available>> {
-    let releases = fetch_raw(repo, per_page, proxy, None)?;
+    let releases = fetch_raw(repo, per_page, proxy)?;
 
     // 把原始结构转成 Available 列表（保留全部条目，供调用方自己挑）。
     let mut out = Vec::new();
@@ -311,6 +295,7 @@ pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result
                 prerelease: r.prerelease,
                 download_url: a.browser_download_url.clone(),
                 digest_url,
+                size: Some(a.size).filter(|n| *n > 0),
             });
         }
     }
@@ -319,7 +304,7 @@ pub fn fetch_releases(repo: &str, per_page: usize, proxy: Option<u16>) -> Result
 
 /// 查核心的最新版。
 pub fn check_core(proxy: Option<u16>) -> Result<Available> {
-    let releases = fetch_raw(XRAY_REPO, 30, proxy, None)?;
+    let releases = fetch_raw(XRAY_REPO, 30, proxy)?;
     let asset = macos_asset_name()?;
     pick_latest(&releases, |n| n == asset)
         .ok_or_else(|| Error::Update(format!("最近 30 个 release 里没有 {asset}")))
@@ -335,8 +320,14 @@ pub fn app_asset_matches(name: &str) -> bool {
 }
 
 /// 查客户端自己的最新版。
-pub fn check_app(proxy: Option<u16>, token: Option<&str>) -> Result<Available> {
-    let releases = fetch_raw(APP_REPO, 30, proxy, token)?;
+///
+/// 仓库是**公开**的，所以匿名就能查，不再需要 token（也刻意不提供 ——
+/// 一个存着只读凭据的配置字段，收益远小于它带来的风险）。
+/// 代价是匿名配额只有 60 次/小时且**按 IP** 算，而请求多经节点出去，
+/// 所以「限流」是会真实发生的 —— 因此 403 必须和 404 分开报，见
+/// [`gh_status_error`]。
+pub fn check_app(proxy: Option<u16>) -> Result<Available> {
+    let releases = fetch_raw(APP_REPO, 30, proxy)?;
     let latest = releases
         .iter()
         .filter(|r| r.assets.iter().any(|a| app_asset_matches(&a.name)))
@@ -352,6 +343,7 @@ pub fn check_app(proxy: Option<u16>, token: Option<&str>) -> Result<Available> {
         published_at: latest.published_at.clone(),
         prerelease: latest.prerelease,
         download_url: asset.browser_download_url.clone(),
+        size: Some(asset.size).filter(|n| *n > 0),
         // 校验和是**整包一份** `SHA256SUMS.txt`，装的是一行一行取，
         // 所以这里只给出文件地址，真正的比对在 install_app_update 里做。
         digest_url: digest_asset_name(&latest.assets),
@@ -368,7 +360,7 @@ fn digest_asset_name(assets: &[GhAsset]) -> Option<String> {
 
 /// 查 geo 数据的最新版。
 pub fn check_geo(proxy: Option<u16>) -> Result<Available> {
-    let releases = fetch_raw(GEO_REPO, 5, proxy, None)?;
+    let releases = fetch_raw(GEO_REPO, 5, proxy)?;
     let latest = releases
         .iter()
         .filter(|r| r.assets.iter().any(|a| a.name == "geosite.dat"))
@@ -390,20 +382,28 @@ pub fn check_geo(proxy: Option<u16>) -> Result<Available> {
         prerelease: latest.prerelease,
         download_url: asset.browser_download_url.clone(),
         digest_url,
+        size: Some(asset.size).filter(|n| *n > 0),
     })
 }
 
 /// 下载到文件。
 pub fn download(url: &str, dest: &Path, proxy: Option<u16>) -> Result<()> {
-    download_auth(url, dest, proxy, None)
+    download_with_progress(url, dest, proxy, |_| {})
 }
 
-/// 下载到文件（带认证）。私有仓库的 release 资产必须走这条。
-pub fn download_auth(
+/// 下载到文件，并在过程中反复报告**已写入的字节数**（给进度条用）。
+///
+/// 为什么自己轮询而不是解析 curl 的进度输出：`--progress-bar` 把进度写到
+/// stderr，格式带 `\r` 且随版本变，解析它比读文件大小脆得多。curl 是流式
+/// 写入的，所以「目标文件现在多大」就是「已经下了多少」—— 准确且不依赖输出格式。
+///
+/// 这是个阻塞函数（内部 sleep + 轮询子进程），调用方要放在
+/// `spawn_blocking` 里。
+pub fn download_with_progress(
     url: &str,
     dest: &Path,
     proxy: Option<u16>,
-    token: Option<&str>,
+    mut on_progress: impl FnMut(u64),
 ) -> Result<()> {
     let mut args = vec![
         "-sSL".to_string(),
@@ -415,27 +415,48 @@ pub fn download_auth(
         "-o".to_string(),
         dest.display().to_string(),
     ];
-    args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
     args.push(url.to_string());
-    run("/usr/bin/curl", &args, DOWNLOAD_TIMEOUT)?;
+
+    let mut child = Command::new("/usr/bin/curl")
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Update(format!("执行 curl 失败：{e}")))?;
+
+    let done_bytes = |dest: &Path| std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                on_progress(done_bytes(dest));
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => break Err(Error::Update(format!("等待 curl 失败：{e}"))),
+        }
+    };
+
+    let status = outcome?;
+    // 收尾再报一次：文件刚好在最后一次轮询之后写完的情况很常见。
+    on_progress(done_bytes(dest));
+    if !status.success() {
+        return Err(Error::Update(format!(
+            "下载失败（curl 退出码 {:?}）：{url}",
+            status.code()
+        )));
+    }
     Ok(())
 }
 
 /// 取一段文本（校验文件用）。
 pub fn fetch_text(url: &str, proxy: Option<u16>) -> Result<String> {
-    fetch_text_auth(url, proxy, None)
-}
-
-/// 取一段文本（带认证）。私有仓库的 `SHA256SUMS.txt` 走这条。
-pub fn fetch_text_auth(url: &str, proxy: Option<u16>, token: Option<&str>) -> Result<String> {
     let mut args = vec![
         "-sSL".to_string(),
         "-f".to_string(),
         "--max-time".to_string(),
         API_TIMEOUT.as_secs().to_string(),
     ];
-    args.extend(auth_args(token));
     args.extend(proxy_args(proxy));
     args.push(url.to_string());
     run("/usr/bin/curl", &args, API_TIMEOUT)
@@ -459,8 +480,22 @@ pub fn parse_sha256sum_for(text: &str, name: &str) -> Option<String> {
         let (Some(hex), Some(file)) = (it.next(), it.next()) else {
             continue;
         };
-        // 有些工具会写成 `*name`（二进制模式）。
-        if file.trim_start_matches('*') != name {
+        // **只比文件名，不比整行里的路径。**
+        //
+        // 我们的 `SHA256SUMS.txt` 是 `shasum -a 256 ./*` 生成的，所以每一行
+        // 长这样（实测）：
+        //
+        //     be1fd342…06cc  ./XrayTun_0.6.2_x86_64_arm64.zip
+        //
+        // 拿整段 `./XrayTun…zip` 去比 `XrayTun…zip` 永远不相等 —— 症状是
+        // 「校验文件里没有 <包名>」，而文件明明就在里面。这里取 path 的
+        // 最后一段，`./x`、`dir/x`、`/abs/x` 都能对上；
+        // 开头的 `*` 是 sha256sum 的二进制模式标记，也要剥掉。
+        let base = Path::new(file.trim_start_matches('*'))
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file);
+        if base != name {
             continue;
         }
         let hex = hex.trim().to_ascii_lowercase();
@@ -806,6 +841,7 @@ pub fn install_core(
     available: &Available,
     managed_dir: &Path,
     proxy: Option<u16>,
+    mut on_progress: impl FnMut(u64),
 ) -> Result<InstalledMeta> {
     let staging = managed_dir.join(".staging");
     let _ = std::fs::remove_dir_all(&staging);
@@ -813,7 +849,7 @@ pub fn install_core(
         .map_err(|e| Error::Update(format!("建暂存目录失败：{e}")))?;
 
     let zip = staging.join("core.zip");
-    download(&available.download_url, &zip, proxy)?;
+    download_with_progress(&available.download_url, &zip, proxy, &mut on_progress)?;
 
     // 校验摘要。上游给了就必须验；没给要**如实说明**而不是假装验过。
     if let Some(url) = &available.digest_url {
@@ -916,6 +952,7 @@ pub fn install_geo(
     available: &Available,
     managed_dir: &Path,
     proxy: Option<u16>,
+    mut on_progress: impl FnMut(u64),
 ) -> Result<InstalledMeta> {
     let staging = managed_dir.join(".staging-geo");
     let _ = std::fs::remove_dir_all(&staging);
@@ -929,7 +966,9 @@ pub fn install_geo(
     let mut staged: Vec<(String, PathBuf)> = Vec::new();
     for (name, url) in [("geoip.dat", geoip_url), ("geosite.dat", geosite_url)] {
         let dest = staging.join(name);
-        download(&url, &dest, proxy)?;
+        // geo 是两个文件（geoip + geosite），进度按「每个文件各自从 0 开始」
+        // 报 —— 分母由调用方按当前文件大小定，界面上表现为两段。
+        download_with_progress(&url, &dest, proxy, &mut on_progress)?;
 
         // 对应的 .sha256sum 与数据文件同目录同名 + 后缀。
         let sum_url = format!("{url}.sha256sum");
@@ -1033,31 +1072,51 @@ mod install_tests {
         assert!(!app_asset_matches("geosite.dat"));
     }
 
-    /// 整包一份的 `SHA256SUMS.txt` 必须**按文件名查行**。
+    /// 整包一份的 `SHA256SUMS.txt` 必须**按文件名查行**，而且要认得出真实格式。
     ///
-    /// 取第一行是错的：里面 dmg 排在 zip 前面，取错了就是拿 dmg 的摘要
-    /// 去校验 zip，永远不通过 —— 而且看起来像「下载损坏」，极难查。
+    /// 这段是**线上文件的原文**（v0.6.2 的 `SHA256SUMS.txt`，逐字抄的）：
+    ///
+    /// ```text
+    /// 1c216baa…4c57  ./XrayTun_0.6.2_x86_64_arm64.dmg
+    /// be1fd342…06cc  ./XrayTun_0.6.2_x86_64_arm64.zip
+    /// ```
+    ///
+    /// 注意 `./` 前缀 —— 我们的管道是 `shasum -a 256 ./*` 生成的。
+    /// 早先的测试手写了一个**没有** `./` 的理想输入，于是单测全绿而真机上的
+    /// 客户端自更新**一次都没成功过**，报的是「校验文件里没有 <包名>」。
+    /// 教训：测试要用管道真正产出的那份格式，别用手写的理想版。
     #[test]
     fn checksums_are_looked_up_by_file_name() {
-        let a = "a".repeat(64);
-        let b = "b".repeat(64);
-        let text =
-            format!("{a}  XrayTun_0.5.2_x86_64_arm64.dmg\n{b}  XrayTun_0.5.2_x86_64_arm64.zip\n");
+        const REAL: &str = "\
+1c216baa89fa26b5b05d583acb003a88e011abbd6cdb6b57109df657b5eb4c57  ./XrayTun_0.6.2_x86_64_arm64.dmg
+be1fd34274975e55ef96cf804459b952be06e3dc159011c688616f2211b106cc  ./XrayTun_0.6.2_x86_64_arm64.zip
+";
         assert_eq!(
-            parse_sha256sum_for(&text, "XrayTun_0.5.2_x86_64_arm64.zip").as_deref(),
-            Some(b.as_str()),
-            "要取 zip 那一行，不是第一行",
+            parse_sha256sum_for(REAL, "XrayTun_0.6.2_x86_64_arm64.zip").as_deref(),
+            Some("be1fd34274975e55ef96cf804459b952be06e3dc159011c688616f2211b106cc"),
+            "必须剥掉 ./ 前缀，并且取 zip 那一行（dmg 排在前面）",
         );
         assert_eq!(
-            parse_sha256sum_for(&text, "XrayTun_0.5.2_x86_64_arm64.dmg").as_deref(),
-            Some(a.as_str()),
+            parse_sha256sum_for(REAL, "XrayTun_0.6.2_x86_64_arm64.dmg").as_deref(),
+            Some("1c216baa89fa26b5b05d583acb003a88e011abbd6cdb6b57109df657b5eb4c57"),
         );
-        assert_eq!(parse_sha256sum_for(&text, "没有这个文件.zip"), None);
-        // 二进制模式写的 `*name` 也要认
-        assert_eq!(
-            parse_sha256sum_for(&format!("{b} *f.zip\n"), "f.zip").as_deref(),
-            Some(b.as_str()),
-        );
+        assert_eq!(parse_sha256sum_for(REAL, "没有这个文件.zip"), None);
+
+        // 其它写法也要认：裸名字、子目录、绝对路径、二进制模式的 `*`
+        let h = "b".repeat(64);
+        for line in [
+            format!("{h}  f.zip"),
+            format!("{h}  ./f.zip"),
+            format!("{h}  dist/f.zip"),
+            format!("{h}  /abs/path/f.zip"),
+            format!("{h} *f.zip"),
+        ] {
+            assert_eq!(
+                parse_sha256sum_for(&line, "f.zip").as_deref(),
+                Some(h.as_str()),
+                "认不出这种写法：{line}",
+            );
+        }
         // 长度不对的 hex 不能认
         assert_eq!(parse_sha256sum_for("deadbeef  f.zip\n", "f.zip"), None);
     }
@@ -1105,27 +1164,20 @@ mod install_tests {
 
     /// 403 和 404 必须给出**不同的**指引。
     ///
-    /// 仓库从私有改成公开之后这条尤其重要：私有期间报 404（要去开权限或填
-    /// token），公开之后被限流报 403（等一会儿，或填 token 提额度）。
-    /// 两者压成同一句「检查更新失败」，用户只会以为整个功能坏了。
+    /// 两者都表现为「检查更新失败」，但处置完全不同：403 是匿名配额被刷满了
+    /// （请求多经节点出去，所以这个额度是整台节点共用的），等一会儿就好；
+    /// 404 是仓库/release 真的不存在。压成同一句话，用户只会以为功能坏了。
     #[test]
     fn gh_status_errors_point_at_the_right_cause() {
         let m = |c| gh_status_error("检查", c).to_string();
         assert!(m(403).contains("限流"), "{}", m(403));
-        assert!(m(404).contains("token"), "{}", m(404));
-        assert!(m(401).contains("token 无效"), "{}", m(401));
+        assert!(!m(403).contains("不存在"), "403 不该说成不存在：{}", m(403));
+        assert!(m(404).contains("不存在"), "{}", m(404));
         assert_ne!(m(403), m(404), "限流和不存在的处置不同，不能是同一句话");
+        // 每一句都要带上状态码，否则用户没法自己查。
+        for c in [401u16, 403, 404, 500] {
+            assert!(m(c).contains(&c.to_string()), "{}", m(c));
+        }
     }
 
-    /// token 为空等于不认证（公开仓库照常工作）。
-    #[test]
-    fn auth_args_are_optional() {
-        assert!(auth_args(None).is_empty());
-        assert!(auth_args(Some("")).is_empty(), "空串不算 token");
-        assert!(auth_args(Some("   ")).is_empty(), "空白也不算");
-        let a = auth_args(Some(" ghp_x "));
-        assert_eq!(a.len(), 2);
-        assert_eq!(a[0], "-H");
-        assert_eq!(a[1], "Authorization: Bearer ghp_x", "两头空白要去掉");
-    }
 }

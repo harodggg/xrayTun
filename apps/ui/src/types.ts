@@ -162,8 +162,6 @@ export interface AppSettings {
   core_path: string | null;
   launch_at_login: boolean;
   log_level: string;
-  /** GitHub 只读 token，只用于拉客户端自己的 release（私有仓库必需）。 */
-  github_token: string;
   restore_system_proxy_on_exit: boolean;
   /** 实时网速显示在窗口标题栏与菜单栏。 */
   show_speed_in_title: boolean;
@@ -234,6 +232,8 @@ export interface NodeExport {
 
 /** 一次可用的更新。 */
 export interface AvailableUpdate {
+  /** 产物字节数；上游没报时为 null。 */
+  size: number | null;
   version: string;
   published_at: string;
   prerelease: boolean;
@@ -264,6 +264,14 @@ export interface DnsStatus {
   foreign_error: string | null;
 }
 
+/** 一次更新下载的进度，用于进度条。 */
+export interface UpdateProgress {
+  label: string;
+  done_bytes: number;
+  /** 上游没报字节数时为 null —— 界面退化成「只显示已下载多少」。 */
+  total_bytes: number | null;
+}
+
 export interface UpdateStatus {
   core_version: string | null;
   core_managed: boolean;
@@ -274,6 +282,8 @@ export interface UpdateStatus {
   latest_geo: AvailableUpdate | null;
   /** 客户端自己的最新版。仓库是私有的，所以这一步需要 token。 */
   latest_app: AvailableUpdate | null;
+  /** 正在进行的更新下载。null 表示没有在下载。 */
+  progress: UpdateProgress | null;
   checked_at: number | null;
   check_error: string | null;
 }

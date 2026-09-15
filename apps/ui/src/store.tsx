@@ -116,6 +116,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           prev ? { ...prev, runtime: payload.runtime, traffic: payload.traffic } : prev,
         );
       },
+      onUpdateProgress: (payload) => {
+        // 进度只更新这一个字段：下载期间每 200ms 一次，全量刷新太浪费。
+        setSnapshot((prev) =>
+          prev
+            ? {
+                ...prev,
+                update: {
+                  ...prev.update,
+                  progress: {
+                    label: payload.label,
+                    done_bytes: payload.done_bytes,
+                    total_bytes: payload.total_bytes,
+                  },
+                },
+              }
+            : prev,
+        );
+      },
       onLog: (payload) => {
         setLogs((prev) => {
           const next = [

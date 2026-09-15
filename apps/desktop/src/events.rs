@@ -16,6 +16,7 @@ pub const PROBE_STARTED: &str = "nodes://probe-started";
 pub const NODES_CHANGED: &str = "nodes://changed";
 pub const SUBSCRIPTIONS_CHANGED: &str = "subscriptions://changed";
 pub const SETTINGS_CHANGED: &str = "settings://changed";
+pub const UPDATE_PROGRESS: &str = "update://progress";
 
 #[derive(Clone, Serialize)]
 pub struct LogPayload {
@@ -49,6 +50,20 @@ pub fn runtime_changed(app: &AppHandle, state: &AppState) {
             traffic: TrafficSample::default(),
         });
     emit(app, RUNTIME_CHANGED, payload);
+}
+
+/// 更新下载进度（核心 / geo / 客户端共用）。
+///
+/// 单独一个事件而不是塞进 `runtime_changed`：下载期间每 200ms 就报一次，
+/// 而快照组装要读文件、问核心版本 —— 用快照推会把一件小事变得很贵。
+pub fn update_progress(app: &AppHandle, label: &str, done: u64, total: Option<u64>) {
+    #[derive(Clone, Serialize)]
+    struct P<'a> {
+        label: &'a str,
+        done_bytes: u64,
+        total_bytes: Option<u64>,
+    }
+    emit(app, UPDATE_PROGRESS, P { label, done_bytes: done, total_bytes: total });
 }
 
 pub fn log_line(app: &AppHandle, entry: LogEntry) {

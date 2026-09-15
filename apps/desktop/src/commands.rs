@@ -233,18 +233,11 @@ pub async fn check_app_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AppSnapshot, String> {
-    let (proxy, token) = state
-        .with(|i| {
-            (
-                i.runtime.running.then_some(i.settings.socks_port),
-                i.settings.github_token.clone(),
-            )
-        })
+    let proxy = state
+        .with(|i| i.runtime.running.then_some(i.settings.socks_port))
         .ok_or("应用状态不可用")?;
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        xt_core::update::check_app(proxy, Some(token.as_str()))
-    })
+    let result = tauri::async_runtime::spawn_blocking(move || xt_core::update::check_app(proxy))
     .await
     .map_err(|e| format!("检查任务失败：{e}"))?;
 
@@ -299,8 +292,9 @@ fn bundle_version(app: &std::path::Path) -> Option<String> {
 fn stage_app_update(
     latest: &xt_core::update::Available,
     proxy: Option<u16>,
-    token: &str,
     tmp: &std::path::Path,
+    total: Option<u64>,
+    mut on_progress: impl FnMut(u64),
 ) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(tmp);
     std::fs::create_dir_all(tmp).map_err(|e| format!("建暂存目录失败：{e}"))?;
@@ -314,11 +308,14 @@ fn stage_app_update(
         .to_string();
     let zip = tmp.join(&zip_name);
 
-    xt_core::update::download_auth(&latest.download_url, &zip, proxy, Some(token))
+    // 进度条的百分比要用 release 报的字节数当分母；上游没报就传 None，
+    // 界面退化成「只显示已下载多少」而不是画一个假的百分比。
+    let _ = total;
+    xt_core::update::download_with_progress(&latest.download_url, &zip, proxy, &mut on_progress)
         .map_err(|e| format!("下载 {zip_name} 失败：{e}"))?;
 
     if let Some(url) = &latest.digest_url {
-        let text = xt_core::update::fetch_text_auth(url, proxy, Some(token))
+        let text = xt_core::update::fetch_text(url, proxy)
             .map_err(|e| format!("取校验和失败：{e}"))?;
         let want = xt_core::update::parse_sha256sum_for(&text, &zip_name)
             .ok_or_else(|| format!("校验文件里没有 {zip_name}"))?;
@@ -358,11 +355,10 @@ pub async fn install_app_update(
 ) -> Result<AppSnapshot, String> {
     let target = current_app_bundle()
         .ok_or("当前不是从 .app 里运行的（开发构建不支持自动更新）")?;
-    let (proxy, token, latest) = state
+    let (proxy, latest) = state
         .with(|i| {
             (
                 i.runtime.running.then_some(i.settings.socks_port),
-                i.settings.github_token.clone(),
                 i.update.latest_app.clone(),
             )
         })
@@ -371,15 +367,19 @@ pub async fn install_app_update(
 
     let tmp = std::env::temp_dir().join(format!("xraytun-update-{}", std::process::id()));
     let tmp2 = tmp.clone();
-    let token2 = token.clone();
     let latest2 = latest.clone();
+    let total = latest.size;
+    let reporter = progress_reporter(app.clone(), "客户端", latest.size);
     let staged = tauri::async_runtime::spawn_blocking(move || {
-        stage_app_update(&latest2, proxy, &token2, &tmp2)
+        stage_app_update(&latest2, proxy, &tmp2, total, reporter)
     })
     .await
     .map_err(|e| format!("更新任务失败：{e}"))?
     .map_err(|e| {
-        state.with(|i| i.push_log("app", "error", format!("准备更新失败：{e}")));
+        state.with(|i| {
+            i.update.progress = None;
+            i.push_log("app", "error", format!("准备更新失败：{e}"));
+        });
         e
     })?;
 
@@ -490,14 +490,16 @@ pub async fn install_core_update(
     let proxy = state.with(|i| i.settings.socks_port).unwrap_or(10808);
     let dir = xt_core::update::managed_core_dir(state.store.root());
 
+    let reporter = progress_reporter(app.clone(), "核心", available.size);
     let meta = tauri::async_runtime::spawn_blocking(move || {
-        xt_core::update::install_core(&available, &dir, Some(proxy))
+        xt_core::update::install_core(&available, &dir, Some(proxy), reporter)
     })
     .await
     .map_err(|e| format!("安装任务失败：{e}"))?
     .map_err(|e| e.to_string())?;
 
     state.with(|i| {
+        i.update.progress = None;
         i.push_log(
             "app",
             "info",
@@ -524,8 +526,9 @@ pub async fn install_geo_update(
     let proxy = state.with(|i| i.settings.socks_port).unwrap_or(10808);
     let dir = xt_core::update::managed_core_dir(state.store.root());
 
+    let reporter = progress_reporter(app.clone(), "geo 数据", available.size);
     let meta = tauri::async_runtime::spawn_blocking(move || {
-        xt_core::update::install_geo(&available, &dir, Some(proxy))
+        xt_core::update::install_geo(&available, &dir, Some(proxy), reporter)
     })
     .await
     .map_err(|e| format!("安装任务失败：{e}"))?
@@ -858,6 +861,35 @@ fn spawn_network_watch(app: &AppHandle, baseline: Option<Egress>, pid: Option<u3
             return; // 只报一次，别刷屏
         }
     });
+}
+
+/// 造一个把下载进度同时送到**状态**和**事件**的回调。
+///
+/// 两条路都要走：事件让进度条立刻动起来（每 200ms 一次），状态则保证
+/// 用户中途切页面/刷新快照之后，进度条不会凭空消失。
+fn progress_reporter(
+    app: AppHandle,
+    label: &'static str,
+    total: Option<u64>,
+) -> impl FnMut(u64) + Send + 'static {
+    let mut last = 0u64;
+    move |done: u64| {
+        // 只在真正前进时才报，避免 curl 卡住时刷屏。
+        if done == last {
+            return;
+        }
+        last = done;
+        if let Some(state) = app.try_state::<AppState>() {
+            state.with(|i| {
+                i.update.progress = Some(crate::state::UpdateProgress {
+                    label: label.to_string(),
+                    done_bytes: done,
+                    total_bytes: total,
+                });
+            });
+        }
+        events::update_progress(&app, label, done, total);
+    }
 }
 
 /// 连上之后在后台重探一次 DNS。

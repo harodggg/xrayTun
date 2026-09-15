@@ -5,6 +5,7 @@ import {
   DNS_MODE_LABEL,
   IPV6_LABEL,
   MODE_LABEL,
+  UpdateProgress,
   type AppSettings,
   type DnsHandling,
   type Ipv6Mode,
@@ -38,6 +39,9 @@ export default function Settings() {
 
   const patch = (p: Partial<AppSettings>) => setDraft({ ...settings, ...p });
   const patchTun = (p: Partial<AppSettings["tun"]>) => patch({ tun: { ...settings.tun, ...p } });
+  // 有进度就说明在下载：拿它当「正在下载」的判据，不用再开一个状态。
+  const downloading = snapshot.update.progress !== null;
+
   const patchDns = (p: Partial<AppSettings["dns"]>) => patch({ dns: { ...settings.dns, ...p } });
   const patchFake = (p: Partial<AppSettings["fakedns"]>) =>
     patch({ fakedns: { ...settings.fakedns, ...p } });
@@ -582,40 +586,32 @@ export default function Settings() {
           </div>
 
           <div className="row row--wrap" style={{ gap: 8 }}>
-            <button className="btn" disabled={busy !== null}
+            <button className="btn" disabled={busy !== null || downloading}
                     onClick={() => void run("check-app", () => api.checkAppUpdate())}>
               检查客户端更新
             </button>
             {snapshot.update.latest_app && (
-              <button className="btn btn--primary" disabled={busy !== null}
+              <button className="btn btn--primary" disabled={busy !== null || downloading}
                       onClick={() => void run("install-app", () => api.installAppUpdate())}>
                 更新到 {snapshot.update.latest_app.version} 并重启
               </button>
             )}
+            {downloading && (
+              <span className="field__hint" style={{ alignSelf: "center" }}>下载中，请勿关闭…</span>
+            )}
           </div>
 
-          <label className="field" style={{ marginTop: 12 }}>
-            <span className="field__label">GitHub token（只读，可选）</span>
-            <input
-              className="input mono"
-              type="password"
-              placeholder="ghp_… 或 github_pat_…"
-              value={settings.github_token}
-              onChange={(e) => patch({ github_token: e.target.value } as Partial<typeof settings>)}
-            />
-          </label>
+          {snapshot.update.progress && <UpdateBar p={snapshot.update.progress} />}
 
           <div className="field__hint" style={{ marginTop: 8 }}>
-            仓库现在是<span className="mono">公开</span>的，所以这里<b>可以留空</b>。
-            但匿名访问的配额只有 <b>60 次/小时</b>，而且 GitHub 是<b>按 IP</b> 算的 ——
-            我们的请求大多经节点出去，等于和整台节点的用户共用这个额度，别人刷满了
-            你这边就会报「限流」。填一个 fine-grained token、只勾这一个仓库的
-            <span className="mono"> Contents: Read </span>，配额提到 5000 次/小时。
-            不要给写权限。
+            仓库是<span className="mono">公开</span>的，匿名就能查更新，所以不需要任何凭据。
+            代价是匿名配额只有 <b>60 次/小时</b>且 GitHub <b>按 IP</b> 算 ——
+            我们的请求大多经节点出去，等于和整台节点的用户共用这个额度，
+            别人刷满时你这边会看到「限流」，过一会儿再试即可。
             <br />
             <b>安装会在替换 App 之后自动重启。</b>更新脚本先等你退出、再替换
             <span className="mono"> /Applications/XrayTun.app</span>，所以安装前请先
-            断开隧道。校验只用 release 里的 <span className="mono">SHA256SUMS.txt</span>
+            断开隧道。校验用 release 里的 <span className="mono">SHA256SUMS.txt</span>
             （能防下载损坏，<b>防不了上游被换掉</b> —— 那需要签名，而这个包是 ad-hoc 签名），
             日志在 <span className="mono">~/Library/Logs/XrayTun/app-update.log</span>。
           </div>
@@ -700,4 +696,53 @@ export default function Settings() {
       </section>
     </>
   );
+}
+
+/** 更新下载进度条。
+ *
+ *  `total_bytes` 为 null 时上游没报字节数 —— 这时**不画百分比**，只显示
+ *  已下载多少。画一个假的百分比比不画更糟。
+ */
+function UpdateBar({ p }: { p: UpdateProgress }) {
+  const pct =
+    p.total_bytes && p.total_bytes > 0
+      ? Math.min(100, Math.round((p.done_bytes / p.total_bytes) * 100))
+      : null;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="row" style={{ justifyContent: "space-between", fontSize: 11 }}>
+        <span>正在下载 {p.label}</span>
+        <span className="mono">
+          {fmtBytes(p.done_bytes)}
+          {p.total_bytes ? ` / ${fmtBytes(p.total_bytes)}` : ""}
+          {pct !== null ? ` · ${pct}%` : ""}
+        </span>
+      </div>
+      <div
+        style={{
+          marginTop: 4,
+          height: 6,
+          borderRadius: 3,
+          background: "var(--border)",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            height: "100%",
+            // 不知道总量时用一个固定的小宽度表示「在动」，而不是假装有进度。
+            width: pct !== null ? `${pct}%` : "30%",
+            background: "var(--accent, var(--ok))",
+            transition: "width 200ms linear",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }

@@ -756,16 +756,6 @@ pub struct AppSettings {
     /// `silent` / `error` / `warning` / `info` / `debug`。
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    /// GitHub 只读 token。**只用于拉客户端自己的 release**。
-    ///
-    /// 为什么需要：本仓库是私有的，GitHub 对未认证的私有仓库请求一律 404
-    /// （实测），不认证就永远收不到客户端更新。XTLS / Loyalsoldier 那两个
-    /// 上游是公开仓库，用不到它。
-    ///
-    /// 填一个 fine-grained token、只给这一个仓库的 `Contents: Read` 即可，
-    /// 不需要任何写权限。仓库改成公开之后这里可以留空。
-    #[serde(default)]
-    pub github_token: String,
     /// 是否在切换模式时自动清理系统代理设置。
     #[serde(default = "yes")]
     pub restore_system_proxy_on_exit: bool,
@@ -806,7 +796,6 @@ impl Default for AppSettings {
             core_path: None,
             launch_at_login: false,
             log_level: default_log_level(),
-            github_token: String::new(),
             restore_system_proxy_on_exit: true,
             show_speed_in_title: true,
         }

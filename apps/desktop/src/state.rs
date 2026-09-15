@@ -112,6 +112,19 @@ pub struct UpdateStatus {
     pub checked_at: Option<u64>,
     /// 检查更新时的错误（核心 / geo / 客户端共用一条）。
     pub check_error: Option<String>,
+    /// 正在进行的下载进度。`None` 表示没有在下载。
+    pub progress: Option<UpdateProgress>,
+}
+
+/// 一次更新下载的进度，用于界面上的进度条。
+///
+/// `total` 来自 GitHub API 报的字节数；上游没报时为 `None`，界面就退化成
+/// **不确定进度**（只显示已下载多少），而不是画一个假的百分比。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateProgress {
+    pub label: String,
+    pub done_bytes: u64,
+    pub total_bytes: Option<u64>,
 }
 
 impl Inner {
