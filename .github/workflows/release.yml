@@ -213,4 +213,14 @@ jobs:
             printf '%s\n' "$listed" | grep -qx "$name" \
               || { echo "Release 里没有 $name" >&2; exit 1; }
           done
-          echo "资产齐全" 
+          echo "资产齐全"
+
+          # **确保它是"已发布"而不是草稿。**
+          #
+          # `gh release create` 在某些失败路径下会留下一个 **draft**，而
+          # **匿名用户看不到草稿** —— 于是 check_app 会认为最新版还是上一个。
+          # 症状极具迷惑性：CI 全绿、资产齐全、`gh release view` 也正常
+          # （它带认证），但**客户端永远收不到这个版本**。
+          # 实测 v0.7.7 就是这样：Release 是草稿，客户端报"最新版 0.7.6"。
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG" --json isDraft --jq 'if .isDraft then error("仍是草稿") else "已发布" end'
