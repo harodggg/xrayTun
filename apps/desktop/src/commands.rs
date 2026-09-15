@@ -796,10 +796,8 @@ pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
             )
         })
         .unwrap_or((false, false, ProxyMode::Direct));
-    if !was || !auto || mode == ProxyMode::Direct {
-        return;
-    }
-    if state.with(|i| i.runtime.running).unwrap_or(false) {
+    let running = state.with(|i| i.runtime.running).unwrap_or(false);
+    if !should_auto_reconnect(was, auto, &mode, running) {
         return;
     }
 
@@ -838,6 +836,46 @@ pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
 /// 这个检查**经本地 SOCKS 入站**发一个 204 请求 —— 那是真实用户路径。
 /// 用 `--socks5-hostname`，域名由节点去解析，所以它同时覆盖了「转发」和
 /// 「节点侧解析」两件事。失败时直接点名是节点的问题。
+/// 探测结果算不算「隧道不通」。
+///
+/// `curl` 拿不到 HTTP 码时（连不上代理、超时、被 reset）`%{http_code}` 是
+/// `000`；进程根本没起来时是空串。两种都算不通，别只认其中一种。
+fn tunnel_is_dead(http_code: &str) -> bool {
+    http_code.is_empty() || http_code == "000"
+}
+
+/// 启动时该不该自动连回来。
+///
+/// 四个条件缺一不可 —— 抽成纯函数是为了能测，而不是散在 async 流程里。
+fn should_auto_reconnect(
+    was_connected: bool,
+    auto_reconnect: bool,
+    mode: &ProxyMode,
+    already_running: bool,
+) -> bool {
+    // 「上次是连着的」= 用户的意图。用户主动停止会清掉它，所以这里成立。
+    was_connected
+        && auto_reconnect
+        && *mode != ProxyMode::Direct
+        && !already_running
+}
+
+/// 连续失败几次之后才重建隧道。
+///
+/// 一次失败可能只是节点抖了一下；连续两次才算隧道真的没了。
+const FAILURES_BEFORE_REBUILD: u32 = 2;
+
+/// 看门狗该不该重建隧道。
+///
+/// 三个条件都必须满足：
+/// * `still_mine` —— 这次连接还是我负责的那次（用户重连会换 pid）；
+/// * `user_wants_it` —— 用户**现在还**想连着（探测是异步的，等结果回来时
+///   他可能已经点了关闭；不看这个就会「点了关闭，几秒后它自己又连上」）；
+/// * 失败次数到阈值。
+fn should_rebuild_tunnel(still_mine: bool, user_wants_it: bool, consecutive_failures: u32) -> bool {
+    still_mine && user_wants_it && consecutive_failures >= FAILURES_BEFORE_REBUILD
+}
+
 /// 经本地 SOCKS 入站发一个**真实请求**，返回 HTTP 状态码（失败时空串）。
 ///
 /// 用 `--socks5-hostname` 让节点去解析域名，所以这一个检查同时覆盖
@@ -913,13 +951,22 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
             }
 
             let code = tunnel_probe(port, 6).await;
-            if !(code.is_empty() || code == "000") {
+            if !tunnel_is_dead(&code) {
                 failures = 0;
                 continue;
             }
             failures += 1;
-            // 一次失败可能是节点抖了一下；**连续两次**才算隧道真的没了。
-            if failures < 2 {
+
+            // **用户可能就在刚才点了「关闭」。** 探测是异步的，等它回来时
+            // 意图可能已经变了 —— 那就什么都别做，否则就是
+            // 「点了关闭，几秒后它自己又连上了」。意图由 `was_connected`
+            // 承载，只有用户主动停止才会清掉它。
+            let user_wants_it = state.with(|i| i.settings.was_connected).unwrap_or(false);
+            if !user_wants_it {
+                state.with(|i| i.push_log("app", "info", "用户已关闭，取消自动重建"));
+                return;
+            }
+            if !should_rebuild_tunnel(true, user_wants_it, failures) {
                 continue;
             }
 
@@ -934,15 +981,6 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
                 i.last_notice = Some("网络中断，正在自动恢复…".into());
             });
             events::runtime_changed(&handle, &state);
-
-            // **用户可能就在刚才点了「关闭」。** 探测是异步的，等它回来时
-            // 意图可能已经变了 —— 那就什么都别做，否则就是
-            // 「点了关闭，几秒后它自己又连上了」。意图由 `was_connected`
-            // 承载，只有用户主动停止才会清掉它。
-            if !state.with(|i| i.settings.was_connected).unwrap_or(false) {
-                state.with(|i| i.push_log("app", "info", "用户已关闭，取消自动重建"));
-                return;
-            }
 
             // 重建：用**当前**的物理出口重新算路由与 DNS。熄屏唤醒后网关
             // 变了也能对上，这正是"能自愈"的关键。
@@ -1008,7 +1046,7 @@ fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
         let Some(state) = handle.try_state::<AppState>() else {
             return;
         };
-        if code.is_empty() || code == "000" {
+        if tunnel_is_dead(&code) {
             // 这个节点用不了。**如果手上有验证过的好节点，自动退回去** ——
             // 用户刚才是从那个节点切过来的（切换会拆掉旧隧道），
             // 留在这里等于让他断网。
@@ -2209,5 +2247,78 @@ mod tests {
         let current = vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()];
         let out = merge_ranked(&current, &[], xt_core::dns_probe::DnsKind::Domestic, pool);
         assert_eq!(out, current);
+    }
+
+    // ---------------------------------------------------------------------
+    // 0.7.x 的隧道生命周期与自愈
+    //
+    // 下面这些**全部是新增用例**，没有改动上面任何一条已有的。它们钉的是
+    // 这一轮真实出过问题的三个判断 —— 抽成纯函数正是为了能这样钉住。
+    // 整体的失败模式分类见 docs/08-failure-modes.md。
+    // ---------------------------------------------------------------------
+
+    /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
+    ///
+    /// `000` 是连不上/超时/被 reset，空串是进程压根没起来 —— 都算不通。
+    /// 但 403 说明**链路是好的**，只是目标拒绝了我们；把它算成不通会
+    /// 让一条能用的隧道被判死并重建。
+    #[test]
+    fn tunnel_probe_result_is_read_as_dead_or_alive() {
+        assert!(tunnel_is_dead(""), "进程没起来时 curl 不输出");
+        assert!(tunnel_is_dead("000"), "连不上/超时/reset 都报 000");
+        assert!(!tunnel_is_dead("204"));
+        assert!(!tunnel_is_dead("200"));
+        assert!(!tunnel_is_dead("403"), "服务器答了任何码都说明链路通");
+    }
+
+    /// 自动重连的四个条件缺一不可。
+    ///
+    /// 自更新会先退出 app、替换、再重启 —— 重启后要不要连回来，完全由
+    /// 这个判断决定。它宽松一点就是「用户关过的隧道自己回来了」，
+    /// 严一点就是「用户没关过的东西断了」。
+    #[test]
+    fn auto_reconnect_requires_intent_and_absence_of_a_running_core() {
+        let tun = ProxyMode::Tun;
+        assert!(should_auto_reconnect(true, true, &tun, false), "上次连着就该连回来");
+        assert!(
+            !should_auto_reconnect(false, true, &tun, false),
+            "用户主动停止过 —— 不该自己连回来",
+        );
+        assert!(
+            !should_auto_reconnect(true, false, &tun, false),
+            "用户关掉了自动重连",
+        );
+        assert!(
+            !should_auto_reconnect(true, true, &ProxyMode::Direct, false),
+            "直连模式没有隧道可连",
+        );
+        assert!(
+            !should_auto_reconnect(true, true, &tun, true),
+            "已经在跑就别重复启动（那会撞出「核心已经在运行」）",
+        );
+    }
+
+    /// 看门狗重建的三个条件：还是我负责的那次连接、用户**现在还**想要、
+    /// 失败次数到阈值。
+    ///
+    /// 中间那个条件最容易被忽略，而漏掉它的后果很具体：
+    /// **点了「关闭」，几秒后它自己又连上了** —— 因为探测是异步的，
+    /// 等结果回来时用户的意图已经变了。
+    #[test]
+    fn watchdog_rebuild_needs_mine_intent_and_threshold() {
+        assert!(
+            !should_rebuild_tunnel(true, true, FAILURES_BEFORE_REBUILD - 1),
+            "一次失败可能只是节点抖了一下，不该立刻拆建",
+        );
+        assert!(should_rebuild_tunnel(true, true, FAILURES_BEFORE_REBUILD));
+        assert!(should_rebuild_tunnel(true, true, 5), "一直不通就该重建");
+        assert!(
+            !should_rebuild_tunnel(false, true, 5),
+            "用户重连过了 —— 旧的看门狗该自己退出，不能去动新的那条隧道",
+        );
+        assert!(
+            !should_rebuild_tunnel(true, false, 5),
+            "用户已关闭 —— 重建它就等于「关闭按钮没用」",
+        );
     }
 }
