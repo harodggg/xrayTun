@@ -713,12 +713,24 @@ app/dns: failed to retrieve response for query.ess.apple.com.
   > Post "https://1.1.1.1/dns-query": io: read/write on closed pipe
 ```
 
-**`io: read/write on closed pipe` 与 `context deadline exceeded` 必须区分开**：
+**三种尾巴的含义完全不同，必须分开看**：
 
-| 日志 | 含义 | 处置 |
-|---|---|---|
-| `context deadline exceeded` | 节点/网络抖动，某台解析器慢 | 等，或换解析器 |
-| `io: read/write on closed pipe` | 隧道脚下那层没了（换网） | **断开重连** |
+| 日志尾巴 | 含义 | 是谁的错 | 处置 |
+|---|---|---|---|
+| `context deadline exceeded` | 解析器在超时时间内没答 | 节点/解析器（网络抖动） | 等，或换解析器 |
+| `io: read/write on closed pipe` | 连接**被人从脚下抽走** | 隧道那层的生命周期 | **断开重连** |
+| `context canceled` | **请求方自己放弃了** | 谁问的谁放弃（不是解析器） | 一般不用管 |
+
+`context canceled` 值得单独说：它不是解析失败，而是「问了之后又不要了」。
+两种常见触发：
+
+* 应用/浏览器在答案回来之前就关掉了连接（用户切走了、页面关了）；
+* **核心正在停机或重载配置** —— 此时所有在途查询会被一起取消，
+  于是日志里会**一次性刷出一片** `context canceled`。
+
+第二种是生命周期造成的，和我们自己的「停止 / 重连」直接对应。判断方法很简单：
+看有没有一条对应的会话重建（helper 的 `status` 里会话 id 会变）。
+如果一大批 `canceled` 出现在你刚点过重连的前后，那就是它，不用管。
 
 应用现在会在连接后每 5 秒比一次「网卡 + 网关」，变了就报一句
 `物理出口已变化（旧 → 新），隧道不再有效，请断开后重新连接`。
