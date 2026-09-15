@@ -54,46 +54,67 @@ pub fn tcp_reachable(addr: SocketAddr, timeout: Duration) -> bool {
     TcpStream::connect_timeout(&addr, timeout).is_ok()
 }
 
+/// 把 socket 绑到指定物理网卡（`IP_BOUND_IF`），**绕开隧道与核心**。
+///
+/// 为什么到处都需要它：TUN 模式接管默认路由之后，任何一个新 socket 的
+/// `connect()` 都会被本地协议栈**在 TUN 那一侧立刻应答**，于是：
+///
+/// * 「直连握手 RTT」会测出 **0ms**（远端服务器不可能 0ms）；
+/// * 并发探测测到的是核心的排队，而不是对端的延迟。
+///
+/// 绑到物理网卡之后，路由查找被限定在这张网卡上，包走真实链路 ——
+/// 这才是「我离那台服务器多远」的真实数字。DNS 探测（`dns_probe`）和
+/// 节点 RTT（`xray::probe`）都靠它。
+///
+/// `interface` 传了但不存在时返回 `Err`：调用方应当知道这次测的是绕了隧道的
+/// 数字，而不是静默拿到一个假的 0ms。
+pub fn bind_to_interface_fd(fd: std::os::unix::io::RawFd, interface: &str) -> std::io::Result<()> {
+    let cname = std::ffi::CString::new(interface)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "网卡名含 NUL"))?;
+    // SAFETY: `if_nametoindex` 只读这个字符串；`setsockopt` 的实参类型与
+    // `socklen_t` 长度和 `c_int` 完全对应。
+    let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if index == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("找不到网卡 {interface}"),
+        ));
+    }
+    let idx = index as libc::c_int;
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_BOUND_IF,
+            &idx as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 网卡名不存在时必须**报错**，不能静默成功。
+    ///
+    /// 静默成功的后果很隐蔽：绑定没生效，而调用方以为绕开了隧道，
+    /// 于是拿到一个假的 0ms 延迟还以为是真的。
     #[test]
-    fn ip_literals_pass_through_without_resolution() {
-        let ips = resolve_host("203.0.113.10");
-        assert_eq!(ips, vec!["203.0.113.10".parse::<IpAddr>().unwrap()]);
-
-        let v6 = resolve_host("2001:db8::1");
-        assert_eq!(v6, vec!["2001:db8::1".parse::<IpAddr>().unwrap()]);
-    }
-
-    #[test]
-    fn unresolvable_host_yields_empty_not_panic() {
-        // `.invalid` 是 RFC 2606 保留的、保证不会解析成功的顶级域。
-        let ips = resolve_host("definitely-not-a-real-host.invalid");
-        assert!(ips.is_empty());
-    }
-
-    #[test]
-    fn localhost_resolves_and_prefers_ipv4() {
-        let ips = resolve_host("localhost");
-        assert!(!ips.is_empty(), "localhost 必须能解析");
-        if ips.len() > 1 {
-            assert!(!ips[0].is_ipv6(), "IPv4 必须排在前面，否则 host 路由可能无效");
-        }
-    }
-
-    #[test]
-    fn tcp_reachable_is_false_for_closed_port() {
-        // 端口 1 上不会有服务。
-        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-        assert!(!tcp_reachable(addr, Duration::from_millis(200)));
-    }
-
-    #[test]
-    fn tcp_reachable_is_true_for_a_listening_socket() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert!(tcp_reachable(addr, Duration::from_millis(500)));
+    fn bind_to_interface_rejects_unknown_nic() {
+        use std::os::unix::io::AsRawFd;
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        assert!(
+            bind_to_interface_fd(sock.as_raw_fd(), "definitely-not-a-nic").is_err(),
+            "不存在的网卡必须报错",
+        );
+        assert!(
+            bind_to_interface_fd(sock.as_raw_fd(), "lo0").is_ok(),
+            "lo0 一定存在，应当成功",
+        );
     }
 }

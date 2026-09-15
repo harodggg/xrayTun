@@ -1345,8 +1345,14 @@ pub async fn test_latency(
     state.with(|i| i.push_log("app", "info", format!("开始测试 {} 个节点的延迟", nodes.len())));
     events::probe_started(&app, nodes.len());
 
+    // 物理出口：RTT 必须**在隧道之外**测，否则隧道开着时握手被本地协议栈
+    // 立刻应答，测出来是 0ms（实测：不绑 en0 是 0ms，绑了是 53ms）。
+    let interface = xt_tun::macos::route::default_route()
+        .ok()
+        .map(|r| r.interface);
+
     let started = Instant::now();
-    let results = crate::supervisor::probe(&nodes, &binary, Duration::from_secs(5))
+    let results = crate::supervisor::probe(&nodes, &binary, Duration::from_secs(5), interface.as_deref())
         .await
         .map_err(|e| {
             state.with(|i| i.push_log("app", "error", format!("探测失败：{e}")));

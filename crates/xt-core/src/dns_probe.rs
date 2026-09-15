@@ -285,30 +285,8 @@ fn probe_name(sample: usize) -> &'static str {
 /// 这也是核心自己的 `direct` 出站用的机制（`IP_BOUND_IF`，见 docs/04 §8）。
 fn bind_to_interface(socket: &std::net::UdpSocket, interface: &str) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
-    let cname = std::ffi::CString::new(interface)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "网卡名含 NUL"))?;
-    // SAFETY: if_nametoindex 只读字符串；setsockopt 的参数长度与类型匹配。
-    let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-    if index == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("找不到网卡 {interface}"),
-        ));
-    }
-    let idx = index as libc::c_int;
-    let rc = unsafe {
-        libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::IPPROTO_IP,
-            libc::IP_BOUND_IF,
-            &idx as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    // 实现在 `net` 里，和节点 RTT 探测共用同一份 —— 那个也需要绕开隧道。
+    crate::net::bind_to_interface_fd(socket.as_raw_fd(), interface)
 }
 
 async fn udp_query(

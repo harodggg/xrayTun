@@ -65,6 +65,16 @@ pub struct ProbeOptions {
     /// 并发探针在抢同一个核心的 CPU 和同一条上行。**节点越多，每个数字越差**，
     /// 而这和节点本身无关。
     pub concurrency: usize,
+    /// 物理网卡名。给了就把它绑到 RTT 探测的 socket 上（`IP_BOUND_IF`）。
+    ///
+    /// **不给的话，隧道开着时 RTT 是假的。** 实测：不绑 en0 测
+    /// `45.207.197.185:443` 得到 **0ms**（远端服务器不可能 0ms ——
+    /// 握手被本地 TUN 应答了），绑了之后是 **53ms**。
+    /// 只有当前选中的那台服务器例外，因为它有 host 路由直连。
+    ///
+    /// 所以「我离服务器多远」这个数字**必须在隧道之外测**，
+    /// 和 DNS 探测绑网卡是同一个道理（见 `net::bind_to_interface_fd`）。
+    pub interface: Option<String>,
 }
 
 impl Default for ProbeOptions {
@@ -76,6 +86,7 @@ impl Default for ProbeOptions {
             timeout: Duration::from_secs(5),
             rtt_samples: RTT_SAMPLES,
             concurrency: 4,
+            interface: None,
         }
     }
 }
@@ -253,6 +264,7 @@ pub async fn probe_nodes(
         let pre_failed = not_ready.contains(&i);
 
         let rtt_samples = opts.rtt_samples;
+        let iface = opts.interface.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await.expect("信号量不会关闭");
 
@@ -261,7 +273,9 @@ pub async fn probe_nodes(
             // RTT 直接对服务器发 TCP 握手，**不碰核心**：即使探针核心启动
             // 失败，延迟这一项依然有值 —— 而这两件事本来就没关系
             // （核心起不来是本地问题，不代表服务器远或近）。
-            let rtt = server_rtt_ms(&node.address, node.port, rtt_samples, timeout).await;
+            let rtt =
+                server_rtt_ms(&node.address, node.port, rtt_samples, timeout, iface.as_deref())
+                    .await;
 
             if pre_failed {
                 let mut r = ProbeResult::failure(&node, "探针端口未在超时内就绪（可能是核心启动失败）");
@@ -331,7 +345,13 @@ pub async fn probe_nodes(
 /// 不需要起核心、不需要第三方可达性 —— 纯粹一次 `connect()`。
 /// 失败了返回 `None`（注意：墙下的 RST 注入会让这里"又快又失败"，
 /// 所以它只作距离参考，可用性由 [`probe_one`] 判定）。
-pub async fn server_rtt_ms(address: &str, port: u16, samples: usize, timeout: Duration) -> Option<u32> {
+pub async fn server_rtt_ms(
+    address: &str,
+    port: u16,
+    samples: usize,
+    timeout: Duration,
+    interface: Option<&str>,
+) -> Option<u32> {
     // 域名地址先解析一次；解析出来的 IP 在多次采样间复用，避免把 DNS
     // 抖动算进延迟里。
     // `resolve_host` 是阻塞实现（走 `ToSocketAddrs`），丢到阻塞线程池，
@@ -346,7 +366,19 @@ pub async fn server_rtt_ms(address: &str, port: u16, samples: usize, timeout: Du
     let mut ok: Vec<u32> = Vec::with_capacity(samples);
     for _ in 0..samples.max(1) {
         let start = Instant::now();
-        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(target)).await {
+        // 用 `TcpSocket` 而不是 `TcpStream::connect`：只有前者能在 connect
+        // **之前**设置 `IP_BOUND_IF`，而绕过隧道必须在那之前生效。
+        let socket = match tokio::net::TcpSocket::new_v4() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if let Some(iface) = interface {
+            use std::os::unix::io::AsRawFd;
+            if let Err(e) = crate::net::bind_to_interface_fd(socket.as_raw_fd(), iface) {
+                tracing::warn!(interface = iface, error = %e, "RTT 探测绑不上物理网卡，测到的是隧道内的假延迟");
+            }
+        }
+        match tokio::time::timeout(timeout, socket.connect(target)).await {
             Ok(Ok(stream)) => {
                 ok.push(start.elapsed().as_millis().min(u32::MAX as u128) as u32);
                 drop(stream);

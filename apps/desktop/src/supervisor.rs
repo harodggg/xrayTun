@@ -524,10 +524,13 @@ pub async fn probe(
     nodes: &[Node],
     core_path: &Path,
     timeout: Duration,
+    interface: Option<&str>,
 ) -> Result<Vec<ProbeResult>, String> {
     let opts = ProbeOptions {
         binary: core_path.to_path_buf(),
         timeout,
+        // 必须传：隧道开着时，不绑物理网卡的「服务器 RTT」是假的 0ms。
+        interface: interface.map(str::to_string),
         ..Default::default()
     };
     xray::probe_nodes(nodes, &opts, None).await.map_err(|e| e.to_string())
