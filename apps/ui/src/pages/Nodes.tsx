@@ -207,7 +207,13 @@ function NodeRow({
   onDelete: () => void;
   onExport: () => void;
 }) {
-  const tier = latencyTier(latencyMs);
+  // 不可用时这个徽章**绝不能是绿的**。
+  //
+  // 它是「本地 → 服务器的 TCP 往返」，只表示**距离**，不代表能用。
+  // 实测有节点 TCP 握手 55ms 完全正常、却转发不了任何流量 —— 那时绿色的
+  // 「55 ms」紧挨着红色的「不可用」，读起来就是自相矛盾，也正是
+  // 「测速和可用性对不上」的来源。节点不可用时降级成中性色。
+  const tier = available === false ? "unknown" : latencyTier(latencyMs);
   const fromSubscription = node.source.kind === "subscription";
 
   return (
@@ -227,7 +233,16 @@ function NodeRow({
           经节点请求一个固定靶点量到的是「本地→服务器→靶点→回来」，
           其中「服务器→靶点」那段取决于服务器离靶点有多远，
           可能让一个很远的节点看起来比近的更快。 */}
-      <span className={`badge badge--${tier}`} title={latencyError ?? ""}>
+      <span
+        className={`badge badge--${tier}`}
+        title={
+          available === false
+            ? `到服务器的距离 ${latencyMs ?? "?"} ms —— 但这个节点转发不了流量，这个数字不代表能用`
+            : latencyMs !== null
+              ? "到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"
+              : (latencyError ?? "")
+        }
+      >
         {latencyMs !== null ? `${latencyMs} ms` : latencyError ? "—" : "未测"}
       </span>
       <span

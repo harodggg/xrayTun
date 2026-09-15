@@ -32,6 +32,15 @@ pub struct CoreRuntime {
     /// 用户看到「已连接」但其实没生效会非常困惑。
     pub routes_committed: bool,
     pub last_error: Option<String>,
+    /// **上一次真正验证过能用的节点 id。**
+    ///
+    /// 为什么需要它：切换节点是整个隧道拆掉重建，而「新节点是坏的」完全可能
+    /// （实测有节点 TCP 可达却转发不了流量）。没有这个记录，切换失败就只能
+    /// 把用户丢在断网状态 —— 有了它就能自动退回上一个可用的节点。
+    ///
+    /// 只在**连通性检查通过之后**才写，所以它是「验证过的」而不是「选过的」。
+    #[serde(default)]
+    pub last_good_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

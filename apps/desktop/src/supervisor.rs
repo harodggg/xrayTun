@@ -318,6 +318,9 @@ impl Supervisor {
             tun_interface: self.physical_interface.clone().map(|_| "utun".to_string()),
             routes_committed: true,
             last_error: None,
+            // 由连通性检查在验证通过后写入（见 commands::spawn_connectivity_check）。
+            // supervisor 这里不认识「哪个节点算好」—— 它只负责建隧道。
+            last_good_node: None,
         })
     }
 

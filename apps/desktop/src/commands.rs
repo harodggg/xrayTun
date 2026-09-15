@@ -809,18 +809,20 @@ fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
             return;
         };
         // 只认自己那一次连接：用户可能已经重连或断开了。
-        let (still_mine, node_name) = state
+        let (still_mine, node_name, node_id) = state
             .with(|i| {
+                let selected = i.settings.selected_node.clone();
                 (
                     i.runtime.running && i.runtime.pid == pid,
                     i.nodes
                         .iter()
-                        .find(|n| Some(&n.id) == i.settings.selected_node.as_ref())
+                        .find(|n| Some(&n.id) == selected.as_ref())
                         .map(|n| n.name.clone())
                         .unwrap_or_default(),
+                    selected.unwrap_or_default(),
                 )
             })
-            .unwrap_or((false, String::new()));
+            .unwrap_or((false, String::new(), String::new()));
         if !still_mine {
             return;
         }
@@ -852,19 +854,45 @@ fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
             return;
         };
         if code.is_empty() || code == "000" {
-            let msg = format!(
-                "节点「{node_name}」已连接，但流量出不去（经它访问目标超时）。请换一个节点。"
-            );
+            // 这个节点用不了。**如果手上有验证过的好节点，自动退回去** ——
+            // 用户刚才是从那个节点切过来的（切换会拆掉旧隧道），
+            // 留在这里等于让他断网。
+            let fallback = state
+                .with(|i| {
+                    i.runtime
+                        .last_good_node
+                        .clone()
+                        .filter(|b| b != &node_id && !node_id.is_empty())
+                })
+                .unwrap_or(None);
+
+            let msg = match &fallback {
+                Some(_) => format!(
+                    "节点「{node_name}」连上了但流量出不去，正在自动退回上一个可用节点"
+                ),
+                None => format!(
+                    "节点「{node_name}」已连接，但流量出不去（经它访问目标超时）。请换一个节点。"
+                ),
+            };
             state.with(|i| {
                 i.push_log("app", "error", msg.clone());
                 i.last_notice = Some(msg);
+                // 先清掉，避免回退后那次检查再失败时又触发一次回退（来回弹）。
+                i.runtime.last_good_node = None;
             });
+            events::runtime_changed(&handle, &state);
+
+            if let Some(back) = fallback {
+                let _ = select_node(handle.clone(), state, back).await;
+            }
         } else {
             state.with(|i| {
-                i.push_log("app", "info", format!("隧道连通性检查通过（HTTP {code}）"))
+                i.push_log("app", "info", format!("隧道连通性检查通过（HTTP {code}）"));
+                // **验证过**才算好节点 —— 这个字段会被切换失败时的回退用到。
+                i.runtime.last_good_node = Some(node_id.clone());
             });
+            events::runtime_changed(&handle, &state);
         }
-        events::runtime_changed(&handle, &state);
     });
 }
 
@@ -1213,13 +1241,47 @@ pub async fn select_node(
         return Err("找不到该节点".into());
     }
     let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
-    settings.selected_node = Some(node_id);
+    let previous = settings.selected_node.clone();
+    settings.selected_node = Some(node_id.clone());
     persist_settings(&state, &settings)?;
 
     // 核心在跑就重启，让新节点立即生效（配置变更走重启，见 docs/03）。
+    //
+    // **这一步是几秒钟的拆建，不是瞬时切换**：Xray 没有配置热重载，
+    // 换节点必须换配置、换配置必须重启核心。所以要有明确的过程提示 ——
+    // 否则用户看到的就是「点了没反应，然后所有连接断一遍」。
     if state.with(|i| i.runtime.running).unwrap_or(false) {
+        let name = state
+            .with(|i| i.nodes.iter().find(|n| n.id == node_id).map(|n| n.name.clone()))
+            .unwrap_or(None)
+            .unwrap_or_else(|| node_id.clone());
+        state.with(|i| i.push_log("app", "info", format!("正在切换到「{name}」，需要重建隧道（几秒）")));
+        let was_good = state
+            .with(|i| i.runtime.last_good_node.clone())
+            .unwrap_or(None)
+            .or(previous.clone());
+
         stop_core(&app, &state).await?;
-        start_core(&app, &state).await?;
+
+        // **这里失败必须回退。** 旧的隧道已经拆了，如果新节点起不来就直接
+        // 把用户丢在断网状态 —— 而「新节点是坏的」是常见情况（实测有节点
+        // TCP 可达却转发不了流量）。没有这一段，一次误选就是一次连环爆炸。
+        if let Err(e) = start_core(&app, &state).await {
+            state.with(|i| {
+                i.push_log(
+                    "app",
+                    "error",
+                    format!("切到该节点失败（{e}），正在退回上一个可用节点"),
+                )
+            });
+            if let Some(back) = was_good.filter(|b| b != &node_id) {
+                let mut s2 = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+                s2.selected_node = Some(back);
+                persist_settings(&state, &s2)?;
+                start_core(&app, &state).await?;
+            }
+            return Err(format!("切到该节点失败，已退回：{e}"));
+        }
     }
     build_snapshot(&app, &state).await
 }
