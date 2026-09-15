@@ -1268,6 +1268,16 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
             ),
         );
     });
+
+    // **必须落盘。** 只在内存里改是不够的：这个标记的**全部用途**就是跨进程
+    // 存活（自更新会重启 app），而重启后读的是磁盘上那份。
+    // 第一版漏了这一步，于是"修好了自动重连"其实没生效 —— 磁盘上始终是
+    // false，重启后照样不连。（实测发现：核心在跑，was_connected 却是 false。）
+    if let Some(current) = state.with(|i| i.settings.clone()) {
+        if let Err(e) = persist_settings(state, &current) {
+            tracing::warn!(error = %e, "记录「上次是连接状态」失败，自更新后可能不会自动重连");
+        }
+    }
     events::runtime_changed(app, state);
 
     // 换网之后隧道不会自愈（路由/网卡绑定/长连接全指向旧出口），

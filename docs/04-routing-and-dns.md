@@ -720,6 +720,10 @@ app/dns: failed to retrieve response for query.ess.apple.com.
 | `context deadline exceeded` | 解析器在超时时间内没答 | 节点/解析器（网络抖动） | 等，或换解析器 |
 | `io: read/write on closed pipe` | 连接**被人从脚下抽走** | 隧道那层的生命周期 | **断开重连** |
 | `context canceled` | **请求方自己放弃了** | 谁问的谁放弃（不是解析器） | 一般不用管 |
+| `unexpected EOF` | 连接**建起来了，但应答读到一半被截断** | 链路中间有人掐断（节点/中间设备） | 偶发不用管；**频繁**说明那条链路在重置长连接 |
+
+四种尾巴对应四种完全不同的问题。只看到 `context deadline exceeded` 就以为是
+"DNS 坏了"，和看到 `unexpected EOF` 就去换解析器，都是找错方向。
 
 `context canceled` 值得单独说：它不是解析失败，而是「问了之后又不要了」。
 两种常见触发：
