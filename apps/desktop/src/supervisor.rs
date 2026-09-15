@@ -125,13 +125,32 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    /// 数据面进程还在不在。
+    /// 数据面进程**现在还活着吗**。
     ///
-    /// 调用方**必须和 `start` 用同一把锁**来判断 —— 在锁外检查的话，
-    /// 「检查完 → 真正 start」之间会被别人插进来，于是又变成
-    /// 「核心已经在运行」那个错误。
-    pub fn is_running(&self) -> bool {
-        self.process.is_some()
+    /// **不能用 `process.is_some()`** —— 那只说明「我们手里有个 handle」。
+    /// 核心自己退出（崩溃、被 OOM 杀掉、被别的工具清理）之后句柄还在，
+    /// `is_some()` 照样返回 true。而 `start_core` 的幂等守卫正是看它 ——
+    /// 于是**按钮点了永远没反应，而核心其实早就没了**（实测症状）。
+    ///
+    /// 这又是一次「状态的来源与真实不一致」（见 docs/08 的 A 类）：
+    /// **观测到的**（我们记的 handle）不能替代**现实**（进程活着）。
+    ///
+    /// 这里顺便把死掉的句柄回收掉，让状态和现实一致 —— 否则后面
+    /// `stop()` 还会对一个已经不存在的进程发信号。
+    ///
+    /// 调用方**必须和 `start` 用同一把锁**来判断：在锁外检查的话，
+    /// 「检查完 → 真正 start」之间会被别人插进来，又变成「核心已经在运行」。
+    pub fn is_running(&mut self) -> bool {
+        // 模式守卫里不能可变借用，所以先取出结果再决定要不要回收。
+        let alive = match self.process.as_mut() {
+            Some(p) => !p.has_exited(),
+            None => return false,
+        };
+        if !alive {
+            tracing::warn!("数据面进程已不在，回收陈旧句柄（下次 start 才能真的起来）");
+            self.process = None;
+        }
+        alive
     }
 
     pub fn session_id(&self) -> Option<&str> {

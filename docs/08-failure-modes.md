@@ -19,6 +19,7 @@
 | 自更新报「校验文件里没有 X.zip」，而文件明明在里面 | `SHA256SUMS.txt` 由 `shasum -a 256 ./*` 生成，每行是 `./X.zip`；解析器拿整段路径比文件名 | 只比 **basename**（剥掉 `./`、目录、`*`） |
 | 0.7.3 声称修好的自动重连没生效 | `was_connected = true` 只写了内存，没 `persist_settings`；而这个标记**全部用途**就是跨进程存活 | 写完立刻落盘，失败会 warn |
 | 「关闭」没反应，再点却说「核心已经在运行」 | 快照里的 `running` 与 supervisor 的真实状态短暂不一致 | `start_core` 幂等；检查放在 **supervisor 锁内** |
+| **连接按钮点了永远没反应**，核心其实早就不在了 | `is_running()` 用 `process.is_some()` —— 那只说明「**我手里有个 handle**」，核心自己退出后句柄还在 | 改成探真实存活（`has_exited()`）并回收陈旧句柄 |
 | 发版永远失败在「打包（universal）」，Release 从未创建 | `universal-apple-darwin` 不是 rustc 的 target，是 **Tauri CLI 的伪 target** | 分别编两个真 target 再 `lipo`；预检 `rustc --print target-list` |
 | CI 红了三个提交没人发现 | `npm --prefix apps/ui exec tsc` 不改 cwd，而 `tsc` 只在**当前目录**找 tsconfig | 加 `-p`；并把 CI 收敛成 `scripts/check.sh`，本地跑同一份 |
 | Actions 缓存永远写不进也读不到 | `check.sh` 的 `npm_config_cache` 默认落在仓库**隔壁**，而 `actions/cache` 缓存的是工作区**里面** | 两个 workflow 的 `env` 里显式对齐 |
@@ -46,6 +47,7 @@
 | 点了「关闭」，几秒后它自己又连上了 | 看门狗的探测是异步的，结果回来时用户的意图已经变了 | 重建前先看 `was_connected`，false 就放弃 |
 | ⌘Q 之后留下孤儿核心占着 10808/10809 | `app.exit()` 不跑析构，`kill_on_drop` 无效 | `sync_cleanup` + `RunEvent::ExitRequested` |
 | 换网 / 熄屏唤醒后隧道死了，只能手动重连 | 路由/网卡绑定/长连接全指向旧出口，且**没有任何自愈** | 看门狗：10 秒真实探测，连续 2 次失败自动重建；重建失败**退回直连** |
+| 核心崩了之后**彻底卡死**：按钮无效、也没人恢复 | 两个「看观测值」的判据一起坏：看门狗看 `runtime.running`（核心一死就被置 false → 看门狗退出），按钮看 `process.is_some()`（句柄还在 → 空转） | 看门狗改看**意图 + 代次**（`was_connected` + pid）；`is_running` 改探真实存活 |
 | 起 TUN 时磁盘满，留下半套网络配置 | ——（**顺序是对的**：`snap.save()?` 在改路由/DNS **之前**，失败即中止） | 见 §E |
 
 **共同教训**：任何「先拆后建」都必须回答**中间失败怎么办**。
@@ -54,7 +56,7 @@
 **钉子**：
 * `dns::restore` —— DHCP 情形走 `Empty`（`bind_to_interface_rejects_unknown_nic` 同级）
 * `commands::network_moved` —— `egress_change_is_detected_by_interface_or_gateway`
-* `commands::should_auto_reconnect` / `tunnel_is_dead` / `should_rebuild_tunnel`
+* `commands::should_auto_reconnect` / `tunnel_is_dead` / `should_rebuild_tunnel` / `watchdog_should_watch`
 
 ---
 

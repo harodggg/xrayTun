@@ -860,6 +860,23 @@ fn should_auto_reconnect(
         && !already_running
 }
 
+/// 看门狗该不该继续盯着这条隧道。
+///
+/// 判据是**意图 + 代次**，而不是观测到的 `runtime.running`：
+///
+/// * 核心自己死掉时，日志转发任务会把 `running` 置 false —— 而那恰恰是
+///   最需要有人把它救回来的时刻。看 `running` 的话看门狗会当场退出，
+///   于是没人恢复，按钮又被幂等守卫挡住，**彻底卡死**（实测症状）。
+/// * 用户主动关闭时才该收手 —— 那个意图由 `was_connected` 承载。
+/// * 用户重连会换 pid，旧的那条隧道不归我管了。
+fn watchdog_should_watch(
+    user_wants_it: bool,
+    my_pid: Option<u32>,
+    current_pid: Option<u32>,
+) -> bool {
+    user_wants_it && my_pid == current_pid
+}
+
 /// 连续失败几次之后才重建隧道。
 ///
 /// 一次失败可能只是节点抖了一下；连续两次才算隧道真的没了。
@@ -931,11 +948,21 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
             let Some(state) = handle.try_state::<AppState>() else {
                 return;
             };
-            let (alive, port, node_name) = state
+            let (wants, pid_now, port, node_name) = state
                 .with(|i| {
                     let selected = i.settings.selected_node.clone();
                     (
-                        i.runtime.running && i.runtime.pid == pid,
+                        // **用意图而不是观测到的 `running`。**
+                        //
+                        // 核心自己死掉时，日志转发任务会把 `running` 置 false。
+                        // 如果这里看 `running`，看门狗会以为「用户断开了」而退出 ——
+                        // 于是核心死了没人恢复，而按钮又被幂等守卫挡住（见
+                        // `Supervisor::is_running`），表现就是**彻底卡死**。
+                        //
+                        // 意图（was_connected）只有用户主动停止才会变，所以它
+                        // 才是「我该不该继续守着」的正确判据。
+                        i.settings.was_connected,
+                        i.runtime.pid,
                         i.settings.socks_port,
                         i.nodes
                             .iter()
@@ -944,9 +971,8 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
                             .unwrap_or_default(),
                     )
                 })
-                .unwrap_or((false, 10808, String::new()));
-            // 用户断开了，或已经重连（换了 pid）—— 都该由新任务接手。
-            if !alive {
+                .unwrap_or((false, None, 10808, String::new()));
+            if !watchdog_should_watch(wants, pid, pid_now) {
                 return;
             }
 
@@ -959,8 +985,7 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
 
             // **用户可能就在刚才点了「关闭」。** 探测是异步的，等它回来时
             // 意图可能已经变了 —— 那就什么都别做，否则就是
-            // 「点了关闭，几秒后它自己又连上了」。意图由 `was_connected`
-            // 承载，只有用户主动停止才会清掉它。
+            // 「点了关闭，几秒后它自己又连上了」。再查一次意图。
             let user_wants_it = state.with(|i| i.settings.was_connected).unwrap_or(false);
             if !user_wants_it {
                 state.with(|i| i.push_log("app", "info", "用户已关闭，取消自动重建"));
@@ -2295,6 +2320,36 @@ mod tests {
         assert!(
             !should_auto_reconnect(true, true, &tun, true),
             "已经在跑就别重复启动（那会撞出「核心已经在运行」）",
+        );
+    }
+
+    /// 看门狗该不该继续盯着：**意图 + 代次**，不看观测到的 `running`。
+    ///
+    /// 这条钉的是一个会「彻底卡死」的组合：核心自己死掉 → 日志转发任务把
+    /// `running` 置 false → 如果看门狗看 `running` 就会当场退出 → 没人恢复；
+    /// 而按钮那边又被幂等守卫挡住（`Supervisor::is_running` 曾经只看
+    /// `process.is_some()`）。两边一起坏，用户就只能看到「点了没反应」。
+    #[test]
+    fn watchdog_keys_off_intent_and_generation_not_observed_state() {
+        assert!(
+            watchdog_should_watch(true, Some(9), Some(9)),
+            "用户还想要、还是我那次连接 —— 继续盯",
+        );
+        assert!(
+            watchdog_should_watch(true, Some(9), Some(9)),
+            "注意：这里**没有** running 参数 —— 核心刚死时 running 已是 false，"
+        );
+        assert!(!watchdog_should_watch(false, Some(9), Some(9)), "用户关掉了，收手");
+        assert!(
+            !watchdog_should_watch(true, Some(9), Some(11)),
+            "已经重连过（换了 pid），这条隧道不归我管了",
+        );
+        // 两边都拿不到 pid 时**继续盯**：宁可多看一会儿，也不要因为
+        // 「分不清代次」就放着一条坏隧道不管（那正是卡死的成因）。
+        // 一旦新的连接有了 pid，这里就不相等，旧看门狗自然退出。
+        assert!(
+            watchdog_should_watch(true, None, None),
+            "拿不到代次信息时继续盯 —— 别放着坏隧道不管",
         );
     }
 
