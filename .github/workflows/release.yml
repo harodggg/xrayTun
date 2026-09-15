@@ -172,11 +172,45 @@ jobs:
           退出或崩溃后可按快照完整回滚。详见 `docs/02-tun-and-privileges.md`。
           EOF
 
-          # Tag 已经存在 Release 时用 upload --clobber 覆盖，避免重跑失败。
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* \
+          # 先建 Release（不带资产），再**逐个**上传。
+          #
+          # 为什么不用 `gh release create dist/*` 一把梭：45MB 的 dmg 走 GitHub
+          # 的上传端点，偶发 `connection reset by peer` 很正常。一把梭失败时
+          # **前面已经传上去的资产会留在那儿**，重跑就撞上
+          # `ReleaseAsset.name already exists`（HTTP 422）—— 实测就卡死在这里，
+          # 结果 Release 只带了一个 SHA256SUMS.txt。
+          #
+          # 逐个传 + `--clobber` + 重试 + 传完校验，才是**可重跑**的：
+          # 任何一步失败重跑都能接着走，而不会卡在"名字已存在"。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # 远端可能只是这一下没连上，所以建之前再确认一次；真建好了
+            # 后面 upload 也会 --clobber 覆盖。
+            gh release create "$TAG" \
               --title "XrayTun ${TAG}" \
-              --notes-file NOTES.md
+              --notes-file NOTES.md \
+              --verify-tag || echo "create 返回非 0（可能已存在），继续逐个上传"
           fi
+
+          for f in dist/*; do
+            name="$(basename "$f")"
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$TAG" "$f" --clobber; then ok=1; break; fi
+              echo "上传 $name 第 $attempt 次失败，$((attempt * 5))s 后重试" >&2
+              sleep $((attempt * 5))
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "资产 $name 重试多次仍失败" >&2
+              exit 1
+            fi
+          done
+
+          # 传完核对：别出现"步骤绿了但资产不全"（上面那个 422 就是这么来的）。
+          listed="$(gh release view "$TAG" --json assets --jq '.assets[].name')"
+          echo "$listed"
+          for f in dist/*; do
+            name="$(basename "$f")"
+            printf '%s\n' "$listed" | grep -qx "$name" \
+              || { echo "Release 里没有 $name" >&2; exit 1; }
+          done
+          echo "资产齐全" 
