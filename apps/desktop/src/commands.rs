@@ -776,6 +776,98 @@ pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<A
     build_snapshot(&app, &state).await
 }
 
+/// 连上之后**真的发一个请求出去**，确认这条隧道能用。
+///
+/// 为什么必须做：启动流程里那两次检查问的都是「**服务器** TCP 可达吗」，
+/// 而「节点活着、却转发不了流量」是完全可能的 —— 实测某个节点正是如此：
+/// TCP 握手 55ms 正常，但经它访问任何目标都超时。
+///
+/// 这时 App 显示「已连接」，用户看到的却是一屏：
+///
+/// ```text
+/// app/dns: failed to retrieve response for x.com.
+///   > Post "https://9.9.9.9/dns-query": context deadline exceeded
+/// ```
+///
+/// 五台国外解析器轮流失败（同层回退在正常工作），但真正的原因在**节点那一侧**，
+/// 日志里完全看不出来。
+///
+/// 这个检查**经本地 SOCKS 入站**发一个 204 请求 —— 那是真实用户路径。
+/// 用 `--socks5-hostname`，域名由节点去解析，所以它同时覆盖了「转发」和
+/// 「节点侧解析」两件事。失败时直接点名是节点的问题。
+fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
+    let port = app
+        .try_state::<AppState>()
+        .and_then(|s| s.with(|i| i.settings.socks_port))
+        .unwrap_or(10808);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // 刚连上时 SOCKS 入站可能还在处理头几个连接，稍等一下再问。
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        // 只认自己那一次连接：用户可能已经重连或断开了。
+        let (still_mine, node_name) = state
+            .with(|i| {
+                (
+                    i.runtime.running && i.runtime.pid == pid,
+                    i.nodes
+                        .iter()
+                        .find(|n| Some(&n.id) == i.settings.selected_node.as_ref())
+                        .map(|n| n.name.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or((false, String::new()));
+        if !still_mine {
+            return;
+        }
+
+        let probe = xt_core::xray::DEFAULT_PROBE_URL.to_string();
+        let code = tauri::async_runtime::spawn_blocking(move || {
+            std::process::Command::new("/usr/bin/curl")
+                .args([
+                    "-sS",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{http_code}",
+                    "--max-time",
+                    "10",
+                    "--socks5-hostname",
+                    &format!("127.0.0.1:{port}"),
+                    &probe,
+                ])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+
+        let Some(state) = handle.try_state::<AppState>() else {
+            return;
+        };
+        if code.is_empty() || code == "000" {
+            let msg = format!(
+                "节点「{node_name}」已连接，但流量出不去（经它访问目标超时）。请换一个节点。"
+            );
+            state.with(|i| {
+                i.push_log("app", "error", msg.clone());
+                i.last_notice = Some(msg);
+            });
+        } else {
+            state.with(|i| {
+                i.push_log("app", "info", format!("隧道连通性检查通过（HTTP {code}）"))
+            });
+        }
+        events::runtime_changed(&handle, &state);
+    });
+}
+
 /// 物理出口的「身份」。隧道是照它建的，换网之后要拿它比对。
 #[derive(Debug, Clone, PartialEq)]
 struct Egress {
@@ -995,6 +1087,10 @@ async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // 换网之后隧道不会自愈（路由/网卡绑定/长连接全指向旧出口），
     // 盯着它，变了就报一句能读的话。带上 pid 是为了让旧 watcher 自己退出。
     spawn_network_watch(app, egress_before, runtime.pid);
+
+    // 「连上了」不等于「能用」：节点可能活着却转发不了流量。
+    // 这直接决定用户接下来会不会面对一屏看不懂的 DNS 超时。
+    spawn_connectivity_check(app, runtime.pid);
 
     // 日志转发任务：核心的 stdout/stderr → 状态环形缓冲 + UI 事件。
     let app_handle = app.clone();
