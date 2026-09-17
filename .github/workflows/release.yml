@@ -133,7 +133,17 @@ jobs:
           set -eu
           D="$CARGO_TARGET_DIR/universal-apple-darwin/release/bundle/dmg"
           mkdir -p dist
-          cp "$D"/*.dmg "$D"/*.zip dist/ 2>/dev/null || true
+          # **按版本挑，别用 `cp *.dmg *.zip` 一把捞。**
+          #
+          # CI 缓存了 .cargo-target，而打包产物目录会跟着跨版本存活 ——
+          # 一把捞会把上一版的包也带进这一版的 Release（实测 v0.7.8 里就混着
+          # 0.7.7 的 dmg/zip，而更新器可能下到那个旧的）。
+          VER="$(python3 -c "import json;print(json.load(open('apps/desktop/tauri.conf.json'))['version'])")"
+          echo "本次版本：$VER"
+          cp "$D"/XrayTun_${VER}_*.dmg "$D"/XrayTun_${VER}_*.zip dist/
+          # 断言正好两个：多了说明捞进了别的版本，少了说明这一版没打出来。
+          n=$(ls dist/*.dmg dist/*.zip 2>/dev/null | wc -l | tr -d ' ')
+          [ "$n" = "2" ] || { echo "预期 2 个产物，实际 $n 个：" >&2; ls -l dist/ >&2; exit 1; }
           # 校验和：下载的人至少能自己核对一下完整性。
           (cd dist && shasum -a 256 ./* > SHA256SUMS.txt)
           ls -lh dist/

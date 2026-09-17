@@ -18,6 +18,7 @@
 |---|---|---|
 | 自更新报「校验文件里没有 X.zip」，而文件明明在里面 | `SHA256SUMS.txt` 由 `shasum -a 256 ./*` 生成，每行是 `./X.zip`；解析器拿整段路径比文件名 | 只比 **basename**（剥掉 `./`、目录、`*`） |
 | 0.7.3 声称修好的自动重连没生效 | `was_connected = true` 只写了内存，没 `persist_settings`；而这个标记**全部用途**就是跨进程存活 | 写完立刻落盘，失败会 warn |
+| 改了个「显示网速」，`was_connected` 就被悄悄清成 false | `save_settings` 写的是前端回传的**整份**设置，而那份快照可能是连接之前取的 | 保存时**保留后端的值** —— 前端不拥有的字段不许整份回传覆盖 |
 | 「关闭」没反应，再点却说「核心已经在运行」 | 快照里的 `running` 与 supervisor 的真实状态短暂不一致 | `start_core` 幂等；检查放在 **supervisor 锁内** |
 | **连接按钮点了永远没反应**，核心其实早就不在了 | `is_running()` 用 `process.is_some()` —— 那只说明「**我手里有个 handle**」，核心自己退出后句柄还在 | 改成探真实存活（`has_exited()`）并回收陈旧句柄 |
 | 发版永远失败在「打包（universal）」，Release 从未创建 | `universal-apple-darwin` 不是 rustc 的 target，是 **Tauri CLI 的伪 target** | 分别编两个真 target 再 `lipo`；预检 `rustc --print target-list` |
@@ -44,6 +45,7 @@
 | 切换节点时「连环爆炸」，切到坏节点后彻底断网 | 先 `stop_core` 再 `start_core`，**后者失败就直接返回** —— 旧隧道已拆、新隧道没建 | 失败退回上一个**验证过**的节点并重连 |
 | 用着用着网停了，日志末尾是 `Logger closing` | 自更新要先退出 app（核心优雅关闭）、替换、重启 —— 而重启后不连回来 | `was_connected` + `auto_reconnect` → 启动时 `reconnect_if_needed` |
 | **每次开机都要手动点一次「连接」** | 自动重连**只试一次**，而开机那一刻 Wi-Fi 往往还没连上、helper 也刚启动 —— 必然失败就放弃 | 后台重试 24 次 × 5s（约 2 分钟）；窗口不等它（`spawn` 而非 `await`） |
+| **合盖唤醒后要手动点一次「连接」** | 唤醒后隧道已失效，而看门狗要等「连续 2 次失败」才重建（~30 秒）；用户在这期间就认为它断了 | 睡眠检测（墙上时钟 vs 单调时钟）：刚醒过来就**只等 1 次失败**（~10 秒） |
 | 核心已经死了，界面还显示「已连接」 | 日志转发任务 `while let Some(..) = rx.recv()` 结束就什么都不做 | 循环结束时把运行时标记为已停止并报错 |
 | 点了「关闭」，几秒后它自己又连上了 | 看门狗的探测是异步的，结果回来时用户的意图已经变了 | 重建前先看 `was_connected`，false 就放弃 |
 | ⌘Q 之后留下孤儿核心占着 10808/10809 | `app.exit()` 不跑析构，`kill_on_drop` 无效 | `sync_cleanup` + `RunEvent::ExitRequested` |
@@ -57,7 +59,7 @@
 **钉子**：
 * `dns::restore` —— DHCP 情形走 `Empty`（`bind_to_interface_rejects_unknown_nic` 同级）
 * `commands::network_moved` —— `egress_change_is_detected_by_interface_or_gateway`
-* `commands::should_auto_reconnect` / `should_keep_reconnecting` / `tunnel_is_dead` / `should_rebuild_tunnel` / `watchdog_should_watch`
+* `commands::should_auto_reconnect` / `should_keep_reconnecting` / `slept_for` / `tunnel_is_dead` / `should_rebuild_tunnel` / `watchdog_should_watch`
 
 ---
 

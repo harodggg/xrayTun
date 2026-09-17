@@ -223,6 +223,12 @@ echo "  · App 架构 $APP_ARCH / 核心架构 ${CORE_ARCH:-未知}"
 #   1. makehybrid 直接从目录生成 HFS 镜像
 #   2. convert 把它压成 UDZO
 DMG_DIR="$RELEASE_DIR/bundle/dmg"
+# **先清空。** 这个目录会被 CI 的 cargo 缓存带着跨版本存活，而收集步骤是
+# `cp *.dmg *.zip` —— 不清的话上一版的包会被一起打进这一版的 Release。
+# 实测 v0.7.8 的 Release 里就混着 0.7.7 的 dmg/zip，而更新器可能下到那个旧的
+# （幸好包内版本核对会拒装）。
+rm -rf "$DMG_DIR"
+mkdir -p "$DMG_DIR"
 mkdir -p "$DMG_DIR"
 DMG="$DMG_DIR/XrayTun_${APP_VERSION}_$APP_ARCH.dmg"
 RAW="$DMG_DIR/.xraytun-raw.dmg"

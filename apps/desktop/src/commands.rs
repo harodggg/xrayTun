@@ -724,6 +724,29 @@ pub async fn save_settings(
         });
     }
 
+    // **`was_connected` 归后端所有，前端不得覆盖它。**
+    //
+    // 它是「用户希望它连着」这个**意图**，只有 `start_core`（连上）和
+    // `stop_proxy`（用户主动点停止）能改。
+    //
+    // 而前端保存的是**整份** `AppSettings`，那份快照可能是**连接之前**取的
+    // —— 于是用户只是改了个「显示网速」或日志级别，就把意图悄悄清成了
+    // false，下一次开机自然不自动连。
+    //
+    // 这是 docs/08 的 A 类：一个字段的**来源**（后端）和**去向**（前端整份回传）
+    // 不是同一个地方。凡是"前端不拥有"的字段，都不能让整份回传覆盖它。
+    let mut settings = settings;
+    if let Some(intent) = state.with(|i| i.settings.was_connected) {
+        if settings.was_connected != intent {
+            tracing::debug!(
+                from = settings.was_connected,
+                to = intent,
+                "忽略前端回传的 was_connected（它由后端拥有）"
+            );
+        }
+        settings.was_connected = intent;
+    }
+
     persist_settings(&state, &settings)?;
 
     // 「显示网速」是个纯展示开关，不该为了它重启核心。这里立刻按新设置
@@ -938,6 +961,24 @@ fn watchdog_should_watch(
 const RECONNECT_ATTEMPTS: u32 = 24;
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// 睡过了多久。
+///
+/// 睡眠时**单调时钟（`Instant`）不推进，墙上时钟继续走**，所以两者的差就是
+/// 睡眠时长。这是不引入任何系统 API 就能检测「睡过了」的标准做法。
+///
+/// 拿它来干什么：唤醒后隧道几乎必然已经失效（节点连接断了，网关也可能变了），
+/// 而看门狗本来要等「连续 2 次探测失败」才重建。知道刚醒过来，就可以
+/// **只等 1 次失败**，把恢复从 ~30 秒压到 ~10 秒。
+///
+/// 为什么不醒来就无条件重建：隧道有时真的没坏，白拆一次要断几秒。
+/// 所以只把「失败的判据」提前，不把「重建」提前。
+fn slept_for(monotonic_elapsed: Duration, wall_elapsed: Duration) -> Duration {
+    wall_elapsed.saturating_sub(monotonic_elapsed)
+}
+
+/// 超过这个时长没跑循环，就认为中间睡过（而不是单纯被调度延迟）。
+const SLEEP_THRESHOLD: Duration = Duration::from_secs(30);
+
 /// 自动重连还要不要继续试。
 ///
 /// 两种情况都该停：
@@ -1012,8 +1053,27 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut failures = 0u32;
+        let mut last_mono = std::time::Instant::now();
+        let mut last_wall = std::time::SystemTime::now();
         loop {
             tokio::time::sleep(Duration::from_secs(10)).await;
+
+            // 这一轮到底隔了多久？单调时钟 vs 墙上时钟的差就是睡眠时长。
+            let now_mono = std::time::Instant::now();
+            let now_wall = std::time::SystemTime::now();
+            let slept = slept_for(
+                now_mono.duration_since(last_mono),
+                now_wall
+                    .duration_since(last_wall)
+                    .unwrap_or_default(),
+            );
+            last_mono = now_mono;
+            last_wall = now_wall;
+            // 刚睡醒：下一轮只要探测失败就立刻重建，不用再等第二次。
+            let just_woke = slept > SLEEP_THRESHOLD;
+            if just_woke {
+                tracing::info!(slept_secs = slept.as_secs(), "检测到从睡眠中唤醒");
+            }
 
             let Some(state) = handle.try_state::<AppState>() else {
                 return;
@@ -1052,6 +1112,10 @@ fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
                 continue;
             }
             failures += 1;
+            if just_woke {
+                // 唤醒这一次失败几乎必然是"隧道真的死了"，不必再等第二次。
+                failures = failures.max(FAILURES_BEFORE_REBUILD);
+            }
 
             // **用户可能就在刚才点了「关闭」。** 探测是异步的，等它回来时
             // 意图可能已经变了 —— 那就什么都别做，否则就是
@@ -2391,6 +2455,24 @@ mod tests {
             !should_auto_reconnect(true, true, &tun, true),
             "已经在跑就别重复启动（那会撞出「核心已经在运行」）",
         );
+    }
+
+    /// 睡眠检测：墙上时钟比单调时钟多走的那部分就是睡眠时长。
+    ///
+    /// 这条判据决定「唤醒后多久开始恢复」—— 判错成「没睡」就退化成
+    /// 等两次失败（约 30 秒），判错成「睡了」则只是早一次探测、无害。
+    #[test]
+    fn sleep_is_detected_as_wall_clock_running_ahead_of_monotonic() {
+        let s = Duration::from_secs;
+        // 正常的一轮：两个时钟走的一样多 → 没睡。
+        assert_eq!(slept_for(s(10), s(10)), Duration::ZERO);
+        // 睡了 8 小时：单调走了 10 秒，墙上走了 8 小时。
+        let slept = slept_for(s(10), s(8 * 3600));
+        assert!(slept > SLEEP_THRESHOLD, "8 小时必须被认成睡过：{slept:?}");
+        // 边界：刚好一分钟。
+        assert!(slept_for(s(10), s(70)) > SLEEP_THRESHOLD);
+        // 墙上时钟落后（NTP 回调）不能 panic，也不能当成睡过。
+        assert_eq!(slept_for(s(60), s(10)), Duration::ZERO);
     }
 
     /// 自动重连该不该继续试。
