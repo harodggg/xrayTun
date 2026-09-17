@@ -43,6 +43,7 @@
 | 崩溃后启动，网络配置没被回滚 | `Restore` 用了 `restore_stale()`（判据是「崩在半路」），而不是 `force_cleanup()` | `Restore` → `tear_down_live_session()` + `force_cleanup()` |
 | 切换节点时「连环爆炸」，切到坏节点后彻底断网 | 先 `stop_core` 再 `start_core`，**后者失败就直接返回** —— 旧隧道已拆、新隧道没建 | 失败退回上一个**验证过**的节点并重连 |
 | 用着用着网停了，日志末尾是 `Logger closing` | 自更新要先退出 app（核心优雅关闭）、替换、重启 —— 而重启后不连回来 | `was_connected` + `auto_reconnect` → 启动时 `reconnect_if_needed` |
+| **每次开机都要手动点一次「连接」** | 自动重连**只试一次**，而开机那一刻 Wi-Fi 往往还没连上、helper 也刚启动 —— 必然失败就放弃 | 后台重试 24 次 × 5s（约 2 分钟）；窗口不等它（`spawn` 而非 `await`） |
 | 核心已经死了，界面还显示「已连接」 | 日志转发任务 `while let Some(..) = rx.recv()` 结束就什么都不做 | 循环结束时把运行时标记为已停止并报错 |
 | 点了「关闭」，几秒后它自己又连上了 | 看门狗的探测是异步的，结果回来时用户的意图已经变了 | 重建前先看 `was_connected`，false 就放弃 |
 | ⌘Q 之后留下孤儿核心占着 10808/10809 | `app.exit()` 不跑析构，`kill_on_drop` 无效 | `sync_cleanup` + `RunEvent::ExitRequested` |
@@ -56,7 +57,7 @@
 **钉子**：
 * `dns::restore` —— DHCP 情形走 `Empty`（`bind_to_interface_rejects_unknown_nic` 同级）
 * `commands::network_moved` —— `egress_change_is_detected_by_interface_or_gateway`
-* `commands::should_auto_reconnect` / `tunnel_is_dead` / `should_rebuild_tunnel` / `watchdog_should_watch`
+* `commands::should_auto_reconnect` / `should_keep_reconnecting` / `tunnel_is_dead` / `should_rebuild_tunnel` / `watchdog_should_watch`
 
 ---
 

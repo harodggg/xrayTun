@@ -802,18 +802,72 @@ pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
     }
 
     state.with(|i| i.push_log("app", "info", "上次退出时是连接状态，正在自动重连…"));
-    match start_core(app, state).await {
-        Ok(()) => {
-            let _ = state.with(|i| i.push_log("app", "info", "已自动重连"));
-        }
-        Err(e) => {
-            let msg = format!("自动重连失败：{e}（可以手动点连接）");
-            let _ = state.with(|i| {
-                i.push_log("app", "warn", msg.clone());
-                i.last_notice = Some(msg);
-            });
+    events::runtime_changed(app, state);
+
+    // **必须重试，而且要在后台重试。**
+    //
+    // 开机时登录项会把 app **立刻**拉起来，而那一刻 Wi-Fi 往往还没连上、
+    // helper 也可能刚启动 —— `start_core` 必然失败。只试一次的话，用户看到的
+    // 就是「每次开机都要手动点连接」，而那正是要消灭的行为。
+    //
+    // 调用方是 `spawn` 出来的（见 lib.rs），所以这里等几分钟也不会挡住窗口。
+    let mut last_err = String::new();
+    for attempt in 1..=RECONNECT_ATTEMPTS {
+        match start_core(app, state).await {
+            Ok(()) => {
+                let msg = if attempt == 1 {
+                    "已自动重连".to_string()
+                } else {
+                    format!("已自动重连（第 {attempt} 次尝试成功）")
+                };
+                let _ = state.with(|i| {
+                    i.push_log("app", "info", msg);
+                    i.last_notice = None;
+                });
+                events::runtime_changed(app, state);
+                return;
+            }
+            Err(e) => {
+                last_err = e;
+                let (wants, running) = state
+                    .with(|i| (i.settings.was_connected, i.runtime.running))
+                    .unwrap_or((false, false));
+                if !should_keep_reconnecting(wants, running) {
+                    let _ = state.with(|i| {
+                        i.push_log(
+                            "app",
+                            "info",
+                            if running {
+                                "隧道已在运行，停止自动重连"
+                            } else {
+                                "用户已关闭，停止自动重连"
+                            },
+                        )
+                    });
+                    return;
+                }
+                // 逐次失败只记 debug：默认日志级别是 warning，不会刷屏；
+                // 而调试时打开 debug 就能看到每次失败的具体原因。
+                let _ = state.with(|i| {
+                    i.push_log(
+                        "app",
+                        "debug",
+                        format!("自动重连第 {attempt}/{RECONNECT_ATTEMPTS} 次未成功：{last_err}"),
+                    )
+                });
+                tokio::time::sleep(RECONNECT_INTERVAL).await;
+            }
         }
     }
+
+    let msg = format!(
+        "自动重连试了 {RECONNECT_ATTEMPTS} 次（约 {} 秒）仍失败：{last_err} —— 请手动连接",
+        RECONNECT_ATTEMPTS as u64 * RECONNECT_INTERVAL.as_secs()
+    );
+    let _ = state.with(|i| {
+        i.push_log("app", "warn", msg.clone());
+        i.last_notice = Some(msg);
+    });
     events::runtime_changed(app, state);
 }
 
@@ -875,6 +929,22 @@ fn watchdog_should_watch(
     current_pid: Option<u32>,
 ) -> bool {
     user_wants_it && my_pid == current_pid
+}
+
+/// 自动重连最多试几次、每次隔多久。
+///
+/// 开机场景下网络和 helper 都可能还没就绪，所以预算给得宽一点：
+/// 24 × 5s ≈ 2 分钟。超过就如实报"请手动连接"，而不是无限重试。
+const RECONNECT_ATTEMPTS: u32 = 24;
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 自动重连还要不要继续试。
+///
+/// 两种情况都该停：
+/// * 用户明确关掉了（意图变了）—— 继续试就是「关不掉」；
+/// * 隧道已经在跑 —— 用户自己点了连接并成功了，再插一手就是抢。
+fn should_keep_reconnecting(user_wants_it: bool, already_running: bool) -> bool {
+    user_wants_it && !already_running
 }
 
 /// 连续失败几次之后才重建隧道。
@@ -2320,6 +2390,28 @@ mod tests {
         assert!(
             !should_auto_reconnect(true, true, &tun, true),
             "已经在跑就别重复启动（那会撞出「核心已经在运行」）",
+        );
+    }
+
+    /// 自动重连该不该继续试。
+    ///
+    /// 它一次性最多试约 2 分钟（开机时网络和 helper 都可能没就绪），
+    /// 所以「什么时候停」必须判对：用户关掉了还继续试 = 关不掉；
+    /// 用户自己连上了还继续试 = 抢。
+    #[test]
+    fn auto_reconnect_stops_when_user_says_so_or_it_is_already_up() {
+        assert!(should_keep_reconnecting(true, false), "用户还想要、还没起来 —— 继续试");
+        assert!(
+            !should_keep_reconnecting(false, false),
+            "用户明确关掉了 —— 再试就是「关不掉的软件」",
+        );
+        assert!(
+            !should_keep_reconnecting(true, true),
+            "已经在跑了（用户自己点成功了）—— 再插一手就是抢",
+        );
+        assert!(
+            !should_keep_reconnecting(false, true),
+            "两种情况同时成立也该停",
         );
     }
 
