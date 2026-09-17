@@ -61,7 +61,7 @@ export default function Settings() {
   };
 
   return (
-    <>
+    <div className="set">
       {dirty && (
         <div className="banner banner--warn">
           <span>✎</span>
@@ -75,8 +75,16 @@ export default function Settings() {
         </div>
       )}
 
+      <nav className="set__nav">
+        <a href="#set-conn">连接</a>
+        <a href="#set-dns">DNS</a>
+        <a href="#set-core">内核与更新</a>
+        <a href="#set-sys">系统与助手</a>
+      </nav>
+
+      <div className="set__body">
       {/* ------------------------------------------------------- 代理入口 */}
-      <section className="card">
+      <section className="card set__sec" id="set-conn">
         <h2 className="card__title">代理入口</h2>
         <p className="card__desc">
           SOCKS 入站的 UDP 支持是 TUN 模式和 QUIC 转发的必要条件，因此始终开启。
@@ -128,7 +136,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- TUN */}
-      <section className="card">
+      <section className="card set__sec" id="set-conn">
         <h2 className="card__title">TUN 模式</h2>
         <p className="card__desc">
           当前模式：<strong>{MODE_LABEL[settings.mode]}</strong>。
@@ -220,7 +228,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- DNS */}
-      <section className="card">
+      <section className="card set__sec" id="set-dns">
         <h2 className="card__title">DNS</h2>
         <p className="card__desc">
           macOS 的 DNS 是<strong>按网络服务</strong>配置的。helper 会在改动前备份、在回滚时还原 ——
@@ -276,7 +284,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- Fake-IP */}
-      <section className="card">
+      <section className="card set__sec" id="set-dns">
         <h2 className="card__title">Fake-IP</h2>
         <p className="card__desc">
           很多人以为 Fake-IP 是 sing-box 独有 —— <strong>不是</strong>。Xray 有原生的
@@ -325,7 +333,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- 内核 */}
-      <section className="card">
+      <section className="card set__sec" id="set-core">
         <h2 className="card__title">内核</h2>
         <div className="field">
           <label>Xray 可执行文件路径</label>
@@ -352,7 +360,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- helper */}
-      <section className="card">
+      <section className="card set__sec" id="set-sys">
         <h2 className="card__title">特权助手（helper）</h2>
         <p className="card__desc">
           macOS 上创建 utun 必须具备 root 权限，而把整个界面跑在 root 下是不可接受的。
@@ -422,7 +430,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------- DNS 解析器 */}
-      <section className="card">
+      <section className="card set__sec" id="set-dns">
         <h2 className="card__title">DNS 解析器</h2>
 
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
@@ -505,7 +513,7 @@ export default function Settings() {
       </section>
 
       {/* --------------------------------------------- 核心与 geo 更新 */}
-      <section className="card">
+      <section className="card set__sec" id="set-core">
         <h2 className="card__title">核心与数据更新</h2>
 
         <div className="kv">
@@ -619,7 +627,7 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- 杂项 */}
-      <section className="card">
+      <section className="card set__sec" id="set-sys">
         <h2 className="card__title">其他</h2>
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
           <input
@@ -694,7 +702,8 @@ export default function Settings() {
           数据目录：<span className="mono">{snapshot.runtime.config_path?.replace(/\/runtime\/.*$/, "") ?? "~/Library/Application Support/com.xraytun.desktop"}</span>
         </div>
       </section>
-    </>
+      </div>
+    </div>
   );
 }
 

@@ -928,3 +928,243 @@ input[type="checkbox"] {
 .dash__details > *:not(summary) {
   margin-top: 12px;
 }
+
+/* ================================================================ 日志页 */
+
+.logs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* 让日志区自己滚动，工具栏与诊断报告固定在上方 */
+  height: 100%;
+  min-height: 0;
+}
+
+.logs-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 计数徽章：只有 error/warn 上色，其余保持中性 —— 否则满屏都是颜色 */
+.logs-bar__count {
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.segmented button.is-active .logs-bar__count {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+}
+
+.logs-bar__count--error {
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--danger);
+}
+
+.logs-bar__count--warn {
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
+}
+
+/* 搜索框吃掉中间的空档：把「筛选」与「动作」自然分开 */
+.logs-bar__search {
+  flex: 1;
+  min-width: 150px;
+  max-width: 320px;
+}
+
+.logs-bar__follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* 诊断报告：与仪表盘的折叠区同一套语言（弱边框、弱化说明文字） */
+.logs-diag {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 12px;
+}
+
+.logs-diag__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+}
+
+.logs-diag__note {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.logs-diag__body {
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.6;
+  background: #0a0e16;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  margin: 0;
+}
+
+/* 日志区：自适应剩余高度，而不是写死 calc(100vh - 190px) */
+.logs-page .logs {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+.logs__empty {
+  color: var(--text-faint);
+  line-height: 1.7;
+  max-width: 60ch;
+}
+
+/* 时间戳加分隔符后需要略宽一点，才能和来源、消息列对齐 */
+.logs-page .log-line__ts {
+  flex: none;
+}
+
+.logs-page .log-line__src {
+  flex: none;
+  width: 44px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-align: right;
+  /* 来源是背景信息，不该和消息抢注意力 */
+  opacity: 0.7;
+}
+
+.logs-page .log-line__msg {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 行首色条：只靠文字颜色在一屏等宽文本里很难扫出等级。
+   用 border-left 而不是伪元素，避免与 flex 对齐打架。 */
+.logs-page .log-line {
+  border-left: 2px solid transparent;
+  padding-left: 7px;
+}
+
+.logs-page .log-line--error {
+  border-left-color: var(--danger);
+}
+
+.logs-page .log-line--warn {
+  border-left-color: var(--warn);
+}
+
+.logs-page .log-line--info {
+  border-left-color: transparent;
+}
+
+.logs-page .log-line--debug {
+  border-left-color: transparent;
+  opacity: 0.72;
+}
+
+/* ================================================================ 设置页
+ *
+ * 原来是 9 张带边框的卡片依次堆叠：一屏放不下，找某一项要一路滚。
+ * 现在左侧是锚点导航（点一下直接到那一组），右侧内容用留白分组、
+ * 弱化卡片边框 —— 与仪表盘同一套语言。
+ */
+
+.set {
+  display: flex;
+  gap: 28px;
+  align-items: flex-start;
+  /* 比仪表盘宽一些：设置页是表单，双列布局需要空间；
+     但也不能铺满 —— 输入框拉得过宽反而难读。 */
+  max-width: 820px;
+}
+
+/* 导航跟随滚动：设置页很长，跳转入口必须一直在视野里 */
+.set__nav {
+  position: sticky;
+  top: 0;
+  flex: none;
+  width: 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 2px;
+}
+
+.set__nav a {
+  display: block;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 12.5px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.set__nav a:hover {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.set__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+}
+
+/* 分组之间用一条极弱的分隔线，而不是每张卡片各画一圈边框 */
+.set__sec {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  scroll-margin-top: 8px;
+}
+
+.set__sec + .set__sec {
+  border-top: 1px solid var(--border);
+  padding-top: 26px;
+}
+
+/* 分组标题比卡片标题更实一档：它现在是页面的层级依据 */
+.set__sec > .card__title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: var(--text);
+}
+
+.set__sec > .card__desc {
+  margin-bottom: 14px;
+  max-width: 68ch;
+}
+
+/* 窄窗口（接近最小 900px）时收起侧栏，否则内容被挤得太窄 */
+@media (max-width: 940px) {
+  .set__nav {
+    display: none;
+  }
+  .set {
+    max-width: none;
+  }
+}
