@@ -33,7 +33,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use xt_proto::{Request, Response, DEFAULT_SOCKET_PATH, PROTOCOL_VERSION};
 
-use error::{HelperError, Result};
+use error::Result;
 use server::Helper;
 
 #[derive(Parser, Debug)]
@@ -306,8 +306,34 @@ fn human_bytes(n: u64) -> String {
     format!("{value:.2} {}", UNITS[unit])
 }
 
-/// 让 `HelperError` 在 main 里可打印。
-#[allow(dead_code)]
-fn describe(e: &HelperError) -> String {
-    format!("{:?}: {}", e.code, e.message)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `human_bytes` 的输出是 CLI 上用户唯一能看到的流量数字，边界要钉住。
+    ///
+    /// 这里刻意记录一个**已知的取整行为**：1023 会显示成 `1023.00 B`，
+    /// 而 1024 显示成 `1.00 KiB`。也就是说「接近 1 KiB」时不会提前进位 ——
+    /// 这是对的（1023 字节就是不到 1 KiB），但看起来会像精度不一致，
+    /// 所以用测试把当前行为固定下来，避免以后有人「顺手四舍五入」。
+    #[test]
+    fn human_bytes_scales_and_keeps_two_decimals() {
+        assert_eq!(human_bytes(0), "0.00 B");
+        assert_eq!(human_bytes(1), "1.00 B");
+        assert_eq!(human_bytes(1023), "1023.00 B");
+        assert_eq!(human_bytes(1024), "1.00 KiB");
+        assert_eq!(human_bytes(1536), "1.50 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.00 MiB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1.00 GiB");
+        assert_eq!(human_bytes(1024u64.pow(4)), "1.00 TiB");
+    }
+
+    /// 超过 TiB 时不再进位（单位表只有 5 档），而不是 panic 或显示错单位。
+    #[test]
+    fn human_bytes_saturates_at_the_largest_unit() {
+        let huge = 1024u64.pow(4) * 5; // 5 TiB
+        assert_eq!(human_bytes(huge), "5.00 TiB");
+        assert_eq!(human_bytes(u64::MAX), format!("{:.2} TiB", u64::MAX as f64 / 1024f64.powi(4)));
+    }
 }
+
