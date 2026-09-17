@@ -654,6 +654,182 @@ mod tests {
     use super::*;
     use xt_core::model::{AppSettings, ProxyMode};
 
+    /// 临时数据目录 + 一个「从不连接」的 helper 客户端。
+    ///
+    /// `HelperClient::new(None)` 只是构造对象，不会去连 socket —— 所以下面这些
+    /// **入口守卫**测试不需要特权、不需要 helper、也不需要真的起核心。
+    fn scaffold(tag: &str) -> (Store, HelperClient) {
+        let dir = std::env::temp_dir().join(format!("xt-sup-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (Store::new(dir), HelperClient::new(None))
+    }
+
+    /// 一个结构合法的节点，用于让「已选节点」这层校验通过。
+    /// 用 JSON 构造：字段与线上数据同形状，避免测试里手抄一堆协议细节。
+    fn fixture_node() -> Node {
+        serde_json::from_str(
+            r#"{
+                "id": "n1",
+                "name": "fixture",
+                "address": "127.0.0.1",
+                "port": 443,
+                "protocol": { "kind": "vless", "uuid": "11111111-2222-3333-4444-555555555555",
+                              "flow": "", "encryption": "none" },
+                "transport": { "kind": "tcp" },
+                "source": { "kind": "manual" }
+            }"#,
+        )
+        .expect("测试夹具节点应当能解析")
+    }
+
+    /// 代理模式下没选节点 -> 必须**在改动任何系统状态之前**就拒绝。
+    ///
+    /// 守卫的**位置**和文案一样重要：它排在「探出口、写配置、建 utun」之前。
+    /// 顺序一旦被改动，用户会先经历一次网络被拆掉、然后才看到「请先选择节点」。
+    #[tokio::test]
+    async fn start_refuses_without_a_selected_node_before_touching_the_system() {
+        let (store, mut helper) = scaffold("no-node");
+        let mut sup = Supervisor::default();
+        let settings = AppSettings::default(); // 默认代理模式，且未选节点
+
+        let err = sup
+            .start(&store, &settings, &[], &mut helper, None, CoreSearchPaths::default())
+            .await
+            .expect_err("没有节点时必须拒绝启动");
+        assert!(err.contains("请先选择一个节点"), "错误文案变了: {err}");
+        assert!(
+            !store.root().join("core").exists(),
+            "被拒绝的启动不该留下任何落盘产物"
+        );
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// TUN 模式下核心版本过老 -> 必须给**可操作**的提示，而不是底层报错。
+    ///
+    /// 用户能做的事是「去设置里换一个核心」，所以文案必须带上版本要求。
+    /// 这一条容易被后续重构改成 `map_err(|e| e.to_string())` 而丢掉人话。
+    ///
+    /// 注意守卫顺序（本次测试就是照着它写的）：**先解析核心路径、再比版本**。
+    /// 路径解析不了时给的是「找不到核心」，不是版本提示 —— 两者都是人话，
+    /// 但指向的动作不同：一个去装核心，一个去换核心。
+    #[tokio::test]
+    async fn start_in_tun_mode_requires_a_core_that_supports_native_tun() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (store, mut helper) = scaffold("tun-version");
+        let mut sup = Supervisor::default();
+
+        // 造一个「能跑但版本过老」的假核心：只回一行 version 输出。
+        let fake = store.root().join("fake-old-xray");
+        std::fs::create_dir_all(store.root()).unwrap();
+        std::fs::write(&fake, "#!/bin/sh\necho 'Xray 1.0.0 (fake)'\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let settings = AppSettings {
+            mode: ProxyMode::Tun,
+            core_path: Some(fake.clone()),
+            selected_node: Some("n1".into()),
+            ..Default::default()
+        };
+
+        let err = sup
+            .start(
+                &store,
+                &settings,
+                &[fixture_node()],
+                &mut helper,
+                None,
+                CoreSearchPaths::default(),
+            )
+            .await
+            .expect_err("核心版本过老时 TUN 模式必须拒绝");
+        assert!(
+            err.contains("不支持原生 TUN") && err.contains(MIN_CORE_VERSION_NATIVE_TUN),
+            "错误应当说清版本要求，实际: {err}"
+        );
+        // 版本过老的核心也不该被启动
+        assert!(!sup.is_running(), "被拒绝的启动不该留下运行中的核心");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 同一个 `Supervisor` 上重复 `start` -> 幂等守卫必须拦下。
+    ///
+    /// 守卫看的是 `is_running()`（进程**真的还活着吗**），不是
+    /// `process.is_some()`。两者混用曾经导致「核心早就崩了，按钮却点了没反应」。
+    #[tokio::test]
+    async fn start_twice_is_refused_by_the_idempotency_guard() {
+        let (store, mut helper) = scaffold("twice");
+        // 用 test 自己起的一个长驻进程占住槽位（不依赖 xray 二进制）
+        let running = XrayProcess::spawn(
+            std::path::Path::new("/bin/sh"),
+            std::path::Path::new("/dev/null"),
+            None,
+        )
+        .await
+        .expect("起 /bin/sh 不该失败");
+        let mut sup = Supervisor {
+            process: Some(running),
+            ..Default::default()
+        };
+        assert!(sup.is_running(), "刚起的进程应当是活的");
+
+        let err = sup
+            .start(
+                &store,
+                &AppSettings::default(),
+                &[],
+                &mut helper,
+                None,
+                CoreSearchPaths::default(),
+            )
+            .await
+            .expect_err("核心在跑时重复 start 必须被拒绝");
+        assert!(err.contains("已经在运行"), "错误文案变了: {err}");
+
+        if let Some(p) = sup.process.take() {
+            let _ = p.shutdown(Duration::from_secs(2)).await;
+        }
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 守卫顺序：**核心解析不出来**时给的是「找不到核心」，而不是版本提示。
+    ///
+    /// 两条都是人话，但指向的动作不同：一个去装核心，一个去换核心。
+    /// 顺序被改（先比版本再解析）会让提示指错方向 —— 用户按「版本太老」
+    /// 去换核心，而实际上根本没有核心。
+    #[tokio::test]
+    async fn start_reports_missing_core_rather_than_a_version_problem() {
+        let (store, mut helper) = scaffold("no-core");
+        let mut sup = Supervisor::default();
+        let settings = AppSettings {
+            mode: ProxyMode::Tun,
+            core_path: Some(PathBuf::from("")), // 解析不出核心
+            selected_node: Some("n1".into()),
+            ..Default::default()
+        };
+
+        let err = sup
+            .start(
+                &store,
+                &settings,
+                &[fixture_node()],
+                &mut helper,
+                None,
+                CoreSearchPaths::default(),
+            )
+            .await
+            .expect_err("找不到核心时必须拒绝");
+        assert!(
+            err.contains("找不到 Xray 核心"),
+            "应当报「找不到核心」而不是版本问题，实际: {err}"
+        );
+        assert!(
+            !err.contains("不支持原生 TUN"),
+            "核心都没有时不该谈版本: {err}"
+        );
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
     /// 回归测试：TUN 请求**必须**把代理服务器 IP 放进 `bypass_hosts`。
     ///
     /// 这个字段一度被留空，理由是「核心的 `autoOutboundsInterface` 已经用

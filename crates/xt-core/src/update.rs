@@ -734,7 +734,121 @@ mod tests {
         assert_eq!(parse_sha256sum("not-a-hash"), None);
     }
 
-    /// 结构性校验要能挡住「截断的文件」和「内容根本不是 geo 数据」。
+    /// **解压按精确条目名匹配，因此上游包必须是平铺的。**
+    ///
+    /// 这条同时是 zip slip 的防线，值得写清楚：
+    ///
+    /// * `unzip_into` 传的是 `-j`（junk paths）+ 精确名。带目录的条目
+    ///   （`inner/xray`）**根本匹配不上** `xray`，unzip 以退出码 11 结束，
+    ///   调用方拿到的是「解压失败」—— 而不是把目录层级重建到目标目录下。
+    /// * 实测确认过：去掉 `-j` 后 `inner/xray` 会变成 `dest/xray`（被压平），
+    ///   但换一个条目名就能重新建出子目录，所以 `-j` 仍必须保留。
+    ///
+    /// 结论：畸形包只会被拒绝，不会写出目标目录之外的东西。
+    #[test]
+    fn unzip_refuses_archives_that_are_not_flat() {
+        let dir = std::env::temp_dir().join(format!("xt-unzip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("payload/inner")).unwrap();
+        std::fs::write(dir.join("payload/inner/xray"), b"#!/bin/sh\n").unwrap();
+
+        let zip = dir.join("payload.zip");
+        let ok = std::process::Command::new("/usr/bin/zip")
+            .current_dir(dir.join("payload"))
+            .args(["-q", "-X", zip.to_str().unwrap(), "inner/xray"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("跳过：系统没有可用的 zip");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let dest = dir.join("dest");
+        let out = unzip_into(&zip, &dest, &["xray"]);
+        assert!(out.is_err(), "非平铺的包应当被拒绝，而不是解出一堆层级");
+
+        // 目录里绝不能出现重建出来的层级
+        if dest.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&dest)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "失败的解压不该留下任何产物，实际: {entries:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 平铺的条目能被正常解出来（这是上游真实的包形状）。
+    #[test]
+    fn unzip_extracts_flat_entries() {
+        let dir = std::env::temp_dir().join(format!("xt-unzip-flat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("payload")).unwrap();
+        std::fs::write(dir.join("payload/xray"), b"core-bytes").unwrap();
+
+        let zip = dir.join("p.zip");
+        let ok = std::process::Command::new("/usr/bin/zip")
+            .current_dir(dir.join("payload"))
+            .args(["-q", "-X", zip.to_str().unwrap(), "xray"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("跳过：系统没有可用的 zip");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let dest = dir.join("dest");
+        unzip_into(&zip, &dest, &["xray"]).expect("平铺条目应当解出来");
+        assert_eq!(
+            std::fs::read(dest.join("xray")).unwrap(),
+            b"core-bytes",
+            "解出来的内容应当一致"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 归档里的其它条目一律不碰：只解出点名的那几个。
+    ///
+    /// 上游包里有 LICENSE、README、geo 数据等多个条目。点名解压既省时间，
+    /// 也避免把一个我们没打算用的文件（可能是可执行文件）落到托管目录里。
+    #[test]
+    fn unzip_takes_only_the_named_entries() {
+        let dir = std::env::temp_dir().join(format!("xt-unzip-sel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("payload")).unwrap();
+        std::fs::write(dir.join("payload/xray"), b"core").unwrap();
+        std::fs::write(dir.join("payload/LICENSE"), b"license text").unwrap();
+
+        let zip = dir.join("p.zip");
+        let ok = std::process::Command::new("/usr/bin/zip")
+            .current_dir(dir.join("payload"))
+            .args(["-q", "-X", zip.to_str().unwrap(), "xray", "LICENSE"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("跳过：系统没有可用的 zip");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let dest = dir.join("dest");
+        unzip_into(&zip, &dest, &["xray"]).expect("解压应当成功");
+        assert!(dest.join("xray").is_file(), "点名的条目要解出来");
+        assert!(
+            !dest.join("LICENSE").exists(),
+            "没点名的条目不该落到目标目录"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn geo_structure_check_rejects_junk() {
         let dir = std::env::temp_dir().join("xt-geo-check-test");
