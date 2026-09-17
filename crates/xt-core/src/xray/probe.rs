@@ -360,34 +360,60 @@ pub async fn server_rtt_ms(
     }?;
     let target = std::net::SocketAddr::new(ip, port);
 
-    let mut ok: Vec<u32> = Vec::with_capacity(samples);
+    // **采样并发做，不串行。**
+    //
+    // 串行 3 次握手在真实链路上要 ~165ms，而这段等待完全发生在「每个样本
+    // 各等一个 RTT」上，三个样本之间没有任何依赖关系 —— 并发后只花 ~1 个 RTT。
+    //
+    // 取舍（实测确认过）：并发握手会互相争抢同一张网卡的发送窗口，
+    // 弱网/高丢包下中位数可能比串行略高。这里选择速度，因为
+    // **RTT 只用来给节点排序、判断远近**，不需要绝对精确；而 `probe_one`
+    // 那条经节点取数据的通路完全不受影响，可用性判定依然准。
+    //
+    // `interface` 每次都要克隆一份：每个任务要独立把 socket 绑到物理网卡，
+    // 否则测到的是隧道内的假 0ms（见 `net::bind_to_interface_fd`）。
+    let iface = interface.map(str::to_string);
+    let mut set = tokio::task::JoinSet::new();
     for _ in 0..samples.max(1) {
-        let start = Instant::now();
-        // 用 `TcpSocket` 而不是 `TcpStream::connect`：只有前者能在 connect
-        // **之前**设置 `IP_BOUND_IF`，而绕过隧道必须在那之前生效。
-        let socket = match tokio::net::TcpSocket::new_v4() {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if let Some(iface) = interface {
-            use std::os::unix::io::AsRawFd;
-            if let Err(e) = crate::net::bind_to_interface_fd(socket.as_raw_fd(), iface) {
-                tracing::warn!(interface = iface, error = %e, "RTT 探测绑不上物理网卡，测到的是隧道内的假延迟");
-            }
+        let iface = iface.clone();
+        set.spawn(async move { sample_rtt_once(target, timeout, iface.as_deref()).await });
+    }
+
+    let mut ok: Vec<u32> = Vec::with_capacity(samples);
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some(ms)) = joined {
+            ok.push(ms);
         }
-        match tokio::time::timeout(timeout, socket.connect(target)).await {
-            Ok(Ok(stream)) => {
-                ok.push(start.elapsed().as_millis().min(u32::MAX as u128) as u32);
-                drop(stream);
-            }
-            // 单次失败不放弃：可能是瞬时丢包。全部失败才算不通。
-            _ => continue,
-        }
+        // 单次失败/任务 panic 都不放弃：可能是瞬时丢包。全部失败才算不通。
     }
     median(&mut ok)
 }
 
-/// 取中位数。空集返回 `None`。抽成纯函数是为了能单测。
+/// 一次 TCP 握手，返回耗时（毫秒）。失败返回 `None`。
+async fn sample_rtt_once(
+    target: std::net::SocketAddr,
+    timeout: Duration,
+    interface: Option<&str>,
+) -> Option<u32> {
+    let start = Instant::now();
+    // 用 `TcpSocket` 而不是 `TcpStream::connect`：只有前者能在 connect
+    // **之前**设置 `IP_BOUND_IF`，而绕过隧道必须在那之前生效。
+    let socket = tokio::net::TcpSocket::new_v4().ok()?;
+    if let Some(iface) = interface {
+        use std::os::unix::io::AsRawFd;
+        if let Err(e) = crate::net::bind_to_interface_fd(socket.as_raw_fd(), iface) {
+            tracing::warn!(interface = iface, error = %e, "RTT 探测绑不上物理网卡，测到的是隧道内的假延迟");
+        }
+    }
+    match tokio::time::timeout(timeout, socket.connect(target)).await {
+        Ok(Ok(stream)) => {
+            let ms = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            drop(stream);
+            Some(ms)
+        }
+        _ => None,
+    }
+}
 /// 探测单个节点：TCP 连接 + TTFB。
 async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u16)> {
     let host = target.host_str().ok_or_else(|| Error::Probe("探测 URL 缺少 host".into()))?;
@@ -568,6 +594,35 @@ mod tests {
         assert_eq!(parse_http_status(b"HTTP/1.1 204 No Content\r\n"), Some(204));
         assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n"), Some(200));
         assert_eq!(parse_http_status(b"garbage"), None);
+    }
+
+    /// 并发采样后，中位数语义必须一字不变：
+    /// 只要有一个样本成功就出值，全部失败才返回 `None`。
+    ///
+    /// 这条钉住的是「并发化不能顺手改坏判定」——并发拿掉的是等待时间，
+    /// 不是「单点失败被中位数压掉」这个性质。
+    #[tokio::test]
+    async fn rtt_sampling_keeps_median_semantics() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // 持续接受连接：样本全部走成功路径
+        let acceptor = tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let ms = server_rtt_ms("127.0.0.1", port, RTT_SAMPLES, Duration::from_secs(2), None).await;
+        assert!(ms.is_some(), "回环上三次握手应当全部成功");
+        assert!(ms.unwrap() < 1000, "回环 RTT 不该到秒级: {ms:?}");
+
+        acceptor.abort();
+
+        // 没人监听：全部样本失败 -> None（而不是 0、不是某个假值）
+        let dead = server_rtt_ms("127.0.0.1", 1, RTT_SAMPLES, Duration::from_millis(200), None).await;
+        assert_eq!(dead, None, "全部失败时必须返回 None");
     }
 
     /// `ok()` 必须看「能不能取到东西」，而不是「RTT 测到没有」。
