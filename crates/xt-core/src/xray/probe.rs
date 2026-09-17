@@ -28,6 +28,7 @@ use url::Url;
 
 use crate::error::{Error, Result};
 use crate::model::Node;
+use crate::util::{median, now_unix};
 use crate::xray::config::{node_to_outbound, API_PORT};
 use crate::xray::process::{wait_for_port, CoreEvent, XrayProcess};
 
@@ -136,10 +137,6 @@ impl ProbeResult {
     pub fn ok(&self) -> bool {
         self.available
     }
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// 生成探针专用的 Xray 配置。**与主配置完全隔离**，避免污染用户正在用的实例。
@@ -391,14 +388,6 @@ pub async fn server_rtt_ms(
 }
 
 /// 取中位数。空集返回 `None`。抽成纯函数是为了能单测。
-fn median(values: &mut [u32]) -> Option<u32> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_unstable();
-    Some(values[values.len() / 2])
-}
-
 /// 探测单个节点：TCP 连接 + TTFB。
 async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u16)> {
     let host = target.host_str().ok_or_else(|| Error::Probe("探测 URL 缺少 host".into()))?;
@@ -579,16 +568,6 @@ mod tests {
         assert_eq!(parse_http_status(b"HTTP/1.1 204 No Content\r\n"), Some(204));
         assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n"), Some(200));
         assert_eq!(parse_http_status(b"garbage"), None);
-    }
-
-    /// 中位数必须扛得住单点抖动 —— 这正是单次采样做不到的事。
-    #[test]
-    fn median_ignores_a_single_outlier() {
-        assert_eq!(median(&mut [190]), Some(190));
-        assert_eq!(median(&mut [210, 190, 191]), Some(191));
-        // 单点异常被压掉：192 vs 850（首次冷 DNS 缓存那种）
-        assert_eq!(median(&mut [192, 850, 191]), Some(192));
-        assert_eq!(median(&mut []), None);
     }
 
     /// `ok()` 必须看「能不能取到东西」，而不是「RTT 测到没有」。

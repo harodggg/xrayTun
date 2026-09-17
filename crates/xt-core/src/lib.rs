@@ -20,6 +20,7 @@ pub mod dns_probe;
 pub mod store;
 pub mod update;
 pub mod subscription;
+pub mod util;
 pub mod xray;
 
 pub use error::{Error, Result};

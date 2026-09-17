@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::util::median;
 
 /// 候选池里的类别。**同时就是界面上的分组。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,14 +446,6 @@ async fn probe_one(c: &DnsCandidate, spec: &ProbeSpec) -> (DnsProbe, Option<Vec<
     probe.answered = reference.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
         || !latencies.is_empty();
     (probe, reference)
-}
-
-fn median(v: &mut [u32]) -> Option<u32> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_unstable();
-    Some(v[v.len() / 2])
 }
 
 /// 多数派投票：返回答案与多数不一致的服务器下标。

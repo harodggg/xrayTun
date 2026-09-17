@@ -335,12 +335,11 @@ pub struct CoreAvailability {
     pub min_native_tun_version: String,
 }
 
-pub fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+/// 当前 Unix 时间戳（秒）。唯一实现在 `xt_core::util`。
+///
+/// 这里只做再导出：命令层与 supervisor 都按 `crate::state::now_unix` 引用它，
+/// 保留这个名字可以让调用点一行都不用改，同时消除重复实现。
+pub use xt_core::util::now_unix;
 
 /// 校验设置并持久化。返回校验错误而不是静默修正 —— 用户需要知道为什么。
 pub fn persist_settings(state: &AppState, settings: &AppSettings) -> Result<(), String> {

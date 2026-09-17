@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::model::{AppSettings, Node, Subscription};
+use crate::util::now_unix;
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -187,13 +188,6 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path)
         .map_err(|e| Error::Store(format!("替换 {} 失败: {e}", path.display())))?;
     Ok(())
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

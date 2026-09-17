@@ -29,6 +29,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::util::now_unix;
 
 /// 核心更新的上游。
 pub const XRAY_REPO: &str = "XTLS/Xray-core";
@@ -804,13 +805,6 @@ impl InstalledMeta {
         std::fs::write(dir.join("meta.json"), s)
             .map_err(|e| Error::Update(format!("写元信息失败：{e}")))
     }
-}
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// 同步地跑一次 `xray version` 并取第一行。
