@@ -1,0 +1,241 @@
+//! **跨语言契约测试**：Rust 的序列化输出 vs 前端手写的 TypeScript 类型。
+//!
+//! # 为什么需要它
+//!
+//! `apps/ui/src/types.ts` 是**手写**的，字段名必须与 Rust 侧 `serde` 的输出一致，
+//! 但两者之间没有编译器检查。这里从两个方向取字段名并比对：一边把真实的 Rust
+//! 值序列化成 JSON 取键，另一边直接读 `types.ts` 里对应接口的字段名。
+//!
+//! # 它到底覆盖什么（用变异测试实测过，不要高估）
+//!
+//! * **TS 声明了 Rust 不提供的字段** -> 本测试抓到
+//!   （实测：往 `AppSnapshot` 注入 `nonexistent_field_probe`，测试红）。
+//! * **Rust 侧改名/删除字段而前端没跟上** -> 通常**编译器先抓到**：
+//!   结构体一改，"构造 AppSnapshot"的代码就编不过。实测确认过这一点，
+//!   所以不要把这个测试当成那类问题的唯一防线。
+//! * **Rust 有、前端未声明的字段** -> 本测试抓到，这是它**独有**的价值：
+//!   它第一次运行时就在 `AppSettings` 上抓到 3 个（见下面的登记表）。
+//!
+//! # 已知不覆盖
+//!
+//! **不校验字段类型**（那需要完整解析 TS）。也就是说 `port: string` 写成
+//! `port: number` 这类错误它看不出来 —— 只校验**名字集合**，而名字正是
+//! 「界面静默读到 undefined」的成因。
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use xraytun_desktop_lib::state::{
+    AppSnapshot, CoreAvailability, CoreRuntime, HelperAvailability, LoginItemState, TrafficSample,
+    UpdateStatus,
+};
+use xt_core::model::AppSettings;
+use xt_core::store::Store;
+
+/// 仓库根目录。
+///
+/// 刻意不在生产代码里加「测试用」的路径导出：`dev_binaries_dir` 的语义是
+/// 「开发期去哪找核心」，与前端资源无关，不该为测试改它。
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("apps/desktop 之上应当有仓库根")
+        .to_path_buf()
+}
+
+fn types_ts() -> String {
+    let p = repo_root().join("apps/ui/src/types.ts");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 {}: {e}", p.display()))
+}
+
+/// 从一个 `export interface X { ... }` 里取出**顶层**字段名。
+///
+/// 只认「行首两个空格 + 标识符 + 可选 ? + 冒号」这种形状 —— 这个文件里的
+/// 接口都是这个风格，够用且不引入 TS 解析器依赖。嵌套对象与注释被跳过：
+/// 嵌套行的缩进更深，注释以 `/` 或 `*` 开头。
+fn ts_interface_fields(src: &str, name: &str) -> BTreeSet<String> {
+    let header = format!("export interface {name} {{");
+    let start = src
+        .find(&header)
+        .unwrap_or_else(|| panic!("types.ts 里找不到 interface {name}"))
+        + header.len();
+
+    // 花括号配平找到接口结尾
+    let mut depth = 1usize;
+    let mut end = start;
+    for (i, ch) in src[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(depth == 0, "interface {name} 的花括号不配平");
+
+    let mut out = BTreeSet::new();
+    for line in src[start..end].lines() {
+        let t = line.trim();
+        if t.starts_with("//") || t.starts_with("/*") || t.starts_with('*') || t.is_empty() {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        // 顶层字段只有一层缩进（2 空格）；更深的属于嵌套对象
+        let indent = line.len() - trimmed.len();
+        if indent != 2 {
+            continue;
+        }
+        if let Some(colon) = trimmed.find(':') {
+            let key = trimmed[..colon].trim().trim_end_matches('?').trim();
+            if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                out.insert(key.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn json_keys(value: &serde_json::Value) -> BTreeSet<String> {
+    value
+        .as_object()
+        .expect("应当是 JSON 对象")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// 一份「所有字段都填上」的 AppSettings，避免序列化时缺键。
+fn full_settings() -> AppSettings {
+    let dir = std::env::temp_dir().join(format!("xt-contract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::new(dir);
+    let settings = store.load_settings(); // 走真实的默认值路径
+    let _ = std::fs::remove_dir_all(store.root());
+    settings
+}
+
+fn full_snapshot() -> AppSnapshot {
+    AppSnapshot {
+        settings: full_settings(),
+        subscriptions: Vec::new(),
+        nodes: Vec::new(),
+        runtime: CoreRuntime::default(),
+        latency: Default::default(),
+        traffic: TrafficSample::default(),
+        notice: None,
+        helper: HelperAvailability::default(),
+        core: CoreAvailability::default(),
+        login_item: LoginItemState::default(),
+        update: UpdateStatus::default(),
+        dns: Default::default(),
+        app_version: "0.0.0".into(),
+    }
+}
+
+/// TS 声明了、Rust 却不提供的字段 —— 这类**必须为零**。
+///
+/// 这正是「界面读到 `undefined`」的成因：前端照着 `types.ts` 去读一个
+/// 后端根本不发的键，TypeScript 看不出问题，运行期也不报错。
+fn assert_ts_is_covered_by_rust(
+    label: &str,
+    value: &serde_json::Value,
+    interface: &str,
+    src: &str,
+) -> BTreeSet<String> {
+    let rust = json_keys(value);
+    let ts = ts_interface_fields(src, interface);
+    let missing: Vec<_> = ts.difference(&rust).collect();
+    assert!(
+        missing.is_empty(),
+        "\n{label}: 前端 types.ts 声明了 Rust **不提供**的字段 {missing:?}\n\
+         前端会读到 undefined。要么在 Rust 侧补上，要么从 types.ts 删掉。"
+    );
+    rust
+}
+
+/// Rust 有、但前端**刻意不暴露**的字段，逐个登记并说明理由。
+///
+/// 允许这种差异是为了不让契约测试变成「每加一个内部字段就必须改前端类型」的
+/// 噪音源；但差异必须是**显式写在这里**的，不能是没人注意的漂移。
+const SETTINGS_FIELDS_NOT_IN_TS: &[(&str, &str)] = &[
+    ("settings_version", "迁移用的内部版本号，界面不需要也不该依赖"),
+    ("was_connected", "重连意图，由 Rust 侧读写，界面不显示"),
+    ("auto_reconnect", "重连策略开关，界面目前没有对应控件"),
+];
+
+#[test]
+fn snapshot_fields_match_the_frontend_types() {
+    // 快照是界面渲染的唯一数据来源，应当是**完全一致**的：
+    // 多一个字段说明界面有东西没用到，少一个说明界面会读到 undefined。
+    let json = serde_json::to_value(full_snapshot()).expect("快照应当能序列化");
+    let rust = json_keys(&json);
+    let ts = ts_interface_fields(&types_ts(), "AppSnapshot");
+
+    assert_eq!(
+        rust,
+        ts,
+        "\nAppSnapshot 与前端 types.ts 的字段不一致：\n  仅 Rust 有: {:?}\n  仅 TS   有: {:?}",
+        rust.difference(&ts).collect::<Vec<_>>(),
+        ts.difference(&rust).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn settings_fields_cover_what_the_frontend_declares() {
+    let src = types_ts();
+    // 1) 前端声明的字段必须都真的存在（否则界面会读到 undefined）
+    let rust = assert_ts_is_covered_by_rust(
+        "AppSettings",
+        &serde_json::to_value(full_settings()).unwrap(),
+        "AppSettings",
+        &src,
+    );
+
+    // 2) 剩下的就是「Rust 有、前端没声明」的部分，必须与登记表**精确一致**
+    let ts = ts_interface_fields(&src, "AppSettings");
+    let extra: BTreeSet<String> = rust.difference(&ts).cloned().collect();
+    let declared: BTreeSet<String> =
+        SETTINGS_FIELDS_NOT_IN_TS.iter().map(|(n, _)| n.to_string()).collect();
+    assert_eq!(
+        extra,
+        declared,
+        "\nAppSettings 里「Rust 有、前端未声明」的字段与登记表不一致：\n  未登记: {:?}\n  登记了但已不存在: {:?}\n\
+         界面不需要的请加进 SETTINGS_FIELDS_NOT_IN_TS 并写明理由；界面需要的就补进 types.ts。",
+        extra.difference(&declared).collect::<Vec<_>>(),
+        declared.difference(&extra).collect::<Vec<_>>()
+    );
+}
+
+/// 这两个结构是独立命令的返回值（`probe_helper` / 快照里的 `core`），
+/// 单独比对是因为它们不走 AppSnapshot 的字段集。
+#[test]
+fn helper_and_core_shapes_match_the_frontend_types() {
+    let src = types_ts();
+    for (label, value, interface) in [
+        (
+            "HelperAvailability",
+            serde_json::to_value(HelperAvailability::default()).unwrap(),
+            "HelperAvailability",
+        ),
+        (
+            "CoreAvailability",
+            serde_json::to_value(CoreAvailability::default()).unwrap(),
+            "CoreAvailability",
+        ),
+    ] {
+        let rust = assert_ts_is_covered_by_rust(label, &value, interface, &src);
+        let ts = ts_interface_fields(&src, interface);
+        let extra: Vec<_> = rust.difference(&ts).collect();
+        assert!(
+            extra.is_empty(),
+            "\n{label}: Rust 提供了前端未声明的字段 {extra:?}\n\
+             界面若需要就补进 types.ts。"
+        );
+    }
+}
