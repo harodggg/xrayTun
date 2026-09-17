@@ -23,13 +23,26 @@ const NAV: Array<{ id: View; label: string }> = [
 export default function App() {
   return (
     <StoreProvider>
-      <Shell />
+      <Shell initialView={initialViewFromUrl()} />
     </StoreProvider>
   );
 }
 
-function Shell() {
-  const [view, setView] = useState<View>("dashboard");
+/**
+ * 只给浏览器预览用的初始页面：`?view=nodes`。
+ *
+ * 生产环境恒为 undefined（`import.meta.env.DEV` 为 false），正式版总是从
+ * 仪表盘开始 —— 这个参数只是让截图工具与手工预览能直接落在某一页，
+ * 不必逐个点导航。
+ */
+function initialViewFromUrl(): View | undefined {
+  if (!import.meta.env.DEV) return undefined;
+  const v = new URLSearchParams(location.search).get("view");
+  return NAV.some((n) => n.id === v) ? (v as View) : undefined;
+}
+
+function Shell({ initialView }: { initialView?: View }) {
+  const [view, setView] = useState<View>(initialView ?? "dashboard");
   const { snapshot, error, clearError } = useStore();
 
   const nodeCount = snapshot?.nodes.length ?? 0;
