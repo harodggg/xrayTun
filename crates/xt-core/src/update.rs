@@ -45,8 +45,17 @@ pub const GEO_REPO: &str = "Loyalsoldier/v2ray-rules-dat";
 /// 如果哪天仓库又改回私有，就必须填 token，否则一律 404。
 pub const APP_REPO: &str = "harodggg/xrayTun";
 
-/// 下载超时。核心约 20MB、geo 约 30MB，给宽一点。
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// 下载超时。核心约 20MB、geo 约 30MB、客户端包约 42MB。
+///
+/// **这是整个 curl 进程的总预算，不是单次尝试的预算。** 它必须容下
+/// 「被断流 → 重试 → 从断点继续」这几次尝试加起来的时间，否则重试会挤掉自己：
+/// 实测 300 秒时，客户端包在慢链路上单次就要 140 秒，重试几次必然撞上超时
+/// （curl 退出码 28），于是**越重试越失败**。
+///
+/// 15 分钟的依据：按实测最差 ~300KB/s 算，42MB 约需 140 秒，留出 4 次完整
+/// 尝试的余量；且每次失败都从断点继续，实际远用不满。真正的「服务器无响应」
+/// 由 API 那一档 30 秒兜住，不会让用户干等。
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(900);
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
@@ -400,17 +409,46 @@ pub fn download(url: &str, dest: &Path, proxy: Option<u16>) -> Result<()> {
 ///
 /// 这是个阻塞函数（内部 sleep + 轮询子进程），调用方要放在
 /// `spawn_blocking` 里。
+///
+/// # 抗断流（0.8.1 修）
+///
+/// 实测在 ~300KB/s 的链路上，42MB 的包下到 30% 会碰到
+/// 「接收数据时连接被重置」。原来的参数对此**完全无能为力**：
+/// 单独的 `--retry N` 只覆盖超时与 5xx，连接重置（curl 退出码 56）不在其中；
+/// 而且没有断点续传，重试也是从零开始。
+///
+/// 现在：`--retry-all-errors` 让**所有**错误都触发重试，`-C -` 让每次重试
+/// 从已下载的字节接着来。于是「网线抖一下」不再等于「重来一遍」。
+///
+/// 为了不让 `-C -` 变成隐患，函数开头会**删掉目标文件**：这样续传只可能
+/// 发生在同一次调用内的重试之间，不会把上一次失败留下的半成品
+/// 与这一次的响应拼在一起（那种拼接会产出坏文件）。
 pub fn download_with_progress(
     url: &str,
     dest: &Path,
     proxy: Option<u16>,
     mut on_progress: impl FnMut(u64),
 ) -> Result<()> {
+    // 从干净状态开始：见上面关于 `-C -` 的说明。
+    let _ = std::fs::remove_file(dest);
+
     let mut args = vec![
         "-sSL".to_string(),
         "-f".to_string(),
+        // 断点续传：curl 自己会从目标文件的现有长度接着下。
+        // 42MB 的包在 ~300KB/s 的链路上要 140 秒，中途被重置很常见，
+        // 没有它就得每次从头再来。
+        "-C".to_string(),
+        "-".to_string(),
+        // 只加 `--retry` 是不够的：curl 默认**只重试有限的几种错误**
+        // （超时、5xx），而「接收数据时连接被重置」（退出码 56）
+        // 不在其中 —— 实测就是这样失败的：下到 30% 直接放弃，
+        // 重试形同虚设。`--retry-all-errors` 才让它对所有错误重试。
         "--retry".to_string(),
-        "2".to_string(),
+        "3".to_string(),
+        "--retry-all-errors".to_string(),
+        "--retry-delay".to_string(),
+        "1".to_string(),
         "--max-time".to_string(),
         DOWNLOAD_TIMEOUT.as_secs().to_string(),
         "-o".to_string(),
@@ -732,6 +770,35 @@ mod tests {
         assert_eq!(parse_sha256sum(&format!("{hex}  geosite.dat")), Some(hex.clone()));
         assert_eq!(parse_sha256sum(&format!("{hex}\n")), Some(hex));
         assert_eq!(parse_sha256sum("not-a-hash"), None);
+    }
+
+    /// **下载前必须清掉目标文件。**
+    ///
+    /// 这条钉住的是 `-C -`（断点续传）的**安全边界**：续传只允许发生在
+    /// 同一次调用内的重试之间。如果目标文件里留着上一次失败的半成品，
+    /// curl 会从那个偏移接着写 —— 一旦远端内容变了或偏移对不上，
+    /// 拼出来的就是一个坏文件（校验能挡住，但那本该是成功）。
+    ///
+    /// 用不可达的 URL 触发失败，然后断言目标文件已被清掉（而不是留着旧内容）。
+    #[test]
+    fn download_starts_from_a_clean_destination() {
+        let dir = std::env::temp_dir().join(format!("xt-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("pkg.zip");
+        std::fs::write(&dest, b"STALE-PARTIAL-CONTENT").unwrap();
+
+        // 127.0.0.1:1 上没有服务，必然失败
+        let r = download_with_progress("http://127.0.0.1:1/nope", &dest, None, |_| {});
+        assert!(r.is_err(), "不可达地址应当失败");
+
+        let left = std::fs::read(&dest).unwrap_or_default();
+        assert!(
+            !left.starts_with(b"STALE-PARTIAL"),
+            "旧内容必须被清掉，否则续传会把两次响应拼起来: {:?}",
+            String::from_utf8_lossy(&left)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **解压按精确条目名匹配，因此上游包必须是平铺的。**
