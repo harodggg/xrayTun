@@ -24,6 +24,21 @@ use crate::state::{
 };
 use crate::AppState;
 
+/// 状态锁不可用时的统一提示。
+///
+/// 抽成常量而不是散落的字面量：这句话就是用户看到的全部信息，
+/// 改一次要能全局生效，而不是漏掉某几处导致同一个故障有两种说法。
+const STATE_UNAVAILABLE: &str = "应用状态不可用";
+
+/// 把领域错误翻成给用户看的一句话。
+///
+/// `xt_core::Error` 的 `Display` 本来就是中文人话（见 `crates/xt-core/src/error.rs`），
+/// 命令层要做的只是脱掉错误类型、留下那句话。这里统一收口，
+/// 避免 16 处各写一遍 `map_err(user_msg)`。
+fn user_msg<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // 快照
 // ---------------------------------------------------------------------------
@@ -140,7 +155,7 @@ async fn run_dns_probe(app: &AppHandle, state: &AppState, apply: bool) -> Result
     });
 
     if apply {
-        let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+        let mut settings = state.with(|i| i.settings.clone()).ok_or(STATE_UNAVAILABLE)?;
         if settings.dns.auto_select {
             let mut changes = Vec::new();
 
@@ -235,7 +250,7 @@ pub async fn check_app_update(
 ) -> Result<AppSnapshot, String> {
     let proxy = state
         .with(|i| i.runtime.running.then_some(i.settings.socks_port))
-        .ok_or("应用状态不可用")?;
+        .ok_or(STATE_UNAVAILABLE)?;
 
     let result = tauri::async_runtime::spawn_blocking(move || xt_core::update::check_app(proxy))
     .await
@@ -319,7 +334,7 @@ fn stage_app_update(
             .map_err(|e| format!("取校验和失败：{e}"))?;
         let want = xt_core::update::parse_sha256sum_for(&text, &zip_name)
             .ok_or_else(|| format!("校验文件里没有 {zip_name}"))?;
-        let got = xt_core::update::sha256_file(&zip).map_err(|e| e.to_string())?;
+        let got = xt_core::update::sha256_file(&zip).map_err(user_msg)?;
         if want != got {
             return Err(format!("校验和不匹配：期望 {want}，实际 {got}"));
         }
@@ -328,7 +343,7 @@ fn stage_app_update(
     }
 
     let stage = tmp.join("stage");
-    xt_core::update::unzip_tree(&zip, &stage).map_err(|e| e.to_string())?;
+    xt_core::update::unzip_tree(&zip, &stage).map_err(user_msg)?;
 
     let app = stage.join("XrayTun.app");
     if !app.is_dir() {
@@ -362,7 +377,7 @@ pub async fn install_app_update(
                 i.update.latest_app.clone(),
             )
         })
-        .ok_or("应用状态不可用")?;
+        .ok_or(STATE_UNAVAILABLE)?;
     let latest = latest.ok_or("还没有检查过客户端更新")?;
 
     let tmp = std::env::temp_dir().join(format!("xraytun-update-{}", std::process::id()));
@@ -496,7 +511,7 @@ pub async fn install_core_update(
     })
     .await
     .map_err(|e| format!("安装任务失败：{e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(user_msg)?;
 
     state.with(|i| {
         i.update.progress = None;
@@ -532,7 +547,7 @@ pub async fn install_geo_update(
     })
     .await
     .map_err(|e| format!("安装任务失败：{e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(user_msg)?;
 
     state.with(|i| {
         i.push_log(
@@ -554,7 +569,7 @@ pub async fn revert_managed_update(
     state: State<'_, AppState>,
 ) -> Result<AppSnapshot, String> {
     let dir = xt_core::update::managed_core_dir(state.store.root());
-    xt_core::update::revert_managed(&dir).map_err(|e| e.to_string())?;
+    xt_core::update::revert_managed(&dir).map_err(user_msg)?;
     state.with(|i| {
         i.push_log("app", "info", "已回退到随包版本（核心与 geo）");
         i.update.latest_core = None;
@@ -645,7 +660,7 @@ pub async fn set_launch_at_login(
     // 注册成功了但需要用户批准时，字段要不要置 true？
     // 由 status() 决定，避免又造出一个「字段和现实不一致」的状态。
     let actual = crate::login_item::status()?;
-    let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+    let mut settings = state.with(|i| i.settings.clone()).ok_or(STATE_UNAVAILABLE)?;
     settings.launch_at_login = actual.is_on();
     persist_settings(&state, &settings)?;
 
@@ -1656,7 +1671,7 @@ pub async fn select_node(
     if !exists {
         return Err("找不到该节点".into());
     }
-    let mut settings = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+    let mut settings = state.with(|i| i.settings.clone()).ok_or(STATE_UNAVAILABLE)?;
     let previous = settings.selected_node.clone();
     settings.selected_node = Some(node_id.clone());
     persist_settings(&state, &settings)?;
@@ -1691,7 +1706,7 @@ pub async fn select_node(
                 )
             });
             if let Some(back) = was_good.filter(|b| b != &node_id) {
-                let mut s2 = state.with(|i| i.settings.clone()).ok_or("应用状态不可用")?;
+                let mut s2 = state.with(|i| i.settings.clone()).ok_or(STATE_UNAVAILABLE)?;
                 s2.selected_node = Some(back);
                 persist_settings(&state, &s2)?;
                 start_core(&app, &state).await?;
@@ -1710,26 +1725,28 @@ pub async fn add_manual_node(
 ) -> Result<AppSnapshot, String> {
     // 用 parse_manual 而不是 parse_share_link：用户粘贴的可能是
     // 一条分享链接、一段订阅正文、或者一条 Clash proxy 定义。
-    let outcome = xt_core::subscription::parse_manual(&link).map_err(|e| e.to_string())?;
+    let outcome = xt_core::subscription::parse_manual(&link).map_err(user_msg)?;
     let node = outcome
         .nodes
         .into_iter()
         .next()
         .ok_or_else(|| "没能解析出节点".to_string())?;
-    state.with(|i| {
-        if !i.nodes.iter().any(|n| n.id == node.id) {
-            i.nodes.push(node.clone());
-        }
-        if i.settings.selected_node.is_none() {
-            i.settings.selected_node = Some(node.id.clone());
-        }
-        let settings = i.settings.clone();
-        let nodes = i.nodes.clone();
-        (settings, nodes)
-    });
-    let (settings, nodes) = state.with(|i| (i.settings.clone(), i.nodes.clone())).ok_or("应用状态不可用")?;
-    state.store.save_nodes(&nodes).map_err(|e| e.to_string())?;
-    state.store.save_settings(&settings).map_err(|e| e.to_string())?;
+    // 一次加锁完成「改内存 + 取出要落盘的两份数据」。
+    // 这里曾经是两次 `state.with`：第一次的返回值被整个丢掉，紧接着再加锁
+    // 克隆同样的两样东西 —— 多一次锁往返加一整份重复克隆。
+    let (settings, nodes) = state
+        .with(|i| {
+            if !i.nodes.iter().any(|n| n.id == node.id) {
+                i.nodes.push(node.clone());
+            }
+            if i.settings.selected_node.is_none() {
+                i.settings.selected_node = Some(node.id.clone());
+            }
+            (i.settings.clone(), i.nodes.clone())
+        })
+        .ok_or(STATE_UNAVAILABLE)?;
+    state.store.save_nodes(&nodes).map_err(user_msg)?;
+    state.store.save_settings(&settings).map_err(user_msg)?;
     events::nodes_changed(&app);
     build_snapshot(&app, &state).await
 }
@@ -1749,9 +1766,9 @@ pub async fn delete_node(
             }
             (i.settings.clone(), i.nodes.clone())
         })
-        .ok_or("应用状态不可用")?;
-    state.store.save_nodes(&nodes).map_err(|e| e.to_string())?;
-    state.store.save_settings(&settings).map_err(|e| e.to_string())?;
+        .ok_or(STATE_UNAVAILABLE)?;
+    state.store.save_nodes(&nodes).map_err(user_msg)?;
+    state.store.save_settings(&settings).map_err(user_msg)?;
     events::nodes_changed(&app);
     build_snapshot(&app, &state).await
 }
@@ -1798,9 +1815,9 @@ pub async fn remove_subscription(
             });
             (i.nodes.clone(), i.subscriptions.clone())
         })
-        .ok_or("应用状态不可用")?;
-    state.store.save_nodes(&nodes).map_err(|e| e.to_string())?;
-    state.store.save_subscriptions(&subs).map_err(|e| e.to_string())?;
+        .ok_or(STATE_UNAVAILABLE)?;
+    state.store.save_nodes(&nodes).map_err(user_msg)?;
+    state.store.save_subscriptions(&subs).map_err(user_msg)?;
     events::nodes_changed(&app);
     build_snapshot(&app, &state).await
 }
@@ -1820,7 +1837,7 @@ pub async fn refresh_subscriptions(
                 .cloned()
                 .collect()
         })
-        .ok_or("应用状态不可用")?;
+        .ok_or(STATE_UNAVAILABLE)?;
 
     if targets.is_empty() {
         return build_snapshot(&app, &state).await;
@@ -1905,9 +1922,9 @@ pub async fn refresh_subscriptions(
         i.last_notice = Some(messages.join("；"));
     });
     persist_subscriptions(&state)?;
-    let (settings, nodes) = state.with(|i| (i.settings.clone(), i.nodes.clone())).ok_or("应用状态不可用")?;
-    state.store.save_nodes(&nodes).map_err(|e| e.to_string())?;
-    state.store.save_settings(&settings).map_err(|e| e.to_string())?;
+    let (settings, nodes) = state.with(|i| (i.settings.clone(), i.nodes.clone())).ok_or(STATE_UNAVAILABLE)?;
+    state.store.save_nodes(&nodes).map_err(user_msg)?;
+    state.store.save_settings(&settings).map_err(user_msg)?;
     events::nodes_changed(&app);
     build_snapshot(&app, &state).await
 }
@@ -1932,7 +1949,7 @@ pub async fn test_latency(
                 .collect();
             (nodes, i.settings.core_path.clone())
         })
-        .ok_or("应用状态不可用")?;
+        .ok_or(STATE_UNAVAILABLE)?;
 
     if nodes.is_empty() {
         return Err("没有可测试的节点".into());
@@ -1946,7 +1963,7 @@ pub async fn test_latency(
         resource_dir.as_deref(),
         dev_dir.as_deref(),
     )
-        .map_err(|e| e.to_string())?;
+        .map_err(user_msg)?;
 
     state.with(|i| i.push_log("app", "info", format!("开始测试 {} 个节点的延迟", nodes.len())));
     events::probe_started(&app, nodes.len());
@@ -2142,8 +2159,8 @@ pub async fn open_data_dir(state: State<'_, AppState>) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn persist_subscriptions(state: &AppState) -> Result<(), String> {
-    let subs = state.with(|i| i.subscriptions.clone()).ok_or("应用状态不可用")?;
-    state.store.save_subscriptions(&subs).map_err(|e| e.to_string())
+    let subs = state.with(|i| i.subscriptions.clone()).ok_or(STATE_UNAVAILABLE)?;
+    state.store.save_subscriptions(&subs).map_err(user_msg)
 }
 
 /// 极简 HTTP 客户端配置。用 `std::net` 之外的东西会引入新依赖，
