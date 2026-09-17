@@ -721,3 +721,210 @@ input[type="checkbox"] {
 .probe-group__title .field__hint {
   font-weight: 400;
 }
+
+/* ================================================================ 仪表盘
+ *
+ * 这一版按「极简」重排：用留白与字阶代替卡片边框，把同权重信息降级，
+ * 让「现在通不通」成为页面上唯一的第一眼信息。
+ *
+ * 命名统一带 `dash__` 前缀，与上面的通用类（.card/.stat/.banner）分开，
+ * 避免为了仪表盘去改那些别处还在用的规则。
+ */
+
+.dash {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  /* 单列阅读宽度。比 720 窄一些：1080 窗口下内容区约 840px，
+     留一点右侧空白是刻意的（极简），但不能留成大半个屏幕。 */
+  max-width: 640px;
+}
+
+/* ---------------------------------------------------------------- 状态区 */
+
+.dash__status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dash__state {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  line-height: 1.25;
+}
+
+/* 状态词本身带颜色：一眼就能读出「通 / 不通 / 中间态」 */
+.dash__state--on .dash__state-label {
+  color: var(--ok);
+}
+.dash__state--warn .dash__state-label {
+  color: var(--warn);
+}
+.dash__state--bad .dash__state-label {
+  color: var(--danger);
+}
+.dash__state--off .dash__state-label {
+  color: var(--text-dim);
+}
+
+.dash__state-label {
+  color: var(--text);
+}
+
+/* 节点名比状态词弱一档：状态是主语，节点是补充 */
+.dash__state-node {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.dash__state .badge {
+  font-size: 11px;
+  font-weight: 500;
+  /* 顶到右侧，与状态词拉开距离 */
+  margin-left: 2px;
+}
+
+.dash__sep {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.dash__meta {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.dash__state-sub {
+  font-size: 12.5px;
+  color: var(--warn);
+  line-height: 1.6;
+}
+
+.dash__hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.65;
+  padding-left: 11px;
+  border-left: 2px solid var(--border-strong);
+}
+
+.dash__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  /* 与上方文字拉开，让操作区自己成组 */
+  margin-top: 10px;
+}
+
+/* ---------------------------------------------------------------- 流量 */
+
+.dash__traffic {
+  display: flex;
+  gap: 34px;
+  flex-wrap: wrap;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.dash__metric {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.dash__metric-arrow {
+  font-size: 13px;
+  color: var(--text-faint);
+}
+
+/* 等宽 + 定宽：数字跳动时不推挤后面的累计值 */
+.dash__metric-rate {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  font-weight: 500;
+  min-width: 96px;
+}
+
+.dash__metric-total {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- 提示 */
+
+/* 只留最要紧那条，且比别处的横幅更轻 —— 它不抢状态区的注意力 */
+.dash__banner {
+  margin-bottom: 0;
+  border-color: transparent;
+  background: var(--bg-elevated);
+}
+
+.dash__more {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  margin-top: -12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dash__more:hover {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------- 诊断（折叠） */
+
+.dash__details {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.dash__details > summary {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+
+.dash__details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 自绘三角：原生 marker 在不同 WebKit 版本里位置不一致 */
+.dash__details > summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--text-faint);
+  transition: transform 0.12s ease;
+}
+
+.dash__details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.dash__details > summary:hover {
+  color: var(--text);
+}
+
+.dash__details > *:not(summary) {
+  margin-top: 12px;
+}
