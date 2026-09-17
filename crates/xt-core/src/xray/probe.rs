@@ -416,6 +416,12 @@ async fn sample_rtt_once(
 }
 /// 探测单个节点：TCP 连接 + TTFB。
 async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u16)> {
+    // **`timeout` 是整个函数的预算，不是每个阶段各自一份。**
+    //
+    // 早先每个阶段各吃满 `timeout`：连接一次（超时后还再重试一次），再叠一个
+    // 读超时 —— 最坏 3×timeout（默认 15s）。而这段时间里该节点一直占着并发
+    // 名额，于是「一个坏节点」能把整批探测拖慢，用户看到的是长时间没反应。
+    let deadline = Instant::now() + timeout;
     let host = target.host_str().ok_or_else(|| Error::Probe("探测 URL 缺少 host".into()))?;
     let target_port = target.port_or_known_default().unwrap_or(80);
     let path = if target.path().is_empty() { "/" } else { target.path() };
@@ -426,12 +432,20 @@ async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u
     // `dns` 段，靶点域名首次解析要经系统解析器绕回主核心的 DNS 模块，
     // 再经 DoH 走节点，本身就是几百毫秒起步）。一次超时就标「失败」
     // 会把能用的节点误报成不可用。
-    let mut stream = match socks5_connect(port, host, target_port, timeout).await {
+    //
+    // 但重试要**先看预算够不够**：只剩一点时间还去重试，等于把「失败」
+    // 往后拖，用户等到的仍是失败，只是更晚。
+    let mut stream = match socks5_connect(port, host, target_port, deadline).await {
         Ok(s) => s,
-        Err(first) => match socks5_connect(port, host, target_port, timeout).await {
-            Ok(s) => s,
-            Err(_) => return Err(first),
-        },
+        Err(first) => {
+            if remaining(deadline) < MIN_RETRY_BUDGET {
+                return Err(first);
+            }
+            match socks5_connect(port, host, target_port, deadline).await {
+                Ok(s) => s,
+                Err(_) => return Err(first),
+            }
+        }
     };
 
     let request = format!(
@@ -445,9 +459,9 @@ async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u
         .map_err(|e| Error::Probe(format!("发送请求失败: {e}")))?;
 
     let mut buf = [0u8; 128];
-    let n = tokio::time::timeout(timeout, stream.read(&mut buf))
+    let n = tokio::time::timeout_at(deadline.into(), stream.read(&mut buf))
         .await
-        .map_err(|_| Error::Probe(format!("等待首字节超时（>{}s）", timeout.as_secs())))?
+        .map_err(|_| Error::Probe(format!("等待首字节超时（总预算 {}s）", timeout.as_secs())))?
         .map_err(|e| Error::Probe(format!("读取响应失败: {e}")))?;
 
     if n == 0 {
@@ -456,6 +470,35 @@ async fn probe_one(port: u16, target: &Url, timeout: Duration) -> Result<(u32, u
     let latency = start.elapsed().as_millis().min(u32::MAX as u128) as u32;
     let status = parse_http_status(&buf[..n]).unwrap_or(0);
     Ok((latency, status))
+}
+
+/// 重试一次所需的最小剩余预算。比它更少时重试几乎注定也超时，
+/// 不如立刻把错误交给用户。
+const MIN_RETRY_BUDGET: Duration = Duration::from_millis(500);
+
+/// 距截止时刻还剩多久；已过期则为零。
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+/// 用**截止时刻**而不是「再等 N 秒」来限制一个操作。
+///
+/// 统一入口的意义：让每个 `await` 都共享同一个预算。用 `timeout(固定时长)`
+/// 会随阶段推进不断「续命」，几个阶段叠起来就是预算的数倍 —— 这正是
+/// 探测最坏耗时的来源。
+async fn timeout_at_remaining<F, T>(
+    deadline: Instant,
+    fut: F,
+    what: &'static str,
+) -> Result<Result<T, std::io::Error>>
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    match tokio::time::timeout(remaining(deadline), fut).await {
+        Ok(Ok(v)) => Ok(Ok(v)),
+        Ok(Err(e)) => Ok(Err(e)),
+        Err(_) => Err(Error::Probe(format!("{what}（预算耗尽）"))),
+    }
 }
 
 fn parse_http_status(buf: &[u8]) -> Option<u16> {
@@ -474,21 +517,25 @@ async fn socks5_connect(
     proxy_port: u16,
     host: &str,
     target_port: u16,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<TcpStream> {
-    let mut stream = tokio::time::timeout(
-        timeout,
+    let mut stream = timeout_at_remaining(
+        deadline,
         TcpStream::connect(("127.0.0.1", proxy_port)),
+        "连接本地探针端口超时",
     )
-    .await
-    .map_err(|_| Error::Probe("连接本地探针端口超时".into()))?
+    .await?
     .map_err(|e| Error::Probe(format!("连接本地探针端口 {proxy_port} 失败: {e}")))?;
     let _ = stream.set_nodelay(true);
 
     // 1) 方法协商：只声明「无认证」。
-    stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    timeout_at_remaining(deadline, stream.write_all(&[0x05, 0x01, 0x00]), "SOCKS5 协商写入超时")
+        .await??;
     let mut greeting = [0u8; 2];
-    stream.read_exact(&mut greeting).await?;
+    // ⚠️ 这些读操作**必须有超时**：探针端口若接受连接后不响应，
+    // 原先裸写的 `read_exact` 会把整个探测永久挂住（不是慢，是永不返回）。
+    timeout_at_remaining(deadline, stream.read_exact(&mut greeting), "SOCKS5 协商响应超时")
+        .await??;
     if greeting[0] != 0x05 {
         return Err(Error::Probe(format!("对端不是 SOCKS5（版本字节 {}）", greeting[0])));
     }
@@ -513,11 +560,11 @@ async fn socks5_connect(
         req.extend_from_slice(host.as_bytes());
     }
     req.extend_from_slice(&target_port.to_be_bytes());
-    stream.write_all(&req).await?;
+    timeout_at_remaining(deadline, stream.write_all(&req), "SOCKS5 请求写入超时").await??;
 
     // 3) 应答。
     let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await?;
+    timeout_at_remaining(deadline, stream.read_exact(&mut head), "SOCKS5 应答超时").await??;
     if head[1] != 0x00 {
         return Err(Error::Probe(format!("SOCKS5 CONNECT 被拒绝（reply={}）", head[1])));
     }
@@ -525,17 +572,17 @@ async fn socks5_connect(
     match head[3] {
         0x01 => {
             let mut skip = [0u8; 4 + 2];
-            stream.read_exact(&mut skip).await?;
+            timeout_at_remaining(deadline, stream.read_exact(&mut skip), "SOCKS5 应答超时").await??;
         }
         0x04 => {
             let mut skip = [0u8; 16 + 2];
-            stream.read_exact(&mut skip).await?;
+            timeout_at_remaining(deadline, stream.read_exact(&mut skip), "SOCKS5 应答超时").await??;
         }
         0x03 => {
             let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
+            timeout_at_remaining(deadline, stream.read_exact(&mut len), "SOCKS5 应答超时").await??;
             let mut skip = vec![0u8; len[0] as usize + 2];
-            stream.read_exact(&mut skip).await?;
+            timeout_at_remaining(deadline, stream.read_exact(&mut skip), "SOCKS5 应答超时").await??;
         }
         other => return Err(Error::Probe(format!("SOCKS5 返回未知地址类型 {other}"))),
     }
@@ -594,6 +641,42 @@ mod tests {
         assert_eq!(parse_http_status(b"HTTP/1.1 204 No Content\r\n"), Some(204));
         assert_eq!(parse_http_status(b"HTTP/1.0 200 OK\r\n"), Some(200));
         assert_eq!(parse_http_status(b"garbage"), None);
+    }
+
+    /// **超时是整个函数的预算，不是每阶段各一份。**
+    ///
+    /// 用一个「接受连接但永不响应」的假 SOCKS5 端口模拟最坏情况：
+    /// 旧实现下这里的 `read_exact` 没有任何超时（连接那一步才有），
+    /// 会把探测**永久挂住**；即使退一步按每阶段各 5s 算，也会拖到 3×5s。
+    /// 现在必须在 `timeout` 附近返回，而不是挂住、也不是数倍超时。
+    #[tokio::test]
+    async fn probe_timeout_is_a_total_budget() {
+        /// 只 accept，不写任何字节。
+        async fn stalling_proxy() -> u16 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((sock, _)) = listener.accept().await {
+                    held.push(sock); // 一直握着，不回任何数据
+                }
+            });
+            port
+        }
+
+        let port = stalling_proxy().await;
+        let target = Url::parse("http://example.com/generate_204").unwrap();
+        let budget = Duration::from_millis(600);
+
+        let started = Instant::now();
+        let out = probe_one(port, &target, budget).await;
+        let spent = started.elapsed();
+
+        assert!(out.is_err(), "对端不响应时必须报错，而不是给成功值");
+        assert!(
+            spent < budget * 3,
+            "耗时 {spent:?} 远超预算 {budget:?} —— 说明仍存在「每阶段各自超时」的叠加"
+        );
     }
 
     /// 并发采样后，中位数语义必须一字不变：
@@ -671,7 +754,7 @@ mod tests {
             sock.write_all(b"HTTP/1.1 204 No Content\r\n\r\n").await.unwrap();
         });
 
-        let mut s = socks5_connect(port, "example.com", 80, Duration::from_secs(2)).await.unwrap();
+        let mut s = socks5_connect(port, "example.com", 80, Instant::now() + Duration::from_secs(2)).await.unwrap();
         let mut buf = [0u8; 32];
         let n = s.read(&mut buf).await.unwrap();
         assert_eq!(parse_http_status(&buf[..n]), Some(204));
@@ -687,7 +770,7 @@ mod tests {
             let _ = sock.read_exact(&mut greet).await;
             let _ = sock.write_all(&[0x05, 0x02]).await; // 要求用户名密码
         });
-        let err = socks5_connect(port, "example.com", 80, Duration::from_secs(2)).await;
+        let err = socks5_connect(port, "example.com", 80, Instant::now() + Duration::from_secs(2)).await;
         assert!(err.is_err());
     }
 }
