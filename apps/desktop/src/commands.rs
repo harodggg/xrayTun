@@ -1661,6 +1661,46 @@ fn classify_log(line: &str) -> &'static str {
 // 节点与订阅
 // ---------------------------------------------------------------------------
 
+/// 切换节点时的决策。
+///
+/// 抽成纯函数是为了能测：这段逻辑决定「切换失败后用户会不会断网」，
+/// 而它是整个 App 里最危险的链路（旧的隧道已经被拆掉了）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SwitchPlan {
+    /// 核心在跑才需要重建隧道；没跑就只是改个选择。
+    pub restart: bool,
+    /// 新节点起不来时退回哪台。`None` = 无处可退。
+    pub fallback_to: Option<String>,
+}
+
+/// 决定「要不要重启核心」以及「失败后退回哪里」。
+///
+/// * `previous` —— 这次切换**之前**选中的节点（正在跑的那台）。
+/// * `last_good` —— 上一次**验证过能用**的节点。
+///
+/// 两者都可能是坏的，也都没有「接下来该用谁」的完整答案。关键约束：
+/// **绝不为了回退而换到「刚刚失败的那台」**，也尽量不退回「已经不在运行的那台」。
+pub(crate) fn switch_plan(
+    running: bool,
+    previous: Option<&str>,
+    last_good: Option<&str>,
+    target: &str,
+) -> SwitchPlan {
+    if !running {
+        return SwitchPlan {
+            restart: false,
+            fallback_to: None,
+        };
+    }
+    // 优先级：验证过的 > 切换前正在跑的。
+    let candidate = last_good.or(previous);
+    SwitchPlan {
+        restart: true,
+        // 等于目标节点时不算回退 —— 那正是刚刚失败的那台。
+        fallback_to: candidate.filter(|c| *c != target).map(str::to_string),
+    }
+}
+
 #[tauri::command]
 pub async fn select_node(
     app: AppHandle,
@@ -1681,16 +1721,16 @@ pub async fn select_node(
     // **这一步是几秒钟的拆建，不是瞬时切换**：Xray 没有配置热重载，
     // 换节点必须换配置、换配置必须重启核心。所以要有明确的过程提示 ——
     // 否则用户看到的就是「点了没反应，然后所有连接断一遍」。
-    if state.with(|i| i.runtime.running).unwrap_or(false) {
+    let running = state.with(|i| i.runtime.running).unwrap_or(false);
+    let last_good = state.with(|i| i.runtime.last_good_node.clone()).unwrap_or(None);
+    let plan = switch_plan(running, previous.as_deref(), last_good.as_deref(), &node_id);
+
+    if plan.restart {
         let name = state
             .with(|i| i.nodes.iter().find(|n| n.id == node_id).map(|n| n.name.clone()))
             .unwrap_or(None)
             .unwrap_or_else(|| node_id.clone());
         state.with(|i| i.push_log("app", "info", format!("正在切换到「{name}」，需要重建隧道（几秒）")));
-        let was_good = state
-            .with(|i| i.runtime.last_good_node.clone())
-            .unwrap_or(None)
-            .or(previous.clone());
 
         stop_core(&app, &state).await?;
 
@@ -1705,7 +1745,7 @@ pub async fn select_node(
                     format!("切到该节点失败（{e}），正在退回上一个可用节点"),
                 )
             });
-            if let Some(back) = was_good.filter(|b| b != &node_id) {
+            if let Some(back) = plan.fallback_to {
                 let mut s2 = state.with(|i| i.settings.clone()).ok_or(STATE_UNAVAILABLE)?;
                 s2.selected_node = Some(back);
                 persist_settings(&state, &s2)?;
@@ -2372,6 +2412,65 @@ mod tests {
     fn redaction_is_identity_when_nothing_to_hide() {
         let line = "已连接 45.207.197.185:443   用时 54ms";
         assert_eq!(redact_secrets(line), line);
+    }
+
+    /// 核心没在跑时，切换只是改个选择：不重启、也谈不上回退。
+    #[test]
+    fn switch_plan_is_inert_when_core_is_idle() {
+        let plan = switch_plan(false, Some("a"), Some("a"), "b");
+        assert!(!plan.restart, "核心没跑就不该重建隧道");
+        assert_eq!(plan.fallback_to, None, "没跑就不用回退");
+    }
+
+    /// 正常情况：从 a 切到 b，b 起不来就退回 a —— 用户不该断网。
+    #[test]
+    fn switch_plan_falls_back_to_running_old_node() {
+        let plan = switch_plan(true, Some("a"), None, "b");
+        assert!(plan.restart);
+        assert_eq!(plan.fallback_to.as_deref(), Some("a"));
+    }
+
+    /// **回归测试（最容易把用户搞断网的那条边界）。**
+    ///
+    /// 场景：正在跑的是 b，`last_good` 也记着 b，用户要切到 c。
+    ///
+    /// `last_good` 因为等于**当时的选中节点** b 而被过滤掉，此时必须退到
+    /// 「切换前正在跑的 b」，而不是退化成一个都不回退。
+    /// 早先用 `last_good.or(previous)` 会得到 `Some(b)`，再被 `!= target`
+    /// 过滤成 `None` —— 于是切换失败就直接断网。
+    #[test]
+    fn switch_plan_keeps_running_node_when_last_good_equals_previous() {
+        let plan = switch_plan(true, Some("b"), Some("b"), "c");
+        assert!(plan.restart);
+        assert_eq!(
+            plan.fallback_to.as_deref(),
+            Some("b"),
+            "切 c 失败时必须退回正在跑的 b"
+        );
+    }
+
+    /// 验证过的节点优先于「切换前选中的节点（可能其实连不上）」。
+    #[test]
+    fn switch_plan_prefers_last_verified_node() {
+        let plan = switch_plan(true, Some("broken"), Some("good"), "new");
+        assert_eq!(plan.fallback_to.as_deref(), Some("good"));
+    }
+
+    /// 从不回退到「刚刚失败的那台」：只有它可退时，宁可如实返回无处可退，
+    /// 也不要假装回退成功而把用户丢在同一个坑里。
+    #[test]
+    fn switch_plan_never_falls_back_to_the_failed_target() {
+        let plan = switch_plan(true, Some("x"), Some("x"), "x");
+        assert!(plan.restart);
+        assert_eq!(plan.fallback_to, None, "回退目标不能是刚失败的那台");
+    }
+
+    /// 没有历史信息时（首次启动、记录被清）不能凭空编一个回退目标。
+    #[test]
+    fn switch_plan_reports_no_fallback_without_history() {
+        let plan = switch_plan(true, None, None, "only-one");
+        assert!(plan.restart);
+        assert_eq!(plan.fallback_to, None);
     }
 
     #[test]
