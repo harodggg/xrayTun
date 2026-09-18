@@ -173,6 +173,66 @@ function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
   );
 }
 
+/**
+ * 缩放范围。
+ *
+ * `1` 是整球可见的基准（球半径 = 画布短边的 0.42）。
+ * 上限 1.8：再大球缘就溢出画布了，只剩一片海岸、失去方位感。
+ * 下限 0.55：跨半球时能把两端一起收进画面。
+ */
+export const MIN_ZOOM = 0.55;
+export const MAX_ZOOM = 1.8;
+
+export function clampZoom(z: number): number {
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+}
+
+/**
+ * 视角该对准哪一点。
+ *
+ * `bytes` 是**整条航线**承载的量，并不属于某一端 —— 所以有流量时对准
+ * **两端的中点**（那就是「让人处在比较合适的观看位置」），没有流量数据时
+ * 退到起点（本机）。
+ *
+ * 导出是为了能测：这属于「算错的后果是视角偏到看不见航线」的那类逻辑，
+ * 不该只靠截图眼看。
+ */
+export function focusPoint(data: GlobeData): { lat: number; lon: number } | null {
+  const r = data.route;
+  if (r && r.bytes > 0) {
+    return { lat: (r.from.lat + r.to.lat) / 2, lon: (r.from.lon + r.to.lon) / 2 };
+  }
+  const p = r ? r.from : data.origin;
+  return p ? { lat: p.lat, lon: p.lon } : null;
+}
+
+/**
+ * 默认缩放：**先看全整个地球，只有航线跨得太远时才缩小**。
+ *
+ * 球面正交投影下，两点夹角为 θ 时屏幕上的间距是 `2R·sin(θ/2)`。要让两端都
+ * 落在画布内，需要 `sin(θ/2)` 不超过约 0.7；据此算出「装得下」所需的缩放，
+ * 但**不超过 1** —— 缩放 1 就是整球可见，正是地球仪打开时该有的样子。
+ *
+ * 所以：
+ * * 近距离（本机与节点在同一片区域，例如广州↔香港 129 公里）：返回 **1**，
+ *   看到整个地球，两端仍清楚标出；
+ * * 跨半球（例如广州↔纽约）：返回小于 1 的值，缩小到两端都进画面。
+ *
+ * 这里刻意**不放大**：早先的公式会把 129 公里的近邻航线放大到接近上限，
+ * 结果球占满画布、只剩一片海岸 —— 反而看不出「从哪飞到哪」。近距离不需要
+ * 把那 1° 撑满屏幕；要看细节可以自己滚轮放大。
+ */
+export function fitZoom(data: GlobeData): number {
+  const r = data.route;
+  if (!r) return 1;
+  const a = toVec(r.from.lat, r.from.lon);
+  const b = toVec(r.to.lat, r.to.lon);
+  const theta = angularDistance(a, b);
+  const half = Math.max(theta / 2, 1e-4);
+  // 0.7 是「两端各留约 30% 余量」的目标；min(1, …) 保证默认不放大
+  return clampZoom(Math.min(1, 0.7 / Math.sin(half)));
+}
+
 /** 两点大圆距离（公里）。 */
 function greatCircleKm(a: GeoLocation, b: GeoLocation): number {
   const R = 6371;
@@ -191,10 +251,12 @@ function greatCircleKm(a: GeoLocation, b: GeoLocation): number {
  * **陆地与航线必须共用这一个变换** —— 各写一份的话，稍微改动一处旋转顺序，
  * 航线就会整体偏离大陆，而且看起来「像是对的」。所以投影只在这里实现一次。
  */
-function makeProjection(W: number, H: number, rotLon: number, rotLat: number) {
+function makeProjection(W: number, H: number, rotLon: number, rotLat: number, zoom = 1) {
   const cx = W / 2;
   const cy = H / 2;
-  const R = Math.min(W, H) * 0.42;
+  // zoom 直接乘在半径上：球体渲染（逐像素）与航线投影共用这一个 R，
+  // 所以缩放对两者天然一致，不会出现「球放大了但航线没跟上」。
+  const R = Math.min(W, H) * 0.42 * zoom;
 
   /** 单位球面点 → 屏幕（含深度 z，>0 表示朝向观察者）。 */
   const project = (v: [number, number, number]): [number, number, number] => {
@@ -220,15 +282,23 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // 视角放在 ref 而不是 state：动画每帧都在改它，放 state 会让 effect
   // 每帧重建一次 RAF 循环（还把 drawScene 的闭包全换掉），纯属浪费。
-  const view = useRef({ lon: 0, lat: 0.25, auto: true });
+  const view = useRef({ lon: 0, lat: 0.25, zoom: 1, auto: true });
   const drag = useRef<{ x: number; y: number } | null>(null);
 
-  // 初始视角对准起点（本机），而不是随便一个经度 —— 打开就能看到自己的位置
+  // 初始视角对准**流量最大**的那一端，并把距离调到两端刚好都在视野里。
+  //
+  // 为什么是「最大」而不是固定的本机：用户关心的是流量去了哪儿。
+  // 两地相距很远时（跨半球）需要缩小才能同时看到两端 —— 那个距离就是
+  // 「最合适的观看位置」，而不是固定一个缩放值。
   useEffect(() => {
-    if (!data?.origin) return;
-    view.current.lon = -data.origin.lon * DEG;
-    view.current.lat = data.origin.lat * DEG * 0.6;
-  }, [data?.origin]);
+    if (!data) return;
+    const focus = focusPoint(data);
+    if (!focus) return;
+    view.current.lon = -focus.lon * DEG;
+    view.current.lat = focus.lat * DEG * 0.6;
+    view.current.zoom = fitZoom(data);
+    view.current.auto = true;
+  }, [data]);
 
   const land = useMemo(() => decodeLandMaskFlat(LAND_MASK_HEX), []);
 
@@ -246,7 +316,7 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
       const t = (now - start) / 1000;
       // 拖动过就不要自动转，否则会跟用户抢
       if (view.current.auto) view.current.lon += 0.0016;
-      drawScene(ctx, canvas, land, data, view.current.lon, view.current.lat, t);
+      drawScene(ctx, canvas, land, data, view.current.lon, view.current.lat, view.current.zoom, t);
       raf = requestAnimationFrame(draw);
     };
     raf = requestAnimationFrame(draw);
@@ -269,6 +339,18 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
   const onUp = () => {
     drag.current = null;
   };
+  // 滚轮缩放：向上滚放大。用非 passive 监听才能 preventDefault，
+  // 否则页面会跟着一起滚。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      view.current.zoom = clampZoom(view.current.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
 
   return (
     <div className="globe">
@@ -282,7 +364,44 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
         onPointerUp={onUp}
         onPointerLeave={onUp}
       />
-      <div className="globe__hint">拖动可旋转</div>
+      <div className="globe__tools">
+        <button
+          className="globe__tool"
+          title="放大"
+          onClick={() => {
+            view.current.auto = false;
+            view.current.zoom = clampZoom(view.current.zoom * 1.25);
+          }}
+        >
+          ＋
+        </button>
+        <button
+          className="globe__tool"
+          title="缩小"
+          onClick={() => {
+            view.current.auto = false;
+            view.current.zoom = clampZoom(view.current.zoom / 1.25);
+          }}
+        >
+          －
+        </button>
+        <button
+          className="globe__tool globe__tool--wide"
+          title="复位到默认视角"
+          onClick={() => {
+            const focus = data ? focusPoint(data) : null;
+            if (focus) {
+              view.current.lon = -focus.lon * DEG;
+              view.current.lat = focus.lat * DEG * 0.6;
+            }
+            view.current.zoom = data ? fitZoom(data) : 1;
+            view.current.auto = true;
+          }}
+        >
+          复位
+        </button>
+      </div>
+      <div className="globe__hint">滚轮缩放 · 拖动旋转</div>
     </div>
   );
 }
@@ -295,11 +414,12 @@ function drawScene(
   data: GlobeData | null,
   rotLon: number,
   rotLat: number,
+  zoom: number,
   t: number,
 ) {
   const W = canvas.width;
   const H = canvas.height;
-  const { cx, cy, R, project, unproject } = makeProjection(W, H, rotLon, rotLat);
+  const { cx, cy, R, project, unproject } = makeProjection(W, H, rotLon, rotLat, zoom);
 
   ctx.clearRect(0, 0, W, H);
 
