@@ -7,6 +7,7 @@
 //! * Xray 内建 `geosite:` / `geoip:` / `ext:` 规则集，不用自己维护大陆域名表。
 //! * 规则顺序敏感：Xray 自上而下取第一条命中，所以「阻断广告」要排在「大陆直连」之前。
 
+pub mod explain;
 pub mod geo;
 
 use serde::{Deserialize, Serialize};
