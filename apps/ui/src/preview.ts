@@ -290,8 +290,15 @@ const BASE_SNAPSHOT: AppSnapshot = {
   app_version: "0.8.0",
 };
 
-/** 造几条日志，覆盖 info/warn/error 与多行文本。 */
+/** 造一批日志：前 120 条用来撑出可滚动区域，末尾几条覆盖 info/warn/error 与多行文本。 */
 export const MOCK_LOGS: LogEntry[] = [
+  ...Array.from({ length: 120 }, (_, i) => ({
+    ts_unix: now - 900 + i,
+    source: i % 3 === 0 ? "core" : "app",
+    level: "info",
+    message: `预热日志 #${i}：填充滚动区域，用于验证「跟随」开关是否真的生效`,
+  })),
+
   { ts_unix: now - 740, source: "app", level: "info", message: "正在切换到「香港 · REALITY 01」，需要重建隧道（几秒）" },
   { ts_unix: now - 736, source: "core", level: "info", message: "Xray 26.9.9 started" },
   { ts_unix: now - 735, source: "app", level: "info", message: "连通性检查通过：经节点 189ms（HTTP 204）" },
@@ -306,14 +313,45 @@ export const MOCK_LOGS: LogEntry[] = [
 
 /** 安装桥接。返回 uninstall，便于热更新时清理。 */
 export function installPreviewBridge(): () => void {
-  const listeners = new Map<number, (payload: unknown) => void>();
+  // **按事件名分组**记录监听者。
+  //
+  // 早先是一个扁平的 `Map<id, cb>`，派发时不看事件名 —— 于是推一条日志会把
+  // 「延迟结果」的处理器也一起叫醒，它对着日志载荷做 `for...of` 立刻抛
+  // `results is not iterable`，React 整棵树卸载（窗口与标签页一起消失）。
+  // 真实 Tauri 的事件是按名字派发的，这里必须一样。
+  //
+  // 关联过程：`listen()` 先调 `transformCallback(cb)` 拿到 id，紧接着
+  // `invoke('plugin:event|listen', { event, handler: id })`。所以在
+  // `transformCallback` 时记下「刚拿到的 id」，在随后的 listen 调用里
+  // 把事件名补上即可（两者在同一个同步段内发生）。
+  const listeners = new Map<string, Map<number, (payload: unknown) => void>>();
   let nextId = 1;
+  let pendingHandlerId: number | null = null;
+  /** 所有登记过的回调（按 id），`listen` 时按事件名归入 `listeners`。 */
+  const allCallbacks = new Map<number, (payload: unknown) => void>();
 
   const internals = {
     invoke: async (cmd: string, _args?: unknown): Promise<unknown> => {
-      // 事件订阅相关命令：假装成功但永不派发事件，页面不会因缺事件而报错。
+      // 事件订阅相关命令：按事件名登记/注销监听者。
       if (cmd.startsWith("plugin:event|")) {
-        return cmd === "plugin:event|listen" ? nextId++ : null;
+        const a = (_args ?? {}) as { event?: string; eventId?: number };
+        if (cmd === "plugin:event|listen") {
+          if (a.event && pendingHandlerId !== null) {
+            const bucket = listeners.get(a.event) ?? new Map();
+            const cb = allCallbacks.get(pendingHandlerId);
+            if (cb) bucket.set(pendingHandlerId, cb);
+            listeners.set(a.event, bucket);
+            pendingHandlerId = null;
+          }
+          return nextId++;
+        }
+        if (cmd === "plugin:event|unlisten") {
+          if (a.event && a.eventId !== undefined) {
+            listeners.get(a.event)?.delete(a.eventId);
+          }
+          return null;
+        }
+        return null;
       }
       switch (cmd) {
         case "snapshot":
@@ -329,11 +367,13 @@ export function installPreviewBridge(): () => void {
     },
     transformCallback: (cb: (payload: unknown) => void) => {
       const id = nextId++;
-      listeners.set(id, cb);
+      allCallbacks.set(id, cb);
+      pendingHandlerId = id; // 紧接着的 listen 调用会用它认领事件名
       return id;
     },
     unregisterCallback: (id: number) => {
-      listeners.delete(id);
+      allCallbacks.delete(id);
+      for (const bucket of listeners.values()) bucket.delete(id);
     },
     convertFileSrc: (p: string) => p,
   };
@@ -342,8 +382,24 @@ export function installPreviewBridge(): () => void {
   // 页面里的 Tauri API 版本探测会读这个
   (window as unknown as Record<string, unknown>).__TAURI__ = {};
 
+  // 开发用：把一条核心日志推给已经订阅的 handler。
+  //
+  // 真实的 Tauri 事件由 Rust 侧 `emit`，浏览器里没有那条通路；而「跟随滚动」
+  // 这类行为只有**真的来新日志**才能验证（往 DOM 里插元素不会触发 React 的
+  // 状态更新）。所以这里按 `core://log` 的载荷形状直接调用监听者。
+  (window as unknown as Record<string, unknown>).__emitCoreLog = (line: string, level = "info") => {
+    // 只发给订阅了 `core://log` 的那些 —— 与真实事件派发一致。
+    const bucket = listeners.get("core://log");
+    if (!bucket) return;
+    for (const cb of bucket.values()) {
+      cb({ event: "core://log", payload: { line, level } });
+    }
+  };
+
   return () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    delete (window as unknown as Record<string, unknown>).__emitCoreLog;
     listeners.clear();
+    allCallbacks.clear();
   };
 }
