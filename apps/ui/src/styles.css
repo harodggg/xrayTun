@@ -1873,3 +1873,65 @@ input[type="checkbox"] {
     padding: 8px 0;
   }
 }
+
+/* ---------------------------------------------------------------- 连线
+ *
+ * 入口 → 车道 → 出口的连线画在覆盖层 SVG 上，位置由实测的 DOM 矩形算出。
+ * 覆盖层本身不吃鼠标事件，否则会挡住车道上的悬停提示。
+ */
+
+.highway {
+  position: relative;
+}
+
+.highway__links {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* 放在卡片**下面**：连线只在卡片之间的空隙里可见。
+     否则线会从文字上压过去（实测 z-index=auto 时就是这样）。
+     仍要高于车道那一列，这样线能和车道端点接上。 */
+  z-index: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+/* 卡片与车道抬到连线之上 */
+.highway__side,
+.highway__legend {
+  position: relative;
+  z-index: 2;
+}
+
+.lane-wrap {
+  position: relative;
+  z-index: 1;
+}
+
+.highway__link {
+  fill: none;
+  stroke-linecap: round;
+}
+
+/* 入口 → 车道：偏绿，和入口那一侧的语义一致 */
+.highway__link--in {
+  stroke: rgba(52, 211, 153, 0.45);
+  stroke-width: 1.3;
+}
+
+/* 车道之间与汇入主干：中性 */
+.highway__link--trunk {
+  stroke: rgba(120, 160, 210, 0.4);
+  stroke-width: 1.3;
+}
+
+/* 主干 → 出口：用强调色，与「出口」的目的地语义一致 */
+.highway__link--out {
+  stroke: rgba(79, 142, 247, 0.5);
+  stroke-width: 1.3;
+}
+
+/* 车道外面再包一层，方便单独量它的位置（Cover 层的连线依赖它） */
+.lane-wrap {
+  display: block;
+}

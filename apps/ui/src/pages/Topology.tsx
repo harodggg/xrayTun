@@ -117,6 +117,15 @@ export default function Topology() {
 
 /** 入口 ↔ 出口之间的车流。 */
 function Highway({ topo }: { topo: Topology }) {
+  // 连线覆盖层要按真实 DOM 位置绘制，所以把关键元素测出来
+  const laneRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const inletRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const outletRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  // 入口与车道一一对应；条目数变少时要把多余的引用截掉，
+  // 否则旧引用会残留（稀疏数组），连线就会按错的位置画。
+  const lanesForLinks = topo.inbound.filter((i) => i.tag !== "api");
+  const inletEls = inletRefs.current.slice(0, lanesForLinks.length);
   // **每个入口一条车道**，包括当前没有流量的（空车道也要显示，否则
   // 「在用但量小」和「根本不通」分不出来）。
   //
@@ -135,7 +144,7 @@ function Highway({ topo }: { topo: Topology }) {
     .filter((s) => s.bytes > 0);
 
   return (
-    <div className="highway">
+    <div className="highway" ref={(el) => setContainer(el)}>
       <div className="highway__legend">
         <span className="highway__legend-item">
           <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.node }} />
@@ -153,8 +162,14 @@ function Highway({ topo }: { topo: Topology }) {
 
       <div className="highway__side">
         <div className="highway__side-title">入口（每个入口一条车道）</div>
-        {lanes.map((i) => (
-          <div className="highway__lane-label" key={i.tag}>
+        {lanes.map((i, idx) => (
+          <div
+            className="highway__lane-label"
+            key={i.tag}
+            ref={(el) => {
+              inletRefs.current[idx] = el;
+            }}
+          >
             <span className="highway__lane-tag">{i.tag}</span>
             <span className="highway__lane-meta">
               {i.protocol}
@@ -165,6 +180,7 @@ function Highway({ topo }: { topo: Topology }) {
             </span>
           </div>
         ))}
+        {/* 合计行刻意不挂 ref：它不是入口，连线不应当连到它 */}
         <div className="highway__lane-label highway__lane-label--total">
           <span className="highway__lane-tag">合计</span>
           <span className="highway__lane-bytes">出入 {formatBytes(inTotal)}</span>
@@ -172,16 +188,32 @@ function Highway({ topo }: { topo: Topology }) {
       </div>
 
       <div className="highway__road">
-        {lanes.map((i) => {
+        {lanes.map((i, idx) => {
           const total = i.downlink_bytes + i.uplink_bytes;
-          return <Lane key={i.tag} bytes={total} shares={shares} />;
+          return (
+            <div
+              key={i.tag}
+              className="lane-wrap"
+              ref={(el) => {
+                laneRefs.current[idx] = el;
+              }}
+            >
+              <Lane bytes={total} shares={shares} />
+            </div>
+          );
         })}
       </div>
 
       <div className="highway__side highway__side--right">
         <div className="highway__side-title">出口（车道颜色 = 去向）</div>
-        {topo.outbound.map((o) => (
-          <div className={`highway__lane-label highway__lane-label--${o.kind}`} key={o.tag}>
+        {topo.outbound.map((o, idx) => (
+          <div
+            className={`highway__lane-label highway__lane-label--${o.kind}`}
+            key={o.tag}
+            ref={(el) => {
+              outletRefs.current[idx] = el;
+            }}
+          >
             <span className="highway__lane-tag">{shortTag(o.tag)}</span>
             <span className="highway__lane-meta">{o.kind}</span>
             <span className="highway__lane-bytes">
@@ -194,7 +226,143 @@ function Highway({ topo }: { topo: Topology }) {
           <span className="highway__lane-bytes">出入 {formatBytes(outTotal)}</span>
         </div>
       </div>
+
+      <HighwayLinks
+        container={container}
+        laneEls={laneRefs.current.slice(0, lanesForLinks.length)}
+        inletEls={inletEls}
+        outletEls={outletRefs.current}
+      />
     </div>
+  );
+}
+
+/**
+ * 入口 → 车道 → 出口 的连线覆盖层。
+ *
+ * # 为什么需要它
+ *
+ * 原来三列是并排的卡片，谁也看不出「哪个入口对应哪条车道、车道又通向哪里」。
+ * 用户要的是「跟连线一样」—— 入口连到它那条车道，车道再分叉到各个出口。
+ *
+ * # 怎么画的
+ *
+ * 用一条绝对定位的 SVG 盖在 `.highway` 上，按**实测的 DOM 位置**画贝塞尔曲线。
+ * 位置不是猜的：用 `getBoundingClientRect` 量真实元素，并用 `ResizeObserver`
+ * 跟随布局变化（流量数字每 2 秒更新一次，宽度会变）。
+ *
+ * # 一条边界
+ *
+ * 「哪条车道通向哪个出口」核心**没有这个计数器**（只有按入口、按出口两类
+ * 统计）。所以连线表达的是「车道汇入出口」这个**结构关系**（配置事实），
+ * 而不是逐条连接的归属。这一点与车道颜色用的是同一套口径。
+ */
+function HighwayLinks({
+  container,
+  laneEls,
+  inletEls,
+  outletEls,
+}: {
+  container: HTMLElement | null;
+  laneEls: (HTMLElement | null)[];
+  inletEls: (HTMLElement | null)[];
+  outletEls: (HTMLElement | null)[];
+}) {
+  const [geo, setGeo] = useState<{
+    w: number;
+    h: number;
+    lanes: { y: number; l: number; r: number }[];
+    inlets: { y: number; l: number; r: number }[];
+    outlets: { y: number; l: number }[];
+  } | null>(null);
+
+  useEffect(() => {
+    if (!container) return;
+    const measure = () => {
+      const base = container.getBoundingClientRect();
+      const rel = (el: HTMLElement | null) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return {
+          l: r.left - base.left,
+          r: r.right - base.left,
+          y: r.top - base.top + r.height / 2,
+        };
+      };
+      // 只取**实际存在**的引用，按索引顺序对齐 ——
+      // 早先用选择器取 `.highway__lane-label`，结果把「合计」那一行也算进来了，
+      // 连线因此多出一条、还被摊开成斜线穿过卡片。
+      const compact = (els: (HTMLElement | null)[]) =>
+        els
+          .map(rel)
+          .filter((v): v is NonNullable<typeof v> => v !== null);
+      const lanes = compact(laneEls);
+      const inlets = compact(inletEls);
+      const outlets = compact(outletEls);
+      setGeo({
+        w: base.width,
+        h: base.height,
+        lanes: lanes.map((v) => ({ y: v.y, l: v.l, r: v.r })),
+        inlets: inlets.map((v) => ({ y: v.y, l: v.l, r: v.r })),
+        outlets: outlets.map((v) => ({ y: v.y, l: v.l })),
+      });
+    };
+
+    measure();
+    // 流量数字每 2 秒更新一次，宽度会变 —— 持续跟随，而不是量一次就完
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    for (const el of [...laneEls, ...inletEls, ...outletEls]) {
+      if (el) ro.observe(el);
+    }
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [container, laneEls.join("|"), inletEls.join("|"), outletEls.join("|")]);
+
+  if (!geo || geo.lanes.length === 0) return null;
+
+  // 车道组的中线：所有连线汇到这条线上，再分向各出口
+  const mid = (geo.lanes[0]!.y + geo.lanes[geo.lanes.length - 1]!.y) / 2;
+
+  /** 三次贝塞尔：中间两个控制点让线走得像匝道，而不是直挺挺的折线。 */
+  const curve = (x1: number, y1: number, x2: number, y2: number) => {
+    const mx = (x1 + x2) / 2;
+    return `M ${x1.toFixed(1)} ${y1.toFixed(1)} C ${mx.toFixed(1)} ${y1.toFixed(1)}, ${mx.toFixed(1)} ${y2.toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+  };
+
+  return (
+    <svg className="highway__links" width={geo.w} height={geo.h} aria-hidden>
+      {/* 入口 → **车道组**（不是「入口 i 连到车道 i」）
+       *
+       * 四条车道是同一个规则链的队列，不是四个独立通道；路由规则决定流量
+       * 从哪个入口去哪个出口。所以连线表达的是「汇入同一条主干、再分流」，
+       * 这才是配置里真实的结构。 */}
+      {geo.inlets.map((box, i) => (
+        <path
+          key={`in-${i}`}
+          className="highway__link highway__link--in"
+          d={curve(box.r, box.y, geo.lanes[0]!.l - 10, mid)}
+        />
+      ))}
+
+      {/* 各车道 → 汇合点 */}
+      {geo.lanes.map((lane, i) => (
+        <path
+          key={`trunk-${i}`}
+          className="highway__link highway__link--trunk"
+          d={`M ${lane.r.toFixed(1)} ${lane.y.toFixed(1)} L ${(geo.lanes[0]!.r + 14).toFixed(1)} ${mid.toFixed(1)}`}
+        />
+      ))}
+
+      {/* 汇合点 → 各出口 */}
+      {geo.outlets.map((box, i) => (
+        <path
+          key={`out-${i}`}
+          className="highway__link highway__link--out"
+          d={curve(geo.lanes[0]!.r + 14, mid, box.l, box.y)}
+        />
+      ))}
+    </svg>
   );
 }
 
