@@ -13,6 +13,13 @@ pub async fn tail_logs(
     limit: Option<usize>,
 ) -> Result<Vec<crate::state::LogEntry>, String> {
     let limit = limit.unwrap_or(400);
+    // 先读**文件**：它跨重启、跨轮转，能拿到「上次开机那一刻」的日志 ——
+    // 那正是排查「开机后没自动连上」唯一有用的证据。
+    let from_file: Vec<crate::state::LogEntry> = state.store.tail_logs(limit);
+    if !from_file.is_empty() {
+        return Ok(from_file);
+    }
+    // 文件还没有（首次运行、或写入失败）：退回内存缓冲，至少不空手。
     state
         .with(|i| {
             let skip = i.logs.len().saturating_sub(limit);

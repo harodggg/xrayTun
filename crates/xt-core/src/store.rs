@@ -173,6 +173,163 @@ impl Store {
         let bytes = serde_json::to_vec_pretty(value)?;
         atomic_write(path, &bytes)
     }
+
+    // -----------------------------------------------------------------------
+    // 日志（按天一个文件，带容量上限）
+    // -----------------------------------------------------------------------
+
+    /// 日志目录。`ensure_dirs` 早就建过它，但**在此之前从没往里写过东西** ——
+    /// 日志只存在内存里，App 一重启就没了。
+    pub fn logs_dir(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
+    /// 追加一条日志。
+    ///
+    /// # 为什么要落盘
+    ///
+    /// 排查的都是**启动/唤醒那一刻**发生的事，而那些日志恰恰在重启时被清空 ——
+    /// 「开机后没自动连上」这类问题于是永远取不到证据（历史上反复修同一个症状，
+    /// 有一部分原因就在这里）。落盘之后，用户重启完还能回头看到当时发生了什么。
+    ///
+    /// # 为什么不长成一个无限增长的文件
+    ///
+    /// 一天一个文件 + 单文件超过 [`LOG_ROTATE_BYTES`] 就轮转，
+    /// 最多保留 [`LOG_KEEP_FILES`] 个。轮转时**按整行**保留最后
+    /// [`LOG_ROTATE_KEEP`] 行，而不是按字节截断 —— 后者会把一行 JSON
+    /// 切成两半，读回来直接解析失败。
+    pub fn append_log(&self, line: &str) -> Result<()> {
+        append_log_line(&self.logs_dir(), line)
+    }
+
+    /// 读最近 `limit` 条日志（跨天、跨轮转，按时间从旧到新）。
+    ///
+    /// 解析失败的行直接跳过：日志文件是排障用的，一行坏掉不该让整页打不开。
+    pub fn tail_logs<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Vec<T> {
+        let dir = self.logs_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("app-") && n.ends_with(".jsonl"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        // 文件名里带日期与轮转序号，字典序即时间序 —— 从新往旧读够 limit 条就停。
+        files.sort();
+        let mut out: Vec<T> = Vec::new();
+        for path in files.iter().rev() {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let mut batch: Vec<T> = text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str::<T>(l).ok())
+                .collect();
+            batch.extend(out);
+            out = batch;
+            if out.len() >= limit {
+                break;
+            }
+        }
+        let skip = out.len().saturating_sub(limit);
+        out.split_off(skip)
+    }
+}
+
+/// 追加一行日志到 `dir`（**唯一实现**）。
+///
+/// 状态层（`apps/desktop`）与 `Store` 都走这里，避免两处各写一份
+/// 命名/轮转逻辑 —— 那种重复一旦漂移，就会出现「界面里显示的日志」和
+/// 「文件里的日志」对不上的情况。
+pub fn append_log_line(dir: &Path, line: &str) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::Store(format!("创建日志目录失败: {e}")))?;
+    let path = dir.join(log_file_name(now_unix()));
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_ROTATE_BYTES {
+        rotate_log_file(&path);
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| Error::Store(format!("打开日志失败: {e}")))?;
+    // **0600**：日志里可能有节点地址、订阅主机名。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    writeln!(f, "{line}").map_err(|e| Error::Store(format!("写日志失败: {e}")))
+}
+
+/// 单文件超过它就开始轮转。
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// 轮转时保留最后多少行（按整行，见 [`Store::append_log`]）。
+const LOG_ROTATE_KEEP: usize = 2000;
+
+/// 同一份日志最多保留几个文件（含当前文件）。
+const LOG_KEEP_FILES: usize = 3;
+
+/// 日志文件名：按**天**分，便于「只看今天」和清理。
+fn log_file_name(unix_secs: u64) -> String {
+    format!("app-{}.jsonl", format_utc_date(unix_secs))
+}
+
+/// `YYYY-MM-DD`（UTC）。
+///
+/// 不引 `chrono`：这里只需要一个可排序的日期串，而少一个依赖对构建更友好
+/// （与 `Cargo.toml` 里刻意不引时间库的取舍一致）。
+fn format_utc_date(unix_secs: u64) -> String {
+    let days = unix_secs / 86_400;
+    // 从 1970-01-01 起按民用历法往前推（Howard Hinnant 的 days_from_civil 逆运算）。
+    let z = days as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// 把 `path` 轮转成 `path.1`（旧的 `.1` 顺移），并把最后 [`LOG_ROTATE_KEEP`]
+/// 行搬到新文件，使当前文件重新变小。超过 [`LOG_KEEP_FILES`] 的旧份删除。
+fn rotate_log_file(path: &Path) {
+    let Some(dir) = path.parent() else { return };
+    let Some(stem) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    // 先把最老的一份删掉，再把 .1..n-2 各往后挪一格
+    let oldest = dir.join(format!("{stem}.{}", LOG_KEEP_FILES - 1));
+    let _ = std::fs::remove_file(&oldest);
+    for i in (1..LOG_KEEP_FILES - 1).rev() {
+        let from = dir.join(format!("{stem}.{i}"));
+        let to = dir.join(format!("{stem}.{}", i + 1));
+        let _ = std::fs::rename(&from, &to);
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() <= LOG_ROTATE_KEEP {
+        return;
+    }
+    let keep = lines[lines.len() - LOG_ROTATE_KEEP..].join("\n");
+    if std::fs::rename(path, dir.join(format!("{stem}.1"))).is_ok() {
+        let _ = std::fs::write(path, keep + "\n");
+    }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -249,6 +406,50 @@ mod tests {
         // 临时文件不应残留
         assert!(!path.with_extension("tmp").exists());
         let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 轮转必须**按整行**，否则会把一行 JSON 切成两半，读回来全部解析失败。
+    #[test]
+    fn log_rotation_keeps_whole_lines() {
+        let dir = std::env::temp_dir().join(format!("xt-logrot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::new(&dir);
+
+        // 写超过保留行数的条目，触发一次轮转
+        for i in 0..(LOG_ROTATE_KEEP + 50) {
+            store
+                .append_log(&format!(r#"{{"ts_unix":{},"message":"line {i}"}}"#, 1_700_000_000 + i))
+                .unwrap();
+        }
+        let back: Vec<serde_json::Value> = store.tail_logs(LOG_ROTATE_KEEP + 100);
+        assert!(
+            back.len() >= LOG_ROTATE_KEEP,
+            "轮转不该丢数据到只剩 {} 条",
+            back.len()
+        );
+        // 每一条都还是合法 JSON（被切半的行会在这里变成解析失败而消失）
+        assert!(
+            back.iter().all(|v| v.get("message").is_some()),
+            "轮转后出现了残缺行"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `tail_logs` 的条数上限与时间顺序。
+    #[test]
+    fn tail_logs_respects_limit_and_order() {
+        let dir = std::env::temp_dir().join(format!("xt-logtail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::new(&dir);
+        for i in 0..20 {
+            store.append_log(&format!(r#"{{"n":{i}}}"#)).unwrap();
+        }
+        let got: Vec<serde_json::Value> = store.tail_logs(5);
+        assert_eq!(got.len(), 5, "应当只返回最后 5 条");
+        assert_eq!(got[4]["n"], 19, "最后一条应当是最新写入的");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

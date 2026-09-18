@@ -80,6 +80,8 @@ pub struct Inner {
     pub dns: DnsStatus,
     /// 最近一次探测/更新的错误，用于 UI 顶部的提示条。
     pub last_notice: Option<String>,
+    /// 日志落盘目录。为什么需要落盘见 [`Inner::push_log`]。
+    pub logs_dir: PathBuf,
 }
 
 /// DNS 探测状态。
@@ -150,19 +152,36 @@ impl Inner {
             update: UpdateStatus::default(),
             dns: DnsStatus::default(),
             last_notice: None,
+            logs_dir: store.logs_dir(),
         }
     }
 
+    /// 记一条日志：**内存环形缓冲 + 落盘**。
+    ///
+    /// 落盘是后补的。在此之前日志只存在内存里，App 一重启就清空 ——
+    /// 而「开机后没自动连上」这类问题要看的恰恰是**启动那一刻**的日志：
+    /// 用户重启完再打开日志页，看到的永远是启动之后的内容，证据已经没了。
+    ///
+    /// 写盘失败**不能**影响主流程：日志是诊断手段，不是功能。
     pub fn push_log(&mut self, source: &str, level: &str, message: impl Into<String>) {
-        if self.logs.len() >= LOG_CAPACITY {
-            self.logs.pop_front();
-        }
-        self.logs.push_back(LogEntry {
+        let entry = LogEntry {
             ts_unix: now_unix(),
             source: source.to_string(),
             level: level.to_string(),
             message: message.into(),
-        });
+        };
+        if let Ok(line) = serde_json::to_string(&entry) {
+            // 用 std::fs 同步写：这几行是对小文件的 append，代价可控。
+            // 换成异步队列会让「进程退出时最后几条日志丢掉」变成常态，
+            // 而那几条恰好最值得看。
+            if let Err(e) = xt_core::store::append_log_line(&self.logs_dir, &line) {
+                tracing::warn!(error = %e, "写日志文件失败");
+            }
+        }
+        if self.logs.len() >= LOG_CAPACITY {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(entry);
     }
 
     /// 找出当前选中的节点。
@@ -430,6 +449,36 @@ mod tests {
         assert_eq!(settings.socks_port, 10808);
         assert_eq!(settings.mode, ProxyMode::SystemProxy);
         assert!(state.with(|i| i.nodes.is_empty()).unwrap());
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// **日志必须在重启后仍然拿得到。**
+    ///
+    /// 这条钉住的是 0.8.3 补的能力：在此之前日志只在内存环形缓冲里，
+    /// App 一重启就清空 —— 而「开机后没自动连上」要看的恰恰是启动那一刻的
+    /// 日志。用户重启完打开日志页，看到的永远是启动之后的内容。
+    ///
+    /// 做法：写几条 → **丢掉整个 AppState**（模拟退出）→ 新建一个指向同一
+    /// 数据目录的实例 → 从文件里读回来。用内存缓冲是过不了这个测试的。
+    #[test]
+    fn logs_survive_a_restart() {
+        let store = temp_store("logs-persist");
+        {
+            let state = AppState::new(store.clone());
+            state.with(|i| {
+                i.push_log("app", "info", "上次退出时是连接状态，正在自动重连…");
+                i.push_log("app", "error", "自动重连试了 24 次仍失败");
+            });
+        } // state 在这里 drop —— 等价于 App 退出
+
+        let reopened = AppState::new(store.clone());
+        let from_file: Vec<LogEntry> = reopened.store.tail_logs(200);
+        assert!(
+            from_file.iter().any(|e| e.message.contains("正在自动重连")),
+            "重启后必须还能读到上次启动的日志，实际拿到 {} 条",
+            from_file.len()
+        );
+        assert!(from_file.iter().any(|e| e.level == "error"));
         let _ = std::fs::remove_dir_all(store.root());
     }
 
