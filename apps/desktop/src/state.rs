@@ -156,13 +156,14 @@ impl Inner {
         }
     }
 
-    /// 记一条日志：**内存环形缓冲 + 落盘**。
+    /// 记一条日志到**内存**环形缓冲（纯内存操作，可以安全地在锁内调用）。
     ///
-    /// 落盘是后补的。在此之前日志只存在内存里，App 一重启就清空 ——
-    /// 而「开机后没自动连上」这类问题要看的恰恰是**启动那一刻**的日志：
-    /// 用户重启完再打开日志页，看到的永远是启动之后的内容，证据已经没了。
+    /// **落盘不在这里**：写文件是阻塞 I/O，而本函数的调用点在
+    /// `Mutex<Inner>` 的临界区内（本文件开头与 `AppState::inner` 都写明
+    /// 「锁只覆盖纯内存操作」）。核心日志转发循环会为核心输出的每一行调用它，
+    /// 一旦在锁内写盘，就会拖住所有状态读者（快照、托盘）。
     ///
-    /// 写盘失败**不能**影响主流程：日志是诊断手段，不是功能。
+    /// 需要落盘的调用方用 [`AppState::log`]，它在**锁外**写文件。
     pub fn push_log(&mut self, source: &str, level: &str, message: impl Into<String>) {
         let entry = LogEntry {
             ts_unix: now_unix(),
@@ -170,14 +171,6 @@ impl Inner {
             level: level.to_string(),
             message: message.into(),
         };
-        if let Ok(line) = serde_json::to_string(&entry) {
-            // 用 std::fs 同步写：这几行是对小文件的 append，代价可控。
-            // 换成异步队列会让「进程退出时最后几条日志丢掉」变成常态，
-            // 而那几条恰好最值得看。
-            if let Err(e) = xt_core::store::append_log_line(&self.logs_dir, &line) {
-                tracing::warn!(error = %e, "写日志文件失败");
-            }
-        }
         if self.logs.len() >= LOG_CAPACITY {
             self.logs.pop_front();
         }
@@ -201,6 +194,8 @@ pub struct AppState {
     /// 核心/隧道的生命周期。用 `tokio::sync::Mutex` 是因为启动流程本身是异步的，
     /// 而 `std::sync::MutexGuard` 不是 `Send`，没法安全地跨 await。
     pub supervisor: tokio::sync::Mutex<crate::supervisor::Supervisor>,
+    /// 日志目录已就绪 —— 避免每条日志都做一次 `create_dir_all`。
+    pub logs_dir_ready: std::sync::atomic::AtomicBool,
     /// helper 连接。单独的锁，避免 helper 的 IPC 拖慢 UI 状态读取。
     ///
     /// 用 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：启动流程需要在
@@ -221,6 +216,39 @@ impl AppState {
             inner: Mutex::new(inner),
             supervisor: tokio::sync::Mutex::new(crate::supervisor::Supervisor::default()),
             helper: tokio::sync::Mutex::new(crate::helper_client::HelperClient::new(None)),
+            logs_dir_ready: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// 记一条日志并落盘 —— **写文件在锁外**。
+    ///
+    /// 这是需要持久化的调用方的入口（见 [`Inner::push_log`] 关于为什么
+    /// 不能把写盘放进锁内的说明）。
+    ///
+    /// 消息里的换行会被转义成字面 `\n`：日志文件是 JSONL，一行必须是一条
+    /// 完整记录 —— 含换行的消息会被拆成多行，每一行都解析失败、被
+    /// `tail_logs` 静默丢掉（核心的多行报错正好是这种情况）。
+    pub fn log(&self, source: &str, level: &str, message: impl Into<String>) {
+        let message = message.into().replace('\r', "").replace('\n', "\\n");
+        let logged = self.with(|i| {
+            i.push_log(source, level, message.clone());
+            i.logs.back().cloned()
+        });
+        let Some(entry) = logged.flatten() else { return };
+        let Ok(line) = serde_json::to_string(&entry) else { return };
+        // 已有日志文件时不再每次 create_dir_all（那是两次额外系统调用）。
+        let dir_exists = self.logs_dir_ready.load(std::sync::atomic::Ordering::Relaxed);
+        let written = if dir_exists {
+            xt_core::store::append_log_line_existing(&self.store.logs_dir(), &line)
+        } else {
+            let r = xt_core::store::append_log_line(&self.store.logs_dir(), &line);
+            if r.is_ok() {
+                self.logs_dir_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            r
+        };
+        if let Err(e) = written {
+            tracing::warn!(error = %e, "写日志文件失败");
         }
     }
 
@@ -465,10 +493,10 @@ mod tests {
         let store = temp_store("logs-persist");
         {
             let state = AppState::new(store.clone());
-            state.with(|i| {
-                i.push_log("app", "info", "上次退出时是连接状态，正在自动重连…");
-                i.push_log("app", "error", "自动重连试了 24 次仍失败");
-            });
+            // 用 `log()`（锁外落盘）而不是 `push_log()`（只进内存）——
+            // 这条测试要验的正是**落盘**。
+            state.log("app", "info", "上次退出时是连接状态，正在自动重连…");
+            state.log("app", "error", "自动重连试了 24 次仍失败");
         } // state 在这里 drop —— 等价于 App 退出
 
         let reopened = AppState::new(store.clone());
@@ -479,6 +507,26 @@ mod tests {
             from_file.len()
         );
         assert!(from_file.iter().any(|e| e.level == "error"));
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 含换行的消息必须落成**一行**。
+    ///
+    /// 日志文件是 JSONL：一行必须是一条完整记录。核心的多行报错（配置片段、
+    /// 栈）如果原样写进去，会被拆成多行，每一行都解析失败、被 `tail_logs`
+    /// 静默丢掉 —— 恰好把最需要看的那类日志弄没了。
+    #[test]
+    fn multiline_messages_are_written_as_one_line() {
+        let store = temp_store("logs-newline");
+        let state = AppState::new(store.clone());
+        state.log("core", "error", "启动失败:\n    \"port\": 10808\n    已被占用");
+
+        let back: Vec<LogEntry> = store.tail_logs(10);
+        assert_eq!(back.len(), 1, "一条消息应当只落成一行");
+        assert!(back[0].message.contains("启动失败"), "内容不该丢");
+        // 文件里也必须只有一行
+        let text = std::fs::read_to_string(store.logs_dir().join("app.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1, "含换行的消息被拆成了多行");
         let _ = std::fs::remove_dir_all(store.root());
     }
 

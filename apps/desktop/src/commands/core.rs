@@ -148,7 +148,7 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
         while let Some(event) = rx.recv().await {
             let level = classify_log(&event.line);
             if let Some(state) = app_handle.try_state::<AppState>() {
-                state.with(|i| i.push_log("core", level, event.line.clone()));
+                state.log("core", level, event.line.clone());
             }
             let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: event.line, level: level.into() });
         }
@@ -431,7 +431,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
             // 「点了关闭，几秒后它自己又连上了」。再查一次意图。
             let user_wants_it = state.with(|i| i.settings.was_connected).unwrap_or(false);
             if !user_wants_it {
-                state.with(|i| i.push_log("app", "info", "用户已关闭，取消自动重建"));
+                state.log("app", "info", "用户已关闭，取消自动重建");
                 return;
             }
             if !should_rebuild_tunnel(true, user_wants_it, failures) {
@@ -455,7 +455,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
             if stop_core(&handle, &state).await.is_ok()
                 && start_core(&handle, &state).await.is_ok()
             {
-                state.with(|i| i.push_log("app", "info", "隧道已自动恢复"));
+                state.log("app", "info", "隧道已自动恢复");
                 // start_core 会 spawn 新的看门狗，这里退出即可。
                 return;
             }
@@ -614,7 +614,7 @@ pub(crate) fn spawn_network_watch(app: &AppHandle, baseline: Option<Egress>, pid
                 before.describe(),
                 now.describe()
             );
-            state.with(|i| i.push_log("app", "error", msg));
+            state.log("app", "error", msg);
             events::runtime_changed(&handle, &state);
             return; // 只报一次，别刷屏
         }
@@ -701,7 +701,7 @@ pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
         return;
     }
 
-    state.with(|i| i.push_log("app", "info", "上次退出时是连接状态，正在自动重连…"));
+    state.log("app", "info", "上次退出时是连接状态，正在自动重连…");
     events::runtime_changed(app, state);
 
     // **必须重试，而且要在后台重试。**

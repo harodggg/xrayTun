@@ -36,7 +36,7 @@ pub async fn select_node(
             .with(|i| i.nodes.iter().find(|n| n.id == node_id).map(|n| n.name.clone()))
             .unwrap_or(None)
             .unwrap_or_else(|| node_id.clone());
-        state.with(|i| i.push_log("app", "info", format!("正在切换到「{name}」，需要重建隧道（几秒）")));
+        state.log("app", "info", format!("正在切换到「{name}」，需要重建隧道（几秒）"));
 
         core::stop_core(&app, &state).await?;
 
@@ -235,7 +235,7 @@ pub async fn refresh_subscriptions(
     for sub in targets {
         // URL 里通常带着 token，日志里绝不打印完整 URL。
         let safe = redact_url(&sub.url);
-        state.with(|i| i.push_log("app", "info", format!("正在更新订阅 {safe}")));
+        state.log("app", "info", format!("正在更新订阅 {safe}"));
 
         match fetch_subscription(&client, &sub.url).await {
             Ok((body, usage)) => match xt_core::subscription::parse_any(&body) {

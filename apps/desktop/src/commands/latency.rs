@@ -39,7 +39,7 @@ pub async fn test_latency(
     )
         .map_err(util::user_msg)?;
 
-    state.with(|i| i.push_log("app", "info", format!("开始测试 {} 个节点的延迟", nodes.len())));
+    state.log("app", "info", format!("开始测试 {} 个节点的延迟", nodes.len()));
     events::probe_started(&app, nodes.len());
 
     // 物理出口：RTT 必须**在隧道之外**测，否则隧道开着时握手被本地协议栈
@@ -52,7 +52,7 @@ pub async fn test_latency(
     let results = crate::supervisor::probe(&nodes, &binary, Duration::from_secs(5), interface.as_deref())
         .await
         .map_err(|e| {
-            state.with(|i| i.push_log("app", "error", format!("探测失败：{e}")));
+            state.log("app", "error", format!("探测失败：{e}"));
             e
         })?;
 

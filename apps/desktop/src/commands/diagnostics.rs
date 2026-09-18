@@ -15,7 +15,16 @@ pub async fn tail_logs(
     let limit = limit.unwrap_or(400);
     // 先读**文件**：它跨重启、跨轮转，能拿到「上次开机那一刻」的日志 ——
     // 那正是排查「开机后没自动连上」唯一有用的证据。
-    let from_file: Vec<crate::state::LogEntry> = state.store.tail_logs(limit);
+    //
+    // 读盘放到阻塞线程池：这是 `async fn`，而 `tail_logs` 会 read_dir +
+    // 读整个文件 + 逐行 JSON 解析（上限约 10MB），直接在这里做会占住
+    // tokio worker（本 crate 别处的阻塞工作也是走 spawn_blocking）。
+    let root = state.store.root().to_path_buf();
+    let from_file: Vec<crate::state::LogEntry> = tauri::async_runtime::spawn_blocking(move || {
+        xt_core::store::Store::new(root).tail_logs(limit)
+    })
+    .await
+    .unwrap_or_default();
     if !from_file.is_empty() {
         return Ok(from_file);
     }
@@ -31,7 +40,12 @@ pub async fn tail_logs(
 #[tauri::command]
 pub async fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
     state.with(|i| i.logs.clear());
-    Ok(())
+    // **文件也要清。** `tail_logs` 优先读文件，只清内存缓冲的话界面刷新一次
+    // 日志就全回来了 —— 那不是「清空」，是把用户当傻子。
+    state
+        .store
+        .clear_logs()
+        .map_err(|e| format!("清空日志文件失败：{e}"))
 }
 
 /// 生成一份可直接贴给维护者的诊断报告。
@@ -75,8 +89,16 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
         snap.nodes.len()
     ));
     out.push_str("\n最近日志:\n");
-    if let Some(logs) = state.with(|i| i.logs.iter().rev().take(50).cloned().collect::<Vec<_>>()) {
-        for entry in logs.into_iter().rev() {
+    // 与 `tail_logs` 用**同一个来源**：报告是用户贴到 issue 里的东西，
+    // 而重启之后内存缓冲是空的 —— 那时报告里最该有的恰恰是重启前那段日志。
+    let recent: Vec<crate::state::LogEntry> = state.store.tail_logs(50);
+    let recent = if recent.is_empty() {
+        state.with(|i| i.logs.iter().rev().take(50).cloned().collect::<Vec<_>>()).unwrap_or_default()
+    } else {
+        recent
+    };
+    if !recent.is_empty() {
+        for entry in recent {
             out.push_str(&format!("[{}] {} {}\n", entry.source, entry.level, redact_secrets(&entry.message)));
         }
     }

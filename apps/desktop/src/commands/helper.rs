@@ -20,7 +20,7 @@ pub async fn probe_helper(state: State<'_, AppState>) -> Result<HelperAvailabili
 pub async fn install_helper(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let script = crate::helper_install::install_script(&app)?;
     crate::helper_install::run_with_admin(&script, "安装 XrayTun 网络配置助手")?;
-    state.with(|i| i.push_log("app", "info", "helper 安装完成"));
+    state.log("app", "info", "helper 安装完成");
     snapshot::build_snapshot(&app, &state).await
 }
 
@@ -36,7 +36,7 @@ pub async fn restart_helper(
     crate::helper_install::run_with_admin(&script, "重启 XrayTun 网络配置助手")?;
     // 连接状态可能已变，强制重连一次。
     state.helper.lock().await.disconnect();
-    state.with(|i| i.push_log("app", "info", "helper 已重启"));
+    state.log("app", "info", "helper 已重启");
     snapshot::build_snapshot(&app, &state).await
 }
 
@@ -47,7 +47,7 @@ pub async fn uninstall_helper(
 ) -> Result<AppSnapshot, String> {
     let script = crate::helper_install::uninstall_script();
     crate::helper_install::run_with_admin(&script, "卸载 XrayTun 网络配置助手")?;
-    state.with(|i| i.push_log("app", "warn", "helper 已卸载"));
+    state.log("app", "warn", "helper 已卸载");
     snapshot::build_snapshot(&app, &state).await
 }
 
@@ -63,10 +63,10 @@ pub async fn restore_stale(
 
     match response {
         Ok(_) => {
-            state.with(|i| i.push_log("app", "info", "已请求 helper 回滚遗留会话"));
+            state.log("app", "info", "已请求 helper 回滚遗留会话");
         }
         Err(e) => {
-            state.with(|i| i.push_log("app", "error", format!("回滚失败：{}", e.message)));
+            state.log("app", "error", format!("回滚失败：{}", e.message));
             return Err(e.message);
         }
     }

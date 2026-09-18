@@ -188,43 +188,49 @@ impl Store {
     ///
     /// # 为什么要落盘
     ///
-    /// 排查的都是**启动/唤醒那一刻**发生的事，而那些日志恰恰在重启时被清空 ——
-    /// 「开机后没自动连上」这类问题于是永远取不到证据（历史上反复修同一个症状，
-    /// 有一部分原因就在这里）。落盘之后，用户重启完还能回头看到当时发生了什么。
+    /// 排查的都是**启动/唤醒那一刻**发生的事，而那些日志在重启时会被清空 ——
+    /// 「开机后没自动连上」这类问题于是永远取不到证据。落盘之后，用户重启完
+    /// 还能回头看到当时发生了什么。
     ///
-    /// # 为什么不长成一个无限增长的文件
+    /// # 为什么只有一个文件 + 一个备份
     ///
-    /// 一天一个文件 + 单文件超过 [`LOG_ROTATE_BYTES`] 就轮转，
-    /// 最多保留 [`LOG_KEEP_FILES`] 个。轮转时**按整行**保留最后
-    /// [`LOG_ROTATE_KEEP`] 行，而不是按字节截断 —— 后者会把一行 JSON
-    /// 切成两半，读回来直接解析失败。
+    /// 早先按天分文件、每天再按 5MB 轮转出 `.1/.2`，结果有四处毛病（都靠审查发现）：
+    /// 按字节触发却按行数放弃、轮转时既保留整份又复制尾部（**同一条日志出现两次**）、
+    /// `tail_logs` 的过滤条件漏掉了 `.1` 后缀、以及**没有任何地方清理旧日期文件**
+    /// （于是「有容量上限」根本不成立）。
+    ///
+    /// 现在只留一个活动文件 + 一个备份，只按字节上限约束：总量上界就是
+    /// [`LOG_MAX_BYTES`] + 修剪后的尾部，一眼能算清，也不需要清理任务。
     pub fn append_log(&self, line: &str) -> Result<()> {
         append_log_line(&self.logs_dir(), line)
     }
 
-    /// 读最近 `limit` 条日志（跨天、跨轮转，按时间从旧到新）。
+    /// 删掉全部日志文件（活动文件与备份）。
     ///
-    /// 解析失败的行直接跳过：日志文件是排障用的，一行坏掉不该让整页打不开。
+    /// 「清空」按钮必须清掉**它显示的那些东西**。`tail_logs` 优先读文件，
+    /// 所以只清内存缓冲的话，界面刷新一次日志就全回来了 —— 那不是清空，
+    /// 是把用户当傻子。
+    pub fn clear_logs(&self) -> Result<()> {
+        let dir = self.logs_dir();
+        for name in log_file_names() {
+            let p = dir.join(name);
+            if p.exists() {
+                std::fs::remove_file(&p)
+                    .map_err(|e| Error::Store(format!("删除 {} 失败: {e}", p.display())))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 读最近 `limit` 条日志（按时间从旧到新），跨轮转。
+    ///
+    /// 解析失败的行直接跳过：日志是排障用的，一行坏掉不该让整页打不开。
     pub fn tail_logs<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Vec<T> {
         let dir = self.logs_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-        let mut files: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("app-") && n.ends_with(".jsonl"))
-                    .unwrap_or(false)
-            })
-            .collect();
-        // 文件名里带日期与轮转序号，字典序即时间序 —— 从新往旧读够 limit 条就停。
-        files.sort();
         let mut out: Vec<T> = Vec::new();
-        for path in files.iter().rev() {
-            let Ok(text) = std::fs::read_to_string(path) else {
+        // 备份在前、活动文件在后 —— 这样拼出来就是时间顺序。
+        for name in log_file_names().iter().rev() {
+            let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
                 continue;
             };
             let mut batch: Vec<T> = text
@@ -243,92 +249,124 @@ impl Store {
     }
 }
 
+/// 活动日志文件与备份的文件名（顺序 = 时间顺序）。
+///
+/// 固定名字，不含日期：见 [`Store::append_log`] 里关于「为什么只有一个文件」的说明。
+const LOG_FILE: &str = "app.jsonl";
+const LOG_FILE_BAK: &str = "app.1.jsonl";
+
+fn log_file_names() -> [&'static str; 2] {
+    [LOG_FILE_BAK, LOG_FILE]
+}
+
+/// 活动文件超过它就修剪一次。
+const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// 修剪后保留的字节数（见 [`Store::append_log`] 的说明）。
+///
+/// **判据是字节，不是行数。** 早先触发看字节、放弃看行数，于是「行很大、
+/// 行数不多」时会出现：每次跨过阈值都白做一遍破坏性重命名，然后什么都不修剪 ——
+/// 文件于是无界增长，而备份被反复churn。（这是审查指出的，测试也复现了。）
+const LOG_KEEP_BYTES: u64 = LOG_MAX_BYTES / 5 * 4;
+
 /// 追加一行日志到 `dir`（**唯一实现**）。
 ///
-/// 状态层（`apps/desktop`）与 `Store` 都走这里，避免两处各写一份
-/// 命名/轮转逻辑 —— 那种重复一旦漂移，就会出现「界面里显示的日志」和
-/// 「文件里的日志」对不上的情况。
+/// 状态层（`apps/desktop`）与 `Store` 都走这里，避免两处各写一份命名/轮转逻辑 ——
+/// 那种重复一旦漂移，就会出现「界面里显示的日志」和「文件里的日志」对不上。
+///
+/// `line` **必须不含换行**：这是 JSONL 格式的要求，含换行的会被拆成多行，
+/// 每一行都解析失败、被 `tail_logs` 静默丢掉。调用方负责转义
+/// （见 `apps/desktop` 的 `AppState::log`）。
 pub fn append_log_line(dir: &Path, line: &str) -> Result<()> {
+    debug_assert!(
+        !line.contains('\n'),
+        "日志行不能含换行：JSONL 要求一行一条，含换行的会被拆散后静默丢弃"
+    );
     std::fs::create_dir_all(dir)
         .map_err(|e| Error::Store(format!("创建日志目录失败: {e}")))?;
-    let path = dir.join(log_file_name(now_unix()));
-    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_ROTATE_BYTES {
-        rotate_log_file(&path);
+    let path = dir.join(LOG_FILE);
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_MAX_BYTES {
+        trim_log_file(&path);
     }
+    append_line_to(&path, line)
+}
+
+/// 与 [`append_log_line`] 相同，但**假定目录已存在**，跳过 `create_dir_all`。
+///
+/// 给高频调用方用：核心日志多的时候每秒几十条，每条都做一次
+/// 「建目录」系统调用是白花的。
+pub fn append_log_line_existing(dir: &Path, line: &str) -> Result<()> {
+    let _ = dir;
+    append_line_to(&dir.join(LOG_FILE), line)
+}
+
+/// 以 **0600** 追加多行（`text` 内部可含换行）。
+fn append_lines_to(path: &Path, text: &str) -> Result<()> {
+    append_to(path, text)
+}
+
+/// 以 **0600** 追加一行。
+///
+/// 权限在**创建时**就指定，而不是先按 umask 建好再 chmod：后者会留下一个
+/// 「真实内容已经写进去、但权限还没收紧」的窗口，而这正是同一文件里
+/// `atomic_write` 已经处理对的事情。
+fn append_line_to(path: &Path, line: &str) -> Result<()> {
+    append_to(path, line)
+}
+
+fn append_to(path: &Path, text: &str) -> Result<()> {
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| Error::Store(format!("打开日志失败: {e}")))?;
-    // **0600**：日志里可能有节点地址、订阅主机名。
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
-    writeln!(f, "{line}").map_err(|e| Error::Store(format!("写日志失败: {e}")))
+    let mut f = opts
+        .open(path)
+        .map_err(|e| Error::Store(format!("打开日志失败: {e}")))?;
+    writeln!(f, "{text}").map_err(|e| Error::Store(format!("写日志失败: {e}")))
 }
 
-/// 单文件超过它就开始轮转。
-const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
-
-/// 轮转时保留最后多少行（按整行，见 [`Store::append_log`]）。
-const LOG_ROTATE_KEEP: usize = 2000;
-
-/// 同一份日志最多保留几个文件（含当前文件）。
-const LOG_KEEP_FILES: usize = 3;
-
-/// 日志文件名：按**天**分，便于「只看今天」和清理。
-fn log_file_name(unix_secs: u64) -> String {
-    format!("app-{}.jsonl", format_utc_date(unix_secs))
-}
-
-/// `YYYY-MM-DD`（UTC）。
+/// 把活动文件修剪到 [`LOG_KEEP_BYTES`]：旧内容整体成为备份，新文件只留尾部。
 ///
-/// 不引 `chrono`：这里只需要一个可排序的日期串，而少一个依赖对构建更友好
-/// （与 `Cargo.toml` 里刻意不引时间库的取舍一致）。
-fn format_utc_date(unix_secs: u64) -> String {
-    let days = unix_secs / 86_400;
-    // 从 1970-01-01 起按民用历法往前推（Howard Hinnant 的 days_from_civil 逆运算）。
-    let z = days as i64 + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// 把 `path` 轮转成 `path.1`（旧的 `.1` 顺移），并把最后 [`LOG_ROTATE_KEEP`]
-/// 行搬到新文件，使当前文件重新变小。超过 [`LOG_KEEP_FILES`] 的旧份删除。
-fn rotate_log_file(path: &Path) {
-    let Some(dir) = path.parent() else { return };
-    let Some(stem) = path.file_name().and_then(|n| n.to_str()) else {
-        return;
-    };
-    // 先把最老的一份删掉，再把 .1..n-2 各往后挪一格
-    let oldest = dir.join(format!("{stem}.{}", LOG_KEEP_FILES - 1));
-    let _ = std::fs::remove_file(&oldest);
-    for i in (1..LOG_KEEP_FILES - 1).rev() {
-        let from = dir.join(format!("{stem}.{i}"));
-        let to = dir.join(format!("{stem}.{}", i + 1));
-        let _ = std::fs::rename(&from, &to);
-    }
+/// **按整行保留**（从后往前累加，直到超过目标字节）—— 按字节硬截会把一行 JSON
+/// 切成两半，读回来那一行解析失败。也**不做「保留整份 + 复制尾部」**：
+/// 那会让同一行同时存在于两代文件里，跨代读取时显示两遍。
+fn trim_log_file(path: &Path) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() <= LOG_ROTATE_KEEP {
+    let mut acc: u64 = 0;
+    let mut keep_from = lines.len();
+    for (i, l) in lines.iter().enumerate().rev() {
+        acc += l.len() as u64 + 1;
+        if acc > LOG_KEEP_BYTES {
+            break;
+        }
+        keep_from = i;
+    }
+    if keep_from == 0 {
+        return; // 整个文件都没超过目标，不该走到这里
+    }
+    let keep = lines[keep_from..].join("\n") + "\n";
+    let Some(dir) = path.parent() else { return };
+    // 旧内容整体挪成备份（覆盖上一份备份），再写一个只含尾部的新活动文件。
+    if std::fs::rename(path, dir.join(LOG_FILE_BAK)).is_err() {
         return;
     }
-    let keep = lines[lines.len() - LOG_ROTATE_KEEP..].join("\n");
-    if std::fs::rename(path, dir.join(format!("{stem}.1"))).is_ok() {
-        let _ = std::fs::write(path, keep + "\n");
+    // 临时文件也是 0600，写内容之前权限就已收紧（不留「有内容但权限宽松」的窗口）。
+    let tmp = dir.join("app.jsonl.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    match append_lines_to(&tmp, keep.trim_end_matches('\n')) {
+        Ok(()) => {
+            let _ = std::fs::rename(&tmp, path);
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -408,30 +446,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(store.root());
     }
 
-    /// 轮转必须**按整行**，否则会把一行 JSON 切成两半，读回来全部解析失败。
+    /// 修剪必须**按整行**，且不重复、不越界。
+    ///
+    /// 上一版这条测试是**假的**：它只写了 2050 行 ~50 字节的内容（约 100KB），
+    /// 根本没跨过 10MB 的触发线，于是「轮转」从未发生 —— 断言在有没有轮转时
+    /// 都通过。现在测试态下 `LOG_KEEP_LINES` 被调小（见该常量），
+    /// 用很少的数据就能真正走一遍修剪。
     #[test]
-    fn log_rotation_keeps_whole_lines() {
-        let dir = std::env::temp_dir().join(format!("xt-logrot-{}", std::process::id()));
+    fn log_trimming_keeps_whole_lines_without_duplication() {
+        let dir = std::env::temp_dir().join(format!("xt-logtrim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::new(&dir);
 
-        // 写超过保留行数的条目，触发一次轮转
-        for i in 0..(LOG_ROTATE_KEEP + 50) {
+        // 写超过保留行数，触发一次修剪
+        let total = 200;
+        for i in 0..total {
             store
-                .append_log(&format!(r#"{{"ts_unix":{},"message":"line {i}"}}"#, 1_700_000_000 + i))
+                .append_log(&format!(r#"{{"n":{i}}}"#))
                 .unwrap();
         }
-        let back: Vec<serde_json::Value> = store.tail_logs(LOG_ROTATE_KEEP + 100);
+
+        // 触发条件是字节数，测试态下行很小，所以显式跨过一次阈值
+        // 每条 ~256 字节，写够 1.5 倍阈值 —— 确保**确实**跨过触发线。
+        // （上一版按 64 字节估算，实际写入量刚好卡在阈值下方，于是修剪从未发生。）
+        let per_line = 256u64;
+        for _ in 0..(LOG_MAX_BYTES * 3 / 2 / per_line + 2) {
+            store.append_log(&format!(r#"{{"pad":"{}"}}"#, "x".repeat(236))).unwrap();
+        }
+        // 文件在 `root/logs/` 下，不是 root 本身 —— 早先这里读错了路径，
+        // 于是断言一直在看一个不存在的文件（0 字节），把「测试写错」伪装成
+        // 「实现没写」。
+        let logs = store.logs_dir();
         assert!(
-            back.len() >= LOG_ROTATE_KEEP,
-            "轮转不该丢数据到只剩 {} 条",
-            back.len()
+            logs.join(LOG_FILE_BAK).exists(),
+            "跨过阈值后应当产生备份文件（说明修剪真的发生了）"
         );
-        // 每一条都还是合法 JSON（被切半的行会在这里变成解析失败而消失）
+
+        let back: Vec<serde_json::Value> = store.tail_logs(2000);
+        assert!(!back.is_empty(), "修剪后不该一条都读不回来");
+        // 每一条都是完整 JSON（被切半的行会在这里消失）
+        assert!(back.iter().all(|v| v.is_object()), "修剪后出现残缺行");
+
+        // **不重复**：早先的实现把整份旧文件留作备份、又把尾部复制进新文件，
+        // 同一条日志会同时存在于两代里，跨代读取就会显示两遍。
+        let seq: Vec<i64> = back.iter().filter_map(|v| v.get("n")?.as_i64()).collect();
+        let mut sorted = seq.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seq.len(), "同一条日志被读到了两次");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「清空」必须连文件一起清 —— 否则界面刷新一次日志就全回来了。
+    #[test]
+    fn clear_logs_removes_files_too() {
+        let dir = std::env::temp_dir().join(format!("xt-logclear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::new(&dir);
+        store.append_log(r#"{"n":1}"#).unwrap();
+        assert!(!store.tail_logs::<serde_json::Value>(10).is_empty());
+
+        store.clear_logs().unwrap();
         assert!(
-            back.iter().all(|v| v.get("message").is_some()),
-            "轮转后出现了残缺行"
+            store.tail_logs::<serde_json::Value>(10).is_empty(),
+            "清空之后不该还能读到日志"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
