@@ -54,6 +54,9 @@ pub enum Error {
     #[error("探针失败: {0}")]
     Probe(String),
 
+    #[error("路由规则集读取失败: {0}")]
+    Routing(String),
+
     #[error("读取核心流量统计失败: {0}")]
     Stats(String),
 
