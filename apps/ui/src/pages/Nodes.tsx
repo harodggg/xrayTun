@@ -256,22 +256,11 @@ function NodeRow({
   const tier = available === false ? "unknown" : latencyTier(latencyMs);
   const fromSubscription = node.source.kind === "subscription";
 
-  const distanceLabel = latencyMs !== null ? `${latencyMs} ms` : latencyError ? "测不到" : "未测";
-  const distanceTitle =
-    available === false
-      ? `到服务器的距离 ${latencyMs ?? "?"} ms —— 但这个节点转发不了流量，这个数字不代表能用`
-      : latencyMs !== null
-        ? "本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"
-        : (latencyError ?? "");
-
-  const availabilityLabel =
-    available === null ? "未测" : available ? "可用" : "不可用";
-  const availabilityTitle =
-    available === null
-      ? "尚未测试"
-      : available
-        ? "经该节点可以正常取到数据"
-        : (latencyError ?? "经该节点取不到数据");
+  const distanceLabel = distanceLabelFor(latencyMs, latencyError);
+  const distanceTitle = distanceTitleFor(latencyMs, available, latencyError);
+  const availabilityLabel = availabilityLabelFor(available);
+  const availabilityTitle = availabilityTitleFor(available, latencyError);
+  const availabilityTone = available === null ? "unknown" : available ? "fast" : "slow";
 
   return (
     <div
@@ -301,7 +290,7 @@ function NodeRow({
         {distanceLabel}
       </span>
       <span
-        className={`badge badge--${available === null ? "unknown" : available ? "fast" : "slow"} node-row__metric`}
+        className={`badge badge--${availabilityTone} node-row__metric`}
         title={availabilityTitle}
       >
         {availabilityLabel}
@@ -338,4 +327,46 @@ function NodeRow({
 /** 供外部复用：把一次探测失败的原因显示成人话。 */
 export function describeProbeError(e: unknown): string {
   return errorText(e);
+}
+
+/**
+ * 四个取值助手。
+ *
+ * 抽成函数而不是写成嵌套三元（`a ? b : c ? d : e`）：这几个值各自有三个分支，
+ * 而且 `available` 是 `boolean | null` 的三态，串在一行里读不出「哪一态对应哪句话」。
+ * 分开之后每个判断都能单独读，也方便单测。
+ */
+
+/** 距离徽章上的文字。测不到与没测过是两回事。 */
+function distanceLabelFor(latencyMs: number | null, latencyError: string | null): string {
+  if (latencyMs !== null) return `${latencyMs} ms`;
+  if (latencyError) return "测不到";
+  return "未测";
+}
+
+/** 距离徽章的悬停说明。不可用时必须讲清「这个数字不代表能用」。 */
+function distanceTitleFor(
+  latencyMs: number | null,
+  available: boolean | null,
+  latencyError: string | null,
+): string {
+  if (available === false) {
+    return `到服务器的距离 ${latencyMs ?? "?"} ms —— 但这个节点转发不了流量，这个数字不代表能用`;
+  }
+  if (latencyMs !== null) {
+    return "本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章";
+  }
+  return latencyError ?? "";
+}
+
+/** 可用性徽章上的文字。`null` 是「还没测」，不能说成「不可用」。 */
+function availabilityLabelFor(available: boolean | null): string {
+  if (available === null) return "未测";
+  return available ? "可用" : "不可用";
+}
+
+function availabilityTitleFor(available: boolean | null, latencyError: string | null): string {
+  if (available === null) return "尚未测试";
+  if (available) return "经该节点可以正常取到数据";
+  return latencyError ?? "经该节点取不到数据";
 }

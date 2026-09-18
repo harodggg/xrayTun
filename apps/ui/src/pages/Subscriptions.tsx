@@ -128,13 +128,18 @@ function SubscriptionRow({
   onRefresh: () => void;
   onRemove: () => void;
 }) {
-  // `usage` 与 `total > 0` 一起收窄：两者任一不成立就没有比例可画，
-  // 于是下面用到的 `usage` 一定是具体的值，不需要非空断言。
-  const usage = sub.usage && sub.usage.total > 0 ? sub.usage : null;
+  // **`usage` 存在就该显示它**，与有没有配额无关。
+  //
+  // 后端把 `total == 0` 定义为「不限量」（见 `SubscriptionUsage::ratio`）。
+  // 早先这里要求 `total > 0` 才认 `usage`，于是「不限量但有有效期」的订阅
+  // **连到期时间都看不到** —— 而「什么时候到期」正是订阅最要紧的两条信息之一。
+  // 现在 `usage` 只按存在与否判断，比例单独算，没有比例就不画条子。
+  const usage = sub.usage;
   const used = usage ? usage.upload + usage.download : 0;
   const total = usage?.total ?? 0;
   const ratio = usage && total > 0 ? Math.min(1, used / total) : null;
-  const tone = ratio === null ? "" : ratio > DANGER_RATIO ? "danger" : ratio > WARN_RATIO ? "warn" : "";
+  const tone = usageTone(ratio);
+  const low = lowQuotaLabel(ratio);
 
   return (
     <div className={`list__row sub-row${sub.last_error ? " sub-row--error" : ""}`} style={{ cursor: "default" }}>
@@ -147,24 +152,31 @@ function SubscriptionRow({
           </span>
         </div>
 
-        {ratio !== null && (
+        {usage && (
           <div className="usage">
-            <div className="usage__bar">
-              <div
-                className={`usage__fill${tone ? ` usage__fill--${tone}` : ""}`}
-                style={{ width: `${(ratio * 100).toFixed(1)}%` }}
-              />
-            </div>
+            {/* 不限量（total == 0）没有比例可画，就不画条子 */}
+            {ratio !== null && (
+              <div className="usage__bar">
+                <div
+                  className={`usage__fill${tone ? ` usage__fill--${tone}` : ""}`}
+                  style={{ width: `${(ratio * 100).toFixed(1)}%` }}
+                />
+              </div>
+            )}
             <div className="usage__text">
-              <span className={tone ? `usage__pct usage__pct--${tone}` : "usage__pct"}>
-                已用 {formatBytes(used)} / {formatBytes(total)}
-              </span>
-              {ratio >= WARN_RATIO && (
-                <span className={`usage__warn usage__warn--${tone}`}>
-                  {ratio >= DANGER_RATIO ? "即将用尽" : "余量偏低"}
+              {usage.total === 0 ? (
+                <span className="usage__pct">不限量 · 已用 {formatBytes(used)}</span>
+              ) : (
+                <span className={`usage__pct${tone ? ` usage__pct--${tone}` : ""}`}>
+                  已用 {formatBytes(used)} / {formatBytes(total)}
                 </span>
               )}
-              {usage?.expire ? <span className="usage__expire">到期 {formatTimestamp(usage.expire)}</span> : null}
+              {low && (
+                <span className={`usage__warn${tone ? ` usage__warn--${tone}` : ""}`}>{low}</span>
+              )}
+              {usage.expire ? (
+                <span className="usage__expire">到期 {formatTimestamp(usage.expire)}</span>
+              ) : null}
             </div>
           </div>
         )}
@@ -193,4 +205,26 @@ function SubscriptionRow({
       </div>
     </div>
   );
+}
+
+/**
+ * 用量档位。`null`（没有配额或还没数据）与 `""` 都表示不强调。
+ *
+ * 抽成函数，而不是写成 `a ? b : c ? d : e`：这里有两个阈值加一个空值，
+ * 串在一行里读不出「now at which tier」。顺带把边界集中到一处 ——
+ * 早先标签用 `>=`、颜色用 `>`，恰好等于阈值时会出现「有文字但没颜色」。
+ */
+function usageTone(ratio: number | null): "" | "warn" | "danger" {
+  if (ratio === null) return "";
+  if (ratio >= DANGER_RATIO) return "danger";
+  if (ratio >= WARN_RATIO) return "warn";
+  return "";
+}
+
+/** 余量偏低时的结论文字；不低就没有。阈值与 [`usageTone`] 共用同一组常量。 */
+function lowQuotaLabel(ratio: number | null): string | null {
+  if (ratio === null) return null;
+  if (ratio >= DANGER_RATIO) return "即将用尽";
+  if (ratio >= WARN_RATIO) return "余量偏低";
+  return null;
 }

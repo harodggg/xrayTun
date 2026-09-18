@@ -210,6 +210,18 @@ const BASE_SNAPSHOT: AppSnapshot = {
       last_error: "HTTP 403：订阅 token 可能已过期",
       usage: null,
     } as unknown as AppSnapshot["subscriptions"][number],
+    {
+      // 第三种形状：**不限量（total == 0）但有有效期**。
+      // 后端把 total == 0 定义为「不限量」，这种订阅没有用量比例可画，
+      // 但到期时间仍然必须显示（曾经被整块藏掉，是个回归）。
+      id: "sub-3",
+      name: "不限量 · 机场 C",
+      url: "https://sub3.example.org/link/redacted",
+      node_count: 0,
+      last_updated: now - 600,
+      last_error: null,
+      usage: { upload: 1_073_741_824, download: 5_368_709_120, total: 0, expire: now + 86_400 * 120 },
+    } as unknown as AppSnapshot["subscriptions"][number],
   ],
   nodes: NODES,
   runtime: {
