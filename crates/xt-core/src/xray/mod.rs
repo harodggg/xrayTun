@@ -10,7 +10,10 @@ pub use config::{
     CoreConfigInput, InboundProfile, TunInboundSpec, API_PORT, MIN_CORE_VERSION_NATIVE_TUN,
 };
 pub use probe::{probe_nodes, ProbeOptions, ProbeResult, DEFAULT_PROBE_URL};
-pub use stats::{query_stats, traffic_from_stats, StatEntry, TrafficCounters, QUERY_STATS_PATH};
+pub use stats::{
+    parse_traffic_counter, query_stats, traffic_by_tag, traffic_from_stats, CounterParts,
+    StatEntry, TrafficCounters, QUERY_STATS_PATH,
+};
 pub use process::{
     core_version, resolve_core_binary, validate_config, wait_for_port, CoreEvent, LogStream,
     XrayProcess,

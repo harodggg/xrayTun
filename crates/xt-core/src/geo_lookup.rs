@@ -215,7 +215,7 @@ fn connect_bound(addr: SocketAddr, interface: Option<&str>) -> Result<std::net::
         .set_nonblocking(true)
         .map_err(|e| format!("设置非阻塞失败: {e}"))?;
     // 在同一作用域内构造 sockaddr 并借用它 —— 不堆分配、不泄漏。
-    let sa = SockAddrStorage::new(addr);
+    let sa = SockAddr::new(addr);
     let rc = {
         // SAFETY: `sa` 覆盖本次调用的生命周期；指针与长度都来自同一个联合体
         unsafe {
@@ -250,60 +250,73 @@ fn connect_bound(addr: SocketAddr, interface: Option<&str>) -> Result<std::net::
     Ok(stream)
 }
 
-/// 栈上的 sockaddr 存储：按地址族存 v4 或 v6，并给出指针与长度。
+/// 栈上的 `sockaddr` 存储：按地址族存 v4 或 v6，并给出指针与长度。
 ///
-/// 用联合体而不是 `Box::into_raw`：后者要靠「永不释放」来延长生命周期，
-/// 那是有意的内存泄漏。这里整块都在调用者的栈上，作用域结束即失效。
+/// 两个实现细节是刻意选的：
+///
+/// * 用联合体而不是 `Box::into_raw` —— 后者要靠「永不释放」来延长生命周期，
+///   那是有意的内存泄漏；
+/// * **长度单独存一个字段**，而不是事后从结构里读。早先读的是
+///   `sockaddr_in6.sin6_len`（两族里较大的那个），那是取巧：一旦两个结构
+///   的大小关系变化就会静默传错长度（系统调用会以 EINVAL 失败，
+///   表现成「查询偶尔失败」）。长度是构造时就知道的事实，直接存下来。
 #[repr(C)]
 union SockAddrStorage {
     v4: std::mem::ManuallyDrop<libc::sockaddr_in>,
     v6: std::mem::ManuallyDrop<libc::sockaddr_in6>,
-    _size: [u8; 28], // 保证足够大（sockaddr_in 16 / sockaddr_in6 28）
+    // 保证联合体足够大以容纳两者（sockaddr_in 16 / sockaddr_in6 28）
+    _size: [u8; 28],
 }
 
-impl SockAddrStorage {
+struct SockAddr {
+    storage: SockAddrStorage,
+    len: libc::socklen_t,
+}
+
+impl SockAddr {
     fn new(addr: SocketAddr) -> Self {
         match addr {
             SocketAddr::V4(v4) => Self {
-                v4: std::mem::ManuallyDrop::new(libc::sockaddr_in {
-                    sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-                    sin_family: libc::AF_INET as u8,
-                    sin_port: v4.port().to_be(),
-                    sin_addr: libc::in_addr {
-                        // `s_addr` 需要网络字节序：octets() 已是网络序
-                        s_addr: u32::from_ne_bytes(v4.ip().octets()),
-                    },
-                    sin_zero: [0; 8],
-                }),
+                storage: SockAddrStorage {
+                    v4: std::mem::ManuallyDrop::new(libc::sockaddr_in {
+                        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+                        sin_family: libc::AF_INET as u8,
+                        sin_port: v4.port().to_be(),
+                        sin_addr: libc::in_addr {
+                            // `s_addr` 要求网络字节序；`octets()` 已经是网络序
+                            s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                        },
+                        sin_zero: [0; 8],
+                    }),
+                },
+                len: std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
             },
             SocketAddr::V6(v6) => Self {
-                v6: std::mem::ManuallyDrop::new(libc::sockaddr_in6 {
-                    sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-                    sin6_family: libc::AF_INET6 as u8,
-                    sin6_port: v6.port().to_be(),
-                    sin6_flowinfo: v6.flowinfo(),
-                    sin6_addr: libc::in6_addr {
-                        s6_addr: v6.ip().octets(),
-                    },
-                    sin6_scope_id: v6.scope_id(),
-                }),
+                storage: SockAddrStorage {
+                    v6: std::mem::ManuallyDrop::new(libc::sockaddr_in6 {
+                        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
+                        sin6_family: libc::AF_INET6 as u8,
+                        sin6_port: v6.port().to_be(),
+                        sin6_flowinfo: v6.flowinfo(),
+                        sin6_addr: libc::in6_addr {
+                            s6_addr: v6.ip().octets(),
+                        },
+                        sin6_scope_id: v6.scope_id(),
+                    }),
+                },
+                len: std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
             },
         }
     }
 
+    /// 传给 `connect(2)` 的通用指针。联合体的两个成员都以 `sockaddr` 开头。
     fn as_ptr(&self) -> *const libc::sockaddr {
-        // SAFETY: 联合体的两个成员都以 sockaddr 开头（C 布局的约定）
-        unsafe { &self.v4 as *const _ as *const libc::sockaddr }
+        // SAFETY: `v4` 与 `v6` 都是 C 布局且首字段等同于 `sockaddr` 的前两字节
+        unsafe { &self.storage.v4 as *const _ as *const libc::sockaddr }
     }
 
     fn len(&self) -> libc::socklen_t {
-        // 由 `new` 构造时写入的 family 决定；这里直接按大小取较大者会越界，
-        // 所以用 sin6_len（两族里较大的那个结构）里的值判断。
-        // SAFETY: `_size` 保证联合体至少 28 字节，读 sin6_len 在范围内
-        unsafe {
-            let s = &self.v6;
-            s.sin6_len as libc::socklen_t
-        }
+        self.len
     }
 }
 
@@ -348,6 +361,32 @@ pub const SELF_KEY: &str = "__self__";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 传给系统调用的长度必须与地址族匹配 —— 传错会以 EINVAL 失败，
+    /// 而表现只是「查询偶尔失败」，很难查。
+    #[test]
+    fn sockaddr_length_matches_family() {
+        let v4: SocketAddr = "1.2.3.4:80".parse().unwrap();
+        let sa = SockAddr::new(v4);
+        assert_eq!(sa.len(), std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t);
+        // 首字节是长度（macOS 的 sockaddr 约定），家族紧随其后
+        let raw = sa.as_ptr() as *const u8;
+        // SAFETY: 指针指向刚构造的 sockaddr_in，前两字节一定可读
+        unsafe {
+            assert_eq!(*raw, std::mem::size_of::<libc::sockaddr_in>() as u8);
+            assert_eq!(*raw.add(1), libc::AF_INET as u8);
+        }
+
+        let v6: SocketAddr = "[::1]:80".parse().unwrap();
+        let sa6 = SockAddr::new(v6);
+        assert_eq!(sa6.len(), std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t);
+        let raw6 = sa6.as_ptr() as *const u8;
+        // SAFETY: 同上
+        unsafe {
+            assert_eq!(*raw6, std::mem::size_of::<libc::sockaddr_in6>() as u8);
+            assert_eq!(*raw6.add(1), libc::AF_INET6 as u8);
+        }
+    }
 
     #[test]
     fn parses_a_successful_response() {

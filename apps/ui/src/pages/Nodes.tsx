@@ -324,11 +324,6 @@ function NodeRow({
   );
 }
 
-/** 供外部复用：把一次探测失败的原因显示成人话。 */
-export function describeProbeError(e: unknown): string {
-  return errorText(e);
-}
-
 /**
  * 四个取值助手。
  *

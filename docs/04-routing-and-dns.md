@@ -798,8 +798,82 @@ cargo run -p xraytun-desktop --example tun_smoke -- --yes-i-understand
 
 ---
 
+## 9.1 判定「这个地址会走哪条规则」
+
+界面要回答「这个网站为什么走代理/直连」，就必须能算出某条规则是否命中。
+这带来两件事：读 `geosite.dat` / `geoip.dat`，以及**与真实核心对拍**。
+
+### 9.1.1 数据文件格式
+
+两个文件都是 protobuf（字段号是**实测**出来的，不是照抄）：
+
+```text
+GeoSiteList { repeated GeoSite entry = 1 }
+GeoSite     { string country_code = 1; repeated Domain domain = 2 }
+Domain      { Type type = 1; string value = 2 }
+            Type: Keyword=0  Regex=1  Domain=2  Full=3
+
+GeoIP       { string country_code = 1; repeated CIDR cidr = 2 }
+CIDR        { bytes ip = 1; uint32 prefix = 2 }
+```
+
+两个容易踩的点：
+
+* **类别名是大写**（文件里是 `CN`），而规则里写的是 `geosite:cn`。
+  比较时统一转大写。
+* **`geoip` 的地址是原始字节**（4 或 16 字节），不是字符串 ——
+  按字符串解会得到乱码并静默不命中。
+* 类型分布实测：`Domain` 五十万条、`Full` 七千多条、`Regex` **仅 371 条**
+  （0.07%）。所以自带一个只支持实际出现写法的极简正则即可，
+  **编译不了的写法明确不命中**，不按别的语义悄悄匹配。
+
+内存上只保留**被规则引用的类别**（当前 6 个 geosite + 2 个 geoip），
+其余流式跳过 —— 峰值内存与文件大小无关。
+
+### 9.1.2 匹配语义
+
+| 类型 | 语义 | 易错点 |
+|---|---|---|
+| `Domain` | 后缀匹配 | **必须落在标签边界**：`google.com` 命中 `www.google.com`，不命中 `notgoogle.com` |
+| `Full` | 精确相等 | 不匹配子域 |
+| `Keyword` | 子串出现 | —— |
+| `Regex` | 正则 | 只支持数据里实际出现的写法 |
+
+域名比较**两边都转小写**：数据里确实存在大写条目，只转一边会「明明在列表里却匹配不上」。
+
+### 9.1.3 一条实测出来的规则语义（容易想当然）
+
+一条规则**同时**写了 `domain` 与 `ip` 时，如果目标只有 IP、没有域名，
+这条规则**不命中**。
+
+我一度按「缺少输入的条件就跳过」实现，于是私网地址 `192.168.1.1` 被判成直连
+（`preset-private` 的 `geoip:private` 命中）。用真实核心跑同一批查询后发现
+它实际把 `192.168.1.1` 送去了**兜底代理** —— 即**缺输入的条件视为不满足**。
+
+判定器已按实测改正，依据写在代码注释里（否则下一个人会像我一样「顺手改回去」）。
+
+### 9.1.4 怎么验证：与真实核心对拍
+
+自己实现规则匹配、再自己写测试，只能证明「与自己的理解一致」。
+所以 `scripts/compare-route.py` 拿**用户原样的规则**造一份带 `access.log`
+的探针配置，起真实 `xray`，用 `--socks5-hostname` 逐个域名/IP 发请求，
+从日志的 `[socks -> 出站]` 读出核心的选择，再与判定器逐条比对。
+
+实测 10/10 一致（baidu/qq→direct、google/gmail→节点、doubleclick→block、
+223.5.5.5→direct、私网与 8.8.8.8→兜底节点）。
+
+**这个对拍就是 9.1.3 那条语义的来源。** 改动判定逻辑后请重跑它。
+
+命令行工具：`cargo run -p xt-core --example route_explain -- <config.json> <数据目录> -- <域名...>`
+
+---
+
 ## 10. 参考
 
 * `crates/xt-core/src/routing.rs` —— IR 与编译
 * `crates/xt-core/src/xray/config.rs` —— DNS 段与入站生成
 * `crates/xt-core/src/model.rs` —— `DnsSettings` / `FakeDnsSettings`
+* `crates/xt-core/src/routing/geo.rs` —— geosite/geoip 读取与匹配
+* `crates/xt-core/src/routing/explain.rs` —— 路由判定
+* `scripts/compare-route.py` —— 与真实核心对拍
+* `crates/xt-core/src/routing/mod.rs` —— IR 与编译（含 `geo` 子模块）

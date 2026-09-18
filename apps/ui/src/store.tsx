@@ -22,10 +22,13 @@ import {
   type ReactNode,
 } from "react";
 import { api, errorText, subscribe } from "./ipc";
+import { isCount, isObject, isText, rejectPayload } from "./eventGuards";
 import type { AppSnapshot, LogEntry, ProbeResult } from "./types";
 
 /** 日志在内存里保留的上限。后端也有自己的上限，这里再兜一层防止长跑占用内存。 */
 const MAX_UI_LOGS = 1500;
+
+
 
 interface StoreValue {
   snapshot: AppSnapshot | null;
@@ -111,12 +114,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     const unsubscribe = subscribe({
       onRuntime: (payload) => {
+        if (!isObject(payload) || !isObject(payload.runtime) || !isObject(payload.traffic)) {
+          return rejectPayload("runtime://changed", payload, "缺少 runtime/traffic 对象");
+        }
         // 增量更新运行时与流量：这两个字段高频变化，全量刷新会很浪费。
         setSnapshot((prev) =>
-          prev ? { ...prev, runtime: payload.runtime, traffic: payload.traffic } : prev,
+          prev
+            ? {
+                ...prev,
+                runtime: payload.runtime as typeof prev.runtime,
+                traffic: payload.traffic as typeof prev.traffic,
+              }
+            : prev,
         );
       },
       onUpdateProgress: (payload) => {
+        if (
+          !isObject(payload) ||
+          !isText(payload.label) ||
+          !isCount(payload.done_bytes) ||
+          !isCount(payload.total_bytes)
+        ) {
+          return rejectPayload("update://progress", payload, "进度字段不完整");
+        }
         // 进度只更新这一个字段：下载期间每 200ms 一次，全量刷新太浪费。
         setSnapshot((prev) =>
           prev
@@ -135,6 +155,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       },
       onLog: (payload) => {
+        if (!isObject(payload) || !isText(payload.line) || !isText(payload.level)) {
+          return rejectPayload("core://log", payload, "缺少 line/level 字符串");
+        }
         setLogs((prev) => {
           const next = [
             ...prev,
@@ -148,12 +171,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return next.length > MAX_UI_LOGS ? next.slice(next.length - MAX_UI_LOGS) : next;
         });
       },
-      onLatency: (results: ProbeResult[]) => {
+      onLatency: (results) => {
+        // **这一条实测崩过**：载荷不是数组时 `for...of` 会抛错并卸载整个树。
+        if (!Array.isArray(results)) {
+          return rejectPayload("nodes://latency", results, "载荷不是数组");
+        }
         setSnapshot((prev) => {
           if (!prev) return prev;
           const latency = { ...prev.latency };
-          for (const r of results) {
-            if (r.node_id) latency[r.node_id] = r;
+          for (const r of results as ProbeResult[]) {
+            if (r && isText(r.node_id)) latency[r.node_id] = r;
           }
           return { ...prev, latency };
         });
@@ -161,6 +188,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setProbeProgress(null);
       },
       onProbeStarted: (payload) => {
+        if (!isObject(payload) || !isCount(payload.total)) {
+          return rejectPayload("nodes://probe-started", payload, "缺少 total");
+        }
         setProbing(true);
         setProbeProgress({ done: 0, total: payload.total });
       },

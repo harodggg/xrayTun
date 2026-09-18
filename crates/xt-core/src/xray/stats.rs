@@ -46,6 +46,7 @@
 //! 这个对应关系由 [`traffic_from_stats`] 的测试钉住。
 
 use std::net::SocketAddr;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -237,6 +238,67 @@ fn decode_grpc_frame(buf: &[u8]) -> Result<&[u8]> {
 ///
 /// 入站 `downlink` = 用户的下载（rx），`uplink` = 上传（tx），
 /// 这个方向是实测确定的，见模块头注释。
+/// 计数器名里解析出来的一个分量。
+///
+/// 名字形如 `inbound>>>tun>>>traffic>>>uplink`：
+/// `direction` 是 `inbound` / `outbound`，`tag` 是入口或出口的名字，
+/// `traffic` 固定不变，`flow` 是 `uplink` / `downlink`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterParts {
+    pub direction: String,
+    pub tag: String,
+    pub flow: String,
+}
+
+/// 解析一个流量计数器的名字。
+///
+/// **只在这里实现一次**：这个格式在三个地方要用（整体流量、按入口分车道、
+/// 按出口取最大）。各写一份手切分的话，格式一变就会有一处漏改，
+/// 而漏改的表现是「数字悄悄变 0」——不会报错。
+pub fn parse_traffic_counter(name: &str) -> Option<CounterParts> {
+    let mut parts = name.split(">>>");
+    let (Some(direction), Some(tag), Some("traffic"), Some(flow), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return None;
+    };
+    if direction != "inbound" && direction != "outbound" {
+        return None;
+    }
+    Some(CounterParts {
+        direction: direction.to_string(),
+        tag: tag.to_string(),
+        flow: flow.to_string(),
+    })
+}
+
+/// 按 tag 汇总某个方向的上下行字节。
+///
+/// 返回 `tag -> (uplink, downlink)`。
+pub fn traffic_by_tag(stats: &[StatEntry], direction: &str) -> HashMap<String, (u64, u64)> {
+    let mut out: HashMap<String, (u64, u64)> = HashMap::new();
+    for s in stats {
+        let Some(parts) = parse_traffic_counter(&s.name) else {
+            continue;
+        };
+        if parts.direction != direction {
+            continue;
+        }
+        let entry = out.entry(parts.tag).or_insert((0, 0));
+        let value = s.value.max(0) as u64;
+        match parts.flow.as_str() {
+            "uplink" => entry.0 = entry.0.saturating_add(value),
+            "downlink" => entry.1 = entry.1.saturating_add(value),
+            _ => {}
+        }
+    }
+    out
+}
+
 pub fn traffic_from_stats(stats: &[StatEntry], ignore_inbound: &str) -> TrafficCounters {
     let mut total = TrafficCounters::default();
     for s in stats {
@@ -374,6 +436,62 @@ mod tests {
                 value: 0,
             }]
         );
+    }
+
+    /// 计数器名的解析：**只此一处**，三处调用共用。
+    #[test]
+    fn parses_counter_names() {
+        let p = parse_traffic_counter("inbound>>>tun>>>traffic>>>downlink").unwrap();
+        assert_eq!(p.direction, "inbound");
+        assert_eq!(p.tag, "tun");
+        assert_eq!(p.flow, "downlink");
+
+        let p = parse_traffic_counter("outbound>>>direct>>>traffic>>>uplink").unwrap();
+        assert_eq!(p.direction, "outbound");
+        assert_eq!(p.tag, "direct");
+    }
+
+    /// 名字不对时必须**拒绝**，而不是解析出一个半成品 ——
+    /// 半成品会让某个 tag 悄悄变成别的名字，数字对不上还查不出来。
+    #[test]
+    fn rejects_malformed_counter_names() {
+        for bad in [
+            "",
+            "inbound>>>tun>>>traffic",              // 少了方向
+            "inbound>>>tun>>>traffic>>>uplink>>>x", // 多了字段
+            "user>>>a@b>>>traffic>>>uplink",        // 不是 inbound/outbound
+            "inbound>>>tun>>>nottraffic>>>uplink",  // 中间不是 traffic
+            "inbound>>>tun>>>traffic>>>sideways",   // 方向名不对但结构合法（保留判断在调用方）
+        ] {
+            let got = parse_traffic_counter(bad);
+            if bad.ends_with("sideways") {
+                // 结构对、flow 名不认识：解析通过，但不会被计入任何一项
+                assert!(got.is_some(), "{bad} 结构合法应当解析成功");
+            } else {
+                assert!(got.is_none(), "{bad} 应当被拒绝");
+            }
+        }
+    }
+
+    /// 按 tag 汇总：同一 tag 的上下行要分别累加，不同 direction 不能混。
+    #[test]
+    fn aggregates_per_tag_and_keeps_directions_apart() {
+        let stats = vec![
+            StatEntry { name: "inbound>>>tun>>>traffic>>>uplink".into(), value: 10 },
+            StatEntry { name: "inbound>>>tun>>>traffic>>>downlink".into(), value: 100 },
+            StatEntry { name: "inbound>>>socks>>>traffic>>>uplink".into(), value: 3 },
+            StatEntry { name: "outbound>>>direct>>>traffic>>>uplink".into(), value: 7 },
+            // 负值（理论上不该出现）按 0 处理，避免把总量减出一个负数
+            StatEntry { name: "inbound>>>tun>>>traffic>>>uplink".into(), value: -5 },
+        ];
+        let inbound = traffic_by_tag(&stats, "inbound");
+        assert_eq!(inbound.get("tun"), Some(&(10, 100)));
+        assert_eq!(inbound.get("socks"), Some(&(3, 0)));
+        // 出口的计数不会混进入口
+        assert!(!inbound.contains_key("direct"));
+
+        let outbound = traffic_by_tag(&stats, "outbound");
+        assert_eq!(outbound.get("direct"), Some(&(7, 0)));
     }
 
     /// 真实响应里 value 是 54 的那条：`inbound>>>api>>>traffic>>>downlink`。

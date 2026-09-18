@@ -14,9 +14,7 @@
 //! 规则链作为拓扑与判定依据展示；而「某个目的地走哪条规则」由
 //! [`explain_dest`] 用真实数据算出来 —— 那一条是有依据的。
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,11 +96,20 @@ fn describe_conditions(rule: &Rule) -> Vec<String> {
 
 /// 从运行中的配置里读规则链。
 fn load_rules(store: &xt_core::store::Store) -> Result<Vec<Rule>, String> {
+    let cfg = read_runtime_config(store)?;
+    rules_from_config(&cfg)
+}
+
+/// 读运行中的配置。读不到时给出**能读懂的原因**（最常见就是核心没在跑）。
+fn read_runtime_config(store: &xt_core::store::Store) -> Result<serde_json::Value, String> {
     let path = store.core_config_path();
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("读运行配置失败（核心没在跑？）: {e}"))?;
-    let cfg: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("解析运行配置失败: {e}"))?;
+    serde_json::from_str(&raw).map_err(|e| format!("解析运行配置失败: {e}"))
+}
+
+/// 从配置里取规则链。**与读文件分开是为了能测**：这段是纯转换。
+fn rules_from_config(cfg: &serde_json::Value) -> Result<Vec<Rule>, String> {
     let rules = cfg
         .get("routing")
         .and_then(|r| r.get("rules"))
@@ -118,13 +125,13 @@ type OutboundInfo = (String, String);
 
 /// 从配置里读入口与出口的静态信息。
 fn load_endpoints(store: &xt_core::store::Store) -> (Vec<InboundInfo>, Vec<OutboundInfo>) {
-    let path = store.core_config_path();
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return (Vec::new(), Vec::new());
-    };
-    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return (Vec::new(), Vec::new());
-    };
+    read_runtime_config(store)
+        .map(|cfg| endpoints_from_config(&cfg))
+        .unwrap_or_default()
+}
+
+/// 从配置里取入口与出口。同样与读文件分开，便于测试。
+fn endpoints_from_config(cfg: &serde_json::Value) -> (Vec<InboundInfo>, Vec<OutboundInfo>) {
     let inbound = cfg
         .get("inbounds")
         .and_then(|v| v.as_array())
@@ -157,28 +164,6 @@ fn load_endpoints(store: &xt_core::store::Store) -> (Vec<InboundInfo>, Vec<Outbo
     (inbound, outbound)
 }
 
-/// 把 `inbound>>>tun>>>traffic>>>uplink` 这类计数器整理成 `tag -> (up, down)`。
-fn traffic_by_tag(stats: &[xt_core::xray::StatEntry], dir: &str) -> HashMap<String, (u64, u64)> {
-    let mut out: HashMap<String, (u64, u64)> = HashMap::new();
-    let prefix = format!("{dir}>>>");
-    for s in stats {
-        let Some(rest) = s.name.strip_prefix(&prefix) else {
-            continue;
-        };
-        let parts: Vec<&str> = rest.split(">>>").collect();
-        if parts.len() != 3 || parts[1] != "traffic" {
-            continue;
-        }
-        let entry = out.entry(parts[0].to_string()).or_insert((0, 0));
-        match parts[2] {
-            "uplink" => entry.0 = entry.0.saturating_add(s.value.max(0) as u64),
-            "downlink" => entry.1 = entry.1.saturating_add(s.value.max(0) as u64),
-            _ => {}
-        }
-    }
-    out
-}
-
 /// 出口的类别：节点 / 直连 / 拦截 / 内部。
 fn outbound_kind(tag: &str, protocol: &str) -> String {
     match protocol {
@@ -209,9 +194,13 @@ pub async fn routing_topology(
     let addr: SocketAddr = ([127, 0, 0, 1], API_PORT).into();
     let (traffic, traffic_error) = match query_stats(addr, Duration::from_millis(1200)).await {
         Ok(stats) => {
-            let up = traffic_by_tag(&stats, "inbound");
-            let down = traffic_by_tag(&stats, "outbound");
-            (Some((up, down)), None)
+            (
+                Some((
+                    xt_core::xray::traffic_by_tag(&stats, "inbound"),
+                    xt_core::xray::traffic_by_tag(&stats, "outbound"),
+                )),
+                None,
+            )
         }
         Err(e) => (None, Some(format!("取流量失败：{e}"))),
     };
@@ -328,16 +317,78 @@ pub async fn explain_dest(
     Ok(explain(&rules, &geo, &query))
 }
 
-/// geo 数据文件所在目录是否可用（给界面一个明确的可用性信号）。
-pub fn geo_unavailable_reason(root: &Path) -> Option<String> {
-    if crate::supervisor::geo_dir(root).is_some() {
-        None
-    } else {
-        Some("数据目录里没有 geosite.dat / geoip.dat".into())
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// 供测试与诊断：把规则条件拼成一行。
-pub fn rule_summary(rule: &Rule) -> String {
-    describe_conditions(rule).join(" · ")
+    fn cfg_with(rules: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "inbounds": [
+                { "tag": "tun", "protocol": "tun" },
+                { "tag": "socks", "protocol": "socks", "port": 10808 }
+            ],
+            "outbounds": [
+                { "tag": "node-abc", "protocol": "vless" },
+                { "tag": "direct", "protocol": "freedom" },
+                { "tag": "block", "protocol": "blackhole" }
+            ],
+            "routing": { "rules": rules }
+        })
+    }
+
+    #[test]
+    fn parses_rules_in_order() {
+        let cfg = cfg_with(serde_json::json!([
+            { "ruleTag": "ads", "outboundTag": "block", "domain": ["geosite:category-ads-all"] },
+            { "ruleTag": "fallback", "outboundTag": "node-abc", "network": "tcp,udp" }
+        ]));
+        let rules = rules_from_config(&cfg).expect("应当解析成功");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].tag.as_deref(), Some("ads"));
+        assert_eq!(rules[0].outbound, "block");
+        assert_eq!(rules[1].conds.network.as_deref(), Some("tcp,udp"));
+    }
+
+    /// 配置里没有 routing 段不是错误：那是「没有规则」的合法状态。
+    #[test]
+    fn missing_routing_section_is_empty_not_error() {
+        let cfg = serde_json::json!({ "inbounds": [], "outbounds": [] });
+        assert_eq!(rules_from_config(&cfg).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn reads_inbound_and_outbound_endpoints() {
+        let cfg = cfg_with(serde_json::json!([]));
+        let (inbound, outbound) = endpoints_from_config(&cfg);
+        assert_eq!(inbound.len(), 2);
+        assert_eq!(inbound[0], ("tun".to_string(), "tun".to_string(), None));
+        assert_eq!(inbound[1], ("socks".to_string(), "socks".to_string(), Some(10808)));
+        assert_eq!(outbound.len(), 3);
+        assert_eq!(outbound[0], ("node-abc".to_string(), "vless".to_string()));
+    }
+
+    /// 条件要翻成能读的一句话；顺序与配置里的字段顺序一致。
+    #[test]
+    fn describes_conditions_in_readable_form() {
+        let cfg = cfg_with(serde_json::json!([
+            {
+                "ruleTag": "r", "outboundTag": "direct",
+                "domain": ["geosite:cn"], "ip": ["geoip:cn"], "port": "443"
+            }
+        ]));
+        let rules = rules_from_config(&cfg).unwrap();
+        let got = describe_conditions(&rules[0]);
+        assert_eq!(got, vec!["域名 geosite:cn", "IP geoip:cn", "端口 443"]);
+    }
+
+    /// 出口类别决定车道颜色：别把 freedom 都当成直连
+    /// （`api` 出站也是 freedom，但它属于内部）。
+    #[test]
+    fn classifies_outbound_kinds() {
+        assert_eq!(outbound_kind("direct", "freedom"), "direct");
+        assert_eq!(outbound_kind("api", "freedom"), "internal");
+        assert_eq!(outbound_kind("block", "blackhole"), "block");
+        assert_eq!(outbound_kind("dns-out", "dns"), "dns");
+        assert_eq!(outbound_kind("node-abc", "vless"), "node");
+    }
 }

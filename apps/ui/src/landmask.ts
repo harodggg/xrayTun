@@ -133,15 +133,6 @@ export function decodeLandMask(hex: string): boolean[][] {
   return rows;
 }
 
-/** 格心的经纬度（度）。 */
-/** 格心的经纬度（度）。 */
-export function cellCenter(row: number, col: number): { lat: number; lon: number } {
-  return {
-    lat: 90 - 2 * row - 1,
-    lon: -180 + 2 * col + 1,
-  };
-}
-
 /**
  * 按经纬度采样陆地（双线性插值）。
  *

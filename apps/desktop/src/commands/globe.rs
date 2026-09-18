@@ -145,15 +145,11 @@ async fn current_exit_bytes() -> u64 {
     let Ok(stats) = xt_core::xray::query_stats(addr, Duration::from_millis(900)).await else {
         return 0;
     };
-    // 出口里最大的那个（就是节点出站）
-    let mut best = 0u64;
-    for s in &stats {
-        if let Some(rest) = s.name.strip_prefix("outbound>>>") {
-            let parts: Vec<&str> = rest.split(">>>").collect();
-            if parts.len() == 3 && parts[1] == "traffic" {
-                best = best.max(s.value.max(0) as u64);
-            }
-        }
-    }
-    best
+    // 出口里流量最大的那个就是节点出站
+    xt_core::xray::traffic_by_tag(&stats, "outbound")
+        .values()
+        .map(|(up, down)| up.saturating_add(*down))
+        .max()
+        .unwrap_or(0)
 }
+
