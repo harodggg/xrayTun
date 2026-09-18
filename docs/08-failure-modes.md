@@ -136,6 +136,8 @@
 | Release 里**只有 `SHA256SUMS.txt`**，dmg/zip 没了 | `gh release create dist/*` 一把梭上传；45MB 的 dmg 偶发 `connection reset`，而**前面传上去的资产会留下**，重跑撞「名字已存在」(422) | 先建 Release → 逐个上传 + 重试 5 次 + `--clobber` → 逐个核对资产 |
 | CI 全绿、资产齐全，**但客户端永远收不到这个版本** | 那个 Release 是 **draft** —— **匿名用户看不到草稿**，于是 `check_app` 认为最新版还是上一个 | 上传后 `gh release edit --draft=false`，并断言 `isDraft == false` |
 
+| 发布成功但**端到端校验跑不完**：40MB 的包能下完，取 `SHA256SUMS.txt` 却超时 | GitHub 的**资产 CDN**（`release-assets.githubusercontent.com`）不通 —— 元数据 API 正常（`api.github.com` 200），重定向也正常发出，跟随重定向取**任意**资产都超时 | 先分清「发布问题」与「网络问题」：`gh release view` 看 draft/资产、`git tag` 看 tag；**不要**因为校验超时就去重发版本。CDN 恢复后重跑 `app_update_check` 即可 |
+
 ### E.1 一条贯穿这一整轮的元教训
 
 上面两行（还有 A 类的 CI 那两行）都属于同一件事：
