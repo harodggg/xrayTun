@@ -8,6 +8,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   NodeExport,
+  RouteExplanation,
+  Topology,
   AppSnapshot,
   AppSettings,
   CoreRuntime,
@@ -43,6 +45,11 @@ export const api = {
     invoke<AppSnapshot>("remove_subscription", { subscriptionId }),
   refreshSubscriptions: (ids?: string[]) =>
     invoke<AppSnapshot>("refresh_subscriptions", { ids: ids ?? null }),
+
+  /** 网络流动拓扑：真实入口/规则链/出口 + 实测流量。 */
+  routingTopology: () => invoke<Topology>("routing_topology"),
+  /** 判定某个目的地会走哪条规则（真实规则 + 真实 geosite/geoip 数据）。 */
+  explainDest: (dest: string) => invoke<RouteExplanation>("explain_dest", { dest }),
 
   testLatency: (nodeIds?: string[]) =>
     invoke<AppSnapshot>("test_latency", { nodeIds: nodeIds ?? null }),

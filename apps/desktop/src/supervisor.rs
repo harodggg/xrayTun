@@ -657,6 +657,31 @@ pub fn core_supports_native_tun(version: &str) -> bool {
     version_meets(version, MIN_CORE_VERSION_NATIVE_TUN)
 }
 
+/// geo 数据文件（`geosite.dat` / `geoip.dat`）所在目录。
+///
+/// **与「核心在哪」是两件事**：geo 和核心由两次独立的更新分发，只更新了核心、
+/// 托管目录里没有 geo 文件是完全正常的状态。所以这里按「谁真的有 geo 文件」
+/// 判断，而不是按「谁提供了核心」—— 后者会让 `geosite:` 规则静默失效。
+///
+/// 抽成函数是为了让「路由判定」也能用同一份判断：界面要说「能不能判定域名规则」，
+/// 判断依据必须与核心实际使用的那个目录一致，否则会出现「核心能用、界面说不能用」。
+pub fn geo_dir(data_root: &Path) -> Option<PathBuf> {
+    let managed = xt_core::update::managed_core_dir(data_root);
+    let candidates: Vec<PathBuf> = vec![
+        managed,
+        // 包内资源目录（发行版）
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_default(),
+        // 开发期：apps/desktop/binaries
+        crate::dev_binaries_dir().unwrap_or_default(),
+    ];
+    candidates
+        .into_iter()
+        .find(|d| !d.as_os_str().is_empty() && (d.join("geosite.dat").is_file() || d.join("geoip.dat").is_file()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -196,6 +196,8 @@ pub struct AppState {
     pub supervisor: tokio::sync::Mutex<crate::supervisor::Supervisor>,
     /// 日志目录已就绪 —— 避免每条日志都做一次 `create_dir_all`。
     pub logs_dir_ready: std::sync::atomic::AtomicBool,
+    /// 路由判定用的 geosite/geoip 数据。解析一次约 350ms，缓存在这里。
+    pub geo: tokio::sync::Mutex<Option<std::sync::Arc<xt_core::routing::geo::GeoData>>>,
     /// helper 连接。单独的锁，避免 helper 的 IPC 拖慢 UI 状态读取。
     ///
     /// 用 `tokio::sync::Mutex` 而不是 `std::sync::Mutex`：启动流程需要在
@@ -217,6 +219,7 @@ impl AppState {
             supervisor: tokio::sync::Mutex::new(crate::supervisor::Supervisor::default()),
             helper: tokio::sync::Mutex::new(crate::helper_client::HelperClient::new(None)),
             logs_dir_ready: std::sync::atomic::AtomicBool::new(false),
+            geo: tokio::sync::Mutex::new(None),
         }
     }
 

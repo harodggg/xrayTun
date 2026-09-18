@@ -1502,3 +1502,241 @@ input[type="checkbox"] {
   gap: 4px;
   align-self: flex-end;
 }
+
+/* ================================================================ 拓扑页
+ *
+ * 公路比喻：左侧入口是匝道、中间是车流、右侧出口是不同去向的车道。
+ * 车流画在入口↔出口之间 —— 那一段有实测依据（inbound/outbound 计数器）；
+ * 规则链另列，因为它无法从统计里得出「哪辆车走了哪条」。
+ */
+
+.highway {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(120px, 1.4fr) minmax(150px, 1fr);
+  gap: 14px;
+  align-items: start;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.highway__side {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.highway__side--right {
+  align-items: flex-end;
+}
+
+.highway__side-title {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.06em;
+}
+
+.highway__lane-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  /* 与右侧车道对齐：同样高度，视觉上像一条条匝道 */
+  min-width: 100%;
+}
+
+.highway__side--right .highway__lane-label {
+  align-items: flex-end;
+  text-align: right;
+}
+
+.highway__lane-tag {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.highway__lane-meta {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.highway__lane-bytes {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 出口按类别着色：节点=强调、直连=绿、拦截=红、内部=灰 */
+.highway__lane-label--node {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.highway__lane-label--direct {
+  box-shadow: inset 2px 0 0 var(--ok);
+}
+.highway__side--right .highway__lane-label--node {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
+.highway__side--right .highway__lane-label--direct {
+  box-shadow: inset -2px 0 0 var(--ok);
+}
+.highway__side--right .highway__lane-label--block {
+  box-shadow: inset -2px 0 0 var(--danger);
+}
+.highway__side--right .highway__lane-label--dns,
+.highway__side--right .highway__lane-label--internal {
+  box-shadow: inset -2px 0 0 var(--text-faint);
+}
+
+.highway__lane-label--total {
+  background: none;
+  color: var(--text-faint);
+}
+
+.highway__road {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 一条车道：深底 + 虚线中线，像路面 */
+.lane {
+  position: relative;
+  height: 26px;
+  border-radius: 4px;
+  background: #0a0e16;
+  overflow: hidden;
+}
+
+.lane::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed var(--border-strong);
+  opacity: 0.5;
+}
+
+.lane__empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* 一辆车（货物） */
+.lane__truck {
+  position: absolute;
+  top: 50%;
+  width: 16px;
+  height: 10px;
+  margin-top: -5px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* ---------------------------------------------------------------- 规则链 */
+
+.chain {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.chain__row {
+  display: grid;
+  grid-template-columns: 22px minmax(120px, auto) 1fr 18px minmax(90px, auto);
+  gap: 8px;
+  align-items: center;
+  padding: 7px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chain__row:last-child {
+  border-bottom: none;
+}
+
+.chain__row:nth-child(odd) {
+  background: color-mix(in srgb, var(--bg-elevated) 55%, transparent);
+}
+
+.chain__idx {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-faint);
+  text-align: right;
+}
+
+.chain__tag {
+  font-weight: 500;
+}
+
+.chain__conds {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.chain__arrow {
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.chain__out {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+/* ---------------------------------------------------------------- 判定结论 */
+
+.verdict {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+}
+
+.verdict__head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.verdict__reasons {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-dim);
+}
+
+.verdict__unknown {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--warn);
+}
+
+@media (max-width: 940px) {
+  .highway {
+    grid-template-columns: 1fr;
+  }
+  .highway__side--right {
+    align-items: flex-start;
+  }
+  .highway__side--right .highway__lane-label {
+    align-items: flex-start;
+    text-align: left;
+    box-shadow: inset 2px 0 0 currentColor;
+  }
+}

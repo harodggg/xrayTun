@@ -290,6 +290,36 @@ const BASE_SNAPSHOT: AppSnapshot = {
   app_version: "0.8.0",
 };
 
+
+/** 预览用的拓扑：形状与真实配置一致（8 条规则、4 个入口、5 个出口）。 */
+const MOCK_TOPOLOGY = {
+  inbound: [
+    { tag: "tun", protocol: "tun", port: null, uplink_bytes: 1_204_887_552, downlink_bytes: 8_412_774_400 },
+    { tag: "socks", protocol: "socks", port: 10808, uplink_bytes: 42_000_000, downlink_bytes: 310_000_000 },
+    { tag: "http", protocol: "http", port: 10809, uplink_bytes: 0, downlink_bytes: 0 },
+    { tag: "api", protocol: "dokodemo-door", port: 10085, uplink_bytes: 0, downlink_bytes: 0 },
+  ],
+  rule: [
+    { index: 0, tag: "internal-dns-hijack", outbound: "dns-out", conditions: ["IP 198.18.0.2", "端口 53"] },
+    { index: 1, tag: "internal-api", outbound: "api", conditions: ["入站 api"] },
+    { index: 2, tag: "preset-private", outbound: "direct", conditions: ["域名 geosite:private", "IP geoip:private"] },
+    { index: 3, tag: "preset-ads", outbound: "block", conditions: ["域名 geosite:category-ads-all"] },
+    { index: 4, tag: "preset-proxy-google", outbound: "node-n1d232c6b8c7a5004", conditions: ["域名 geosite:google"] },
+    { index: 5, tag: "preset-cn-domain", outbound: "direct", conditions: ["域名 geosite:cn"] },
+    { index: 6, tag: "preset-cn-ip", outbound: "direct", conditions: ["IP geoip:cn"] },
+    { index: 7, tag: "internal-fallback", outbound: "node-n1d232c6b8c7a5004", conditions: ["网络 tcp,udp"] },
+  ],
+  outbound: [
+    { tag: "node-n1d232c6b8c7a5004", protocol: "vless", kind: "node", uplink_bytes: 1_246_000_000, downlink_bytes: 8_600_000_000 },
+    { tag: "direct", protocol: "freedom", kind: "direct", uplink_bytes: 900_000, downlink_bytes: 120_000_000 },
+    { tag: "block", protocol: "blackhole", kind: "block", uplink_bytes: 12_000, downlink_bytes: 0 },
+    { tag: "dns-out", protocol: "dns", kind: "dns", uplink_bytes: 300_000, downlink_bytes: 300_000 },
+    { tag: "api", protocol: "freedom", kind: "internal", uplink_bytes: 4_000, downlink_bytes: 8_000 },
+  ],
+  traffic_error: null,
+  geo_available: true,
+};
+
 /** 造一批日志：前 120 条用来撑出可滚动区域，末尾几条覆盖 info/warn/error 与多行文本。 */
 export const MOCK_LOGS: LogEntry[] = [
   ...Array.from({ length: 120 }, (_, i) => ({
@@ -356,6 +386,25 @@ export function installPreviewBridge(): () => void {
       switch (cmd) {
         case "snapshot":
           return scenarioSnapshot();
+        case "routing_topology":
+          return MOCK_TOPOLOGY;
+        case "explain_dest": {
+          // 判定用真实规则会命中哪条 —— 预览里给一个**与真实配置同形**的结果，
+          // 便于核对界面文案；真实判定由 Rust 侧完成（已与真实核心对拍）。
+          const dest = String((_args as { dest?: string })?.dest ?? "");
+          const isCn = /(baidu|qq|taobao|cn$|\.cn$)/i.test(dest);
+          const isGoogle = /google|gmail|youtube/i.test(dest);
+          const isAds = /doubleclick|ads?\./i.test(dest);
+          const tag = isAds ? "preset-ads" : isGoogle ? "preset-proxy-google" : isCn ? "preset-cn-domain" : "internal-fallback";
+          const out = isAds ? "block" : isGoogle || !isCn ? "node-n1d232c6b8c7a5004" : "direct";
+          return {
+            rule_index: 3,
+            rule_tag: tag,
+            outbound: out,
+            reasons: [isAds ? "命中 geosite:category-ads-all" : isGoogle ? "命中 geosite:google" : isCn ? "命中 geosite:cn" : "网络 tcp 匹配"],
+            undecidable: [],
+          };
+        }
         case "tail_logs":
           return MOCK_LOGS;
         case "diagnostics":

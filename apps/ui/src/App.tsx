@@ -6,16 +6,18 @@ import Dashboard from "./pages/Dashboard";
 import Nodes from "./pages/Nodes";
 import Subscriptions from "./pages/Subscriptions";
 import Routing from "./pages/Routing";
+import Topology from "./pages/Topology";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
 
-type View = "dashboard" | "nodes" | "subscriptions" | "routing" | "logs" | "settings";
+type View = "dashboard" | "nodes" | "subscriptions" | "routing" | "topology" | "logs" | "settings";
 
 const NAV: Array<{ id: View; label: string }> = [
   { id: "dashboard", label: "仪表盘" },
   { id: "nodes", label: "节点" },
   { id: "subscriptions", label: "订阅" },
   { id: "routing", label: "规则" },
+  { id: "topology", label: "拓扑" },
   { id: "logs", label: "日志" },
   { id: "settings", label: "设置" },
 ];
@@ -114,6 +116,7 @@ function Shell({ initialView }: { initialView?: View }) {
           {view === "nodes" && <Nodes />}
           {view === "subscriptions" && <Subscriptions />}
           {view === "routing" && <Routing />}
+        {view === "topology" && <Topology />}
           {view === "logs" && <Logs />}
           {view === "settings" && <Settings />}
         </div>

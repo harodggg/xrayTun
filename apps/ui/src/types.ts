@@ -453,3 +453,49 @@ export function latencyTier(ms: number | null | undefined): "unknown" | "fast" |
   if (ms < 400) return "ok";
   return "slow";
 }
+
+// ---------------------------------------------------------------------------
+// 网络流动拓扑
+// ---------------------------------------------------------------------------
+
+export interface TopoInbound {
+  tag: string;
+  protocol: string;
+  port: number | null;
+  uplink_bytes: number;
+  downlink_bytes: number;
+}
+
+export interface TopoOutbound {
+  tag: string;
+  protocol: string;
+  /** node | direct | block | dns | internal */
+  kind: string;
+  uplink_bytes: number;
+  downlink_bytes: number;
+}
+
+export interface TopoRule {
+  index: number;
+  tag: string;
+  outbound: string;
+  /** 人类可读的条件摘要，例如 `域名 geosite:cn` */
+  conditions: string[];
+}
+
+export interface Topology {
+  inbound: TopoInbound[];
+  rule: TopoRule[];
+  outbound: TopoOutbound[];
+  /** 取流量失败的原因（核心没在跑时）。界面据此如实说明，而不是画 0 流量。 */
+  traffic_error: string | null;
+  geo_available: boolean;
+}
+
+export interface RouteExplanation {
+  rule_index: number | null;
+  rule_tag: string | null;
+  outbound: string;
+  reasons: string[];
+  undecidable: string[];
+}
