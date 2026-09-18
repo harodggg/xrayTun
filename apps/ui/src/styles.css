@@ -1512,9 +1512,11 @@ input[type="checkbox"] {
 
 .highway {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(120px, 1.4fr) minmax(150px, 1fr);
+  grid-template-columns: minmax(130px, 1fr) minmax(140px, 1.5fr) minmax(130px, 1fr);
   gap: 14px;
-  align-items: start;
+  /* **车道在垂直方向居中**：左右两列（入口/出口）比车道列高得多，
+     顶端对齐会让车道孤零零挂在左上角。居中之后整幅图像一条公路。 */
+  align-items: center;
   padding: 14px 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
