@@ -5,8 +5,9 @@
 //! 项目自带的 `geoip.dat` **只有国别与网段，没有经纬度**（实测确认：整个文件里
 //! 没有任何 8 字节 double 字段）。要在地球上把位置点画出来，就必须另找坐标来源。
 //!
-//! 当前用的是 `ip-api.com`（实测可用，精度到城市）。代价是**被查的 IP 会发给
-//! 第三方** —— 对自建节点来说这等于把「你在用哪台服务器」告诉对方。所以：
+//! 当前用的是 `ip-api.com`（实测可用，精度到城市，并带 `lang=zh-CN` 让地名
+//! 用中文返回）。代价是**被查的 IP 会发给第三方** —— 对自建节点来说这等于把
+//! 「你在用哪台服务器」告诉对方。所以：
 //!
 //! * 结果按 IP 缓存，同一个 IP 只查一次；
 //! * 界面上明确标注「位置来自 ip-api.com」，不假装是本地算出来的。
@@ -63,7 +64,11 @@ const TIMEOUT: Duration = Duration::from_secs(6);
 ///
 /// `interface` 为 `None` 时按系统默认路由出去（不推荐：隧道开着会查错）。
 pub fn lookup(ip: &str, interface: Option<&str>) -> Result<GeoLocation, String> {
-    let path = format!("/json/{ip}?fields=status,message,country,city,lat,lon,isp");
+    // `lang=zh-CN`：地名用中文返回（实测支持，例如 香港 / 广州市）。
+    // 界面要显示「香港」「大理」这类具体地点，英文名对中文用户不友好。
+    let path = format!(
+        "/json/{ip}?fields=status,message,country,city,lat,lon,isp&lang=zh-CN"
+    );
     let body = http_get(HOST, 80, &path, interface)?;
     let parsed: IpApiResponse =
         serde_json::from_str(&body).map_err(|e| format!("解析位置响应失败: {e}"))?;
@@ -87,7 +92,12 @@ pub fn lookup(ip: &str, interface: Option<&str>) -> Result<GeoLocation, String> 
 
 /// 查**本机**的公网出口位置（绑物理网卡，避免查到节点的位置）。
 pub fn lookup_self(interface: Option<&str>) -> Result<GeoLocation, String> {
-    let body = http_get(HOST, 80, "/json/?fields=status,message,country,city,lat,lon,isp,query", interface)?;
+    let body = http_get(
+        HOST,
+        80,
+        "/json/?fields=status,message,country,city,lat,lon,isp,query&lang=zh-CN",
+        interface,
+    )?;
     #[derive(Deserialize)]
     struct WithQuery {
         status: String,
@@ -341,7 +351,7 @@ mod tests {
 
     #[test]
     fn parses_a_successful_response() {
-        let body = r#"{"status":"success","country":"Hong Kong","city":"Hong Kong",
+        let body = r#"{"status":"success","country":"香港","city":"香港",
                        "lat":22.3193,"lon":114.169,"isp":"Vapeline Technology"}"#;
         let p: IpApiResponse = serde_json::from_str(body).unwrap();
         assert_eq!(p.status, "success");

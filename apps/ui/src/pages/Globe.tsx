@@ -449,8 +449,11 @@ function drawScene(
       drawPlane(ctx, sx, sy, arcPoint, u);
     }
 
-    marker(ctx, project, route.from, "#34d399", "本机");
-    marker(ctx, project, route.to, "#4f8ef7", route.node_name);
+    // 标记上写**具体地点**（城市 + 国别），而不是「本机」这种看不出去哪儿的词；
+    // 第二行小字给 IP。城市的缺失（有些 IP 查不到城市）用国别兜底。
+    const placed: { x: number; y: number; w: number; h: number }[] = [];
+    marker(ctx, project, route.from, "#34d399", placeLabel(route.from), "本机 · " + route.from.ip, placed);
+    marker(ctx, project, route.to, "#4f8ef7", placeLabel(route.to), route.node_name, placed);
   }
 }
 
@@ -506,7 +509,12 @@ function marker(
   project: (v: [number, number, number]) => [number, number, number],
   loc: GeoLocation,
   color: string,
+  /** 主行：具体地点（城市 + 国别）。 */
   label: string,
+  /** 副行：小字补充（IP 或节点名）。 */
+  sub?: string,
+  /** 已占用的标签框，用于避让（相邻地点只差一百多公里时标签会叠在一起）。 */
+  placed?: { x: number; y: number; w: number; h: number }[],
 ) {
   const [px, py, pz] = project(toVec(loc.lat, loc.lon));
   if (pz <= 0.02) return; // 背面不画（否则会浮在球外，看着像错位）
@@ -525,8 +533,70 @@ function marker(
   ctx.fillStyle = color;
   ctx.fill();
 
-  ctx.font = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
-  ctx.fillStyle = "rgba(230, 236, 245, 0.92)";
+  // 标签底衬：球面有明暗，纯文字在某些区域会看不清
+  const main = `600 13px -apple-system, "PingFang SC", ui-monospace, sans-serif`;
+  const under = `400 10.5px -apple-system, "PingFang SC", ui-monospace, sans-serif`;
   ctx.textAlign = "left";
-  ctx.fillText(label, px + 10, py + 4);
+  const tx = px + 11;
+
+  ctx.font = main;
+  const w1 = ctx.measureText(label).width;
+  const w2 = sub ? (ctx.font = under, ctx.measureText(sub).width) : 0;
+  const boxW = Math.max(w1, w2) + 10;
+  const boxH = sub ? 30 : 18;
+  let by = py - (sub ? 15 : 10);
+
+  // 避让：与已放好的标签太近就往下挪，直到不撞。
+  // 两个地点只差一百多公里时（例如广州与香港），标签本来就该看得到两个。
+  if (placed) {
+    const overlaps = (y: number) =>
+      placed.some(
+        (p) =>
+          Math.abs(p.x - (tx - 5)) < Math.max(p.w, boxW) &&
+          Math.abs(p.y - y) < (p.h + boxH) / 2 + 2,
+      );
+    let guard = 0;
+    while (overlaps(by) && guard < 8) {
+      by += boxH + 5;
+      guard++;
+    }
+  }
+  const box = { x: tx - 5, y: by, w: boxW, h: boxH };
+  placed?.push(box);
+
+  // 从标记点到标签的引线：挪开之后仍然看得出标签对应哪个点
+  ctx.strokeStyle = "rgba(160, 178, 200, 0.45)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(px + 4, py);
+  ctx.lineTo(box.x, by + boxH / 2);
+  ctx.stroke();
+
+  ctx.fillStyle = "rgba(8, 12, 20, 0.62)";
+  ctx.beginPath();
+  ctx.roundRect(box.x, by, boxW, boxH, 4);
+  ctx.fill();
+
+  ctx.font = main;
+  ctx.fillStyle = "rgba(236, 242, 250, 0.96)";
+  ctx.fillText(label, tx, by + 13);
+
+  if (sub) {
+    ctx.font = under;
+    ctx.fillStyle = "rgba(160, 178, 200, 0.9)";
+    ctx.fillText(sub, tx, by + 26);
+  }
+}
+
+/**
+ * 位置标记的主行文字：**具体地点**。
+ *
+ * 用户要的是「看到香港、大理」，所以城市优先；查不到城市时退到国别，
+ * 两个都没有才说「未知位置」—— 不留空，也不编。
+ */
+function placeLabel(loc: GeoLocation): string {
+  const city = loc.city.trim();
+  const country = loc.country.trim();
+  if (city && country) return `${city} · ${country}`;
+  return city || country || "未知位置";
 }
