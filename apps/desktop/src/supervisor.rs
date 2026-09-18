@@ -153,6 +153,14 @@ impl Supervisor {
         alive
     }
 
+    /// 运行中的核心 pid（进程真的活着才算）。
+    ///
+    /// 给 `start_core` 的「已经在跑」分支用：那条路径上核心是活的，
+    /// 但监控任务可能还没启动 —— 需要 pid 才能补上。
+    pub fn running_pid(&self) -> Option<u32> {
+        self.process.as_ref().and_then(|p| p.pid())
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }

@@ -66,8 +66,23 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
     // 这个检查必须在**拿到 supervisor 锁之后**做：在锁外检查的话，
     // 「检查完 → 真正 start」之间照样会被插进来。
     if supervisor.is_running() {
+        // **核心已经在跑 ≠ 监控已经在守。**
+        //
+        // 这一条路径原本直接返回，一个监控任务都不启动 —— 于是出现
+        // 「核心在跑、界面显示已连接、但没有任何人在守」：换网之后不会重建，
+        // 熄屏唤醒之后也不会。用户看到的正是「要手动点一下连接」。
+        //
+        // 这不是构造出来的场景：自动更新会让 App 重启，重启后的自动重连
+        // 若撞上这个早退，就落在这里。实测日志里 2 小时内
+        // `[info] 连通性检查通过` 一条都没有，而看门狗每 10 秒就该记一条。
+        //
+        // 用 `running_pid()` 而不是 `runtime.pid`：这里要的是**进程真的活着**
+        // 那个 pid（`is_running` 刚确认过）。重复 spawn 由 `spawn_monitors`
+        // 内部的 pid 去重挡住。
+        let pid = supervisor.running_pid();
         drop(helper);
         drop(supervisor);
+        spawn_monitors(app, egress_before.clone(), pid);
         return Ok(());
     }
 
@@ -100,6 +115,10 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
         }
     };
 
+    // 新核心起来了：启动它的监控（换网检测 / 连通性检查 / 看门狗）。
+    // 与「已经在跑」那条路径共用同一个入口，避免两处各写一份。
+    spawn_monitors(app, egress_before, runtime.pid);
+
     state.with(|i| {
         i.runtime = runtime.clone();
         // 记下「用户希望它连着」。自更新/重启之后要靠它自动连回来 ——
@@ -127,19 +146,6 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
         }
     }
     events::runtime_changed(app, state);
-
-    // 换网之后隧道不会自愈（路由/网卡绑定/长连接全指向旧出口），
-    // 盯着它，变了就报一句能读的话。带上 pid 是为了让旧 watcher 自己退出。
-    spawn_network_watch(app, egress_before, runtime.pid);
-
-    // 「连上了」不等于「能用」：节点可能活着却转发不了流量。
-    // 这直接决定用户接下来会不会面对一屏看不懂的 DNS 超时。
-    spawn_connectivity_check(app, runtime.pid);
-
-    // 一直盯着：熄屏唤醒、换网、节点抖动之后，隧道可能已经死了而界面还显示
-    // 「已连接」。**只要用户没主动断开，网络就不该是坏的** —— 所以这里不是
-    // 报警，而是自动重建（重建也失败就退回直连，至少能上网）。
-    spawn_tunnel_watchdog(app, runtime.pid);
 
     // 日志转发任务：核心的 stdout/stderr → 状态环形缓冲 + UI 事件。
     let app_handle = app.clone();
@@ -188,9 +194,12 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
 pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let mut supervisor = state.supervisor.lock().await;
     let mut helper = state.helper.lock().await;
+    let pid = supervisor.running_pid();
     let result = supervisor.stop(&mut helper).await;
     drop(helper);
     drop(supervisor);
+    // 核心已经停了：它的监控凭据作废，否则表里会留下永远不会释放的旧 pid。
+    release_monitors(pid);
 
     state.with(|i| {
         // 采样任务必须先收掉：核心没了，api 端口也没人监听，
@@ -358,7 +367,30 @@ pub(crate) async fn tunnel_probe(port: u16, timeout_secs: u32) -> String {
 ///
 /// 用户主动断开时 `runtime.running` 变 false，这个任务下一轮就自己退出；
 /// 重连会换 pid，旧的那个同样会退出 —— 所以不会出现多个看门狗打架。
-pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
+/// 启动某个核心 pid 的全部监控任务（换网检测 / 连通性检查 / 看门狗）。
+///
+/// **两条启动路径共用它**：核心刚被启动、以及核心本来就在跑（早退那条）。
+/// 后者是这次修的核心 —— 早退之前没人启动监控，于是出现「核心在跑、
+/// 界面显示已连接、但没有任何人在守」，换网与熄屏之后都不会自愈。
+///
+/// 按 pid 去重：该 pid 已经有监控在守时 `MonitorGuard::claim` 返回 `None`，
+/// 这里直接跳过，避免多个看门狗互相打架（各自重建隧道）。
+pub(crate) fn spawn_monitors(app: &AppHandle, baseline: Option<Egress>, pid: Option<u32>) {
+    let Some(guard) = MonitorGuard::claim(pid) else {
+        // 该 pid 已经有监控在守（正常启动那条路径已经 spawn 过）—— 不重复起。
+        return;
+    };
+    // 换网之后隧道不会自愈（路由/网卡绑定/长连接全指向旧出口），
+    // 盯着它，变了就重建 —— 只报错让用户手动连，正是要消灭的行为。
+    spawn_network_watch(app, baseline, pid, guard.clone());
+    // 「连上了」不等于「能用」：节点可能活着却转发不了流量。
+    spawn_connectivity_check(app, pid, guard.clone());
+    // 一直盯着：熄屏唤醒、换网、节点抖动之后隧道可能已经死了而界面还显示
+    // 「已连接」。只要用户没主动断开，网络就不该是坏的。
+    spawn_tunnel_watchdog(app, pid, guard);
+}
+
+pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut failures = 0u32;
@@ -477,7 +509,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>) {
     });
 }
 
-pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>) {
+pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
     let port = app
         .try_state::<AppState>()
         .and_then(|s| s.with(|i| i.settings.socks_port))
@@ -583,7 +615,14 @@ pub(crate) fn network_moved(before: &Egress, after: &Egress) -> bool {
 /// 切换时常常会抖几下（WiFi 掉一下再回来），自动重连会跟着来回拆建，
 /// 风险远大于收益。把「静默失效」变成一句能读的报错，让用户在网络稳定之后
 /// 自己点重连 —— 那样才真的有效。
-pub(crate) fn spawn_network_watch(app: &AppHandle, baseline: Option<Egress>, pid: Option<u32>) {
+pub(crate) fn spawn_network_watch(
+    app: &AppHandle,
+    baseline: Option<Egress>,
+    pid: Option<u32>,
+    // 守卫的存在就是「占位」：它被这个任务持有到结束，最后一个放到它时
+    // 才会把 pid 从监控表里移除。所以这里刻意不读它。
+    _guard: MonitorGuard,
+) {
     let Some(before) = baseline else {
         return;
     };
@@ -837,6 +876,68 @@ pub(crate) const FAILURES_BEFORE_REBUILD: u32 = 2;
 /// 自动重连最多试几次、每次隔多久。
 ///
 /// 开机场景下网络和 helper 都可能还没就绪，所以预算给得宽一点：
+/// 已经 spawn 过监控任务的核心 pid。
+///
+/// # 为什么需要它
+///
+/// 监控任务（换网检测 / 连通性检查 / 看门狗）原本只在 `start_core` 的**末尾**
+/// 启动，而那个函数在「supervisor 里已经有核心在跑」时会**提前返回** ——
+/// 于是那条路径上一个监控都没有。
+///
+/// 这不是理论问题：**自动更新**会让核心退出、App 重启，重启后的自动重连
+/// 撞上那个早退，结果就是「核心在跑，但没有任何人在守」。用户看到的是
+/// 换网后断、熄屏后要手动点连接 —— 因为自愈的那一环根本没启动。
+/// （实测日志：2 小时里 `[info] 连通性检查通过` 一条都没有，而看门狗每
+/// 10 秒就该记一条。）
+///
+/// 所以监控的启动被提到早退之前。但早退那条路径上的核心**可能已经在被
+/// 监控着**（正常启动时就 spawn 过），重复 spawn 会让多个看门狗互相打架
+/// （各自重建隧道）。用这张表按 pid 去重。
+fn monitors_spawned() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// 一个核心 pid 的监控凭据。
+///
+/// **构造即占用**：拿不到（该 pid 已经有人在守）就返回 `None`，调用方据此跳过
+/// spawn。三个监控任务各自持有一份克隆，**最后一个结束时**才把 pid 从表里移除 ——
+/// 这样同一个 pid 之后仍能重新被监控（例如核心重启后 pid 恰好复用），
+/// 而中途退出其中任何一个都不会让另外两个失去登记。
+#[derive(Clone)]
+pub(crate) struct MonitorGuard(std::sync::Arc<u32>);
+
+impl MonitorGuard {
+    fn claim(pid: Option<u32>) -> Option<Self> {
+        let pid = pid?;
+        let mut set = monitors_spawned().lock().ok()?;
+        if !set.insert(pid) {
+            return None; // 已经有监控在守这个 pid
+        }
+        Some(Self(std::sync::Arc::new(pid)))
+    }
+}
+
+impl Drop for MonitorGuard {
+    fn drop(&mut self) {
+        // `Arc<u32>` 只有最后一个引用 drop 时才会走到这里（其余是克隆），
+        // 所以「最后一个任务结束才注销」是靠 Arc 的语义天然成立的。
+        if std::sync::Arc::strong_count(&self.0) == 1 {
+            if let Ok(mut set) = monitors_spawned().lock() {
+                set.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// 核心停了：它的监控凭据一并作废，否则表里会留下永远不会释放的旧 pid。
+fn release_monitors(pid: Option<u32>) {
+    if let (Some(pid), Ok(mut set)) = (pid, monitors_spawned().lock()) {
+        set.remove(&pid);
+    }
+}
+
 /// 24 × 5s ≈ 2 分钟。超过就如实报"请手动连接"，而不是无限重试。
 pub(crate) const RECONNECT_ATTEMPTS: u32 = 24;
 
@@ -862,7 +963,43 @@ impl Egress {
 mod tests {
     use super::*;
 
-        /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
+        /// **同一个 pid 不能被监控两次**（去重），而全部释放后可以重新监控。
+    ///
+    /// 这条钉住的是这次修复的关键约束：监控的启动被提到了「核心已经在跑」
+    /// 那条早退路径之前，于是必须保证重复调用不会 spawn 出多个看门狗 ——
+    /// 多个看门狗会各自重建隧道，互相拆台。
+    #[test]
+    fn monitor_guard_deduplicates_per_pid() {
+        let pid = 424_242u32;
+        // 先清干净，避免与其它测试串扰
+        release_monitors(Some(pid));
+
+        let first = MonitorGuard::claim(Some(pid));
+        assert!(first.is_some(), "第一次应当能占用");
+
+        // 第二个克隆也算「有人在守」——这正是三个监控任务共享守卫的情形
+        let clone = first.as_ref().unwrap().clone();
+        assert!(
+            MonitorGuard::claim(Some(pid)).is_none(),
+            "同一个 pid 第二次占用必须被拒（否则会 spawn 出重复的看门狗）"
+        );
+
+        // 三个任务各自持有一份；只有全部释放后 pid 才回到可占用
+        drop(first);
+        assert!(
+            MonitorGuard::claim(Some(pid)).is_none(),
+            "还有一份克隆活着时，仍然算有人在守"
+        );
+        drop(clone);
+        let again = MonitorGuard::claim(Some(pid));
+        assert!(again.is_some(), "全部释放后应当可以重新占用");
+        drop(again);
+
+        // 没有 pid（核心没有进程句柄）时不占用，也不 panic
+        assert!(MonitorGuard::claim(None).is_none());
+    }
+
+    /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
         ///
         /// `000` 是连不上/超时/被 reset，空串是进程压根没起来 —— 都算不通。
         /// 但 403 说明**链路是好的**，只是目标拒绝了我们；把它算成不通会
