@@ -188,16 +188,24 @@ const BASE_SNAPSHOT: AppSnapshot = {
       id: "sub-1",
       name: "主订阅 · 机场 A",
       url: "https://sub.example.com/api/v1/client/subscribe?token=redacted",
-      node_count: 0,
+      node_count: 3,
       last_updated: now - 1800,
       last_error: null,
-      usage: { upload: 12_884_901_888, download: 88_312_678_400, total: 500_000_000_000, expire_at: now + 86_400 * 47 },
+      // 形状必须与后端一致：`SubscriptionUsage { upload, download, total, expire }`
+      // ——注意到期字段叫 `expire`（不是 `expire_at`），早先这里写错，
+      // 于是用量条在预览里根本不渲染，把「mock 写错」伪装成「界面没实现」。
+      usage: {
+        upload: 12_884_901_888,
+        download: 88_312_678_400,
+        total: 500_000_000_000,
+        expire: now + 86_400 * 47,
+      },
     } as unknown as AppSnapshot["subscriptions"][number],
     {
       id: "sub-2",
       name: "备用 · 机场 B",
       url: "https://sub2.example.net/link/redacted",
-      node_count: 0,
+      node_count: 1,
       last_updated: now - 86_400 * 3,
       last_error: "HTTP 403：订阅 token 可能已过期",
       usage: null,
