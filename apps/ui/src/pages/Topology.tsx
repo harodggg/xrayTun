@@ -24,11 +24,19 @@ import type { RouteExplanation, Topology } from "../types";
 /** 车辆在这段时间内从入口走到出口（秒）。纯视觉节奏，与真实速率无关。 */
 const TRIP_SECONDS = 1.6;
 
-/** 一辆车代表多少字节：速率越高，路上的车越多。 */
-const BYTES_PER_VEHICLE = 256 * 1024;
+/**
+ * 一条车道上的车辆数区间。
+ *
+ * 下限 5：**空车道也画几辆车**，否则「这条入口在用、只是量小」与
+ * 「这条入口根本不通」在界面上一模一样。
+ * 上限 15：再多就挤成一片、看不出是车了。
+ */
+const MIN_VEHICLES = 5;
+const MAX_VEHICLES = 15;
 
-/** 同时最多画多少辆，避免高速率时糊成一片。 */
-const MAX_VEHICLES = 14;
+/** 车辆数按字节做对数映射的参考点：1 MiB 与 1 TiB 对应两端。 */
+const VEHICLE_SCALE_MIN_BYTES = 1024 * 1024;
+const VEHICLE_SCALE_MAX_BYTES = 1024 ** 4;
 
 export default function Topology() {
   const [topo, setTopo] = useState<Topology | null>(null);
@@ -109,15 +117,42 @@ export default function Topology() {
 
 /** 入口 ↔ 出口之间的车流。 */
 function Highway({ topo }: { topo: Topology }) {
-  // 每个入口一条车道；货物量取该入口的实测总字节
+  // **每个入口一条车道**，包括当前没有流量的（空车道也要显示，否则
+  // 「在用但量小」和「根本不通」分不出来）。
+  //
+  // 只排除内部管理入口（`api`，dokodemo-door:10085）：那是应用自己查统计用的
+  // 通道，不是用户的流量，画出来只是噪声。
   const lanes = topo.inbound.filter((i) => i.tag !== "api");
   const outTotal = topo.outbound.reduce((a, o) => a + o.uplink_bytes + o.downlink_bytes, 0);
   const inTotal = lanes.reduce((a, i) => a + i.uplink_bytes + i.downlink_bytes, 0);
 
+  // 车流按出口类别着色。份额取自**全局**出口字节数 —— 这是实测的；
+  // 而「某个入口的货具体去了哪个出口」拿不到（核心没有这个计数器），
+  // 所以份额只用来决定各色车辆的比例，不声称归属。
+  const shares = topo.outbound
+    .filter((o) => o.kind === "node" || o.kind === "direct" || o.kind === "block")
+    .map((o) => ({ kind: o.kind, bytes: o.uplink_bytes + o.downlink_bytes }))
+    .filter((s) => s.bytes > 0);
+
   return (
     <div className="highway">
+      <div className="highway__legend">
+        <span className="highway__legend-item">
+          <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.node }} />
+          经节点
+        </span>
+        <span className="highway__legend-item">
+          <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.direct }} />
+          直连
+        </span>
+        <span className="highway__legend-item">
+          <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.block }} />
+          已拦截
+        </span>
+      </div>
+
       <div className="highway__side">
-        <div className="highway__side-title">入口</div>
+        <div className="highway__side-title">入口（每个入口一条车道）</div>
         {lanes.map((i) => (
           <div className="highway__lane-label" key={i.tag}>
             <span className="highway__lane-tag">{i.tag}</span>
@@ -139,12 +174,12 @@ function Highway({ topo }: { topo: Topology }) {
       <div className="highway__road">
         {lanes.map((i) => {
           const total = i.downlink_bytes + i.uplink_bytes;
-          return <Lane key={i.tag} bytes={total} />;
+          return <Lane key={i.tag} bytes={total} shares={shares} />;
         })}
       </div>
 
       <div className="highway__side highway__side--right">
-        <div className="highway__side-title">出口</div>
+        <div className="highway__side-title">出口（车道颜色 = 去向）</div>
         {topo.outbound.map((o) => (
           <div className={`highway__lane-label highway__lane-label--${o.kind}`} key={o.tag}>
             <span className="highway__lane-tag">{shortTag(o.tag)}</span>
@@ -172,18 +207,23 @@ function shortTag(t: string): string {
 /**
  * 一条车道上的车。
  *
- * 车的**数量**由真实字节数决定（每 256KB 一辆，上限 14 辆），位置随时间前进。
- * 这只表达「这条路上有多少货在走」——不是「哪辆车去了哪条规则」。
+ * * **数量**：按该入口的实测字节做对数映射，落在 5–15 之间。
+ *   空车道也画几辆 —— 否则「在用但量小」和「根本不通」看起来一样。
+ * * **颜色**：按出口类别的**全局份额**分配（蓝=节点、绿=直连、红=拦截）。
+ *   每个非零类别至少一辆，这样「有没有被拦截」永远看得见。
+ * * 这只表达「这条路上有多少货、大致都去哪儿」——**不是**「哪辆车去了哪条规则」，
+ *   后者核心没有计数器，画出来就是编的。
  */
-function Lane({ bytes }: { bytes: number }) {
-  const count = Math.min(MAX_VEHICLES, Math.floor(bytes / BYTES_PER_VEHICLE));
+function Lane({ bytes, shares }: { bytes: number; shares: { kind: string; bytes: number }[] }) {
+  const count = vehicleCount(bytes);
+  const kinds = useMemo(() => allocateKinds(count, shares), [count, shares]);
+  const colorOf = (kind: string) => OUTBOUND_COLOR[kind] ?? "var(--accent)";
+
   const [tick, setTick] = useState(0);
   const raf = useRef<number | null>(null);
   const start = useRef<number>(performance.now());
 
   useEffect(() => {
-    // 只在这条车道真的有货时才跑动画：0 辆车时不必占着一帧一帧的回调。
-    if (count === 0) return;
     const step = (now: number) => {
       setTick((now - start.current) / 1000 / TRIP_SECONDS);
       raf.current = requestAnimationFrame(step);
@@ -192,7 +232,7 @@ function Lane({ bytes }: { bytes: number }) {
     return () => {
       if (raf.current !== null) cancelAnimationFrame(raf.current);
     };
-  }, [count]);
+  }, []);
 
   if (count === 0) {
     return (
@@ -204,20 +244,76 @@ function Lane({ bytes }: { bytes: number }) {
 
   return (
     <div className="lane">
-      {Array.from({ length: count }, (_, i) => {
-        // 均匀铺开并循环前进
-        const phase = (tick + i / count) % 1;
+      {kinds.map((kind, i) => {
+        // 每辆车速度略有差异，免得整排像一列火车一起动
+        const speed = 1 + ((i * 37) % 23) / 100;
+        const phase = (tick * speed + i / count) % 1;
         return (
           <span
             key={i}
             className="lane__truck"
-            style={{ left: `${(phase * 100).toFixed(2)}%` }}
-            aria-hidden
+            style={{ left: `${(phase * 100).toFixed(2)}%`, background: colorOf(kind) }}
+            title={OUTBOUND_LABEL[kind] ?? kind}
           />
         );
       })}
     </div>
   );
+}
+
+/** 出口类别 → 车道颜色。三色对应三种去向。 */
+const OUTBOUND_COLOR: Record<string, string> = {
+  node: "#4f8ef7",
+  direct: "#34d399",
+  block: "#f87171",
+};
+
+const OUTBOUND_LABEL: Record<string, string> = {
+  node: "经节点",
+  direct: "直连",
+  block: "已拦截",
+};
+
+/**
+ * 车辆数：按字节做对数映射到 [MIN_VEHICLES, MAX_VEHICLES]。
+ *
+ * 用对数而不是线性：流量能跨好几个数量级（几 MB 到几十 GB），
+ * 线性映射会让小流量永远只有 5 辆、大流量一直顶到 15 辆，中间全糊在一起。
+ */
+function vehicleCount(bytes: number): number {
+  if (bytes <= 0) return MIN_VEHICLES;
+  const lo = Math.log10(VEHICLE_SCALE_MIN_BYTES);
+  const hi = Math.log10(VEHICLE_SCALE_MAX_BYTES);
+  const v = Math.log10(bytes);
+  const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+  return Math.round(MIN_VEHICLES + t * (MAX_VEHICLES - MIN_VEHICLES));
+}
+
+/**
+ * 把 `count` 辆车按份额分配给各去向。
+ *
+ * 规则：每个非零去向先保底 1 辆（否则「有拦截但份额极小」时会一辆都不显示，
+ * 用户会以为没拦截），剩下的按字节比例分。
+ */
+function allocateKinds(count: number, shares: { kind: string; bytes: number }[]): string[] {
+  if (shares.length === 0) {
+    // 没有出口数据（核心没在跑）：不假装知道去向，用中性色
+    return Array.from({ length: count }, () => "node");
+  }
+  const total = shares.reduce((a, s) => a + s.bytes, 0);
+  const out: string[] = [];
+  let used = 0;
+  for (const s of shares) {
+    const quota = Math.max(1, Math.round((s.bytes / total) * count));
+    const take = Math.min(quota, count - used);
+    for (let i = 0; i < take; i++) out.push(s.kind);
+    used += take;
+    if (used >= count) break;
+  }
+  // 份额取整可能没分满，用占比最大的补齐
+  const biggest = shares.reduce((a, b) => (b.bytes > a.bytes ? b : a)).kind;
+  while (out.length < count) out.push(biggest);
+  return out.slice(0, count);
 }
 
 /**

@@ -1523,7 +1523,7 @@ input[type="checkbox"] {
 .highway__side {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .highway__side--right {
@@ -1597,14 +1597,41 @@ input[type="checkbox"] {
 .highway__road {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
-/* 一条车道：深底 + 虚线中线，像路面 */
+
+/* 车道颜色图例：三种去向各一色，避免颜色含义不可知 */
+.highway__legend {
+  /* 图例在 highway 的 grid 里，要跨满三列，否则会占掉一个车道的位置 */
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 0 0 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.highway__legend-item {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+
+.highway__legend-dot {
+  width: 9px;
+  height: 5px;
+  border-radius: 1px;
+}
+
+/* 一条车道：深底 + 虚线中线，像路面。
+   高度压到 18px、车 9×5px —— 车辆本身是「流量密度」的记号，
+   不需要占多少面积，一屏能看清所有入口更重要。 */
 .lane {
   position: relative;
-  height: 26px;
-  border-radius: 4px;
+  height: 18px;
+  border-radius: 3px;
   background: #0a0e16;
   overflow: hidden;
 }
@@ -1629,16 +1656,16 @@ input[type="checkbox"] {
   color: var(--text-faint);
 }
 
-/* 一辆车（货物） */
+/* 一辆车（货物）。颜色由出口类别决定，见 Topology.tsx 的 OUTBOUND_COLOR。 */
 .lane__truck {
   position: absolute;
   top: 50%;
-  width: 16px;
-  height: 10px;
-  margin-top: -5px;
-  border-radius: 2px;
-  background: var(--accent);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+  width: 9px;
+  height: 5px;
+  margin-top: -2.5px;
+  border-radius: 1px;
+  /* 颜色通过行内 style 给（三种去向各一色） */
+  box-shadow: 0 0 4px currentColor;
 }
 
 /* ---------------------------------------------------------------- 规则链 */
