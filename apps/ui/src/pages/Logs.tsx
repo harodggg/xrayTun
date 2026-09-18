@@ -19,8 +19,9 @@
  * 多行消息按原样保留换行与缩进、复制走剪贴板且失败时退化为控制台输出。
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "../ipc";
+import { useFollowScroll } from "../useFollowScroll";
 import { useStore } from "../store";
 
 const LEVELS = ["all", "info", "warn", "error", "debug"] as const;
@@ -42,8 +43,6 @@ export default function Logs() {
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
   const [level, setLevel] = useState<Level>("all");
   const [query, setQuery] = useState("");
-  const [follow, setFollow] = useState(true);
-  const bottomRef = useRef<HTMLDivElement>(null);
 
   // 各等级的条数：用于筛选标签上的计数。基于**全量**日志算，
   // 而不是基于当前筛选结果 —— 否则切换等级时数字会互相矛盾。
@@ -64,12 +63,13 @@ export default function Logs() {
     });
   }, [logs, level, query]);
 
-  // 自动滚到底：只有在「跟随」打开时才做，否则用户往上翻历史会被不断打断。
-  useEffect(() => {
-    if (follow) {
-      bottomRef.current?.scrollIntoView({ block: "end" });
-    }
-  }, [filtered.length, follow]);
+  // 跟随滚动：行为与判据见 `useFollowScroll`。
+  //
+  // 关键修正是**用滚动位置表达意图**：用户往上翻历史时自动暂停跟随，
+  // 滚回底部自动恢复。原来的实现是「只要开关开着就每次滚到底」，
+  // 于是用户往上翻时会被下一条日志立刻拽回底部（实测 scrollTop 50 → 2065），
+  // 表现就是「根本滚不动」。
+  const { boxRef, bottomRef, follow, setFollow, onScroll } = useFollowScroll(filtered.length);
 
   const exportLogs = async () => {
     const text = filtered
@@ -152,7 +152,7 @@ export default function Logs() {
         </div>
       )}
 
-      <div className="logs">
+      <div className="logs" ref={boxRef} onScroll={onScroll}>
         {filtered.length === 0 ? (
           <div className="logs__empty">
             {logs.length === 0 ? (

@@ -80,6 +80,11 @@ else
   npm --prefix apps/ui ci --no-audit --no-fund
 fi
 
+step "前端单元测试"
+# 前端也有需要回归保护的行为（例如日志的跟随滚动），跑在类型检查之前：
+# 测试挂了就没必要再往下走。
+npm --prefix apps/ui test
+
 step "TypeScript 类型检查"
 # 项目路径必须显式给：见文件开头的说明。
 npm --prefix apps/ui exec tsc -- --noEmit -p apps/ui/tsconfig.json
