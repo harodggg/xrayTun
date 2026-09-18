@@ -499,3 +499,31 @@ export interface RouteExplanation {
   reasons: string[];
   undecidable: string[];
 }
+
+/** IP 的地理位置（来自 ip-api.com）。 */
+export interface GeoLocation {
+  ip: string;
+  country: string;
+  city: string;
+  lat: number;
+  lon: number;
+  isp: string;
+  /** 数据来源，界面据此如实标注。 */
+  source: string;
+}
+
+/** 地球仪上的一条航线：本机 → 出口节点。 */
+export interface GlobeRoute {
+  from: GeoLocation;
+  to: GeoLocation;
+  /** 这条航线当前承载的实测字节（上行+下行）。 */
+  bytes: number;
+  node_name: string;
+}
+
+export interface GlobeData {
+  route: GlobeRoute | null;
+  origin: GeoLocation | null;
+  /** 拿不到位置时的原因。 */
+  error: string | null;
+}

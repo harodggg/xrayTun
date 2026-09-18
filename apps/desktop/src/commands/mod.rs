@@ -48,6 +48,7 @@ mod latency;
 mod nodes;
 mod settings;
 mod snapshot;
+mod globe;
 mod topology;
 mod util;
 
@@ -58,4 +59,5 @@ pub use latency::*;
 pub use nodes::*;
 pub use settings::*;
 pub use snapshot::*;
+pub use globe::*;
 pub use topology::*;

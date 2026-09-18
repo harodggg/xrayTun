@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  GlobeData,
   NodeExport,
   RouteExplanation,
   Topology,
@@ -45,6 +46,9 @@ export const api = {
     invoke<AppSnapshot>("remove_subscription", { subscriptionId }),
   refreshSubscriptions: (ids?: string[]) =>
     invoke<AppSnapshot>("refresh_subscriptions", { ids: ids ?? null }),
+
+  /** 地球仪数据：本机与出口节点的地理位置（来自 ip-api.com）。 */
+  globeData: () => invoke<GlobeData>("globe_data"),
 
   /** 网络流动拓扑：真实入口/规则链/出口 + 实测流量。 */
   routingTopology: () => invoke<Topology>("routing_topology"),

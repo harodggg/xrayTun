@@ -1740,3 +1740,107 @@ input[type="checkbox"] {
     box-shadow: inset 2px 0 0 currentColor;
   }
 }
+
+/* ================================================================ 地球仪
+ *
+ * 一张深色海图：球体是海洋、位图是陆地、大圆弧是航线。
+ * 配色沿用应用的强调色，避免和整体风格脱节。
+ */
+
+.globe {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 0;
+}
+
+.globe__canvas {
+  width: min(100%, 560px);
+  height: auto;
+  aspect-ratio: 1;
+  cursor: grab;
+  touch-action: none;
+}
+
+.globe__canvas:active {
+  cursor: grabbing;
+}
+
+.globe__hint {
+  position: absolute;
+  bottom: 4px;
+  right: 8px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+/* 航线两端的事实 */
+.facts {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 12px;
+  align-items: center;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fact__label {
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+.fact__place {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.fact__meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.fact__src {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+.facts__mid {
+  text-align: center;
+  padding: 0 8px;
+}
+
+.facts__km {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.facts__km--small {
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.facts__hint {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+@media (max-width: 760px) {
+  .facts {
+    grid-template-columns: 1fr;
+  }
+  .facts__mid {
+    text-align: left;
+    padding: 8px 0;
+  }
+}

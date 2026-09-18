@@ -83,6 +83,7 @@ pub fn run() {
             commands::snapshot,
             commands::routing_topology,
             commands::explain_dest,
+            commands::globe_data,
             commands::save_settings,
             commands::set_mode,
             commands::start_proxy,

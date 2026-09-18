@@ -13,6 +13,7 @@
 //! `docs/03-xray-integration.md`。
 
 pub mod error;
+pub mod geo_lookup;
 pub mod model;
 pub mod net;
 pub mod routing;

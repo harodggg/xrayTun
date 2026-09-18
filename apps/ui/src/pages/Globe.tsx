@@ -1,0 +1,532 @@
+/**
+ * 地球仪：本机 → 出口节点的航线。
+ *
+ * # 画的是什么
+ *
+ * 一条从本机公网出口到出口节点的**大圆弧**（球面上两点间的最短路径，也正是
+ * 真实网络包大致会走的方向），飞机沿弧线飞；弧线两端各有一个位置点。
+ * 飞机的数量与速度由**实测速率**决定 —— 速率越高，天上的货越多。
+ *
+ * # 哪些是真的，哪些不是
+ *
+ * * 位置：**真**的，但来自 ip-api.com（项目自带的 geoip.dat 没有经纬度）。
+ *   界面上标注来源，因为这意味着「被查的 IP 发给了第三方」。
+ * * 航线弧度：**真**的几何（两点确定的大圆）。
+ * * 大陆轮廓：**粗略**。2° 分辨率的海陆位图（约 4KB，不引地图依赖），
+ *   不是导航级海岸线 —— 方位感是对的，细节没有。
+ * * 飞行速度：**视觉节奏**，不代表真实时延。
+ *
+ * # 为什么自己画而不引 Three.js
+ *
+ * 前端目前只有 React + Tauri（包体 195KB / gzip 66KB）。一个地球仪不值得
+ * 让包体翻倍 —— 正交投影 + 大圆插值这些数学量很小，画布绘制也够用。
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { api, errorText } from "../ipc";
+import { LAND_MASK_HEX, decodeLandMaskFlat, sampleLand } from "../landmask";
+import { formatBytes } from "../types";
+import type { GeoLocation, GlobeData } from "../types";
+
+const DEG = Math.PI / 180;
+
+/** 经纬度 → 单位球面坐标（z 轴指向观察者）。 */
+function toVec(lat: number, lon: number): [number, number, number] {
+  const la = lat * DEG;
+  const lo = lon * DEG;
+  return [Math.cos(la) * Math.sin(lo), Math.sin(la), Math.cos(la) * Math.cos(lo)];
+}
+
+/** 绕 Y 轴（经度方向）旋转。 */
+function rotY(v: [number, number, number], a: number): [number, number, number] {
+  const [x, y, z] = v;
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  return [x * c + z * s, y, -x * s + z * c];
+}
+
+/** 绕 X 轴（纬度方向）旋转 —— 拖动时用。 */
+function rotX(v: [number, number, number], a: number): [number, number, number] {
+  const [x, y, z] = v;
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  return [x, y * c - z * s, y * s + z * c];
+}
+
+/** 球面上两点之间插值（大圆的近似：球面线性插值，视觉上足够）。 */
+function slerp(
+  a: [number, number, number],
+  b: [number, number, number],
+  t: number,
+): [number, number, number] {
+  const dot = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+  const omega = Math.acos(dot);
+  if (omega < 1e-6) return a;
+  const so = Math.sin(omega);
+  const ca = Math.sin((1 - t) * omega) / so;
+  const cb = Math.sin(t * omega) / so;
+  return [a[0] * ca + b[0] * cb, a[1] * ca + b[1] * cb, a[2] * ca + b[2] * cb];
+}
+
+/** 两点间的大圆角距（弧度）—— 决定弧线拱多高。 */
+function angularDistance(
+  a: [number, number, number],
+  b: [number, number, number],
+): number {
+  const dot = Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]));
+  return Math.acos(dot);
+}
+
+export default function Globe() {
+  const [data, setData] = useState<GlobeData | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      setData(await api.globeData());
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <div className="page">
+      <section className="page__sec">
+        <div className="row row--between">
+          <div>
+            <h2 className="page__title">地球仪</h2>
+            <p className="page__desc">
+              从本机到出口节点的大圆弧航线。飞机的数量与快慢由实测速率决定；
+              大陆轮廓是 2° 分辨率的粗略示意，不是导航级海岸线。
+            </p>
+          </div>
+          <button className="btn btn--ghost" disabled={busy} onClick={() => void load()}>
+            {busy ? <span className="spin" /> : null}
+            重新定位
+          </button>
+        </div>
+
+        {loadError && (
+          <div className="banner banner--error">
+            <span>✕</span>
+            <div>{loadError}</div>
+          </div>
+        )}
+
+        <GlobeCanvas data={data} />
+
+        {data?.error && (
+          <div className="note">
+            {data.error}
+            <br />
+            位置查询需要访问 ip-api.com（项目自带的 geoip 数据没有经纬度）。
+          </div>
+        )}
+        {data?.route && <RouteFacts data={data} />}
+      </section>
+    </div>
+  );
+}
+
+/** 航线两端的事实卡片。 */
+function RouteFacts({ data }: { data: GlobeData }) {
+  const r = data.route!;
+  const km = greatCircleKm(r.from, r.to);
+  return (
+    <div className="facts">
+      <Fact label="起点" loc={r.from} />
+      <div className="facts__mid">
+        <div className="facts__km">{Math.round(km).toLocaleString()} km</div>
+        <div className="facts__hint">大圆距离</div>
+        <div className="facts__km facts__km--small">{formatBytes(r.bytes)}</div>
+        <div className="facts__hint">出口累计流量（实测）</div>
+      </div>
+      <Fact label={`出口 · ${r.node_name}`} loc={r.to} />
+    </div>
+  );
+}
+
+function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
+  return (
+    <div className="fact">
+      <div className="fact__label">{label}</div>
+      <div className="fact__place">
+        {loc.city ? `${loc.city} · ` : ""}
+        {loc.country || "未知"}
+      </div>
+      <div className="fact__meta">
+        {loc.ip} · {loc.lat.toFixed(2)}, {loc.lon.toFixed(2)}
+      </div>
+      {loc.isp && <div className="fact__meta">{loc.isp}</div>}
+      <div className="fact__src">位置来源：{loc.source}</div>
+    </div>
+  );
+}
+
+/** 两点大圆距离（公里）。 */
+function greatCircleKm(a: GeoLocation, b: GeoLocation): number {
+  const R = 6371;
+  const dLat = (b.lat - a.lat) * DEG;
+  const dLon = (b.lon - a.lon) * DEG;
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * DEG) * Math.cos(b.lat * DEG) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+}
+
+
+/**
+ * 当前视角的坐标变换。
+ *
+ * **陆地与航线必须共用这一个变换** —— 各写一份的话，稍微改动一处旋转顺序，
+ * 航线就会整体偏离大陆，而且看起来「像是对的」。所以投影只在这里实现一次。
+ */
+function makeProjection(W: number, H: number, rotLon: number, rotLat: number) {
+  const cx = W / 2;
+  const cy = H / 2;
+  const R = Math.min(W, H) * 0.42;
+
+  /** 单位球面点 → 屏幕（含深度 z，>0 表示朝向观察者）。 */
+  const project = (v: [number, number, number]): [number, number, number] => {
+    const r = rotX(rotY(v, rotLon), rotLat);
+    return [cx + r[0] * R, cy - r[1] * R, r[2]];
+  };
+
+  /** 屏幕上的一点 → 球面法线（用于逐像素采样）；不在球上返回 null。 */
+  const unproject = (sx: number, sy: number): [number, number, number] | null => {
+    const x = (sx - cx) / R;
+    const y = (cy - sy) / R;
+    const d2 = x * x + y * y;
+    if (d2 > 1) return null;
+    const z = Math.sqrt(1 - d2);
+    return rotY(rotX([x, y, z], -rotLat), -rotLon);
+  };
+
+  return { cx, cy, R, project, unproject };
+}
+
+/** 球体画布。 */
+function GlobeCanvas({ data }: { data: GlobeData | null }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  // 视角放在 ref 而不是 state：动画每帧都在改它，放 state 会让 effect
+  // 每帧重建一次 RAF 循环（还把 drawScene 的闭包全换掉），纯属浪费。
+  const view = useRef({ lon: 0, lat: 0.25, auto: true });
+  const drag = useRef<{ x: number; y: number } | null>(null);
+
+  // 初始视角对准起点（本机），而不是随便一个经度 —— 打开就能看到自己的位置
+  useEffect(() => {
+    if (!data?.origin) return;
+    view.current.lon = -data.origin.lon * DEG;
+    view.current.lat = data.origin.lat * DEG * 0.6;
+  }, [data?.origin]);
+
+  const land = useMemo(() => decodeLandMaskFlat(LAND_MASK_HEX), []);
+
+  // 动画循环：只依赖数据本身，不依赖视角
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let raf = 0;
+    const start = performance.now();
+
+    const draw = (now: number) => {
+      const t = (now - start) / 1000;
+      // 拖动过就不要自动转，否则会跟用户抢
+      if (view.current.auto) view.current.lon += 0.0016;
+      drawScene(ctx, canvas, land, data, view.current.lon, view.current.lat, t);
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [land, data]);
+
+  const onDown = (e: React.PointerEvent) => {
+    view.current.auto = false;
+    drag.current = { x: e.clientX, y: e.clientY };
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+  };
+  const onMove = (e: React.PointerEvent) => {
+    if (!drag.current) return;
+    const dx = e.clientX - drag.current.x;
+    const dy = e.clientY - drag.current.y;
+    drag.current = { x: e.clientX, y: e.clientY };
+    view.current.lon += dx * 0.006;
+    view.current.lat = Math.max(-1.3, Math.min(1.3, view.current.lat + dy * 0.006));
+  };
+  const onUp = () => {
+    drag.current = null;
+  };
+
+  return (
+    <div className="globe">
+      <canvas
+        ref={canvasRef}
+        width={720}
+        height={720}
+        className="globe__canvas"
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerLeave={onUp}
+      />
+      <div className="globe__hint">拖动可旋转</div>
+    </div>
+  );
+}
+
+/** 画一帧。 */
+function drawScene(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  land: number[],
+  data: GlobeData | null,
+  rotLon: number,
+  rotLat: number,
+  t: number,
+) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const { cx, cy, R, project, unproject } = makeProjection(W, H, rotLon, rotLat);
+
+  ctx.clearRect(0, 0, W, H);
+
+  // ---- 球体：逐像素采样陆地 ----
+  //
+  // 为什么不用「把每个格子投影成方块」：那样会留缝、海岸线是方的。
+  // 逐像素反向投影 + 双线性采样能得到平滑的海岸线，代价是每帧约
+  // 50 万次坐标运算 —— 对这些运算量来说完全可以接受。
+  const img = ctx.createImageData(W, H);
+  const px = img.data;
+  const x0 = Math.max(0, Math.floor(cx - R) - 1);
+  const x1 = Math.min(W - 1, Math.ceil(cx + R) + 1);
+  const y0 = Math.max(0, Math.floor(cy - R) - 1);
+  const y1 = Math.min(H - 1, Math.ceil(cy + R) + 1);
+  const R2 = R * R;
+
+  // 光照方向（左上），让球面有立体感
+  const L = [-0.45, 0.55, 0.7];
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const d2 = dx * dx + dy * dy;
+      const i = (y * W + x) * 4;
+      if (d2 > R2) continue; // 球外：留透明
+
+      const nx = dx / R;
+      const ny = -dy / R;
+      const nz = Math.sqrt(Math.max(0, 1 - d2 / R2));
+
+      const lit = Math.max(0, nx * L[0]! + ny * L[1]! + nz * L[2]!);
+      const rim = 1 - nz; // 边缘压暗，像一颗球
+
+      const world = unproject(x, y);
+      let landAmount = 0;
+      if (world) {
+        const lat = Math.asin(Math.max(-1, Math.min(1, world[1]))) / DEG;
+        const lon = Math.atan2(world[0], world[2]) / DEG;
+        landAmount = sampleLand(land, lat, lon);
+      }
+
+      // 海洋
+      let r = 14 + 10 * lit;
+      let g = 22 + 14 * lit;
+      let b = 38 + 22 * lit;
+
+      if (landAmount > 0.5) {
+        // 陆地：偏灰绿，同样受光照
+        const t2 = (0.5 + lit * 0.5) * 0.95;
+        r = 62 * t2 + 14;
+        g = 92 * t2 + 20;
+        b = 116 * t2 + 30;
+      } else if (landAmount > 0.12) {
+        // 海岸线过渡：把插值区间的中间地带稍微提亮，形成一圈浅滩
+        const k = (landAmount - 0.12) / 0.38;
+        r += 18 * k * lit;
+        g += 26 * k * lit;
+        b += 30 * k * lit;
+      }
+
+      const shade = 1 - rim * 0.35;
+      px[i] = Math.min(255, r * shade);
+      px[i + 1] = Math.min(255, g * shade);
+      px[i + 2] = Math.min(255, b * shade);
+      px[i + 3] = 255; // 球体本身不透明
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  // ---- 经纬网：极淡的参考线，像海图 ----
+  ctx.strokeStyle = "rgba(120, 160, 210, 0.10)";
+  ctx.lineWidth = 1;
+  for (let lat = -60; lat <= 60; lat += 30) {
+    ctx.beginPath();
+    let started = false;
+    for (let lon = -180; lon <= 180; lon += 4) {
+      const [sx, sy, pz] = project(toVec(lat, lon));
+      if (pz <= 0) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(sx, sy);
+        started = true;
+      } else ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+  }
+  for (let lon = -180; lon < 180; lon += 30) {
+    ctx.beginPath();
+    let started = false;
+    for (let lat = -90; lat <= 90; lat += 4) {
+      const [sx, sy, pz] = project(toVec(lat, lon));
+      if (pz <= 0) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(sx, sy);
+        started = true;
+      } else ctx.lineTo(sx, sy);
+    }
+    ctx.stroke();
+  }
+
+  // ---- 球体轮廓（大气辉光） ----
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(79, 142, 247, 0.30)";
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+
+  // ---- 航线 ----
+  const route = data?.route;
+  if (route) {
+    const a = toVec(route.from.lat, route.from.lon);
+    const b = toVec(route.to.lat, route.to.lon);
+    const arc = angularDistance(a, b);
+
+    // 大圆抬升：跨得越远拱得越高（近处两点几乎贴地，远处才高高拱起）
+    const lift = 0.04 + 0.20 * (arc / Math.PI);
+    const arcPoint = (u: number): [number, number, number] => {
+      const p = slerp(a, b, u);
+      const scale = 1 + lift * Math.sin(Math.PI * u);
+      return project([p[0] * scale, p[1] * scale, p[2] * scale]);
+    };
+
+    ctx.beginPath();
+    for (let i = 0; i <= 160; i++) {
+      const [sx, sy, pz] = arcPoint(i / 160);
+      // 地平线以下的部分不画（否则会浮在球外）
+      if (pz < -0.05) continue;
+      if (i === 0) ctx.moveTo(sx, sy);
+      else ctx.lineTo(sx, sy);
+    }
+    ctx.strokeStyle = "rgba(79, 142, 247, 0.6)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // 飞机：数量由实测字节决定
+    const planes = vehicleCount(route.bytes);
+    for (let i = 0; i < planes; i++) {
+      const u = (t / 7 + i / planes) % 1;
+      const [sx, sy, pz] = arcPoint(u);
+      if (pz <= 0) continue; // 绕到背面就藏起来
+      drawPlane(ctx, sx, sy, arcPoint, u);
+    }
+
+    marker(ctx, project, route.from, "#34d399", "本机");
+    marker(ctx, project, route.to, "#4f8ef7", route.node_name);
+  }
+}
+
+/** 飞机数量：按实测字节，每 512KB 一架，最多 6 架。 */
+function vehicleCount(bytes: number): number {
+  if (bytes <= 0) return 1;
+  return Math.max(1, Math.min(6, Math.floor(bytes / (512 * 1024)) || 1));
+}
+
+/** 画一架飞机（按航向旋转的小三角 + 尾迹）。 */
+function drawPlane(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  arcPoint: (u: number) => [number, number, number],
+  u: number,
+) {
+  // 航向由弧线上前后两点决定
+  const ahead = arcPoint(Math.min(1, u + 0.01));
+  const ang = Math.atan2(ahead[1] - py, ahead[0] - px);
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(ang);
+
+  // 尾迹
+  const trail = ctx.createLinearGradient(-22, 0, 0, 0);
+  trail.addColorStop(0, "rgba(79, 142, 247, 0)");
+  trail.addColorStop(1, "rgba(140, 190, 255, 0.55)");
+  ctx.strokeStyle = trail;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-22, 0);
+  ctx.lineTo(-4, 0);
+  ctx.stroke();
+
+  // 机身
+  ctx.fillStyle = "#dbeafe";
+  ctx.beginPath();
+  ctx.moveTo(7, 0);
+  ctx.lineTo(-4, 4.2);
+  ctx.lineTo(-1.5, 0);
+  ctx.lineTo(-4, -4.2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+}
+
+/** 画一个位置标记（点 + 标签 + 呼吸圈）。 */
+function marker(
+  ctx: CanvasRenderingContext2D,
+  project: (v: [number, number, number]) => [number, number, number],
+  loc: GeoLocation,
+  color: string,
+  label: string,
+) {
+  const [px, py, pz] = project(toVec(loc.lat, loc.lon));
+  if (pz <= 0.02) return; // 背面不画（否则会浮在球外，看着像错位）
+
+  const pulse = 1 + 0.35 * Math.sin(performance.now() / 500);
+  ctx.beginPath();
+  ctx.arc(px, py, 7 * pulse, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+
+  ctx.beginPath();
+  ctx.arc(px, py, 4, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  ctx.font = "600 12px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = "rgba(230, 236, 245, 0.92)";
+  ctx.textAlign = "left";
+  ctx.fillText(label, px + 10, py + 4);
+}

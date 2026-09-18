@@ -388,6 +388,18 @@ export function installPreviewBridge(): () => void {
           return scenarioSnapshot();
         case "routing_topology":
           return MOCK_TOPOLOGY;
+        case "globe_data":
+          // 用与 Rust 侧一致的形状；坐标取自实测（本机=大理，节点=香港）
+          return {
+            route: {
+              from: { ip: "116.53.173.241", country: "China", city: "Dali Old Town", lat: 25.6886, lon: 100.159, isp: "Chinanet", source: "ip-api.com" },
+              to: { ip: "45.207.197.185", country: "Hong Kong", city: "Hong Kong", lat: 22.3193, lon: 114.169, isp: "Vapeline Technology", source: "ip-api.com" },
+              bytes: 9_846_000_000,
+              node_name: "Xray-45.207.197.185",
+            },
+            origin: { ip: "116.53.173.241", country: "China", city: "Dali Old Town", lat: 25.6886, lon: 100.159, isp: "Chinanet", source: "ip-api.com" },
+            error: null,
+          };
         case "explain_dest": {
           // 判定用真实规则会命中哪条 —— 预览里给一个**与真实配置同形**的结果，
           // 便于核对界面文案；真实判定由 Rust 侧完成（已与真实核心对拍）。
