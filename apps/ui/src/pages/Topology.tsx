@@ -126,6 +126,10 @@ function Highway({ topo }: { topo: Topology }) {
           <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.block }} />
           已拦截
         </span>
+        <span className="highway__legend-item">
+          <span className="highway__legend-dot" style={{ background: NEUTRAL }} />
+          内部通道
+        </span>
         <span className="highway__legend-note">货车沿连线从入口开到出口</span>
       </div>
 
@@ -198,12 +202,24 @@ function shortTag(t: string): string {
   return t;
 }
 
-/** 出口类别 → 货车颜色。三色对应三种去向。 */
+/**
+ * 出口类别 → 颜色。
+ *
+ * 只有三种去向有颜色：经节点（蓝）/ 直连（绿）/ 已拦截（红）。
+ * `dns` 与 `internal`（api）是**内部通道**，不是流向用户的去向，
+ * 所以用中性灰 —— 早先没有为它们配色，fallback 成了蓝色，
+ * 看起来像「另一条走节点的路」，那是误导。
+ */
 const OUTBOUND_COLOR: Record<string, string> = {
   node: "#4f8ef7",
   direct: "#34d399",
   block: "#f87171",
+  dns: "#64748b",
+  internal: "#64748b",
 };
+
+/** 中性灰：内部通道（dns / api）的颜色。 */
+const NEUTRAL = "#64748b";
 
 /** 一条车道上的货车数量：按字节做对数映射到 [3, 8]。 */
 function trucksOnLane(bytes: number): number {
@@ -278,8 +294,17 @@ function Flow({
   const truckRectRefs = useRef<(SVGRectElement | null)[]>([]);
   /** 每条路线那条「完整合并路径」—— 只用来算货车位置，不显示。 */
   const guideRefs = useRef<(SVGPathElement | null)[]>([]);
-  /** 动画起始时刻：跨 effect 重建保持连续，避免每 2 秒跳一次。 */
-  const startRef = useRef<number | null>(null);
+  /**
+   * 上一帧的时间戳。用**时间增量累积**推进度，而不是「绝对时间 × 速度」。
+   *
+   * 为什么：拓扑每 2 秒刷新一次，入口卡片的宽度会变 → 路径长度变。
+   * 若按绝对时间算比例 `u = t·v/total`，长度一变，同一时刻的 `u` 就跳 ——
+   * 表现就是车在路上跳。改成累积路程后，长度变化只影响「占全程的比例」，
+   * 走过的**绝对距离**是连续的。
+   */
+  const prevRef = useRef<number | null>(null);
+  /** 每辆车的累计进度（0..1 循环）。按货车下标保存，跨 effect 重建连续。 */
+  const progressRef = useRef<number[]>([]);
 
   // 测量：把 DOM 位置换算成「相对容器的坐标」，再拼出每条路线的路径
   useEffect(() => {
@@ -340,11 +365,14 @@ function Flow({
         // 这样图例重新成立，而且一眼能看出「这条线通向哪类出口」。
         const branches: { startFrac: number; color: string }[] = [];
         let acc = 0;
-        const totalD = segs.reduce((a, sg) => a + segApproxLen(sg), 0) || 1;
+        // 去程总长 = 主干 + 各分支；回程不计入分支比例（它按相反顺序返回，
+        // 颜色已经由 `trunkFrac` 之外的逻辑处理为「沿用去程颜色」）
+        const outboundLen =
+          segApproxLen(segs[0]!) + outlets.reduce((a, b) => a + Math.hypot(b.l - forkX, b.y - inlet.y), 0);
+        const totalD = outboundLen || 1;
         outlets.forEach((b, k) => {
           // 类别要取**出口对象**上的 kind（位置矩形里没有这个信息）
-          const color =
-            OUTBOUND_COLOR[outbound[k]?.kind ?? ""] ?? OUTBOUND_COLOR.node ?? "#4f8ef7";
+          const color = OUTBOUND_COLOR[outbound[k]?.kind ?? ""] ?? NEUTRAL;
           branches.push({ startFrac: acc / totalD, color });
           const sg: Seg = {
             kind: "curve",
@@ -358,6 +386,32 @@ function Flow({
           segs.push(sg);
           acc += segApproxLen(sg);
         });
+        // **闭环**：走到最后一个出口后，原路回到分叉与入口。
+        //
+        // 不闭环的话，车到终点会瞬间回到起点 —— 而这两点在屏幕上相距约
+        // 400px，表现就是「跳一下」（实测量到 457px 的跳变）。
+        // 回程按**相反顺序**经过各分支，看起来就是有去有回，也不会让
+        // 车凭空消失或闪现。
+        for (let k = outlets.length - 1; k >= 0; k--) {
+          const b = outlets[k]!;
+          segs.push({
+            kind: "curve",
+            x1: b.l,
+            y1: b.y,
+            x2: forkX,
+            y2: inlet.y,
+            cx: clampMid(forkX, b.l),
+          });
+        }
+        segs.push({
+          kind: "curve",
+          x1: forkX,
+          y1: inlet.y,
+          x2: inlet.r,
+          y2: inlet.y,
+          cx: (inlet.r + forkX) / 2,
+        });
+
         routes.push({
           d: routeToD(segs),
           segs,
@@ -379,8 +433,10 @@ function Flow({
       if (el) ro.observe(el);
     }
     return () => ro.disconnect();
+    // 依赖里**不放位置数组**：它们每次刷新都会重建，放了会让动画每 2 秒
+    // 重启一次（表现是车跳回起点）。位置的更新由 ResizeObserver 触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [container, inletEls.join("|"), outletEls.join("|")]);
+  }, [container]);
 
   // 沿路径行走：用 `getPointAtLength` 把货车摆到路上。
   // 不用 state 驱动（每帧 setState 会把整棵树重渲染），直接改 transform。
@@ -398,44 +454,57 @@ function Flow({
     const paths = guideRefs.current.filter(Boolean) as SVGPathElement[];
     if (paths.length === 0) return;
     const lengths = paths.map((p) => p.getTotalLength());
-    const maxLen = Math.max(...lengths, 1);
 
     let raf = 0;
-    if (startRef.current === null) startRef.current = performance.now();
-    const t0 = startRef.current;
     const step = (now: number) => {
-      const el = (now - t0) / 1000;
+      const prev = prevRef.current ?? now;
+      const dt = Math.min(0.1, (now - prev) / 1000); // 夹住，避免切标签后一次跳很远
+      prevRef.current = now;
+
       groups.forEach(({ el: g, slot }) => {
         const idx = Number(g.dataset.route ?? 0);
         const path = paths[idx];
         if (!path) return;
         const total = lengths[idx] ?? 1;
-        const phase = Number(g.dataset.phase ?? 0);
-        // 速度与路径长度成正比：这样长路线不会显得慢吞吞
-        const u = ((el / TRAVEL_SECONDS) * (total / maxLen) + phase) % 1;
-        const pt = path.getPointAtLength(u * total);
+
+        // **累积路程**：每辆车按各自速度前进，长度变化不影响走过的绝对距离
+        const speed = TRAVEL_SECONDS > 0 ? total / TRAVEL_SECONDS : 0;
+        const base = Number(g.dataset.phase ?? 0);
+        const prevP = progressRef.current[slot] ?? base;
+        const next = (prevP + (speed * dt) / Math.max(total, 1)) % 1;
+        progressRef.current[slot] = next;
+
+        const pt = path.getPointAtLength(next * total);
         g.setAttribute("transform", `translate(${pt.x.toFixed(1)} ${pt.y.toFixed(1)})`);
 
-        // 颜色跟着**当前所在的分支**变：所在分支通向哪类出口，就用那个颜色
+        // 颜色跟着**当前所在的分支**变
         const rect = truckRectRefs.current[slot];
         const branches = geo.routes[idx]?.branches ?? [];
         if (rect && branches.length > 0) {
-          // 分支起点按长度比例排列；取最后一个已进入的分支
+          // 去程：主干末端之后按**已进入的最远分支**着色；
+          // 回程：沿用去程的颜色（不闪回）
           const preFrac = trunkFrac(geo.routes[idx]!);
           let color = geo.routes[idx]!.segs[0]?.color ?? "";
-          if (u >= preFrac && preFrac < 1) {
-            const t = (u - preFrac) / (1 - preFrac);
-            for (const b of branches) {
-              if (t >= b.startFrac) color = b.color;
+          if (next >= preFrac && preFrac < 1) {
+            const t = (next - preFrac) / (1 - preFrac);
+            if (t <= 1) {
+              for (const b of branches) {
+                if (t >= b.startFrac) color = b.color;
+              }
+            } else {
+              color = branches[branches.length - 1]?.color ?? color;
             }
           }
-          rect.setAttribute("fill", color || branches[0]?.color || "#4f8ef7");
+          rect.setAttribute("fill", color || branches[0]?.color || NEUTRAL);
         }
       });
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      prevRef.current = null; // 下一轮从「现在」接着走，不补算中间的停顿
+    };
   }, [geo, container]);
 
   if (!geo) return null;
@@ -498,7 +567,7 @@ function Flow({
             width={9}
             height={5}
             rx={1}
-            fill="#4f8ef7"
+            fill={NEUTRAL}
             ref={(el) => {
               truckRectRefs.current[i] = el;
             }}
@@ -509,11 +578,19 @@ function Flow({
   );
 }
 
-/** 主干（入口 → 分叉）在整条路线长度里占的比例。 */
+/**
+ * 主干（入口 → 分叉）在**去程**里占的比例。
+ *
+ * 路线是闭环（去程 + 回程），但着色只关心去程：主干段中性，之后按进入的
+ * 分支着色，回程沿用最后那条分支的颜色。所以这里以「去程长度」为分母。
+ */
 function trunkFrac(route: Route): number {
-  const total = route.segs.reduce((a, sg) => a + segApproxLen(sg), 0);
-  if (total <= 0) return 1;
   const trunk = segApproxLen(route.segs[0]!);
+  const outbound = route.branches.length;
+  if (outbound === 0) return 1;
+  // 去程 = 主干 + 各分支；分支长度在构建时已累计，这里用路径总长的一半近似
+  const total = route.segs.reduce((a, sg) => a + segApproxLen(sg), 0) / 2;
+  if (total <= 0) return 1;
   return Math.min(1, trunk / total);
 }
 
