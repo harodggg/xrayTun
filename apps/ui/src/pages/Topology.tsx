@@ -223,17 +223,19 @@ interface Seg {
   y2: number;
   /** 曲线在 x 方向的中间控制点（"line" 忽略）。 */
   cx?: number;
+  /** 这一段的颜色：扇出分支按目的地的出口类别着色。 */
+  color?: string;
 }
 
 /** 一条完整的货运路线：入口 → 车道 → 扇出 → 出口。 */
 interface Route {
   d: string;
   segs: Seg[];
-  /** 货车颜色（按终点出口的去向）。 */
-  color: string;
   label: string;
   /** 这条路线属于哪个入口（货车数量按入口的字节数决定）。 */
   inlet: number;
+  /** 每个出口分支的起点累计长度与颜色，用于让货车跟着当前去向变色。 */
+  branches: { startFrac: number; color: string }[];
 }
 
 /**
@@ -273,6 +275,9 @@ function Flow({
     routes: Route[];
   } | null>(null);
   const truckRefs = useRef<(SVGGElement | null)[]>([]);
+  const truckRectRefs = useRef<(SVGRectElement | null)[]>([]);
+  /** 每条路线那条「完整合并路径」—— 只用来算货车位置，不显示。 */
+  const guideRefs = useRef<(SVGPathElement | null)[]>([]);
   /** 动画起始时刻：跨 effect 重建保持连续，避免每 2 秒跳一次。 */
   const startRef = useRef<number | null>(null);
 
@@ -297,8 +302,6 @@ function Flow({
         return;
       }
 
-      // 路由分组：出口按相邻切段分给各入口（只为画得清楚，不声称归属）
-      const per = Math.ceil(outlets.length / inlets.length);
       // 分叉点：放在入口与出口之间的**流动区**里、靠近出口那一侧，
       // 给「扇出」留出弧线空间。它代表「规则链做出的去向判定」。
       const gapStart = inlets[0]!.r;
@@ -310,44 +313,58 @@ function Flow({
 
       const routes: Route[] = [];
       inlets.forEach((inlet, i) => {
-        const mine = outlets.slice(i * per, (i + 1) * per);
-        mine.forEach((box, k) => {
-          // 每个出口一条分支，但**共用同一个入口分叉点** ——
-          // 形状就是「一个源点扇出多条弧线」。
-          //
-          // 同一入口的多条分支合并成**一条连续路径**：中间是那条汇入的弧线，
-          // 之后依次往返每个出口。这样 getPointAtLength 能连续采样，
-          // 货车沿整条路线来回走（用户要的「看到车在线上走，整个流程」）。
-          const segs: Seg[] = [
-            {
-              kind: "curve",
-              x1: inlet.r,
-              y1: inlet.y,
-              x2: forkX,
-              y2: inlet.y,
-              cx: (inlet.r + forkX) / 2,
-            },
-          ];
-          const ordered = k === 0 ? mine : [mine[0]!, ...mine.slice(1).filter((b) => b !== box), box];
-          ordered.forEach((b) => {
-            segs.push({
-              kind: "curve",
-              x1: forkX,
-              y1: inlet.y,
-              x2: b.l,
-              y2: b.y,
-              cx: clampMid(forkX, b.l),
-            });
-          });
-          if (k > 0) return; // 同一入口只生成一条合并路径
-          routes.push({
-            d: routeToD(segs),
-            segs,
-            color: OUTBOUND_COLOR[outbound[i * per]?.kind ?? ""] ?? "#4f8ef7",
-            label: "",
-            /** 这条路线属于哪个入口（货车数量按入口字节数决定）。 */
-            inlet: i,
-          });
+        // **一对多**：每个入口都扇出到**全部**出口。
+        //
+        // 物理上这也更贴近事实：所有入口的流量都经过同一条规则链，
+        // 由规则链决定去向，所以任何入口都可能去任何出口。
+        // 早先按相邻切段分（一条入口只连自己那几个），看起来像「每个入口
+        // 有自己独立的一组出口」，那是不对的。
+        //
+        // 代价是线条数 = 入口数 × 出口数（当前 3×6 = 18 条），所以线的透明度
+        // 压低、主视觉留给货车。
+        const segs: Seg[] = [
+          {
+            kind: "curve",
+            x1: inlet.r,
+            y1: inlet.y,
+            x2: forkX,
+            y2: inlet.y,
+            cx: (inlet.r + forkX) / 2,
+          },
+        ];
+        // 合并成**一条连续路径**：中间是那条汇入弧线，之后依次往返每个出口。
+        // 这样 getPointAtLength 能连续采样，货车沿整条路线来回走 ——
+        // 而「哪条车道通向哪个出口」核心没有计数器，所以车走的是
+        // 「这个入口可能去的所有出口」这条完整路径，不声称具体归属。
+        // 每条扇出分支按**目的地的出口类别**着色（蓝=节点 / 绿=直连 / 红=拦截），
+        // 这样图例重新成立，而且一眼能看出「这条线通向哪类出口」。
+        const branches: { startFrac: number; color: string }[] = [];
+        let acc = 0;
+        const totalD = segs.reduce((a, sg) => a + segApproxLen(sg), 0) || 1;
+        outlets.forEach((b, k) => {
+          // 类别要取**出口对象**上的 kind（位置矩形里没有这个信息）
+          const color =
+            OUTBOUND_COLOR[outbound[k]?.kind ?? ""] ?? OUTBOUND_COLOR.node ?? "#4f8ef7";
+          branches.push({ startFrac: acc / totalD, color });
+          const sg: Seg = {
+            kind: "curve",
+            x1: forkX,
+            y1: inlet.y,
+            x2: b.l,
+            y2: b.y,
+            cx: clampMid(forkX, b.l),
+            color,
+          };
+          segs.push(sg);
+          acc += segApproxLen(sg);
+        });
+        routes.push({
+          d: routeToD(segs),
+          segs,
+          label: "",
+          /** 这条路线属于哪个入口（货车数量按入口字节数决定）。 */
+          inlet: i,
+          branches,
         });
       });
 
@@ -369,23 +386,26 @@ function Flow({
   // 不用 state 驱动（每帧 setState 会把整棵树重渲染），直接改 transform。
   useEffect(() => {
     if (!geo || geo.routes.length === 0) return;
-    const groups = truckRefs.current.filter(Boolean) as SVGGElement[];
+    // **按下标收集**：过滤掉空位会让下标与 `data-slot` 错位，
+    // 那样货车会套用别的车的颜色。
+    const groups: { el: SVGGElement; slot: number }[] = [];
+    truckRefs.current.forEach((el, slot) => {
+      if (el) groups.push({ el, slot });
+    });
     if (groups.length === 0) return;
 
-    // 取每条路线的长度，用于让所有货车速度一致（长路线走得久）
-    const paths = container?.querySelectorAll<SVGPathElement>(".flow__route");
-    if (!paths || paths.length === 0) return;
-    const lengths = Array.from(paths).map((p) => p.getTotalLength());
+    // 用那条隐藏的**完整合并路径**算位置（可见的线是分段画的，长度不等于整条）
+    const paths = guideRefs.current.filter(Boolean) as SVGPathElement[];
+    if (paths.length === 0) return;
+    const lengths = paths.map((p) => p.getTotalLength());
     const maxLen = Math.max(...lengths, 1);
 
     let raf = 0;
-    // 起始时间放在 ref 里：这个 effect 每次 geo 变化都会重建
-    // （流量每 2 秒刷新一次），用局部变量会让货车每 2 秒**跳回起点**。
     if (startRef.current === null) startRef.current = performance.now();
     const t0 = startRef.current;
     const step = (now: number) => {
       const el = (now - t0) / 1000;
-      groups.forEach((g) => {
+      groups.forEach(({ el: g, slot }) => {
         const idx = Number(g.dataset.route ?? 0);
         const path = paths[idx];
         if (!path) return;
@@ -395,6 +415,22 @@ function Flow({
         const u = ((el / TRAVEL_SECONDS) * (total / maxLen) + phase) % 1;
         const pt = path.getPointAtLength(u * total);
         g.setAttribute("transform", `translate(${pt.x.toFixed(1)} ${pt.y.toFixed(1)})`);
+
+        // 颜色跟着**当前所在的分支**变：所在分支通向哪类出口，就用那个颜色
+        const rect = truckRectRefs.current[slot];
+        const branches = geo.routes[idx]?.branches ?? [];
+        if (rect && branches.length > 0) {
+          // 分支起点按长度比例排列；取最后一个已进入的分支
+          const preFrac = trunkFrac(geo.routes[idx]!);
+          let color = geo.routes[idx]!.segs[0]?.color ?? "";
+          if (u >= preFrac && preFrac < 1) {
+            const t = (u - preFrac) / (1 - preFrac);
+            for (const b of branches) {
+              if (t >= b.startFrac) color = b.color;
+            }
+          }
+          rect.setAttribute("fill", color || branches[0]?.color || "#4f8ef7");
+        }
       });
       raf = requestAnimationFrame(step);
     };
@@ -419,11 +455,32 @@ function Flow({
 
   return (
     <svg className="flow" width={geo.w} height={geo.h} aria-hidden>
-      {/* 连线本体 */}
+      {/* 连线本体：主干中性，各扇出分支按**目的地的出口类别**着色。
+          着色依据是出口的 kind（实测数据），所以图例对得上。 */}
       {geo.routes.map((r, i) => (
-        <path key={`p-${i}`} className="flow__route" d={r.d} stroke={r.color} />
+        <g key={`p-${i}`}>
+          {r.segs.map((sg, k) => (
+            <path
+              key={`p-${i}-${k}`}
+              className={sg.color ? "flow__route" : "flow__route flow__route--trunk"}
+              d={routeToD([sg])}
+              stroke={sg.color ?? "rgba(120,160,210,0.45)"}
+            />
+          ))}
+        </g>
       ))}
-      {/* 货车：沿连线从入口开到出口 */}
+      {/* 唯一一条**完整**的合并路径：只用于给货车算位置（隐藏不显示） */}
+      {geo.routes.map((r, i) => (
+        <path
+          key={`guide-${i}`}
+          className="flow__guide"
+          d={r.d}
+          ref={(el) => {
+            guideRefs.current[i] = el;
+          }}
+        />
+      ))}
+      {/* 货车：沿整条路线（入口 → 分叉 → 各出口）来回走，颜色跟着当前去向 */}
       {trucks.map((t, i) => (
         <g
           key={`t-${i}`}
@@ -432,14 +489,32 @@ function Flow({
           }}
           data-route={t.route}
           data-phase={t.phase}
+          data-slot={i}
           className="flow__truck"
         >
-          <rect x={-4.5} y={-2.5} width={9} height={5} rx={1}
-                fill={geo.routes[t.route]?.color ?? "#4f8ef7"} />
+          <rect
+            x={-4.5}
+            y={-2.5}
+            width={9}
+            height={5}
+            rx={1}
+            fill="#4f8ef7"
+            ref={(el) => {
+              truckRectRefs.current[i] = el;
+            }}
+          />
         </g>
       ))}
     </svg>
   );
+}
+
+/** 主干（入口 → 分叉）在整条路线长度里占的比例。 */
+function trunkFrac(route: Route): number {
+  const total = route.segs.reduce((a, sg) => a + segApproxLen(sg), 0);
+  if (total <= 0) return 1;
+  const trunk = segApproxLen(route.segs[0]!);
+  return Math.min(1, trunk / total);
 }
 
 /** 一辆车走完全程需要的秒数（视觉节奏）。 */
@@ -476,6 +551,13 @@ function routeToD(segs: Seg[]): string {
     );
   }
   return parts.join(" ");
+}
+
+/** 一段的近似长度，只用于把「分支起点」换算成路径上的比例。 */
+function segApproxLen(s: Seg): number {
+  const dx = s.x2 - s.x1;
+  const dy = s.y2 - s.y1;
+  return Math.hypot(dx, dy);
 }
 
 /**

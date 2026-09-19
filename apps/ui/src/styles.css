@@ -1665,9 +1665,20 @@ input[type="checkbox"] {
 
 .flow__route {
   fill: none;
-  /* 比货车稍暗：货车是主角，但线要看得见 —— 否则车看起来在凭空飘 */
-  stroke-width: 1.5;
-  opacity: 0.5;
+  /* 线条数 = 入口数 × 出口数（3×6 = 18），所以压得更暗一些：
+     线是轨道、货车才是主视觉。太亮会糊成一片。 */
+  stroke-width: 1.2;
+  opacity: 0.3;
+}
+
+.flow__guide {
+  /* 只用来给货车算位置，不显示 */
+  fill: none;
+  stroke: none;
+}
+
+.flow__route--trunk {
+  opacity: 0.22;
 }
 
 .flow__truck rect {
