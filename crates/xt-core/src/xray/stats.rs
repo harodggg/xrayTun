@@ -46,7 +46,7 @@
 //! 这个对应关系由 [`traffic_from_stats`] 的测试钉住。
 
 use std::net::SocketAddr;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -269,6 +269,12 @@ pub fn parse_traffic_counter(name: &str) -> Option<CounterParts> {
     if direction != "inbound" && direction != "outbound" {
         return None;
     }
+    // 空 tag（例如 `inbound>>>>>traffic>>>uplink`）不是合法计数器：
+    // 放过去会凭空多出一个名字为空的条目，把所有「名字被切坏」的计数
+    // 都算到它头上 —— 数字对不上，却不会报错。
+    if tag.is_empty() {
+        return None;
+    }
     Some(CounterParts {
         direction: direction.to_string(),
         tag: tag.to_string(),
@@ -276,51 +282,183 @@ pub fn parse_traffic_counter(name: &str) -> Option<CounterParts> {
     })
 }
 
-/// 按 tag 汇总某个方向的上下行字节。
+/// 把一批「计数器名 → 值」按方向折成 `tag -> (uplink, downlink)`。
 ///
-/// 返回 `tag -> (uplink, downlink)`。
-pub fn traffic_by_tag(stats: &[StatEntry], direction: &str) -> HashMap<String, (u64, u64)> {
+/// **flow 名不认识时必须整条丢弃**，不能先建 entry 再忽略：那样
+/// `inbound>>>tun>>>traffic>>>sideways` 会凭空造出一个值为 0 的 `tun`，
+/// 让「这个名字没被识别」看起来像「这个入口流量是 0」。
+fn aggregate_by_tag<'a, I>(entries: I, direction: &str) -> HashMap<String, (u64, u64)>
+where
+    I: IntoIterator<Item = (&'a str, u64)>,
+{
     let mut out: HashMap<String, (u64, u64)> = HashMap::new();
-    for s in stats {
-        let Some(parts) = parse_traffic_counter(&s.name) else {
+    for (name, value) in entries {
+        let Some(parts) = parse_traffic_counter(name) else {
             continue;
         };
         if parts.direction != direction {
             continue;
         }
+        let is_uplink = match parts.flow.as_str() {
+            "uplink" => true,
+            "downlink" => false,
+            _ => continue,
+        };
         let entry = out.entry(parts.tag).or_insert((0, 0));
-        let value = s.value.max(0) as u64;
-        match parts.flow.as_str() {
-            "uplink" => entry.0 = entry.0.saturating_add(value),
-            "downlink" => entry.1 = entry.1.saturating_add(value),
-            _ => {}
+        if is_uplink {
+            entry.0 = entry.0.saturating_add(value);
+        } else {
+            entry.1 = entry.1.saturating_add(value);
         }
     }
     out
 }
 
+/// 按 tag 汇总某个方向的上下行字节。
+///
+/// 返回 `tag -> (uplink, downlink)`。
+pub fn traffic_by_tag(stats: &[StatEntry], direction: &str) -> HashMap<String, (u64, u64)> {
+    aggregate_by_tag(
+        stats.iter().map(|s| (s.name.as_str(), s.value.max(0) as u64)),
+        direction,
+    )
+}
+
+/// 全体入站的 rx/tx 合计。
+///
+/// 与 [`traffic_by_tag`] 共用 [`parse_traffic_counter`] —— 这个格式**只解析
+/// 一次**：各写一份手切分的话，格式一变就会有一处漏改，而漏改的表现是
+/// 「数字悄悄变 0」，不会报错。
 pub fn traffic_from_stats(stats: &[StatEntry], ignore_inbound: &str) -> TrafficCounters {
     let mut total = TrafficCounters::default();
     for s in stats {
-        let Some(rest) = s.name.strip_prefix("inbound>>>") else {
+        let Some(parts) = parse_traffic_counter(&s.name) else {
             continue;
         };
-        let mut parts = rest.split(">>>");
-        let (Some(tag), Some("traffic"), Some(dir)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        if tag == ignore_inbound || parts.next().is_some() {
+        if parts.direction != "inbound" || parts.tag == ignore_inbound {
             continue;
         }
         let value = s.value.max(0) as u64;
-        match dir {
-            "downlink" => total.rx_bytes += value,
-            "uplink" => total.tx_bytes += value,
+        match parts.flow.as_str() {
+            "downlink" => total.rx_bytes = total.rx_bytes.saturating_add(value),
+            "uplink" => total.tx_bytes = total.tx_bytes.saturating_add(value),
             _ => {}
         }
     }
     total
+}
+
+// ---------------------------------------------------------------------------
+// 跨核心重启的单调化
+// ---------------------------------------------------------------------------
+
+/// 单个累计计数器的跨重启单调化。
+///
+/// Xray 的计数器是**累计值**，核心重启（换网 / 熄屏唤醒 / 节点抖动时看门狗
+/// 的 `stop_core` + `start_core`）会让它归零。直接把原始值给界面，用户看到的
+/// 就是「8 GiB → 0 → 再涨」—— 那正是被当成「数据乱跳」的现象。
+///
+/// 这里把归零前的值累进 `base`，返回值 = `base + 新原始值`：读数不回退，
+/// 而「归零」这件事本身用 [`MonotonicCounter::resets`] 如实上报，
+/// 不做平滑掩盖。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MonotonicCounter {
+    /// 历次归零前累计下来的量。
+    base: u64,
+    /// 上一次看到的原始值。
+    last_raw: u64,
+    /// 观察到归零的次数。
+    resets: u32,
+}
+
+impl MonotonicCounter {
+    /// 观察一个原始值，返回单调化后的累计值。
+    pub fn observe(&mut self, raw: u64) -> u64 {
+        if raw < self.last_raw {
+            // 原始值回退 = 计数器被重置（核心重启）。把上一段累计量接上，
+            // 而不是把读数掉回去。
+            self.base = self.base.saturating_add(self.last_raw);
+            self.resets = self.resets.saturating_add(1);
+        }
+        self.last_raw = raw;
+        self.base.saturating_add(raw)
+    }
+
+    /// 观察到的归零次数。
+    pub fn resets(&self) -> u32 {
+        self.resets
+    }
+}
+
+/// 一组计数器的单调化状态（`计数器全名 -> 状态`）。
+///
+/// 用 `BTreeMap` 而不是 `HashMap`：遍历顺序确定，不会因为哈希顺序不同
+/// 让两次采样看起来像变了。
+#[derive(Debug, Clone, Default)]
+pub struct MonotonicCounters {
+    inner: BTreeMap<String, MonotonicCounter>,
+}
+
+impl MonotonicCounters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 观察一个计数器名对应的原始值，返回单调化后的值。
+    pub fn observe(&mut self, name: &str, raw: u64) -> u64 {
+        self.inner.entry(name.to_string()).or_default().observe(raw)
+    }
+
+    /// 观察一整批原始值（`计数器全名 -> 原始累计值`），返回同形状的单调值。
+    pub fn observe_all(&mut self, raw: &BTreeMap<String, u64>) -> BTreeMap<String, u64> {
+        raw.iter()
+            .map(|(name, value)| (name.clone(), self.observe(name, *value)))
+            .collect()
+    }
+
+    /// 到目前为止观察到的最多归零次数。`>0` 表示核心重启过。
+    pub fn max_resets(&self) -> u32 {
+        self.inner
+            .values()
+            .map(MonotonicCounter::resets)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// 一次采样里每个流量计数器的原始累计值（`计数器全名 -> 字节数`）。
+///
+/// 只保留 [`parse_traffic_counter`] 认得的名字：畸形名字不能混进来，
+/// 否则它会被当成真实历史参与 base 计算，把别的计数器的值带偏。
+pub fn counter_values(stats: &[StatEntry]) -> BTreeMap<String, u64> {
+    let mut out: BTreeMap<String, u64> = BTreeMap::new();
+    for s in stats {
+        if parse_traffic_counter(&s.name).is_none() {
+            continue;
+        }
+        let value = s.value.max(0) as u64;
+        let slot = out.entry(s.name.clone()).or_insert(0);
+        *slot = slot.saturating_add(value);
+    }
+    out
+}
+
+/// 按 tag 汇总某个方向的**跨核心重启单调**累计字节。
+///
+/// 返回 `(tag -> (uplink, downlink), 观察到的归零次数)`。
+pub fn monotonic_traffic_by_tag(
+    counters: &mut MonotonicCounters,
+    stats: &[StatEntry],
+    direction: &str,
+) -> (HashMap<String, (u64, u64)>, u32) {
+    let smoothed = counters.observe_all(&counter_values(stats));
+    (
+        aggregate_by_tag(
+            smoothed.iter().map(|(name, v)| (name.as_str(), *v)),
+            direction,
+        ),
+        counters.max_resets(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -586,5 +724,153 @@ mod tests {
             put_varint(v, &mut buf);
             assert_eq!(read_varint(&buf, 0).unwrap(), (v, buf.len()), "值 {v}");
         }
+    }
+
+    /// 空 tag 不是合法计数器：放过去会凭空多出一个名字为空的条目，
+    /// 把所有「名字被切坏」的计数都算到它头上 —— 数字对不上却不报错。
+    #[test]
+    fn rejects_counter_names_with_empty_tag() {
+        assert!(parse_traffic_counter("inbound>>>>>traffic>>>uplink").is_none());
+        assert!(parse_traffic_counter("outbound>>>>>traffic>>>downlink").is_none());
+        // 正常名字当然要认，别把保护做成误伤
+        assert!(parse_traffic_counter("inbound>>>tun>>>traffic>>>uplink").is_some());
+    }
+
+    /// flow 名不认识时必须整条丢弃。先建 entry 再忽略的话，会造出一个
+    /// 值为 0 的 tag ——「这个名字没被识别」看起来就像「这个入口流量是 0」。
+    #[test]
+    fn unknown_flow_does_not_create_a_phantom_tag() {
+        let stats = vec![StatEntry {
+            name: "inbound>>>tun>>>traffic>>>sideways".into(),
+            value: 500,
+        }];
+        assert!(traffic_by_tag(&stats, "inbound").is_empty());
+        let (by_tag, _) = monotonic_traffic_by_tag(&mut MonotonicCounters::new(), &stats, "inbound");
+        assert!(by_tag.is_empty(), "未知 flow 不得造出 0 值条目");
+    }
+
+    /// **本次要修的核心回归**：核心重启让计数器归零，累计读数不得回退。
+    #[test]
+    fn monotonic_counter_does_not_go_backwards_across_a_reset() {
+        let mut c = MonotonicCounter::default();
+        assert_eq!(c.observe(8_600_000_000), 8_600_000_000);
+        // 核心重启：计数器从 0 重新计
+        assert_eq!(c.observe(0), 8_600_000_000, "归零不得让读数掉回去");
+        assert_eq!(c.resets(), 1);
+        // 重启之后的新流量继续累加在续接值上
+        assert_eq!(c.observe(4_096), 8_600_004_096);
+        assert_eq!(c.resets(), 1);
+    }
+
+    /// 连续归零两次：每一次都要把「该段重启前的量」累进基数。
+    /// 少加一次就丢一段真实流量，多加一次就凭空涨 —— 两种都是数字悄悄错。
+    #[test]
+    fn monotonic_counter_accumulates_each_session_before_a_reset() {
+        let mut c = MonotonicCounter::default();
+        assert_eq!(c.observe(1_000), 1_000);
+        assert_eq!(c.observe(0), 1_000); // 第一次重启：base += 1000
+        assert_eq!(c.observe(500), 1_500);
+        assert_eq!(c.observe(3), 1_503); // 第二次重启：base += 500
+        assert_eq!(c.resets(), 2);
+        assert_eq!(c.observe(10), 1_510);
+    }
+
+    /// base 必须按计数器分开记：某个出口归零补偿不能凭空加到别的出口上。
+    #[test]
+    fn monotonic_counters_keep_tags_independent() {
+        let mut counters = MonotonicCounters::new();
+        let first = counter_values(&[
+            StatEntry { name: "outbound>>>node-a>>>traffic>>>downlink".into(), value: 5_000 },
+            StatEntry { name: "outbound>>>node-b>>>traffic>>>downlink".into(), value: 100 },
+        ]);
+        counters.observe_all(&first);
+
+        // 只有 node-a 归零，node-b 继续正常增长
+        let second = counter_values(&[
+            StatEntry { name: "outbound>>>node-a>>>traffic>>>downlink".into(), value: 0 },
+            StatEntry { name: "outbound>>>node-b>>>traffic>>>downlink".into(), value: 150 },
+        ]);
+        let smoothed = counters.observe_all(&second);
+
+        assert_eq!(
+            smoothed.get("outbound>>>node-a>>>traffic>>>downlink").copied(),
+            Some(5_000)
+        );
+        assert_eq!(
+            smoothed.get("outbound>>>node-b>>>traffic>>>downlink").copied(),
+            Some(150),
+            "没归零的 tag 不该被抬高"
+        );
+        assert_eq!(counters.max_resets(), 1);
+    }
+
+    /// 畸形名字与负值不能进入 base 计算：否则会被当成真实历史，
+    /// 在下次采样时凭空抬高读数。
+    #[test]
+    fn counter_values_ignore_malformed_names_and_clamp_negatives() {
+        let v = counter_values(&[
+            StatEntry { name: "outbound>>>node-a>>>traffic>>>downlink".into(), value: 100 },
+            StatEntry { name: "outbound>>>node-a>>>traffic".into(), value: 9_999 },
+            StatEntry { name: ">>>".into(), value: 9_999 },
+            StatEntry { name: "inbound>>>>>traffic>>>uplink".into(), value: 9_999 },
+            // 理论上不该出现负值；真出现时按 0，不能回绕成天文数字
+            StatEntry { name: "outbound>>>node-a>>>traffic>>>downlink".into(), value: -5 },
+        ]);
+        assert_eq!(v.len(), 1, "只有合法名字能进入单调化");
+        assert_eq!(v.get("outbound>>>node-a>>>traffic>>>downlink").copied(), Some(100));
+    }
+
+    /// 聚合本身不得制造回退：计数器只增时，按 tag 的合计与总量只能增。
+    /// （防的是聚合里出现重置/取 max/改方向之类的改动。）
+    #[test]
+    fn aggregates_are_monotonic_when_counters_grow() {
+        let earlier = vec![
+            StatEntry { name: "inbound>>>tun>>>traffic>>>downlink".into(), value: 1_000 },
+            StatEntry { name: "inbound>>>tun>>>traffic>>>uplink".into(), value: 100 },
+            StatEntry { name: "inbound>>>socks>>>traffic>>>downlink".into(), value: 50 },
+        ];
+        let later = vec![
+            StatEntry { name: "inbound>>>tun>>>traffic>>>downlink".into(), value: 7_000 },
+            StatEntry { name: "inbound>>>tun>>>traffic>>>uplink".into(), value: 900 },
+            StatEntry { name: "inbound>>>socks>>>traffic>>>downlink".into(), value: 80 },
+        ];
+
+        let before = traffic_by_tag(&earlier, "inbound");
+        let after = traffic_by_tag(&later, "inbound");
+        for (tag, (up0, down0)) in &before {
+            let (up1, down1) = after.get(tag).copied().expect("同一 tag 应当还在");
+            assert!(up1 >= *up0 && down1 >= *down0, "{tag} 的合计回退了");
+        }
+        let t0 = traffic_from_stats(&earlier, "api");
+        let t1 = traffic_from_stats(&later, "api");
+        assert!(t1.rx_bytes >= t0.rx_bytes && t1.tx_bytes >= t0.tx_bytes);
+    }
+
+    /// 端到端（不含网络）：计数器归零后单调化汇总不回退，且归零次数被上报。
+    #[test]
+    fn monotonic_traffic_by_tag_reports_resets_without_regressing() {
+        let mut counters = MonotonicCounters::new();
+        let before = vec![StatEntry {
+            name: "outbound>>>node-a>>>traffic>>>downlink".into(),
+            value: 8_000,
+        }];
+        let (first, resets0) = monotonic_traffic_by_tag(&mut counters, &before, "outbound");
+        assert_eq!(first.get("node-a"), Some(&(0, 8_000)));
+        assert_eq!(resets0, 0);
+
+        let reset = vec![StatEntry {
+            name: "outbound>>>node-a>>>traffic>>>downlink".into(),
+            value: 0,
+        }];
+        let (second, resets1) = monotonic_traffic_by_tag(&mut counters, &reset, "outbound");
+        assert_eq!(second.get("node-a"), Some(&(0, 8_000)), "归零不得回退");
+        assert_eq!(resets1, 1, "归零事件要如实上报");
+
+        let grown = vec![StatEntry {
+            name: "outbound>>>node-a>>>traffic>>>downlink".into(),
+            value: 64,
+        }];
+        let (third, _) = monotonic_traffic_by_tag(&mut counters, &grown, "outbound");
+        assert_eq!(third.get("node-a"), Some(&(0, 8_064)));
     }
 }

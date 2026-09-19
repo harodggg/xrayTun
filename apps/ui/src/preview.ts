@@ -316,9 +316,35 @@ const MOCK_TOPOLOGY = {
     { tag: "dns-out", protocol: "dns", kind: "dns", uplink_bytes: 300_000, downlink_bytes: 300_000 },
     { tag: "api", protocol: "freedom", kind: "internal", uplink_bytes: 4_000, downlink_bytes: 8_000 },
   ],
-  traffic_error: null,
+  traffic_error: null as string | null,
+  traffic_ok: true,
+  counter_resets: 0,
   geo_available: true,
 };
+
+/**
+ * 预览用的拓扑场景。
+ *
+ * `?preview=1&traffic=unavailable` 模拟「这次没查到流量」。后端契约（task-5）
+ * 是：此时所有 `*_bytes` 填**占位 0**、`traffic_ok=false`、`traffic_error`
+ * 给出原因，且恒有 `traffic_ok === (traffic_error === null)`。
+ *
+ * 为什么要有这个开关：没有它时，「查不到流量」这条路径在预览里永远看不到，
+ * 前端按 `traffic_ok` 渲染的分支就没法截图、没法回归 —— 上一版正是这么漏的。
+ */
+function topologyScenario(): typeof MOCK_TOPOLOGY {
+  const unavailable = new URLSearchParams(location.search).get("traffic") === "unavailable";
+  if (!unavailable) return MOCK_TOPOLOGY;
+  return {
+    ...MOCK_TOPOLOGY,
+    traffic_error: "核心未运行：读不到 StatsService，本次流量不可用",
+    traffic_ok: false,
+    counter_resets: 0,
+    // 与后端一致：不可用时字节是**占位 0**，不是真实读数。
+    inbound: MOCK_TOPOLOGY.inbound.map((x) => ({ ...x, uplink_bytes: 0, downlink_bytes: 0 })),
+    outbound: MOCK_TOPOLOGY.outbound.map((x) => ({ ...x, uplink_bytes: 0, downlink_bytes: 0 })),
+  };
+}
 
 /** 造一批日志：前 120 条用来撑出可滚动区域，末尾几条覆盖 info/warn/error 与多行文本。 */
 export const MOCK_LOGS: LogEntry[] = [
@@ -341,8 +367,427 @@ export const MOCK_LOGS: LogEntry[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// 拓扑自检探针（**只在 `?preview=1` 下存在**）
+// ---------------------------------------------------------------------------
+//
+// # 为什么需要它
+//
+// 拓扑动画的「数据乱跳」以前只能靠临时 CDP 脚本排查：每个人写一份、
+// 每次量的口径还不一样（有人量屏幕位移，有人量进度增量），数字没法对比。
+// 这里把口径固化下来，测试与排查都用**同一条命令**量。
+//
+// # 关键取舍
+//
+// 探针**只读 DOM**，不碰 `Topology.tsx` 的内部状态：
+//   - 位置：`.flow__truck` 元素的 `transform="translate(x y)"`；
+//   - 进度：把该点投到同一条路线的 `.flow__guide` 路径上反推弧长比例
+//     （`getPointAtLength` 采样 + 局部细化）。所以 progress 是**独立重建**的，
+//     不是从组件里读出来的，能真正校验「车在不在线上」。
+//
+// 判据用**最大/中位步长之比**，不用固定像素阈值：路径长度会随卡片宽度变化，
+// 固定阈值（例如「>50px 就算跳」）在长路径上会漏报、短路径上会误报。
+//
+// # 怎么用
+//
+// ```js
+// window.__topologyProbe()               // 取当前快照 + 最近 N 帧步长统计
+// window.__topologyProbe({ reset: true }) // 先清空帧缓冲再取（测试前调用）
+// ```
+//
+// 帧的采集用 `MutationObserver` 盯 `.flow__truck` 的 `transform`，而不是自己
+// 再跑一个 rAF：动画每帧写一次 transform，观察到的就是**动画自己的帧**，
+// 采样间隔与它的 `dt` 同源，不会因为两个 rAF 回调的先后相位差而虚增步长。
+// （自跑 rAF 的版本在 CPU 被 `cargo test` 抢走时会把 ratio 从 1.36 抬到 2.64，
+//  全是测量误差。）
+//
+// 默认保留 240 帧（约 4 秒 @60fps），可用 `?preview=1&probeFrames=900` 调大窗口。
+
+/** 帧缓冲长度；`?probeFrames=` 只能调大，上限 3600 帧（约 1 分钟）。 */
+const PROBE_FRAME_LIMIT = (() => {
+  const raw = Number(new URLSearchParams(location.search).get("probeFrames"));
+  return Number.isFinite(raw) && raw >= 10 ? Math.min(3600, Math.floor(raw)) : 240;
+})();
+
+interface ProbeFrameTruck {
+  /** 稳定身份：`data-truck-key`（如 `route#3`，跨刷新不变）。 */
+  key: string;
+  slot: number;
+  route: number;
+  x: number;
+  y: number;
+}
+
+interface ProbeFrame {
+  t: number;
+  /** 按**身份**（`data-truck-key`）配对的车辆快照。 */
+  trucks: ProbeFrameTruck[];
+}
+
+export interface TopologyProbeTruck {
+  /** 稳定身份（`data-truck-key`）；DOM 上缺失时退化为 `slot:<n>`。 */
+  key: string;
+  slot: number;
+  route: number;
+  /** 0..1；从 DOM 上的导引路径反推。定位不到时为 null。 */
+  progress: number | null;
+  x: number;
+  y: number;
+  /**
+   * 与导引路径的最近距离（px）。正常应 <2px —— 这是采样缓存的**分辨率上限**
+   * （约每 2px 一个采样点，分叉处可能选到相邻分支）。明显大于 2px 才说明车脱线。
+   */
+  off_path: number | null;
+  /** 当前填充色，即「车当前走的是哪条分支」。 */
+  fill: string | null;
+}
+
+/** 判读档位：见 `hint` 与 README 里的三档规则。 */
+export type TopologyProbeVerdict = "ok" | "suspect" | "jump" | "unknown";
+
+export interface TopologyProbeSteps {
+  /** 参与统计的相邻帧步数。 */
+  samples: number;
+  max: number;
+  median: number;
+  p95: number;
+  /**
+   * 判据。三档（阈值 3，不是 2）：
+   * - `≤ 2` 正常；
+   * - `2 < ratio ≤ 3` 可疑 —— 若 `frame_gaps.max_ms > 25` 多半是环境卡顿；
+   * - `> 3` 确定是位置跳变（注入瞬移对照实测 39.6，余量充足）。
+   *
+   * 为什么不是 2：动画自己有一帧最多补 2 帧的策略（`dt > 1/30 → dt = 1/30`），
+   * 所以**主线程被抢时会自然升到 ~2.2**，那是设计内行为（实测 2.196）。
+   */
+  ratio_max_median: number | null;
+}
+
+export interface TopologyProbeFrameGaps {
+  max_ms: number;
+  median_ms: number;
+  p95_ms: number;
+}
+
+export interface TopologyProbeResult {
+  /** `verdict === "ok"` 时为 true；`unknown`（样本不足/没有车）时为 false。 */
+  ok: boolean;
+  /** 三档判读结果：`ok` / `suspect` / `jump` / `unknown`。 */
+  verdict: TopologyProbeVerdict;
+  hint: string;
+  /** 帧缓冲里的帧数（含空帧）与时间跨度。`frames` 已合并同帧双写，`batches` 是原始批数。 */
+  frames: number;
+  batches: number;
+  window_ms: number;
+  /** 配对同一辆车用的身份来源：`data-truck-key`（正常）或 `data-slot`（退化）。 */
+  identity: string;
+  /** 缓冲窗口内货车数量发生变化的次数。 */
+  truck_count_changes: number;
+  /** 同一辆车（按身份）换了路线的次数。 */
+  route_changes: number;
+  trucks: TopologyProbeTruck[];
+  steps: TopologyProbeSteps;
+  /** rAF 帧间隔；用来判断尖峰是不是「环境卡顿」造成的。 */
+  frame_gaps: TopologyProbeFrameGaps;
+  /** 按**身份**拆开的步长（按 max 从大到小排），用来回答「跳的是哪辆车」。 */
+  per_truck: { key: string; slot: number; route: number; samples: number; max: number; median: number }[];
+}
+
+/** 解析 `transform="translate(x y)"`（也接受逗号）。 */
+function parseTranslate(transform: string | null): { x: number; y: number } | null {
+  if (!transform) return null;
+  const m = /translate\(\s*(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)\s*\)/.exec(transform);
+  if (!m || m[1] === undefined || m[2] === undefined) return null;
+  return { x: Number(m[1]), y: Number(m[2]) };
+}
+
+/**
+ * 一条导引路径的采样缓存。
+ *
+ * 为什么要有缓存：`getPointAtLength` 在这几条路径上约 **0.28ms/次**（实测），
+ * 若每辆车都从头粗采样 800 点，14 辆车就要 22000 次 ≈ 6.3 秒，会把渲染主线程
+ * 卡住到 CDP 连接超时。改成「每条路径采样一次（约每 2px 一个点），扫数组找最近点，
+ * 再局部细化」：3 条路径 + 14 辆车的细化 ≈ 2000 次 ≈ 0.6 秒。
+ */
+interface GuideCache {
+  total: number;
+  ls: number[];
+  xs: number[];
+  ys: number[];
+  step: number;
+}
+
+function sampleGuide(path: SVGPathElement, total: number): GuideCache {
+  // 约每 2px 一个采样点（上限 600）：分叉点附近两条分支可能只差几像素，
+  // 采样太稀时最优点会落到另一条分支上，`off_path` 会虚报（实测 5-7px）。
+  const n = Math.min(600, Math.max(100, Math.ceil(total / 2)));
+  const ls: number[] = [];
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i <= n; i++) {
+    const l = (i / n) * total;
+    const p = path.getPointAtLength(l);
+    ls.push(l);
+    xs.push(p.x);
+    ys.push(p.y);
+  }
+  return { total, ls, xs, ys, step: total / n };
+}
+
+/** 在缓存里找最近点，再在它附近做局部细化（直线搜索 + 折半）。 */
+function nearestOnPath(path: SVGPathElement, cache: GuideCache, x: number, y: number): { l: number; d2: number } {
+  let bestL = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < cache.ls.length; i++) {
+    const dx = (cache.xs[i] ?? 0) - x;
+    const dy = (cache.ys[i] ?? 0) - y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD) {
+      bestD = d2;
+      bestL = cache.ls[i] ?? 0;
+    }
+  }
+  let step = cache.step;
+  for (let iter = 0; iter < 20 && step > 0.02; iter++) {
+    for (const cand of [bestL - step, bestL + step]) {
+      const l = Math.min(cache.total, Math.max(0, cand));
+      const p = path.getPointAtLength(l);
+      const d2 = (p.x - x) ** 2 + (p.y - y) ** 2;
+      if (d2 < bestD) {
+        bestD = d2;
+        bestL = l;
+      }
+    }
+    step /= 2;
+  }
+  return { l: bestL, d2: bestD };
+}
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  if (s.length % 2 === 1) return s[mid] ?? 0;
+  return ((s[mid - 1] ?? 0) + (s[mid] ?? 0)) / 2;
+}
+
+function percentile(xs: number[], q: number): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const idx = Math.min(s.length - 1, Math.max(0, Math.ceil(q * s.length) - 1));
+  return s[idx] ?? 0;
+}
+
+/**
+ * 把「同一帧里的多次写入」合并成一次。
+ *
+ * 为什么需要：dev 下 React 严格模式会把动画 effect 挂两次，于是同一帧里有
+ * 两个 rAF 回调各写一次 `transform`；而 MutationObserver 的回调是 microtask，
+ * 两个回调之间会各交一批记录 —— 表现为「间隔 0.2ms 的两帧」。
+ * 不合并的话 `步长/间隔` 会被这种同帧双写放大到 30×（实测），
+ * 看起来像故障。合并保留**后写**的那次（后写的才是屏幕上看到的）。
+ *
+ * 8ms（约半帧）的阈值远小于一帧（16.7ms），所以不会把真实的两帧并掉。
+ */
+function mergeSameFrame(frames: ProbeFrame[], minGapMs = 8): ProbeFrame[] {
+  const out: ProbeFrame[] = [];
+  for (const f of frames) {
+    const last = out[out.length - 1];
+    if (last && f.t - last.t < minGapMs) {
+      out[out.length - 1] = f;
+      continue;
+    }
+    out.push(f);
+  }
+  return out;
+}
+
+export function installTopologyProbe(): () => void {
+  const frames: ProbeFrame[] = [];
+  /** 上一批 transform 写入的时间；间隔过大说明拓扑卸载过，中间要插一个空帧。 */
+  let lastBatchAt = 0;
+  /** 超过这个间隔没有写入，就认为「中间什么都没发生」，不把两侧配成一步。 */
+  const STALE_MS = 300;
+
+  const observer = new MutationObserver((records) => {
+    const byKey = new Map<string, ProbeFrameTruck>();
+    for (const r of records) {
+      if (r.attributeName !== "transform") continue;
+      const el = r.target as SVGGElement;
+      if (!el.classList?.contains("flow__truck")) continue;
+      const p = parseTranslate(el.getAttribute("transform"));
+      if (!p) continue;
+      const slot = Number(el.dataset.slot ?? 0);
+      // **按 `data-truck-key` 配对**，不按 slot：修复后车辆数量会随流量变化
+      // （预告是 14 辆，跨档位时会增减），按下标比「同一辆车」会整体错位，
+      // 报出假跳变。缺 key 时才退化为 `slot:<n>`。
+      const key = el.dataset.truckKey ?? `slot:${slot}`;
+      byKey.set(key, { key, slot, route: Number(el.dataset.route ?? 0), x: p.x, y: p.y });
+    }
+    if (byKey.size === 0) return;
+    const t = performance.now();
+    // 空帧让「卸载 → 挂载」之间的两帧不会被配成一步，
+    // 否则一次页面切换会被误算成一个巨大的位移尖峰。
+    if (lastBatchAt > 0 && t - lastBatchAt > STALE_MS) frames.push({ t, trucks: [] });
+    lastBatchAt = t;
+    frames.push({ t, trucks: [...byKey.values()] });
+    while (frames.length > PROBE_FRAME_LIMIT) frames.shift();
+  });
+  // 挂在 documentElement 上（而不是 `.flow`）是因为 SVG 会随页面切换重建，
+  // 观察根节点就不必在每次挂载后重新绑定。
+  observer.observe(document.documentElement, { subtree: true, attributes: true, attributeFilter: ["transform"] });
+
+  const currentTrucks = (): TopologyProbeTruck[] => {
+    const guides = [...document.querySelectorAll<SVGPathElement>(".flow__guide")];
+    // 每条路径只采样一次（见 GuideCache 的说明）
+    const caches = guides.map((g) => {
+      try {
+        const t = g.getTotalLength();
+        return t > 0 ? sampleGuide(g, t) : null;
+      } catch {
+        return null;
+      }
+    });
+    const out: TopologyProbeTruck[] = [];
+    document.querySelectorAll<SVGGElement>(".flow__truck").forEach((el, i) => {
+      const p = parseTranslate(el.getAttribute("transform"));
+      if (!p) return;
+      const route = Number(el.dataset.route ?? 0);
+      const guide = guides[route];
+      const cache = caches[route] ?? null;
+      let progress: number | null = null;
+      let offPath: number | null = null;
+      if (guide && cache) {
+        const hit = nearestOnPath(guide, cache, p.x, p.y);
+        progress = hit.l / cache.total;
+        offPath = Math.sqrt(hit.d2);
+      }
+      out.push({
+        key: el.dataset.truckKey ?? `slot:${Number(el.dataset.slot ?? i)}`,
+        slot: Number(el.dataset.slot ?? i),
+        route,
+        progress,
+        x: p.x,
+        y: p.y,
+        off_path: offPath,
+        fill: el.querySelector("rect")?.getAttribute("fill") ?? null,
+      });
+    });
+    return out;
+  };
+
+  const probe = (opts?: { reset?: boolean } | boolean): TopologyProbeResult => {
+    const reset = opts === true || (typeof opts === "object" && opts !== null && opts.reset === true);
+    if (reset) {
+      frames.length = 0;
+      lastBatchAt = 0;
+    }
+    // 统计口径统一用「合并后的帧」，见 mergeSameFrame 的说明。
+    const merged = mergeSameFrame(frames);
+
+    const steps: number[] = [];
+    const gaps: number[] = [];
+    const byKey = new Map<string, { slot: number; route: number; xs: number[] }>();
+    let truckCountChanges = 0;
+    let routeChanges = 0;
+    for (let i = 1; i < merged.length; i++) {
+      const a = merged[i - 1];
+      const b = merged[i];
+      if (!a || !b) continue;
+      const gap = b.t - a.t;
+      if (gap > 0) gaps.push(gap);
+      if (a.trucks.length !== b.trucks.length) truckCountChanges++;
+      // **按身份配对**：只有两帧都出现过的 key 才算「同一辆车走了一步」。
+      // 新车（本帧才出现）没有前一帧位置，不构成一步，也不算跳变。
+      const prev = new Map(a.trucks.map((x) => [x.key, x]));
+      for (const pb of b.trucks) {
+        const pa = prev.get(pb.key);
+        if (!pa) continue;
+        if (pa.route !== pb.route) routeChanges++;
+        const d = Math.hypot(pb.x - pa.x, pb.y - pa.y);
+        steps.push(d);
+        const rec = byKey.get(pb.key);
+        if (rec) rec.xs.push(d);
+        else byKey.set(pb.key, { slot: pb.slot, route: pb.route, xs: [d] });
+      }
+    }
+
+    const max = steps.length > 0 ? Math.max(...steps) : 0;
+    const med = median(steps);
+    const ratio = steps.length >= 2 && med > 0 ? max / med : null;
+    const first = merged[0];
+    const last = merged[merged.length - 1];
+    const gapsMax = gaps.length > 0 ? Math.max(...gaps) : 0;
+
+    // 快照只算一次：`currentTrucks()` 每次要跑上千次 getPointAtLength。
+    const snapshot = currentTrucks();
+
+    // 三档判读（阈值 3，不是 2）：见 TopologyProbeSteps.ratio_max_median 的说明。
+    let verdict: TopologyProbeVerdict;
+    if (ratio === null) verdict = "unknown";
+    else if (ratio > 3) verdict = "jump";
+    else if (ratio > 2) verdict = "suspect";
+    else verdict = "ok";
+
+    return {
+      ok: verdict === "ok",
+      verdict,
+      hint:
+        "判据三档：ratio_max_median ≤2 正常；2–3 且 frame_gaps.max_ms >25 疑似环境卡顿" +
+        "（换空闲时刻重测）；>3 确定是位置跳变（注入瞬移对照实测 39.6）。" +
+        "配对同一辆车用 data-truck-key（跨刷新稳定），不是 data-slot —— " +
+        "车数会随流量变化，按 slot 比会整体错位、报假跳变。" +
+        "实测前先 __topologyProbe({reset:true})，再用 ?probeFrames= 拉长窗口。" +
+        "progress 由 DOM 上的 .flow__guide 反推，非组件内部状态。",
+      frames: merged.length,
+      batches: frames.length,
+      window_ms: first && last ? Math.max(0, last.t - first.t) : 0,
+      // 退化时 key 恒为 `slot:<n>`，所以据此判断身份来源。
+      identity: snapshot.length > 0 && snapshot.every((t) => !t.key.startsWith("slot:")) ? "data-truck-key" : "data-slot",
+      truck_count_changes: truckCountChanges,
+      route_changes: routeChanges,
+      trucks: snapshot,
+      steps: {
+        samples: steps.length,
+        max,
+        median: med,
+        p95: percentile(steps, 0.95),
+        ratio_max_median: ratio,
+      },
+      frame_gaps: {
+        max_ms: gapsMax,
+        median_ms: median(gaps),
+        p95_ms: percentile(gaps, 0.95),
+      },
+      per_truck: [...byKey.entries()]
+        .map(([key, v]) => ({
+          key,
+          slot: v.slot,
+          route: v.route,
+          samples: v.xs.length,
+          max: Math.max(...v.xs),
+          median: median(v.xs),
+        }))
+        // 跳得最厉害的排前面，直接回答「跳的是哪辆车」。
+        .sort((a, b) => b.max - a.max),
+    };
+  };
+
+  (window as unknown as Record<string, unknown>).__topologyProbe = probe;
+
+  return () => {
+    observer.disconnect();
+    frames.length = 0;
+    delete (window as unknown as Record<string, unknown>).__topologyProbe;
+  };
+}
+
 /** 安装桥接。返回 uninstall，便于热更新时清理。 */
 export function installPreviewBridge(): () => void {
+  // 拓扑自检探针（`window.__topologyProbe()`）：只读 DOM，与假后端无关，
+  // 但只在预览模式下需要，所以挂在这里一起装、一起卸。
+  const uninstallProbe = installTopologyProbe();
+
   // **按事件名分组**记录监听者。
   //
   // 早先是一个扁平的 `Map<id, cb>`，派发时不看事件名 —— 于是推一条日志会把
@@ -387,7 +832,7 @@ export function installPreviewBridge(): () => void {
         case "snapshot":
           return scenarioSnapshot();
         case "routing_topology":
-          return MOCK_TOPOLOGY;
+          return topologyScenario();
         case "globe_data":
           // 用与 Rust 侧一致的形状；坐标取自实测（本机=大理，节点=香港）
           return {
@@ -440,6 +885,18 @@ export function installPreviewBridge(): () => void {
   };
 
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = internals;
+  // `@tauri-apps/api/event` 的 `_unlisten` 不走 `invoke`，而是**直接**调
+  // `window.__TAURI_EVENT_PLUGIN_INTERNALS__.unregisterListener(event, eventId)`。
+  // 真实 Tauri 由 webview 注入这个全局；预览里以前没有它，于是每次
+  // register/unlisten 都抛 `Cannot read properties of undefined` —— 那是
+  // **预览桥接的缺口，不是产品缺陷**（生产路径用的是 Tauri 自己的 internals）。
+  // 这里补上按事件名注销的方法，与 `plugin:event|unlisten` 命令保持同一语义。
+  (window as unknown as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+    unregisterListener: (event: string, eventId: number) => {
+      listeners.get(event)?.delete(eventId);
+      allCallbacks.delete(eventId);
+    },
+  };
   // 页面里的 Tauri API 版本探测会读这个
   (window as unknown as Record<string, unknown>).__TAURI__ = {};
 
@@ -458,7 +915,9 @@ export function installPreviewBridge(): () => void {
   };
 
   return () => {
+    uninstallProbe();
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    delete (window as unknown as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__;
     delete (window as unknown as Record<string, unknown>).__emitCoreLog;
     listeners.clear();
     allCallbacks.clear();

@@ -26,7 +26,7 @@ function loc(lat: number, lon: number): GeoLocation {
 
 function data(from: GeoLocation, to: GeoLocation, bytes: number): GlobeData {
   return {
-    route: { from, to, bytes, node_name: "n" },
+    route: { from, to, bytes, node_name: "n", traffic_ok: true, counter_resets: 0 },
     origin: from,
     error: null,
   };

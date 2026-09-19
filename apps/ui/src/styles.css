@@ -1779,9 +1779,23 @@ input[type="checkbox"] {
   color: var(--warn);
 }
 
-@media (max-width: 940px) {
+/* G1：窗口 900–939px（`tauri.conf.json` 的 minWidth 是 900）时，早先这条媒体查询
+ * 把 `.highway` 改成单列，但 `.highway__side--right` 仍写着 `grid-column: 3` →
+ * 浏览器生成隐式列，实测 `501px 0px 150px`：入口卡片被拉到 501px、流动区塌成 0px、
+ * 15 条彩色线一条都画不出来；同一块里的 `box-shadow: inset 2px 0 0 currentColor`
+ * 还把 5 张出口卡片的色条全变成同一种白，蓝/绿/红语义全丢。
+ *
+ * 修法：断点降到 880px（低于 minWidth，正常窗口不会命中），并且即使命中，
+ * 两侧也落在同一列、色条改回**显式类别色**而不是 currentColor。
+ * 本文件里这段媒体查询曾有**两份**完全相同的拷贝（改一处漏一处），已删掉后一份。 */
+@media (max-width: 880px) {
   .highway {
     grid-template-columns: 1fr;
+  }
+  .highway__side,
+  .highway__side--right {
+    grid-column: 1;
+    grid-row: auto;
   }
   .highway__side--right {
     align-items: flex-start;
@@ -1789,7 +1803,19 @@ input[type="checkbox"] {
   .highway__side--right .highway__lane-label {
     align-items: flex-start;
     text-align: left;
-    box-shadow: inset 2px 0 0 currentColor;
+  }
+  .highway__side--right .highway__lane-label--node {
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .highway__side--right .highway__lane-label--direct {
+    box-shadow: inset 2px 0 0 var(--ok);
+  }
+  .highway__side--right .highway__lane-label--block {
+    box-shadow: inset 2px 0 0 var(--danger);
+  }
+  .highway__side--right .highway__lane-label--dns,
+  .highway__side--right .highway__lane-label--internal {
+    box-shadow: inset 2px 0 0 var(--text-faint);
   }
 }
 
@@ -1981,20 +2007,6 @@ input[type="checkbox"] {
   margin-top: 6px;
   font-size: 11.5px;
   color: var(--warn);
-}
-
-@media (max-width: 940px) {
-  .highway {
-    grid-template-columns: 1fr;
-  }
-  .highway__side--right {
-    align-items: flex-start;
-  }
-  .highway__side--right .highway__lane-label {
-    align-items: flex-start;
-    text-align: left;
-    box-shadow: inset 2px 0 0 currentColor;
-  }
 }
 
 /* ================================================================ 地球仪

@@ -37,3 +37,6 @@
 # ---- 杂项 ----
 *.log
 .DS_Store
+
+# 本地临时资料（Chrome profile、截图、探测脚本）—— 不入库
+.scratch/

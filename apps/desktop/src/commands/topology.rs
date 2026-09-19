@@ -14,16 +14,19 @@
 //! 规则链作为拓扑与判定依据展示；而「某个目的地走哪条规则」由
 //! [`explain_dest`] 用真实数据算出来 —— 那一条是有依据的。
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
+use tokio::sync::Mutex;
 
 use xt_core::routing::explain::{explain, DestQuery, Rule, RouteExplanation};
 use xt_core::routing::geo::GeoData;
-use xt_core::xray::{query_stats, API_PORT};
+use xt_core::xray::stats::{monotonic_traffic_by_tag, MonotonicCounters};
+use xt_core::xray::{query_stats, StatEntry, API_PORT};
 
 use super::*;
 
@@ -33,7 +36,8 @@ pub struct TopoInbound {
     pub tag: String,
     pub protocol: String,
     pub port: Option<u16>,
-    /// 实测：该入口的上行/下行字节（累计）。
+    /// 实测：该入口的上行/下行字节（累计，跨核心重启保持单调）。
+    /// `Topology.traffic_ok == false` 时固定为 0，**不是**真实读数。
     pub uplink_bytes: u64,
     pub downlink_bytes: u64,
 }
@@ -45,6 +49,8 @@ pub struct TopoOutbound {
     pub protocol: String,
     /// 这个出口是「节点」还是「直连/拦截」这类功能性出口。
     pub kind: String,
+    /// 累计字节，跨核心重启保持单调。`Topology.traffic_ok == false` 时
+    /// 固定为 0，**不是**真实读数。
     pub uplink_bytes: u64,
     pub downlink_bytes: u64,
 }
@@ -68,6 +74,17 @@ pub struct Topology {
     /// 取流量失败时的原因（例如核心没在跑）。界面据此如实说明，
     /// 而不是画一条 0 字节的假流量。
     pub traffic_error: Option<String>,
+    /// **本次流量是否可信。**
+    ///
+    /// `false` = 这次没查到（原因见 `traffic_error`）。此时所有 `*_bytes`
+    /// 都是占位 0，**不是**真实读数 —— 界面必须显示「—」，不能显示 0 B。
+    /// 恒有 `traffic_ok == traffic_error.is_none()`。
+    pub traffic_ok: bool,
+    /// 累计字节跨核心重启续接时，被补偿掉的归零次数。
+    ///
+    /// `>0` 表示核心重启过（换网 / 熄屏唤醒 / 节点抖动的看门狗重建），
+    /// 累计值已被续接而不是归零。界面可以据此如实说明，不用平滑掩盖。
+    pub counter_resets: u32,
     /// 数据目录里是否有 geosite/geoip —— 没有的话域名规则无法判定。
     pub geo_available: bool,
 }
@@ -181,35 +198,73 @@ fn outbound_kind(tag: &str, protocol: &str) -> String {
     .to_string()
 }
 
-/// 取拓扑：真实入口 / 规则链 / 出口 + 实测流量。
-#[tauri::command]
-pub async fn routing_topology(
-    state: State<'_, AppState>,
-) -> Result<Topology, String> {
-    let store = &state.store;
-    let rules = load_rules(store)?;
-    let (inbounds, outbounds) = load_endpoints(store);
+/// 进程内的累计流量读数表：用来把「核心重启后计数器归零」补偿掉。
+///
+/// 为什么是模块级 `static` 而不是 `AppState` 的字段：本任务的写入范围
+/// 不含 `state.rs`，而这份状态只服务于本命令自己的采样历史，没有跨模块
+/// 语义。用 `tokio::sync::Mutex` 是因为锁要跨 `.await`（见
+/// [`routing_topology`]）。
+static TRAFFIC_COUNTERS: OnceLock<Mutex<MonotonicCounters>> = OnceLock::new();
 
-    // 流量：核心没在跑时拿不到，如实记录原因而不是画 0
-    let addr: SocketAddr = ([127, 0, 0, 1], API_PORT).into();
-    let (traffic, traffic_error) = match query_stats(addr, Duration::from_millis(1200)).await {
+fn traffic_counters() -> &'static Mutex<MonotonicCounters> {
+    TRAFFIC_COUNTERS.get_or_init(|| Mutex::new(MonotonicCounters::new()))
+}
+
+/// 一次流量采样的结果：要么是实测值，要么是「没查到」的原因。
+///
+/// **这里刻意不用 0 表示「没查到」**：0 是合法读数（真的没有流量），两者
+/// 混在一起，界面就会在「查不到」时把累计值画成 0 —— 用户看到的是
+/// 「8 GiB → 0 → 8 GiB」。
+#[derive(Debug, Default)]
+struct TrafficRead {
+    inbound: HashMap<String, (u64, u64)>,
+    outbound: HashMap<String, (u64, u64)>,
+    error: Option<String>,
+    /// 观察到的计数器归零次数（核心重启 / 换网 / 唤醒会 stop_core+start_core）。
+    resets: u32,
+}
+
+/// 把一次查询结果读成流量。与 `query_stats` 分开：这段是纯的、能测。
+///
+/// 累计值跨核心重启保持单调，见 [`MonotonicCounters`]。
+fn read_traffic(
+    stats: Result<Vec<StatEntry>, String>,
+    counters: &mut MonotonicCounters,
+) -> TrafficRead {
+    match stats {
         Ok(stats) => {
-            (
-                Some((
-                    xt_core::xray::traffic_by_tag(&stats, "inbound"),
-                    xt_core::xray::traffic_by_tag(&stats, "outbound"),
-                )),
-                None,
-            )
+            let (inbound, inbound_resets) =
+                monotonic_traffic_by_tag(counters, &stats, "inbound");
+            let (outbound, outbound_resets) =
+                monotonic_traffic_by_tag(counters, &stats, "outbound");
+            TrafficRead {
+                inbound,
+                outbound,
+                error: None,
+                resets: inbound_resets.max(outbound_resets),
+            }
         }
-        Err(e) => (None, Some(format!("取流量失败：{e}"))),
-    };
-    let (in_up, out_up) = traffic.unwrap_or_default();
+        Err(e) => TrafficRead {
+            error: Some(format!("取流量失败：{e}")),
+            ..TrafficRead::default()
+        },
+    }
+}
 
+/// 把静态拓扑（入口 / 规则链 / 出口）与实测流量拼成给界面的 [`Topology`]。
+///
+/// 纯函数，便于测试：这里的错法几乎都是「数字悄悄不对」，只能靠断言钉住。
+fn assemble_topology(
+    inbounds: Vec<InboundInfo>,
+    outbounds: Vec<OutboundInfo>,
+    rules: &[Rule],
+    traffic: &TrafficRead,
+    geo_available: bool,
+) -> Topology {
     let inbound = inbounds
         .into_iter()
         .map(|(tag, protocol, port)| {
-            let (up, down) = in_up.get(&tag).copied().unwrap_or((0, 0));
+            let (up, down) = traffic.inbound.get(&tag).copied().unwrap_or((0, 0));
             TopoInbound {
                 tag,
                 protocol,
@@ -223,7 +278,7 @@ pub async fn routing_topology(
     let outbound = outbounds
         .into_iter()
         .map(|(tag, protocol)| {
-            let (up, down) = out_up.get(&tag).copied().unwrap_or((0, 0));
+            let (up, down) = traffic.outbound.get(&tag).copied().unwrap_or((0, 0));
             TopoOutbound {
                 tag: tag.clone(),
                 kind: outbound_kind(&tag, &protocol),
@@ -245,13 +300,48 @@ pub async fn routing_topology(
         })
         .collect();
 
-    Ok(Topology {
+    Topology {
         inbound,
         rule,
         outbound,
-        traffic_error,
-        geo_available: crate::supervisor::geo_dir(state.store.root()).is_some(),
-    })
+        traffic_error: traffic.error.clone(),
+        traffic_ok: traffic.error.is_none(),
+        counter_resets: traffic.resets,
+        geo_available,
+    }
+}
+
+/// 取拓扑：真实入口 / 规则链 / 出口 + 实测流量。
+#[tauri::command]
+pub async fn routing_topology(
+    state: State<'_, AppState>,
+) -> Result<Topology, String> {
+    let store = &state.store;
+    let rules = load_rules(store)?;
+    let (inbounds, outbounds) = load_endpoints(store);
+
+    // 流量：核心没在跑时拿不到，如实记录原因而不是画 0。
+    //
+    // 锁**包住查询**：累计值的单调化依赖「采样顺序 = 观察顺序」。两个并发的
+    // `routing_topology`（例如 React StrictMode 的双次挂载）若乱序观察，后采到
+    // 的值会成为基准，先采到的旧值就被误判成「核心重启」，凭空抬高读数。
+    // 查询最长 1.2s 超时，每 2 秒一次的轮询下串行化没有代价。
+    let addr: SocketAddr = ([127, 0, 0, 1], API_PORT).into();
+    let traffic = {
+        let mut counters = traffic_counters().lock().await;
+        let stats = query_stats(addr, Duration::from_millis(1200))
+            .await
+            .map_err(|e| e.to_string());
+        read_traffic(stats, &mut counters)
+    };
+
+    Ok(assemble_topology(
+        inbounds,
+        outbounds,
+        &rules,
+        &traffic,
+        crate::supervisor::geo_dir(state.store.root()).is_some(),
+    ))
 }
 
 /// 判定一个目的地会走哪条规则（用真实规则 + 真实 geosite/geoip 数据）。
@@ -390,5 +480,140 @@ mod tests {
         assert_eq!(outbound_kind("block", "blackhole"), "block");
         assert_eq!(outbound_kind("dns-out", "dns"), "dns");
         assert_eq!(outbound_kind("node-abc", "vless"), "node");
+    }
+
+    /// 用标准夹具（入口 tun/socks，出口 node-abc/direct/block）拼一份拓扑。
+    fn topo_from(read: &TrafficRead) -> Topology {
+        let cfg = cfg_with(serde_json::json!([]));
+        let (inbounds, outbounds) = endpoints_from_config(&cfg);
+        let rules = rules_from_config(&cfg).unwrap();
+        assemble_topology(inbounds, outbounds, &rules, read, true)
+    }
+
+    /// 某个出口的 (上行, 下行)。
+    fn out_bytes(topo: &Topology, tag: &str) -> (u64, u64) {
+        let o = topo
+            .outbound
+            .iter()
+            .find(|o| o.tag == tag)
+            .expect("夹具里有这个出口");
+        (o.uplink_bytes, o.downlink_bytes)
+    }
+
+    fn exit_stat(name: &str, value: i64) -> StatEntry {
+        StatEntry { name: name.to_string(), value }
+    }
+
+    /// **本次要修的核心语义**：查统计失败时接口必须能表达「不可用」，
+    /// 而不是只给一个 0 —— 界面拿到的 0 会被画成「流量归零」，正是
+    /// 用户说的「数据乱跳」。
+    #[test]
+    fn missing_stats_are_marked_unavailable_instead_of_silent_zero() {
+        let mut counters = MonotonicCounters::new();
+        let read = read_traffic(Err("连接 api 入站失败".into()), &mut counters);
+        let topo = topo_from(&read);
+
+        assert!(!topo.traffic_ok, "没查到时必须标记为不可信");
+        assert_eq!(
+            topo.traffic_error.as_deref(),
+            Some("取流量失败：连接 api 入站失败")
+        );
+        // 两个字段表达同一件事，不允许漂移
+        assert_eq!(topo.traffic_ok, topo.traffic_error.is_none());
+        assert_eq!(topo.counter_resets, 0);
+        // 字节字段形状未变，仍是占位 0：正因为如此，界面**必须**看 traffic_ok。
+        assert!(topo
+            .outbound
+            .iter()
+            .all(|o| o.uplink_bytes == 0 && o.downlink_bytes == 0));
+    }
+
+    /// 查到统计但某个 tag 没有计数器 = **真的是 0**。它与「没查到」是两回事，
+    /// 不能因为两者都是 0 就混成一个。
+    #[test]
+    fn successful_stats_keep_real_zeros_distinct_from_unavailable() {
+        let stats = vec![
+            exit_stat("inbound>>>tun>>>traffic>>>downlink", 1_000),
+            exit_stat("inbound>>>tun>>>traffic>>>uplink", 10),
+            exit_stat("outbound>>>node-abc>>>traffic>>>downlink", 2_048),
+        ];
+        let mut counters = MonotonicCounters::new();
+        let topo = topo_from(&read_traffic(Ok(stats), &mut counters));
+
+        assert!(topo.traffic_ok);
+        assert_eq!(topo.traffic_error, None);
+        let tun = topo.inbound.iter().find(|i| i.tag == "tun").unwrap();
+        assert_eq!((tun.uplink_bytes, tun.downlink_bytes), (10, 1_000));
+        // 配置里有 socks，计数器里没有：查到了统计，所以这是真的 0
+        let socks = topo.inbound.iter().find(|i| i.tag == "socks").unwrap();
+        assert_eq!((socks.uplink_bytes, socks.downlink_bytes), (0, 0));
+        assert_eq!(out_bytes(&topo, "node-abc"), (0, 2_048));
+    }
+
+    /// **lead 指出的 primary 回归**：核心重启（看门狗 stop_core+start_core）
+    /// 让计数器归零，拓扑给界面的累计字节不得回退，且必须如实上报「重启过」。
+    #[test]
+    fn cumulative_bytes_survive_a_core_restart_without_regressing() {
+        let mut counters = MonotonicCounters::new();
+
+        let before = vec![exit_stat("outbound>>>node-abc>>>traffic>>>downlink", 8_600_000_000)];
+        let first = topo_from(&read_traffic(Ok(before), &mut counters));
+        assert_eq!(out_bytes(&first, "node-abc"), (0, 8_600_000_000));
+        assert_eq!(first.counter_resets, 0);
+
+        // 重启：计数器从 0 重新计
+        let after_restart = vec![exit_stat("outbound>>>node-abc>>>traffic>>>downlink", 0)];
+        let second = topo_from(&read_traffic(Ok(after_restart), &mut counters));
+        assert!(second.traffic_ok);
+        assert_eq!(
+            out_bytes(&second, "node-abc"),
+            (0, 8_600_000_000),
+            "重启不得让累计值归零（那正是用户看到的乱跳）"
+        );
+        assert_eq!(second.counter_resets, 1, "重启事件要如实上报，不能平滑掩盖");
+
+        // 重启后的新流量继续累加在续接值上
+        let grown = vec![exit_stat("outbound>>>node-abc>>>traffic>>>downlink", 4_096)];
+        let third = topo_from(&read_traffic(Ok(grown), &mut counters));
+        assert_eq!(out_bytes(&third, "node-abc"), (0, 8_600_004_096));
+    }
+
+    /// 连续两次重启：每一段重启前的量都要被续接。少加一份就丢真实流量，
+    /// 多加一份就凭空上涨 —— 两者都是「数字悄悄错」。
+    #[test]
+    fn consecutive_restarts_accumulate_each_session() {
+        let mut counters = MonotonicCounters::new();
+        let mut step = |value: i64| {
+            let stats = vec![exit_stat("outbound>>>node-abc>>>traffic>>>uplink", value)];
+            topo_from(&read_traffic(Ok(stats), &mut counters))
+        };
+
+        assert_eq!(out_bytes(&step(1_000), "node-abc"), (1_000, 0));
+        assert_eq!(out_bytes(&step(0), "node-abc"), (1_000, 0));
+        assert_eq!(out_bytes(&step(500), "node-abc"), (1_500, 0));
+        assert_eq!(out_bytes(&step(3), "node-abc"), (1_503, 0));
+        let last = step(10);
+        assert_eq!(out_bytes(&last, "node-abc"), (1_510, 0));
+        assert_eq!(last.counter_resets, 2);
+    }
+
+    /// 一次查询失败不能污染单调化基准：下次查到的值要和**上一次成功采样**
+    /// 比，否则失败期间的重启会被漏掉、把归零当成新流量。
+    #[test]
+    fn a_failed_sample_does_not_reset_the_monotonic_baseline() {
+        let mut counters = MonotonicCounters::new();
+        let big = vec![exit_stat("outbound>>>node-abc>>>traffic>>>downlink", 9_000)];
+        let first = topo_from(&read_traffic(Ok(big), &mut counters));
+        assert_eq!(out_bytes(&first, "node-abc"), (0, 9_000));
+
+        // 这一拍没查到：不得更新基准，也不得把读数当 0
+        let failed = topo_from(&read_traffic(Err("超时".into()), &mut counters));
+        assert!(!failed.traffic_ok);
+
+        // 下一拍查到：核心在这期间重启过，计数器只有 7
+        let after = vec![exit_stat("outbound>>>node-abc>>>traffic>>>downlink", 7)];
+        let third = topo_from(&read_traffic(Ok(after), &mut counters));
+        assert_eq!(out_bytes(&third, "node-abc"), (0, 9_007), "基准仍是 9000");
+        assert_eq!(third.counter_resets, 1);
     }
 }

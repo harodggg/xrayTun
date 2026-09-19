@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MutableRefObject } from "react";
 
 import { api, errorText } from "../ipc";
 import { formatBytes } from "../types";
@@ -60,7 +61,7 @@ export default function Topology() {
         <h2 className="page__title">网络流动</h2>
         <p className="page__desc">
           入口是流量进来的地方，规则链按真实顺序决定去哪，出口是最终去向。
-          车上的货物是字节；车辆数量由实测速率决定。
+          车上的货物是字节；车辆数量由累计流量决定（累计值只增不减，不代表当前速率）。
         </p>
         <Highway topo={topo} />
         {topo.traffic_error && (
@@ -68,6 +69,12 @@ export default function Topology() {
             取不到实时流量：{topo.traffic_error}
             <br />
             （拓扑本身仍然是真的 —— 它来自运行中的配置。这里不画 0 字节的假流量。）
+          </div>
+        )}
+        {/* 累计值跨核心重启被续接过：如实说明，**不做平滑掩盖**（后端刻意保留了这个信息） */}
+        {topo.counter_resets > 0 && (
+          <div className="note">
+            核心重启过 {topo.counter_resets} 次，累计流量已续接（所以数字没有掉回 0）。
           </div>
         )}
       </section>
@@ -100,19 +107,30 @@ export default function Topology() {
 
 /** 入口 ↔ 出口之间的车流。 */
 function Highway({ topo }: { topo: Topology }) {
-  const inletRefs = useRef<(HTMLDivElement | null)[]>([]);
-  const outletRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const inletRefs = useRef<(HTMLElement | null)[]>([]);
+  const outletRefs = useRef<(HTMLElement | null)[]>([]);
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  /** 稳定的 callback ref：早先写成内联箭头，每次渲染都先 null 再 el，容器状态反复抖动。 */
+  const containerRef = useCallback((el: HTMLDivElement | null) => setContainer(el), []);
 
   // **每个入口一条车道**，包括当前没有流量的（空车道也显示，否则
   // 「在用但量小」和「根本不通」分不出来）。只排除内部管理入口
   // （`api` = dokodemo-door:10085，那是应用自己查统计的通道，不是用户流量）。
   const lanes = topo.inbound.filter((i) => i.tag !== "api");
+  /**
+   * 这次流量是否可信。`traffic_ok === false` 时所有 `*_bytes` 都是**占位 0**
+   * （见 `types.ts`），照单全收就会把「没查到」画成「0 B」——
+   * 用户看到的「8.01 GiB → 0 → 8.01 GiB」正是这么来的。
+   *
+   * 两个信号都看：契约上是 `traffic_ok === (traffic_error === null)`，
+   * 但任一个说「不可用」就按不可用处理，不赌后端不会只填其中一个。
+   */
+  const trafficOk = topo.traffic_ok !== false && !topo.traffic_error;
   const outTotal = topo.outbound.reduce((a, o) => a + o.uplink_bytes + o.downlink_bytes, 0);
   const inTotal = lanes.reduce((a, i) => a + i.uplink_bytes + i.downlink_bytes, 0);
 
   return (
-    <div className="highway" ref={(el) => setContainer(el)}>
+    <div className="highway" ref={containerRef}>
       <div className="highway__legend">
         <span className="highway__legend-item">
           <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.node }} />
@@ -149,14 +167,17 @@ function Highway({ topo }: { topo: Topology }) {
               {i.port ? ` :${i.port}` : ""}
             </span>
             <span className="highway__lane-bytes">
-              ↓{formatBytes(i.downlink_bytes)} ↑{formatBytes(i.uplink_bytes)}
+              {trafficOk ? `↓${formatBytes(i.downlink_bytes)} ↑${formatBytes(i.uplink_bytes)}` : "流量不可用"}
             </span>
           </div>
         ))}
         {/* 合计行刻意不挂 ref：它不是入口，连线不应当连到它 */}
         <div className="highway__lane-label highway__lane-label--total">
           <span className="highway__lane-tag">合计</span>
-          <span className="highway__lane-bytes">出入 {formatBytes(inTotal)}</span>
+          {/* 查不到流量时**不把占位 0 算进合计**：合计会突然垮到 0 B，看着就像数据在跳 */}
+          <span className="highway__lane-bytes">
+            {trafficOk ? `出入 ${formatBytes(inTotal)}` : "流量不可用"}
+          </span>
         </div>
       </div>
 
@@ -175,13 +196,15 @@ function Highway({ topo }: { topo: Topology }) {
             <span className="highway__lane-tag">{shortTag(o.tag)}</span>
             <span className="highway__lane-meta">{o.kind}</span>
             <span className="highway__lane-bytes">
-              ↓{formatBytes(o.downlink_bytes)} ↑{formatBytes(o.uplink_bytes)}
+              {trafficOk ? `↓${formatBytes(o.downlink_bytes)} ↑${formatBytes(o.uplink_bytes)}` : "流量不可用"}
             </span>
           </div>
         ))}
         <div className="highway__lane-label highway__lane-label--total">
           <span className="highway__lane-tag">合计</span>
-          <span className="highway__lane-bytes">出入 {formatBytes(outTotal)}</span>
+          <span className="highway__lane-bytes">
+            {trafficOk ? `出入 ${formatBytes(outTotal)}` : "流量不可用"}
+          </span>
         </div>
       </div>
 
@@ -189,8 +212,9 @@ function Highway({ topo }: { topo: Topology }) {
         container={container}
         inbound={lanes}
         outbound={topo.outbound}
-        inletEls={inletRefs.current.slice(0, lanes.length)}
-        outletEls={outletRefs.current}
+        inletRefs={inletRefs}
+        outletRefs={outletRefs}
+        trafficOk={trafficOk}
       />
     </div>
   );
@@ -221,11 +245,21 @@ const OUTBOUND_COLOR: Record<string, string> = {
 /** 中性灰：内部通道（dns / api）的颜色。 */
 const NEUTRAL = "#64748b";
 
-/** 一条车道上的货车数量：按字节做对数映射到 [3, 8]。 */
+/**
+ * 一条车道上的货车数量：按字节做对数映射到 [3, 8]。
+ *
+ * # 这里踩过一次坑，别再写 `1 << 40`
+ *
+ * JS 的位移是 **32 位取模**：`1 << 40 === 1 << 8 === 256`。于是上限
+ * `hi = log10(256) = 2.41` 小于下限 `lo = log10(1 MiB) = 6.02`，比值恒为负、
+ * 被 `Math.max(0, …)` 压成 0 —— **任何 ≥1 MiB 的流量都只画 3 辆**（与空车道一样），
+ * 反过来 1 字节能画 8 辆。界面上「车辆数量由实测速率决定」因此是假的。
+ * 用 `1024 ** n`（或 `2 ** 40`）才是真的 1 TiB。
+ */
 function trucksOnLane(bytes: number): number {
-  if (bytes <= 0) return 3; // 空车道也画几辆，否则「量小」与「不通」看不出来
-  const lo = Math.log10(1 << 20); // 1 MiB
-  const hi = Math.log10(1 << 40); // 1 TiB
+  if (!Number.isFinite(bytes) || bytes <= 0) return 3; // 空车道也画几辆，否则「量小」与「不通」看不出来
+  const lo = Math.log10(1024 ** 2); // 1 MiB
+  const hi = Math.log10(1024 ** 4); // 1 TiB
   const t = Math.max(0, Math.min(1, (Math.log10(bytes) - lo) / (hi - lo)));
   return Math.round(3 + t * 5);
 }
@@ -245,13 +279,39 @@ interface Seg {
 
 /** 一条完整的货运路线：入口 → 车道 → 扇出 → 出口。 */
 interface Route {
+  /** 稳定身份 = 入口 tag。车靠它找到自己的路线，入口顺序变了也不会串。 */
+  key: string;
   d: string;
   segs: Seg[];
-  label: string;
-  /** 这条路线属于哪个入口（货车数量按入口的字节数决定）。 */
+  /** 这条路线属于哪个入口（货车数量按入口的字节数决定），下标对应 `inbound`。 */
   inlet: number;
-  /** 每个出口分支的起点累计长度与颜色，用于让货车跟着当前去向变色。 */
+  /** 每个出口分支的起点累计比例与颜色，用于让货车跟着当前去向变色。 */
   branches: { startFrac: number; color: string }[];
+}
+
+/** 一辆货车跨帧的全部状态。按**稳定身份**保存，不按数组下标。 */
+interface TruckState {
+  /** 沿路径的**绝对路程（px）**，不是「占全程的比例」。 */
+  dist: number;
+  /** 上一帧写进 `transform` 的屏幕坐标（首帧前为 NaN）。 */
+  x: number;
+  y: number;
+  /** 上一帧该路线 `d` 的签名：变了说明几何变了，需要重锚。 */
+  sig: string;
+  /**
+   * **正常行走**时的每帧步长（px）参考值，用来把「位置修正速度」限制在正常车速量级。
+   * 只在没有被限速的帧上更新 —— 否则限速值会成为下一帧的参考，上限每帧 ×1.5 指数增长。
+   */
+  walkRef: number;
+  /** 上一帧的填充色，避免每帧都写 DOM。 */
+  color?: string;
+}
+
+/** 一个锚点，坐标相对 `.highway` 容器：`l`=卡片左缘、`r`=卡片右缘、`y`=垂直中心。 */
+interface Rel {
+  l: number;
+  r: number;
+  y: number;
 }
 
 /**
@@ -266,6 +326,17 @@ interface Route {
  * 现在一条路线就是**一条合并路径**（入口 → 车道 → 扇出 → 出口），
  * 货车沿它从头走到尾；车道那一列只作为「道路」的视觉底衬。
  *
+ * # 「不跳」在这里的准确含义（三条不变量）
+ *
+ * 1. **身份稳定**：车的身份是 `路线key#序号`（挂 `data-truck-key`），
+ *    不是数组下标。车辆数量一变，按下标存的进度会让后面的车整体错位、
+ *    带着旧进度落到**别人的路线**上（实测中位 44.8px vs 稳态 4.4px）。
+ * 2. **进度按绝对路程（px）存**，不按「占全程的比例」。比例会随路径长度变化
+ *    而指向别处：出口增减 / 容器缩放都会让同一比例落到完全不同的屏幕点。
+ * 3. **几何变化时重锚 + 限速**：路径重算后用「上一帧的屏幕点」在新路径上
+ *    取最近点作为新路程（位移最小），且单帧位置修正不超过正常车速的 1.5 倍 ——
+ *    几何突变时让车**走**过去，而不是一帧瞬移过去。
+ *
  * # 一处边界
  *
  * 「哪条车道通向哪个出口」核心**没有这个计数器**（只有按入口、按出口两类
@@ -276,24 +347,28 @@ function Flow({
   container,
   inbound,
   outbound,
-  inletEls,
-  outletEls,
+  inletRefs,
+  outletRefs,
+  trafficOk,
 }: {
   container: HTMLElement | null;
   inbound: TopoInbound[];
   outbound: TopoOutbound[];
-  inletEls: (HTMLElement | null)[];
-  outletEls: (HTMLElement | null)[];
+  /**
+   * 直接拿 ref（而不是 `ref.current` 的**快照数组**）：快照是**渲染时**取的，
+   * 而 ref 在 commit 时才更新。入口/出口集合变化的那个渲染里，快照仍指向旧元素，
+   * 测量就会拿到已卸载的卡片（rect 全 0）。读 `.current` 永远是最新的。
+   */
+  inletRefs: MutableRefObject<(HTMLElement | null)[]>;
+  outletRefs: MutableRefObject<(HTMLElement | null)[]>;
+  /** 流量是否可信；`false` 时字节字段是占位 0，不能当读数用。 */
+  trafficOk: boolean;
 }) {
   const [geo, setGeo] = useState<{
     w: number;
     h: number;
     routes: Route[];
   } | null>(null);
-  const truckRefs = useRef<(SVGGElement | null)[]>([]);
-  const truckRectRefs = useRef<(SVGRectElement | null)[]>([]);
-  /** 每条路线那条「完整合并路径」—— 只用来算货车位置，不显示。 */
-  const guideRefs = useRef<(SVGPathElement | null)[]>([]);
   /**
    * 上一帧的时间戳。用**时间增量累积**推进度，而不是「绝对时间 × 速度」。
    *
@@ -303,41 +378,70 @@ function Flow({
    * 走过的**绝对距离**是连续的。
    */
   const prevRef = useRef<number | null>(null);
-  /** 每辆车的累计进度（0..1 循环）。按货车下标保存，跨 effect 重建连续。 */
-  const progressRef = useRef<number[]>([]);
+  /**
+   * 每辆车的状态，按**稳定身份**（`data-truck-key`）保存 —— 不按数组下标。
+   * 跨 effect 重建连续。
+   */
+  const progressRef = useRef<Map<string, TruckState>>(new Map());
+  /**
+   * 最后一次**可信**的入口字节数（按入口 tag）。
+   * `traffic_ok === false` 时拿它继续算车数：否则每次查询失败，车数都会
+   * 从 13 掉到 9 再弹回来，那是另一种「乱跳」。
+   */
+  const lastBytesRef = useRef<Map<string, number>>(new Map());
+
+  /**
+   * 入口/出口的**身份集合**。测量 effect 必须在它变化时重跑：
+   * 早先 effect 只依赖 `[container]`，闭包长期持有旧元素数组 ——
+   * 删掉一个入口后重测，还会拿**已卸载**的卡片（rect 全 0）当锚点，
+   * 整条扇出塌向原点（实测 guide 路径 2581px → 5585px，单帧位移 353.8px）。
+   */
+  const topoSig = `${inbound.map((i) => i.tag).join("|")}=>${outbound.map((o) => o.tag).join("|")}`;
 
   // 测量：把 DOM 位置换算成「相对容器的坐标」，再拼出每条路线的路径
   useEffect(() => {
     if (!container) return;
     const measure = () => {
       const base = container.getBoundingClientRect();
-      const rel = (el: HTMLElement | null) => {
-        if (!el) return null;
+      const rel = (el: HTMLElement | null | undefined): Rel | null => {
+        // 已从文档移除、或还没布局的元素会给出**全 0** 的 rect。
+        // 把它当锚点会让整条扇出塌向 (0,0) —— 实测 guide 路径 2581px → 5585px。
+        if (!el || !el.isConnected) return null;
         const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return null;
         return {
           l: r.left - base.left,
           r: r.right - base.left,
           y: r.top - base.top + r.height / 2,
         };
       };
-      const inlets = compact(inletEls.map(rel));
-      const outlets = compact(outletEls.map(rel));
-      if (inlets.length === 0 || outlets.length === 0) {
+      // **按下标对齐**：inlets[i] ↔ inbound[i]、outlets[j] ↔ outbound[j]，空位保留为 null。
+      // 早先用 `compact` 把空位挤掉，于是「中间少一个」（比如 DNS 出口被删掉）时，
+      // 后面的出口会串到别人的 kind 上，颜色与字节也跟着错位。
+      const inlets = inbound.map((_, i) => rel(inletRefs.current[i]));
+      const outlets = outbound.map((_, j) => rel(outletRefs.current[j]));
+      const firstInlet = inlets.find((x): x is Rel => x !== null);
+      const firstOutlet = outlets.find((x): x is Rel => x !== null);
+      if (!firstInlet || !firstOutlet) {
         setGeo({ w: base.width, h: base.height, routes: [] });
         return;
       }
 
-      // 分叉点：放在入口与出口之间的**流动区**里、靠近出口那一侧，
-      // 给「扇出」留出弧线空间。它代表「规则链做出的去向判定」。
-      const gapStart = inlets[0]!.r;
-      const gapEnd = outlets[0]!.l;
-      // 分叉点放得靠出口一侧：入口→分叉留 ~70%（汇入弧线），
-      // 分叉→出口留 ~30%（扇出弧线）。两者都在流动区**内部**预留，
-      // 不占单独的列 —— 整页有 max-width，多一列就把流动区压没了。
-      const forkX = gapStart + (gapEnd - gapStart) * 0.7;
+      // 分叉点：放在入口与出口之间的**流动区**里。
+      //
+      // 系数 0.35 = 汇入占 35%、扇出占 65%：扇出有 3×5 = 15 条曲线，
+      // 汇入只有 3 条。早先取 0.7 时实测分支区只有 145×277px（宽高比 0.52，
+      // 外侧支线几乎是竖线），而左侧 70% 的空隙只跑 3 条水平主干 —— 空间分配正好反了。
+      // 改成 0.35 后分支区约 315×277（宽高比 1.14），扇面横向摊开一倍。
+      const gapStart = firstInlet.r;
+      const gapEnd = firstOutlet.l;
+      const forkX = gapStart + (gapEnd - gapStart) * 0.35;
 
       const routes: Route[] = [];
       inlets.forEach((inlet, i) => {
+        // 这张卡片这一轮量不到（还没布局）：先不画它。
+        // 注意不能因此挤掉下标 —— `key` 用入口 tag，下一次测量它会自己回来。
+        if (!inlet) return;
         // **一对多**：每个入口都扇出到**全部**出口。
         //
         // 物理上这也更贴近事实：所有入口的流量都经过同一条规则链，
@@ -347,75 +451,81 @@ function Flow({
         //
         // 代价是线条数 = 入口数 × 出口数（当前 3×6 = 18 条），所以线的透明度
         // 压低、主视觉留给货车。
-        const segs: Seg[] = [
-          {
-            kind: "curve",
-            x1: inlet.r,
-            y1: inlet.y,
-            x2: forkX,
-            y2: inlet.y,
-            cx: (inlet.r + forkX) / 2,
-          },
-        ];
-        // 合并成**一条连续路径**：中间是那条汇入弧线，之后依次往返每个出口。
-        // 这样 getPointAtLength 能连续采样，货车沿整条路线来回走 ——
-        // 而「哪条车道通向哪个出口」核心没有计数器，所以车走的是
-        // 「这个入口可能去的所有出口」这条完整路径，不声称具体归属。
-        // 每条扇出分支按**目的地的出口类别**着色（蓝=节点 / 绿=直连 / 红=拦截），
-        // 这样图例重新成立，而且一眼能看出「这条线通向哪类出口」。
-        const branches: { startFrac: number; color: string }[] = [];
-        let acc = 0;
-        // 去程总长 = 主干 + 各分支；回程不计入分支比例（它按相反顺序返回，
-        // 颜色已经由 `trunkFrac` 之外的逻辑处理为「沿用去程颜色」）
-        const outboundLen =
-          segApproxLen(segs[0]!) + outlets.reduce((a, b) => a + Math.hypot(b.l - forkX, b.y - inlet.y), 0);
-        const totalD = outboundLen || 1;
-        outlets.forEach((b, k) => {
-          // 类别要取**出口对象**上的 kind（位置矩形里没有这个信息）
-          const color = OUTBOUND_COLOR[outbound[k]?.kind ?? ""] ?? NEUTRAL;
-          branches.push({ startFrac: acc / totalD, color });
-          const sg: Seg = {
-            kind: "curve",
-            x1: forkX,
-            y1: inlet.y,
-            x2: b.l,
-            y2: b.y,
-            cx: clampMid(forkX, b.l),
-            color,
-          };
-          segs.push(sg);
-          acc += segApproxLen(sg);
-        });
-        // **闭环**：走到最后一个出口后，原路回到分叉与入口。
+        // **每条分支「去 + 回」成对插入**，而不是「先去完所有出口再一起回来」。
         //
-        // 不闭环的话，车到终点会瞬间回到起点 —— 而这两点在屏幕上相距约
-        // 400px，表现就是「跳一下」（实测量到 457px 的跳变）。
-        // 回程按**相反顺序**经过各分支，看起来就是有去有回，也不会让
-        // 车凭空消失或闪现。
-        for (let k = outlets.length - 1; k >= 0; k--) {
-          const b = outlets[k]!;
-          segs.push({
-            kind: "curve",
-            x1: b.l,
-            y1: b.y,
-            x2: forkX,
-            y2: inlet.y,
-            cx: clampMid(forkX, b.l),
-          });
-        }
-        segs.push({
+        // 这是「车走在可见线上」的前提：SVG 的 `C`（三次贝塞尔）从**上一段的终点**
+        // 继续，只有相邻两段满足 `seg[i].x1 === seg[i-1].x2`（且 y 相同）时，
+        // 合并路径的几何才等于那些可见线的几何。
+        // 早先把所有回程堆在最后，于是「去第 2 个出口」的曲线从**第 1 个出口**
+        // 出发 —— 实测量到 46.7% 的行程离任何可见线 >1.5px、最大偏离 23.8px，
+        // 也就是用户最早说的「车的路径不对」。
+        const trunk: Seg = {
+          kind: "curve",
+          x1: inlet.r,
+          y1: inlet.y,
+          x2: forkX,
+          y2: inlet.y,
+          cx: (inlet.r + forkX) / 2,
+        };
+        const trunkBack: Seg = {
           kind: "curve",
           x1: forkX,
           y1: inlet.y,
           x2: inlet.r,
           y2: inlet.y,
           cx: (inlet.r + forkX) / 2,
+        };
+        const pairs: { fwd: Seg; back: Seg; color: string }[] = [];
+        outlets.forEach((b, k) => {
+          if (!b) return;
+          // 类别要取**出口对象**上的 kind（位置矩形里没有这个信息）
+          const color = OUTBOUND_COLOR[outbound[k]?.kind ?? ""] ?? NEUTRAL;
+          pairs.push({
+            color,
+            fwd: {
+              kind: "curve",
+              x1: forkX,
+              y1: inlet.y,
+              x2: b.l,
+              y2: b.y,
+              cx: clampMid(forkX, b.l),
+              color,
+            },
+            back: {
+              kind: "curve",
+              x1: b.l,
+              y1: b.y,
+              x2: forkX,
+              y2: inlet.y,
+              cx: clampMid(forkX, b.l),
+            },
+          });
+        });
+        // 依次拼接：主干 → (去出口1 → 回分叉) → (去出口2 → 回分叉) → … → 回入口。
+        // 每一段的终点就是下一段的起点，所以合并路径等于**可见线的并集**，
+        // 且首尾重合（闭环）—— 车走完一圈不会瞬移回起点。
+        const segs: Seg[] = [trunk];
+        const branches: { startFrac: number; color: string }[] = [];
+        let acc = segApproxLen(trunk);
+        for (const p of pairs) {
+          branches.push({ startFrac: 0, color: p.color }); // 比例稍后按整圈总长归一化
+          segs.push(p.fwd, p.back);
+          acc += segApproxLen(p.fwd) + segApproxLen(p.back);
+        }
+        segs.push(trunkBack);
+        acc += segApproxLen(trunkBack);
+        const lapApprox = acc || 1;
+        let cum = segApproxLen(trunk);
+        branches.forEach((b, k) => {
+          b.startFrac = cum / lapApprox;
+          cum += segApproxLen(pairs[k]!.fwd) + segApproxLen(pairs[k]!.back);
         });
 
         routes.push({
+          // 稳定身份 = 入口 tag：入口顺序/数量变化时，车的身份不跟着漂。
+          key: inbound[i]!.tag,
           d: routeToD(segs),
           segs,
-          label: "",
           /** 这条路线属于哪个入口（货车数量按入口字节数决定）。 */
           inlet: i,
           branches,
@@ -426,78 +536,137 @@ function Flow({
     };
 
     measure();
-    // 流量每 2 秒刷新一次，卡片宽度会变 —— 持续跟随，而不是量一次就完
+    // 流量每 2 秒刷新一次，卡片宽度/行数会变 —— 持续跟随，而不是量一次就完
     const ro = new ResizeObserver(measure);
     ro.observe(container);
-    for (const el of [...inletEls, ...outletEls]) {
+    for (const el of [...inletRefs.current, ...outletRefs.current]) {
       if (el) ro.observe(el);
     }
     return () => ro.disconnect();
-    // 依赖里**不放位置数组**：它们每次刷新都会重建，放了会让动画每 2 秒
-    // 重启一次（表现是车跳回起点）。位置的更新由 ResizeObserver 触发。
+    // 依赖里**不放位置数组**：它们每次渲染都会重建，放了会让动画每 2 秒重启一次
+    // （表现是车跳回起点）。几何更新由 ResizeObserver 触发；
+    // 入口/出口的**身份集合**变化时（topoSig 变）必须重跑，否则闭包会一直
+    // 拿着旧元素数组（含已卸载的卡片）去测量。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [container]);
+  }, [container, topoSig]);
 
   // 沿路径行走：用 `getPointAtLength` 把货车摆到路上。
   // 不用 state 驱动（每帧 setState 会把整棵树重渲染），直接改 transform。
   useEffect(() => {
-    if (!geo || geo.routes.length === 0) return;
-    // **按下标收集**：过滤掉空位会让下标与 `data-slot` 错位，
-    // 那样货车会套用别的车的颜色。
-    const groups: { el: SVGGElement; slot: number }[] = [];
-    truckRefs.current.forEach((el, slot) => {
-      if (el) groups.push({ el, slot });
+    if (!container || !geo || geo.routes.length === 0) return;
+    const routeIdxByKey = new Map(geo.routes.map((r, i) => [r.key, i]));
+    // 用容器里那条隐藏的**完整合并路径**算位置（可见的线是分段画的，长度不等于整条）。
+    // **直接按下标取 DOM**：早先用 `guideRefs.current.filter(Boolean)` 把空位挤掉了，
+    // 删掉一条路线后下标被压缩，剩下的货车会读到**别的路线**的路径。
+    const guides = [...container.querySelectorAll<SVGPathElement>("path.flow__guide")];
+    const totals = guides.map((p) => {
+      try {
+        return p.getTotalLength();
+      } catch {
+        return 0;
+      }
     });
-    if (groups.length === 0) return;
-
-    // 用那条隐藏的**完整合并路径**算位置（可见的线是分段画的，长度不等于整条）
-    const paths = guideRefs.current.filter(Boolean) as SVGPathElement[];
-    if (paths.length === 0) return;
-    const lengths = paths.map((p) => p.getTotalLength());
+    const sigs = geo.routes.map((r) => r.d);
 
     let raf = 0;
     const step = (now: number) => {
-      const prev = prevRef.current ?? now;
-      const dt = Math.min(0.1, (now - prev) / 1000); // 夹住，避免切标签后一次跳很远
+      const prev = prevRef.current;
       prevRef.current = now;
-
-      groups.forEach(({ el: g, slot }) => {
-        const idx = Number(g.dataset.route ?? 0);
-        const path = paths[idx];
-        if (!path) return;
-        const total = lengths[idx] ?? 1;
-
-        // **累积路程**：每辆车按各自速度前进，长度变化不影响走过的绝对距离
-        const speed = TRAVEL_SECONDS > 0 ? total / TRAVEL_SECONDS : 0;
-        const base = Number(g.dataset.phase ?? 0);
-        const prevP = progressRef.current[slot] ?? base;
-        const next = (prevP + (speed * dt) / Math.max(total, 1)) % 1;
-        progressRef.current[slot] = next;
-
-        const pt = path.getPointAtLength(next * total);
-        g.setAttribute("transform", `translate(${pt.x.toFixed(1)} ${pt.y.toFixed(1)})`);
-
-        // 颜色跟着**当前所在的分支**变
-        const rect = truckRectRefs.current[slot];
-        const branches = geo.routes[idx]?.branches ?? [];
-        if (rect && branches.length > 0) {
-          // 去程：主干末端之后按**已进入的最远分支**着色；
-          // 回程：沿用去程的颜色（不闪回）
-          const preFrac = trunkFrac(geo.routes[idx]!);
-          let color = geo.routes[idx]!.segs[0]?.color ?? "";
-          if (next >= preFrac && preFrac < 1) {
-            const t = (next - preFrac) / (1 - preFrac);
-            if (t <= 1) {
-              for (const b of branches) {
-                if (t >= b.startFrac) color = b.color;
-              }
-            } else {
-              color = branches[branches.length - 1]?.color ?? color;
-            }
-          }
-          rect.setAttribute("fill", color || branches[0]?.color || NEUTRAL);
+      let dt: number;
+      if (prev === null) {
+        dt = 1 / 60; // 这一轮动画的第一帧：按标称帧长走一步
+      } else {
+        dt = (now - prev) / 1000;
+        if (!Number.isFinite(dt) || dt < 0 || dt > 0.1) {
+          // 掉帧 / 切标签回来：**不补算**中间的停顿，否则会在那一帧跳很远
+          dt = 0;
+        } else if (dt > 1 / 30) {
+          // 一帧里最多按 2 帧补：主线程卡 100ms 时补满会一步走 37px，
+          // 观感就是「跳一下」；宁可让动画在那几帧里走慢一点。
+          dt = 1 / 30;
         }
-      });
+      }
+
+      const state = progressRef.current;
+      // 每帧按 DOM 取车：车辆数量变化时 React 会增删节点，这里自然跟上，
+      // 不需要任何按下标的数组（那正是错位的来源）。
+      for (const g of container.querySelectorAll<SVGGElement>("g.flow__truck")) {
+        const key = g.dataset.truckKey;
+        if (!key) continue;
+        const idx = routeIdxByKey.get(g.dataset.routeKey ?? "");
+        if (idx === undefined) continue; // 这条路线这轮没画出来：等下一轮测量
+        const path = guides[idx];
+        const total = totals[idx] ?? 0;
+        if (!path || !(total > 0)) continue;
+        const route = geo.routes[idx]!;
+
+        let st = state.get(key);
+        if (!st) {
+          const phase = Number(g.dataset.phase ?? 0);
+          st = {
+            dist: (Number.isFinite(phase) ? phase : 0) * total,
+            x: NaN,
+            y: NaN,
+            sig: sigs[idx]!,
+            walkRef: 0,
+          };
+          state.set(key, st);
+        }
+        const walk = (total / TRAVEL_SECONDS) * dt;
+
+        // 几何变了（这条路的 `d` 变了）→ 用**上一帧的屏幕点**在新路径上取最近点重锚：
+        // 在「必须落到新路上」的前提下，这个落点离原位置最近。
+        if (st.sig !== sigs[idx]) {
+          if (Number.isFinite(st.x) && Number.isFinite(st.y)) {
+            st.dist = nearestLength(path, total, st.x, st.y);
+          }
+          st.sig = sigs[idx]!;
+        }
+        st.dist += walk;
+        if (st.dist >= total) st.dist -= total * Math.floor(st.dist / total);
+
+        const target = path.getPointAtLength(st.dist);
+        let nx = target.x;
+        let ny = target.y;
+        let capped = false;
+        if (Number.isFinite(st.x) && Number.isFinite(st.y)) {
+          const gap = Math.hypot(target.x - st.x, target.y - st.y);
+          // 位置修正速度上限 = **正常行走速度**的 1.5 倍（且不低于这一帧的正常步长）。
+          // 几何突变（窗口缩放 / 出口增减）时车**匀速**走过去，而不是一帧跳过去。
+          //
+          // 参考量必须取「正常行走时的步长」并且**在被限速的帧上不更新**：
+          // 早先拿「上一帧实际走了多远」当参考，限速帧本身会成为下一帧的参考，
+          // 于是上限每帧 ×1.5 指数增长 —— 看起来是车先慢慢挪、再越挪越快，几帧内冲过去。
+          const cap = Math.max(1.5 * st.walkRef, walk);
+          if (gap > cap) {
+            const k = cap / gap;
+            nx = st.x + (target.x - st.x) * k;
+            ny = st.y + (target.y - st.y) * k;
+            capped = true;
+          }
+        }
+        const stepLen = Number.isFinite(st.x) ? Math.hypot(nx - st.x, ny - st.y) : walk;
+        if (!capped) st.walkRef = stepLen; // 只有正常行走才更新参考步长
+        st.x = nx;
+        st.y = ny;
+        g.setAttribute("transform", `translate(${nx.toFixed(1)} ${ny.toFixed(1)})`);
+
+        // 颜色跟着**当前所在的分支**变：取整圈里**最靠后**那条已进入的分支，
+        // 回程（回到分叉那段）沿用刚离开的那条分支的颜色，不闪回。
+        const rect = g.querySelector("rect");
+        if (rect) {
+          const u = st.dist / total;
+          let color = "";
+          for (const b of route.branches) {
+            if (u >= b.startFrac) color = b.color;
+          }
+          const fill = color || route.branches[0]?.color || NEUTRAL;
+          if (fill !== st.color) {
+            rect.setAttribute("fill", fill);
+            st.color = fill;
+          }
+        }
+      }
       raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
@@ -505,20 +674,40 @@ function Flow({
       cancelAnimationFrame(raf);
       prevRef.current = null; // 下一轮从「现在」接着走，不补算中间的停顿
     };
+    // 依赖只放「测量结果」与容器：位置数组每次渲染都会重建，放进来会让动画
+    // 每 2 秒重启一次（表现是车跳回起点）。
   }, [geo, container]);
 
   if (!geo) return null;
 
-  // 每辆货车：数量按**入口**的字节数决定，挂在属于该入口的路线（每条路线
-  // 已经合并了若干分支）上。一个入口的货就沿它自己那条路线来回走。
-  const trucks: { route: number; phase: number }[] = [];
+  /**
+   * 一个入口用于**决定车数**的字节数。
+   *
+   * 流量不可信时（`traffic_ok === false`）继续用最后一次可信读数，
+   * 而不是 0：否则每次查询失败车数都会 13 → 9 → 13 地弹，那也是一种乱跳。
+   */
+  const laneBytes = (lane: TopoInbound | undefined): number => {
+    if (!lane) return 0;
+    const total = lane.uplink_bytes + lane.downlink_bytes;
+    if (trafficOk) {
+      lastBytesRef.current.set(lane.tag, total);
+      return total;
+    }
+    return lastBytesRef.current.get(lane.tag) ?? 0;
+  };
+
+  // 每辆货车：数量按**入口**的字节数决定，沿属于该入口的那条路线来回走。
+  // 身份 = `路线key#序号`：车辆数量变化时，已有车的身份、路线、进度都不变。
+  const trucks: { key: string; routeKey: string; routeIdx: number; phase: number }[] = [];
   geo.routes.forEach((r, idx) => {
-    const bytes = inbound[r.inlet]
-      ? inbound[r.inlet]!.downlink_bytes + inbound[r.inlet]!.uplink_bytes
-      : 0;
-    const count = trucksOnLane(bytes);
+    const count = trucksOnLane(laneBytes(inbound[r.inlet]));
     for (let k = 0; k < count; k++) {
-      trucks.push({ route: idx, phase: (k / count + (k % 3) * 0.04) % 1 });
+      trucks.push({
+        key: `${r.key}#${k}`,
+        routeKey: r.key,
+        routeIdx: idx,
+        phase: (k / count + (k % 3) * 0.04) % 1,
+      });
     }
   });
 
@@ -526,11 +715,11 @@ function Flow({
     <svg className="flow" width={geo.w} height={geo.h} aria-hidden>
       {/* 连线本体：主干中性，各扇出分支按**目的地的出口类别**着色。
           着色依据是出口的 kind（实测数据），所以图例对得上。 */}
-      {geo.routes.map((r, i) => (
-        <g key={`p-${i}`}>
+      {geo.routes.map((r) => (
+        <g key={`p-${r.key}`}>
           {r.segs.map((sg, k) => (
             <path
-              key={`p-${i}-${k}`}
+              key={`p-${r.key}-${k}`}
               className={sg.color ? "flow__route" : "flow__route flow__route--trunk"}
               d={routeToD([sg])}
               stroke={sg.color ?? "rgba(120,160,210,0.45)"}
@@ -539,66 +728,65 @@ function Flow({
         </g>
       ))}
       {/* 唯一一条**完整**的合并路径：只用于给货车算位置（隐藏不显示） */}
-      {geo.routes.map((r, i) => (
-        <path
-          key={`guide-${i}`}
-          className="flow__guide"
-          d={r.d}
-          ref={(el) => {
-            guideRefs.current[i] = el;
-          }}
-        />
+      {geo.routes.map((r) => (
+        <path key={`guide-${r.key}`} className="flow__guide" d={r.d} />
       ))}
-      {/* 货车：沿整条路线（入口 → 分叉 → 各出口）来回走，颜色跟着当前去向 */}
+      {/* 货车：沿整条路线（入口 → 分叉 → 各出口）来回走，颜色跟着当前去向。
+          `data-truck-key` 是**稳定身份**，跨刷新用它认「同一辆车」。 */}
       {trucks.map((t, i) => (
         <g
-          key={`t-${i}`}
-          ref={(el) => {
-            truckRefs.current[i] = el;
-          }}
-          data-route={t.route}
+          key={t.key}
+          data-truck-key={t.key}
+          data-route-key={t.routeKey}
+          data-route={t.routeIdx}
           data-phase={t.phase}
           data-slot={i}
           className="flow__truck"
         >
-          <rect
-            x={-4.5}
-            y={-2.5}
-            width={9}
-            height={5}
-            rx={1}
-            fill={NEUTRAL}
-            ref={(el) => {
-              truckRectRefs.current[i] = el;
-            }}
-          />
+          <rect x={-4.5} y={-2.5} width={9} height={5} rx={1} fill={NEUTRAL} />
         </g>
       ))}
     </svg>
   );
 }
 
-/**
- * 主干（入口 → 分叉）在**去程**里占的比例。
- *
- * 路线是闭环（去程 + 回程），但着色只关心去程：主干段中性，之后按进入的
- * 分支着色，回程沿用最后那条分支的颜色。所以这里以「去程长度」为分母。
- */
-function trunkFrac(route: Route): number {
-  const trunk = segApproxLen(route.segs[0]!);
-  const outbound = route.branches.length;
-  if (outbound === 0) return 1;
-  // 去程 = 主干 + 各分支；分支长度在构建时已累计，这里用路径总长的一半近似
-  const total = route.segs.reduce((a, sg) => a + segApproxLen(sg), 0) / 2;
-  if (total <= 0) return 1;
-  return Math.min(1, trunk / total);
-}
-
 /** 一辆车走完全程需要的秒数（视觉节奏）。 */
 const TRAVEL_SECONDS = 7;
 
-function compact<T>(v: (T | null)[]): T[] {
-  return v.filter((x): x is T => x !== null);
+/**
+ * 在 `path` 上找离点 `(px, py)` **最近**的弧长（px）。
+ *
+ * 用途：几何变化（卡片被撑宽、出口增减、窗口缩放）后，把货车的「上一帧屏幕点」
+ * 投到新路径上作为新路程 —— 在「必须落到新路上」的前提下，这个落点位移最小。
+ * 先粗采样 65 点，再在最优点两侧做黄金分割细化；只算距离，不依赖 `getPathSegAtLength`。
+ */
+function nearestLength(path: SVGPathElement, total: number, px: number, py: number): number {
+  const dist2 = (l: number): number => {
+    const p = path.getPointAtLength(l);
+    const dx = p.x - px;
+    const dy = p.y - py;
+    return dx * dx + dy * dy;
+  };
+  const N = 64;
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i <= N; i++) {
+    const l = (i / N) * total;
+    const d = dist2(l);
+    if (d < bestD) {
+      bestD = d;
+      best = l;
+    }
+  }
+  let lo = Math.max(0, best - total / N);
+  let hi = Math.min(total, best + total / N);
+  for (let it = 0; it < 12; it++) {
+    const m1 = lo + (hi - lo) * 0.382;
+    const m2 = lo + (hi - lo) * 0.618;
+    if (dist2(m1) < dist2(m2)) hi = m2;
+    else lo = m1;
+  }
+  return (lo + hi) / 2;
 }
 
 function clampMid(x1: number, x2: number): number {
@@ -613,6 +801,15 @@ function clampMid(x1: number, x2: number): number {
  * 这一点很关键：早先每段各写一个 `M`，于是路径里有三段互不相连的子路径，
  * 而 `getPointAtLength` 是沿**一条**路径连续采样的 —— 货车会在段与段之间跳。
  * （表现就是车停在车道两端不动、中间的路程被跳过。）
+ *
+ * # 对调用者的硬要求：相邻两段必须**真的**首尾相接
+ *
+ * `C` 的起点是**上一段的终点**，参数里并没有「起点」—— 传进去的
+ * `s.x1/s.y1` 只用来算控制点。所以若 `seg[i].x1/y1 !== seg[i-1].x2/y2`，
+ * 合并路径会从上一段的终点「斜着」连到这一段的控制点上，几何与那些
+ * **单独画出来的可见线**就不再是一回事：车会离线。
+ * （实测踩过：把回程堆到最后，导致去第 2 个出口的曲线从第 1 个出口出发，
+ * 46.7% 的行程离任何可见线 >1.5px、最大偏离 23.8px。）
  *
  * 直线段也用三次贝塞尔表示（控制点取在两端，退化成直线），
  * 这样整条路线是一条命令序列，长度与采样都可预期。

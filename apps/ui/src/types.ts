@@ -462,6 +462,10 @@ export interface TopoInbound {
   tag: string;
   protocol: string;
   port: number | null;
+  /**
+   * 累计字节（跨核心重启保持单调）。
+   * `Topology.traffic_ok === false` 时这两个字段固定为 0，**不是**真实读数。
+   */
   uplink_bytes: number;
   downlink_bytes: number;
 }
@@ -471,6 +475,10 @@ export interface TopoOutbound {
   protocol: string;
   /** node | direct | block | dns | internal */
   kind: string;
+  /**
+   * 累计字节（跨核心重启保持单调）。
+   * `Topology.traffic_ok === false` 时这两个字段固定为 0，**不是**真实读数。
+   */
   uplink_bytes: number;
   downlink_bytes: number;
 }
@@ -489,6 +497,19 @@ export interface Topology {
   outbound: TopoOutbound[];
   /** 取流量失败的原因（核心没在跑时）。界面据此如实说明，而不是画 0 流量。 */
   traffic_error: string | null;
+  /**
+   * 本次流量是否可信。`false` = 这次没查到（原因见 `traffic_error`），
+   * 此时所有 `*_bytes` 都是占位 0，界面必须显示「—」而不是 0 B。
+   *
+   * 恒有 `traffic_ok === (traffic_error === null)`，两者不会不一致。
+   */
+  traffic_ok: boolean;
+  /**
+   * 累计字节跨核心重启续接时，被补偿掉的归零次数。
+   * `> 0` 表示核心重启过（换网 / 熄屏唤醒 / 节点抖动），
+   * 累计值已被续接而不是归零；界面可据此如实说明，而不用平滑掩盖。
+   */
+  counter_resets: number;
   geo_available: boolean;
 }
 
@@ -520,8 +541,12 @@ export interface GeoLocation {
 export interface GlobeRoute {
   from: GeoLocation;
   to: GeoLocation;
-  /** 这条航线当前承载的实测字节（上行+下行）。 */
+  /** 这条航线当前承载的实测字节（上行+下行，跨核心重启保持单调）。 */
   bytes: number;
+  /** 取流量失败时为 false，此时 `bytes` 固定为 0，不是真实读数。 */
+  traffic_ok: boolean;
+  /** 累计值跨核心重启续接时被补偿掉的归零次数。 */
+  counter_resets: number;
   node_name: string;
 }
 

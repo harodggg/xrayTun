@@ -11,12 +11,15 @@
 //! 「节点自己的位置」—— 错得很像对的。详见 `xt_core::geo_lookup`。
 
 use std::net::IpAddr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
+use tokio::sync::Mutex;
 
 use xt_core::geo_lookup::{merge_sources, parse_api, parse_who, GeoLocation};
+use xt_core::xray::stats::{monotonic_traffic_by_tag, MonotonicCounters, StatEntry};
 
 use super::*;
 
@@ -28,7 +31,14 @@ pub struct GlobeRoute {
     /// 终点（出口节点）。
     pub to: GeoLocation,
     /// 这条航线当前承载的实测字节（上行+下行），用于决定飞机密度。
+    ///
+    /// **跨核心重启保持单调**；`traffic_ok == false` 时固定为 0，
+    /// **不是**真实读数（此前正是这里把「没查到」显示成了 0）。
     pub bytes: u64,
+    /// 这次到底查没查到流量。
+    pub traffic_ok: bool,
+    /// 累计值跨重启续接时补偿掉的归零次数（`>0` = 核心重启过）。
+    pub counter_resets: u32,
     /// 出口节点的名字。
     pub node_name: String,
 }
@@ -116,11 +126,13 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
     let route = match (origin.clone(), exit) {
         (Some(from), Some(to)) => {
             // 实测流量：取当前节点的累计字节，让飞机密度有依据
-            let bytes = current_exit_bytes().await;
+            let traffic = current_exit_traffic().await;
             Some(GlobeRoute {
                 from,
                 to,
-                bytes,
+                bytes: traffic.bytes,
+                traffic_ok: traffic.ok,
+                counter_resets: traffic.resets,
                 node_name: node.map(|(n, _)| n).unwrap_or_else(|| "节点".into()),
             })
         }
@@ -193,19 +205,63 @@ async fn query_self(interface: Option<String>) -> Option<GeoLocation> {
     )
 }
 
-/// 当前出口节点的累计字节（拿不到就返回 0 —— 界面据此显示「无实测流量」）。
-async fn current_exit_bytes() -> u64 {
-    let addr: std::net::SocketAddr =
-        ([127, 0, 0, 1], xt_core::xray::config::API_PORT).into();
-    let Ok(stats) = xt_core::xray::query_stats(addr, Duration::from_millis(900)).await else {
-        return 0;
+/// 出口累计字节的读取结果：把「值」与「这次是否查到」分开表达。
+///
+/// **不用 0 表示「没查到」**：0 是合法读数（真的没有流量），混在一起会让
+/// 地球仪在查询失败时显示「出口累计 0 B」——那是假读数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExitTraffic {
+    bytes: u64,
+    ok: bool,
+    /// 观察到的计数器归零次数（核心重启）。
+    resets: u32,
+}
+
+impl ExitTraffic {
+    /// 这次没查到：`bytes` 是占位 0，调用方必须看 `ok`。
+    fn unavailable() -> Self {
+        Self { bytes: 0, ok: false, resets: 0 }
+    }
+}
+
+/// 从一次采样里算出口累计字节 —— 纯函数，便于测试（这一段的错法都是
+/// 「数字悄悄不对」）。
+///
+/// 出口里流量最大的那个就是节点出站。累计值跨核心重启保持单调，
+/// 见 [`MonotonicCounters`]。
+fn read_exit_traffic(
+    stats: Option<&[StatEntry]>,
+    counters: &mut MonotonicCounters,
+) -> ExitTraffic {
+    let Some(stats) = stats else {
+        return ExitTraffic::unavailable();
     };
-    // 出口里流量最大的那个就是节点出站
-    xt_core::xray::traffic_by_tag(&stats, "outbound")
+    let (by_tag, resets) = monotonic_traffic_by_tag(counters, stats, "outbound");
+    let bytes = by_tag
         .values()
         .map(|(up, down)| up.saturating_add(*down))
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    ExitTraffic { bytes, ok: true, resets }
+}
+
+/// 进程内的出口累计读数表：把「核心重启后计数器归零」补偿掉，见 topology.rs。
+static EXIT_COUNTERS: OnceLock<Mutex<MonotonicCounters>> = OnceLock::new();
+
+/// 当前出口节点的累计字节。查不到时 `ok=false`（而不是把 0 当读数）。
+///
+/// 锁包住查询：单调化依赖「采样顺序 = 观察顺序」，理由同 topology.rs。
+async fn current_exit_traffic() -> ExitTraffic {
+    let addr: std::net::SocketAddr =
+        ([127, 0, 0, 1], xt_core::xray::config::API_PORT).into();
+    let mut counters = EXIT_COUNTERS
+        .get_or_init(|| Mutex::new(MonotonicCounters::new()))
+        .lock()
+        .await;
+    let stats = xt_core::xray::query_stats(addr, Duration::from_millis(900))
+        .await
+        .ok();
+    read_exit_traffic(stats.as_deref(), &mut counters)
 }
 
 #[cfg(test)]
@@ -245,5 +301,69 @@ mod tests {
         );
         // 节点在香港（实测），纬度应当在 22 附近
         assert!((node.lat - 22.3).abs() < 2.0, "节点纬度应当在香港附近，实际 {}", node.lat);
+    }
+
+    /// 查不到流量时必须标记为不可用：把 0 当实测值会让地球仪显示
+    /// 「出口累计 0 B」——那是一次查询失败，不是真的没有流量。
+    #[test]
+    fn unavailable_stats_are_flagged_rather_than_zero() {
+        let t = read_exit_traffic(None, &mut MonotonicCounters::new());
+        assert!(!t.ok, "查不到必须标记为不可用");
+        assert_eq!(t.bytes, 0);
+        assert_eq!(t.resets, 0);
+    }
+
+    /// **primary 回归**：核心重启让计数器归零，地球仪的累计字节不得回退。
+    #[test]
+    fn exit_bytes_do_not_regress_across_a_core_restart() {
+        let mut counters = MonotonicCounters::new();
+        let big = vec![StatEntry {
+            name: "outbound>>>node-a>>>traffic>>>downlink".into(),
+            value: 8_600_000_000,
+        }];
+        let first = read_exit_traffic(Some(&big), &mut counters);
+        assert!(first.ok);
+        assert_eq!(first.bytes, 8_600_000_000);
+        assert_eq!(first.resets, 0);
+
+        // 核心重启：计数器从 0 重新计
+        let reset = vec![StatEntry {
+            name: "outbound>>>node-a>>>traffic>>>downlink".into(),
+            value: 0,
+        }];
+        let second = read_exit_traffic(Some(&reset), &mut counters);
+        assert!(second.ok);
+        assert_eq!(second.bytes, 8_600_000_000, "重启不得让累计值归零");
+        assert_eq!(second.resets, 1);
+
+        // 重启后的新流量继续累加
+        let grown = vec![StatEntry {
+            name: "outbound>>>node-a>>>traffic>>>downlink".into(),
+            value: 1_024,
+        }];
+        assert_eq!(read_exit_traffic(Some(&grown), &mut counters).bytes, 8_600_001_024);
+    }
+
+    /// 出口取「上下行合计最大的那个」；畸形名字不产生假值。
+    #[test]
+    fn busiest_outbound_wins_and_junk_names_produce_no_bytes() {
+        let stats = vec![
+            StatEntry { name: "outbound>>>direct>>>traffic>>>downlink".into(), value: 100 },
+            StatEntry { name: "outbound>>>node-a>>>traffic>>>downlink".into(), value: 900 },
+            StatEntry { name: "outbound>>>node-a>>>traffic>>>uplink".into(), value: 900 },
+            // 畸形：不参与
+            StatEntry { name: "outbound>>>node-a>>>traffic".into(), value: 7 },
+            // 入站计数不能混进出口
+            StatEntry { name: "inbound>>>tun>>>traffic>>>downlink".into(), value: 10_000 },
+        ];
+        let t = read_exit_traffic(Some(&stats), &mut MonotonicCounters::new());
+        assert!(t.ok);
+        assert_eq!(t.bytes, 1_800, "取上下行合计最大的出口");
+
+        // 查到了统计但没有任何合法出口计数 = 真的 0（而不是「没查到」）
+        let junk = vec![StatEntry { name: "outbound>>>node-a>>>traffic".into(), value: 7 }];
+        let none = read_exit_traffic(Some(&junk), &mut MonotonicCounters::new());
+        assert!(none.ok, "查到统计时 ok 必须为真");
+        assert_eq!(none.bytes, 0);
     }
 }
