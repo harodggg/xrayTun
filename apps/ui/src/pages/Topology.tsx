@@ -19,24 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, errorText } from "../ipc";
 import { formatBytes } from "../types";
-import type { RouteExplanation, Topology } from "../types";
-
-/** 车辆在这段时间内从入口走到出口（秒）。纯视觉节奏，与真实速率无关。 */
-const TRIP_SECONDS = 1.6;
-
-/**
- * 一条车道上的车辆数区间。
- *
- * 下限 5：**空车道也画几辆车**，否则「这条入口在用、只是量小」与
- * 「这条入口根本不通」在界面上一模一样。
- * 上限 15：再多就挤成一片、看不出是车了。
- */
-const MIN_VEHICLES = 5;
-const MAX_VEHICLES = 15;
-
-/** 车辆数按字节做对数映射的参考点：1 MiB 与 1 TiB 对应两端。 */
-const VEHICLE_SCALE_MIN_BYTES = 1024 * 1024;
-const VEHICLE_SCALE_MAX_BYTES = 1024 ** 4;
+import type { RouteExplanation, TopoInbound, TopoOutbound, Topology } from "../types";
 
 export default function Topology() {
   const [topo, setTopo] = useState<Topology | null>(null);
@@ -117,31 +100,17 @@ export default function Topology() {
 
 /** 入口 ↔ 出口之间的车流。 */
 function Highway({ topo }: { topo: Topology }) {
-  // 连线覆盖层要按真实 DOM 位置绘制，所以把关键元素测出来
   const laneRefs = useRef<(HTMLDivElement | null)[]>([]);
   const inletRefs = useRef<(HTMLDivElement | null)[]>([]);
   const outletRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
-  // 入口与车道一一对应；条目数变少时要把多余的引用截掉，
-  // 否则旧引用会残留（稀疏数组），连线就会按错的位置画。
-  const lanesForLinks = topo.inbound.filter((i) => i.tag !== "api");
-  const inletEls = inletRefs.current.slice(0, lanesForLinks.length);
-  // **每个入口一条车道**，包括当前没有流量的（空车道也要显示，否则
-  // 「在用但量小」和「根本不通」分不出来）。
-  //
-  // 只排除内部管理入口（`api`，dokodemo-door:10085）：那是应用自己查统计用的
-  // 通道，不是用户的流量，画出来只是噪声。
+
+  // **每个入口一条车道**，包括当前没有流量的（空车道也显示，否则
+  // 「在用但量小」和「根本不通」分不出来）。只排除内部管理入口
+  // （`api` = dokodemo-door:10085，那是应用自己查统计的通道，不是用户流量）。
   const lanes = topo.inbound.filter((i) => i.tag !== "api");
   const outTotal = topo.outbound.reduce((a, o) => a + o.uplink_bytes + o.downlink_bytes, 0);
   const inTotal = lanes.reduce((a, i) => a + i.uplink_bytes + i.downlink_bytes, 0);
-
-  // 车流按出口类别着色。份额取自**全局**出口字节数 —— 这是实测的；
-  // 而「某个入口的货具体去了哪个出口」拿不到（核心没有这个计数器），
-  // 所以份额只用来决定各色车辆的比例，不声称归属。
-  const shares = topo.outbound
-    .filter((o) => o.kind === "node" || o.kind === "direct" || o.kind === "block")
-    .map((o) => ({ kind: o.kind, bytes: o.uplink_bytes + o.downlink_bytes }))
-    .filter((s) => s.bytes > 0);
 
   return (
     <div className="highway" ref={(el) => setContainer(el)}>
@@ -158,10 +127,11 @@ function Highway({ topo }: { topo: Topology }) {
           <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.block }} />
           已拦截
         </span>
+        <span className="highway__legend-note">货车沿连线从入口开到出口</span>
       </div>
 
       <div className="highway__side">
-        <div className="highway__side-title">入口（每个入口一条车道）</div>
+        <div className="highway__side-title">入口</div>
         {lanes.map((i, idx) => (
           <div
             className="highway__lane-label"
@@ -188,31 +158,28 @@ function Highway({ topo }: { topo: Topology }) {
       </div>
 
       <div className="highway__road">
-        {lanes.map((i, idx) => {
-          const total = i.downlink_bytes + i.uplink_bytes;
-          return (
-            <div
-              key={i.tag}
-              className="lane-wrap"
-              ref={(el) => {
-                laneRefs.current[idx] = el;
-              }}
-            >
-              <Lane bytes={total} shares={shares} />
-            </div>
-          );
-        })}
+        {lanes.map((i, idx) => (
+          <div
+            key={i.tag}
+            className="lane-wrap"
+            ref={(el) => {
+              laneRefs.current[idx] = el;
+            }}
+          >
+            <div className="lane" />
+          </div>
+        ))}
       </div>
 
       {/* 扇形**专用一列**（第 3 列）：不给它独立空间的话，车道列会占满中间，
-          扇形只能在 10px 宽的间隙里画，看着像一堆竖线（实测过）。
+          扇形只能在 10px 宽的间隙里画、看着像一堆竖线（实测：横向只跨 4px）。
 
-          位置必须与列顺序一致：它是第 3 列，就必须排在车道列之后、出口列之前。
-          早先放在最前面，结果出口列被挤到了这一列的宽度（84px、文字折行）。 */}
+          位置必须与列顺序一致 —— 早先放在 DOM 最前，结果出口卡片被挤进
+          84px 的窄列、文字折行。 */}
       <span className="highway__spacer" aria-hidden />
 
       <div className="highway__side highway__side--right">
-        <div className="highway__side-title">出口（车道颜色 = 去向）</div>
+        <div className="highway__side-title">出口（颜色 = 去向）</div>
         {topo.outbound.map((o, idx) => (
           <div
             className={`highway__lane-label highway__lane-label--${o.kind}`}
@@ -234,43 +201,89 @@ function Highway({ topo }: { topo: Topology }) {
         </div>
       </div>
 
-      <HighwayLinks
+      <Flow
         container={container}
-        laneEls={laneRefs.current.slice(0, lanesForLinks.length)}
-        inletEls={inletEls}
+        inbound={lanes}
+        outbound={topo.outbound}
+        laneEls={laneRefs.current.slice(0, lanes.length)}
+        inletEls={inletRefs.current.slice(0, lanes.length)}
         outletEls={outletRefs.current}
       />
     </div>
   );
 }
 
+/** 出口 tag 太长时截断显示（节点 tag 形如 `node-n1d232c6b8c7a5004`）。 */
+function shortTag(t: string): string {
+  if (t.startsWith("node-")) return `节点 ${t.slice(5, 13)}…`;
+  return t;
+}
+
+/** 出口类别 → 货车颜色。三色对应三种去向。 */
+const OUTBOUND_COLOR: Record<string, string> = {
+  node: "#4f8ef7",
+  direct: "#34d399",
+  block: "#f87171",
+};
+
+/** 一条车道上的货车数量：按字节做对数映射到 [3, 8]。 */
+function trucksOnLane(bytes: number): number {
+  if (bytes <= 0) return 3; // 空车道也画几辆，否则「量小」与「不通」看不出来
+  const lo = Math.log10(1 << 20); // 1 MiB
+  const hi = Math.log10(1 << 40); // 1 TiB
+  const t = Math.max(0, Math.min(1, (Math.log10(bytes) - lo) / (hi - lo)));
+  return Math.round(3 + t * 5);
+}
+
+/** 一条路线的一段折线（屏幕坐标）。 */
+interface Seg {
+  kind: "curve" | "line";
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  /** 曲线在 x 方向的中间控制点（"line" 忽略）。 */
+  cx?: number;
+}
+
+/** 一条完整的货运路线：入口 → 车道 → 扇出 → 出口。 */
+interface Route {
+  d: string;
+  segs: Seg[];
+  /** 货车颜色（按终点出口的去向）。 */
+  color: string;
+  label: string;
+}
+
 /**
- * 入口 → 车道 → 出口 的连线覆盖层。
+ * 网络流动：连线 + 沿连线行走的货车。
  *
- * # 为什么需要它
+ * # 为什么连线和货车画在同一层
  *
- * 原来三列是并排的卡片，谁也看不出「哪个入口对应哪条车道、车道又通向哪里」。
- * 用户要的是「跟连线一样」—— 入口连到它那条车道，车道再分叉到各个出口。
+ * 早期把「车道」和「连线」分成两层：车道是带货车的容器、连线是覆盖层。
+ * 结果是**货车只在自己那条车道里左右漂**，和连线没有关系 ——
+ * 看着像两套不相干的东西。
  *
- * # 怎么画的
+ * 现在一条路线就是**一条合并路径**（入口 → 车道 → 扇出 → 出口），
+ * 货车沿它从头走到尾；车道那一列只作为「道路」的视觉底衬。
  *
- * 用一条绝对定位的 SVG 盖在 `.highway` 上，按**实测的 DOM 位置**画贝塞尔曲线。
- * 位置不是猜的：用 `getBoundingClientRect` 量真实元素，并用 `ResizeObserver`
- * 跟随布局变化（流量数字每 2 秒更新一次，宽度会变）。
- *
- * # 一条边界
+ * # 一处边界
  *
  * 「哪条车道通向哪个出口」核心**没有这个计数器**（只有按入口、按出口两类
- * 统计）。所以连线表达的是「车道汇入出口」这个**结构关系**（配置事实），
- * 而不是逐条连接的归属。这一点与车道颜色用的是同一套口径。
+ * 统计）。所以出口按相邻切段分配到车道，只为了**画得清楚**；
+ * 它表达「车道与出口相连」这个结构关系（来自配置），不声称逐条归属。
  */
-function HighwayLinks({
+function Flow({
   container,
+  inbound,
+  outbound,
   laneEls,
   inletEls,
   outletEls,
 }: {
   container: HTMLElement | null;
+  inbound: TopoInbound[];
+  outbound: TopoOutbound[];
   laneEls: (HTMLElement | null)[];
   inletEls: (HTMLElement | null)[];
   outletEls: (HTMLElement | null)[];
@@ -278,13 +291,13 @@ function HighwayLinks({
   const [geo, setGeo] = useState<{
     w: number;
     h: number;
-    /** 扇形列的左右边界（画连线用）。 */
-    fan: { l: number; r: number } | null;
-    lanes: { y: number; l: number; r: number }[];
-    inlets: { y: number; l: number; r: number }[];
-    outlets: { y: number; l: number }[];
+    routes: Route[];
   } | null>(null);
+  const truckRefs = useRef<(SVGGElement | null)[]>([]);
+  /** 动画起始时刻：跨 effect 重建保持连续，避免每 2 秒跳一次。 */
+  const startRef = useRef<number | null>(null);
 
+  // 测量：把 DOM 位置换算成「相对容器的坐标」，再拼出每条路线的路径
   useEffect(() => {
     if (!container) return;
     const measure = () => {
@@ -298,35 +311,71 @@ function HighwayLinks({
           y: r.top - base.top + r.height / 2,
         };
       };
-      // 只取**实际存在**的引用，按索引顺序对齐 ——
-      // 早先用选择器取 `.highway__lane-label`，结果把「合计」那一行也算进来了，
-      // 连线因此多出一条、还被摊开成斜线穿过卡片。
-      // 扇形列的边界：连线画在这一列里
-      const spacer = container.querySelector(".highway__spacer");
-      const spacerRect = spacer?.getBoundingClientRect();
-      const fan = spacerRect
-        ? { l: spacerRect.left - base.left, r: spacerRect.right - base.left }
-        : null;
+      const spacer = container.querySelector(".highway__spacer")?.getBoundingClientRect();
+      const fan = spacer
+        ? { l: spacer.left - base.left, r: spacer.right - base.left }
+        : { l: 0, r: 0 };
 
-      const compact = (els: (HTMLElement | null)[]) =>
-        els
-          .map(rel)
-          .filter((v): v is NonNullable<typeof v> => v !== null);
-      const lanes = compact(laneEls);
-      const inlets = compact(inletEls);
-      const outlets = compact(outletEls);
-      setGeo({
-        w: base.width,
-        h: base.height,
-        fan,
-        lanes: lanes.map((v) => ({ y: v.y, l: v.l, r: v.r })),
-        inlets: inlets.map((v) => ({ y: v.y, l: v.l, r: v.r })),
-        outlets: outlets.map((v) => ({ y: v.y, l: v.l })),
+      const lanes = compact(laneEls.map(rel));
+      const inlets = compact(inletEls.map(rel));
+      const outlets = compact(outletEls.map(rel));
+      if (lanes.length === 0 || outlets.length === 0) {
+        setGeo({ w: base.width, h: base.height, routes: [] });
+        return;
+      }
+
+      const routes: Route[] = [];
+      const per = Math.ceil(outlets.length / lanes.length);
+      lanes.forEach((lane, i) => {
+        const mine = outlets.slice(i * per, (i + 1) * per);
+        if (mine.length === 0) return;
+        // 入口与车道一一对应时用同一行；数量不一致时轮流取，避免取不到
+        const inlet = inlets[i] ?? inlets[i % Math.max(1, inlets.length)];
+
+        // 车道 → 扇出列 → 出口的**分叉点**：放在扇出列里，
+        // 给曲线留出横向空间（早先贴着车道边缘，横向只跨 4px）
+        const forkX = fan.l + (fan.r - fan.l) * 0.3;
+
+        mine.forEach((box) => {
+          const segs: Seg[] = [];
+          // 1) 入口 → 车道左缘（弧线）
+          if (inlet) {
+            segs.push({
+              kind: "curve",
+              x1: inlet.r,
+              y1: inlet.y,
+              x2: lane.l,
+              y2: lane.y,
+              cx: (inlet.r + lane.l) / 2,
+            });
+          }
+          // 2) 沿车道走（直线）
+          segs.push({ kind: "line", x1: lane.l, y1: lane.y, x2: lane.r, y2: lane.y });
+          // 3) 车道右缘 → 分叉点（直线）
+          segs.push({ kind: "line", x1: lane.r, y1: lane.y, x2: forkX, y2: lane.y });
+          // 4) 分叉点 → 出口左缘（弧线）
+          segs.push({
+            kind: "curve",
+            x1: forkX,
+            y1: lane.y,
+            x2: box.l,
+            y2: box.y,
+            cx: clampMid(forkX, box.l),
+          });
+          routes.push({
+            d: routeToD(segs),
+            segs,
+            color: OUTBOUND_COLOR[outbound[i * per + mine.indexOf(box)]?.kind ?? ""] ?? "#4f8ef7",
+            label: outbound[i * per + mine.indexOf(box)]?.kind ?? "",
+          });
+        });
       });
+
+      setGeo({ w: base.width, h: base.height, routes });
     };
 
     measure();
-    // 流量数字每 2 秒更新一次，宽度会变 —— 持续跟随，而不是量一次就完
+    // 流量每 2 秒刷新一次，卡片宽度会变 —— 持续跟随，而不是量一次就完
     const ro = new ResizeObserver(measure);
     ro.observe(container);
     for (const el of [...laneEls, ...inletEls, ...outletEls]) {
@@ -336,199 +385,130 @@ function HighwayLinks({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [container, laneEls.join("|"), inletEls.join("|"), outletEls.join("|")]);
 
-  if (!geo || geo.lanes.length === 0) return null;
+  // 沿路径行走：用 `getPointAtLength` 把货车摆到路上。
+  // 不用 state 驱动（每帧 setState 会把整棵树重渲染），直接改 transform。
+  useEffect(() => {
+    if (!geo || geo.routes.length === 0) return;
+    const groups = truckRefs.current.filter(Boolean) as SVGGElement[];
+    if (groups.length === 0) return;
 
-  // 车道组的中线：所有连线汇到这条线上，再分向各出口
-  const mid = (geo.lanes[0]!.y + geo.lanes[geo.lanes.length - 1]!.y) / 2;
+    // 取每条路线的长度，用于让所有货车速度一致（长路线走得久）
+    const paths = container?.querySelectorAll<SVGPathElement>(".flow__route");
+    if (!paths || paths.length === 0) return;
+    const lengths = Array.from(paths).map((p) => p.getTotalLength());
+    const maxLen = Math.max(...lengths, 1);
 
-  /**
-   * 三次贝塞尔：中间两个控制点让线走得像匝道，而不是直挺挺的折线。
-   *
-   * 控制点的 x 必须**落在两端之间**（`clamp`）。否则 x 接近时中点会跑出
-   * 区间，曲线先向一边再折回、横向跨度缩成一团 —— 实测踩过：
-   * 分叉点 532、出口左缘 538 时，曲线包围盒宽度只剩 10px，看着像一堆短线。
-   */
-  const curve = (x1: number, y1: number, x2: number, y2: number) => {
-    const lo = Math.min(x1, x2);
-    const hi = Math.max(x1, x2);
-    const mx = Math.min(hi, Math.max(lo, (x1 + x2) / 2));
-    return `M ${x1.toFixed(1)} ${y1.toFixed(1)} C ${mx.toFixed(1)} ${y1.toFixed(1)}, ${mx.toFixed(1)} ${y2.toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`;
-  };
+    let raf = 0;
+    // 起始时间放在 ref 里：这个 effect 每次 geo 变化都会重建
+    // （流量每 2 秒刷新一次），用局部变量会让货车每 2 秒**跳回起点**。
+    if (startRef.current === null) startRef.current = performance.now();
+    const t0 = startRef.current;
+    const step = (now: number) => {
+      const el = (now - t0) / 1000;
+      groups.forEach((g) => {
+        const idx = Number(g.dataset.route ?? 0);
+        const path = paths[idx];
+        if (!path) return;
+        const total = lengths[idx] ?? 1;
+        const phase = Number(g.dataset.phase ?? 0);
+        // 速度与路径长度成正比：这样长路线不会显得慢吞吞
+        const u = ((el / TRAVEL_SECONDS) * (total / maxLen) + phase) % 1;
+        const pt = path.getPointAtLength(u * total);
+        g.setAttribute("transform", `translate(${pt.x.toFixed(1)} ${pt.y.toFixed(1)})`);
+      });
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [geo, container]);
+
+  if (!geo) return null;
+
+  // 每辆货车：按车道的字节数决定数量，分配在**同一条车道的各条路线**上
+  const trucks: { route: number; phase: number }[] = [];
+  const byLane = new Map<number, number[]>();
+  geo.routes.forEach((_, idx) => {
+    const lane = routeLane(idx, geo.routes.length, inbound.length);
+    const list = byLane.get(lane) ?? [];
+    list.push(idx);
+    byLane.set(lane, list);
+  });
+  byLane.forEach((routeIdxs, lane) => {
+    const count = trucksOnLane(inbound[lane] ? inbound[lane]!.downlink_bytes + inbound[lane]!.uplink_bytes : 0);
+    for (let k = 0; k < count; k++) {
+      trucks.push({
+        route: routeIdxs[k % routeIdxs.length]!,
+        phase: (k / count + (k % 3) * 0.05) % 1,
+      });
+    }
+  });
 
   return (
-    <svg className="highway__links" width={geo.w} height={geo.h} aria-hidden>
-      {/* 入口 → 车道组：每个入口都汇入这几条车道 */}
-      {geo.inlets.map((box, i) => (
-        <path
-          key={`in-${i}`}
-          className="highway__link highway__link--in"
-          d={curve(box.r, box.y, (geo.fan ? geo.fan.l : geo.lanes[0]!.l) - 6, mid)}
-        />
+    <svg className="flow" width={geo.w} height={geo.h} aria-hidden>
+      {/* 连线本体 */}
+      {geo.routes.map((r, i) => (
+        <path key={`p-${i}`} className="flow__route" d={r.d} stroke={r.color} />
       ))}
-
-      {/* 车道 → 出口：**每条车道直接扇出**到分配给它的出口。
-       *
-       * 形状是「一个源点扇出多条弧线」（与地球仪的航线同一种视觉语言）。
-       * 早先是先汇到一个中间点再分叉，那样看不出「这些去向和车道的关系」。
-       *
-       * 出口按顺序轮流分配给车道，保证每条车道都有去向 ——
-       * 而不是把全部出口都挂在第一条车道上。
-       *
-       * 一处边界：**「哪条车道通向哪个出口」核心没有这个计数器**
-       * （只有按入口、按出口两类统计）。所以这里表达的是「车道与出口相连」
-       * 这个结构关系（来自配置），不声称逐条归属。 */}
-      {geo.lanes.map((lane, i) => {
-        // **相邻**分配：把出口按顺序切成几段，每条车道负责一段。
-        //
-        // 这样每条车道的扇形**不交叉**，像一把规整的扇子。
-        // 试过交错分配（0,3 / 1,4 / 2,5），扇形摊得更开，但线互相穿插、
-        // 看着很乱 —— 拓扑图里「乱」的代价高于「铺得开」。
-        const lanes = geo.lanes.length;
-        const per = Math.ceil(geo.outlets.length / lanes);
-        const mine = geo.outlets.slice(i * per, (i + 1) * per);
-
-        // 从车道右缘引到**扇形列的左边界**，再在扇形列里扇出到各出口。
-        const fanL = geo.fan ? geo.fan.l : lane.r + 8;
-        const fanR = geo.fan ? geo.fan.r : (geo.outlets[0]?.l ?? lane.r + 40);
-        // 分叉点放在扇形列里：横向跨度足够，看起来才是扇子
-        const forkX = fanL + (fanR - fanL) * 0.25;
-
-        return (
-          <g key={`fan-${i}`}>
-            <path
-              className="highway__link highway__link--trunk"
-              d={`M ${lane.r.toFixed(1)} ${lane.y.toFixed(1)} L ${forkX.toFixed(1)} ${lane.y.toFixed(1)}`}
-            />
-            {mine.map((box, k) => (
-              <path
-                key={`out-${i}-${k}`}
-                className="highway__link highway__link--out"
-                d={curve(forkX, lane.y, box.l, box.y)}
-              />
-            ))}
-          </g>
-        );
-      })}
+      {/* 货车：沿连线从入口开到出口 */}
+      {trucks.map((t, i) => (
+        <g
+          key={`t-${i}`}
+          ref={(el) => {
+            truckRefs.current[i] = el;
+          }}
+          data-route={t.route}
+          data-phase={t.phase}
+          className="flow__truck"
+        >
+          <rect x={-4.5} y={-2.5} width={9} height={5} rx={1}
+                fill={geo.routes[t.route]?.color ?? "#4f8ef7"} />
+        </g>
+      ))}
     </svg>
   );
 }
 
-/** 出口 tag 太长时截断显示（节点 tag 形如 `node-n1d232c6b8c7a5004`）。 */
-function shortTag(t: string): string {
-  if (t.startsWith("node-")) return `节点 ${t.slice(5, 13)}…`;
-  return t;
+/** 一辆车走完全程需要的秒数（视觉节奏）。 */
+const TRAVEL_SECONDS = 7;
+
+function compact<T>(v: (T | null)[]): T[] {
+  return v.filter((x): x is T => x !== null);
+}
+
+function clampMid(x1: number, x2: number): number {
+  const lo = Math.min(x1, x2);
+  const hi = Math.max(x1, x2);
+  return Math.min(hi, Math.max(lo, (x1 + x2) / 2));
 }
 
 /**
- * 一条车道上的车。
+ * 把路线拼成**一条连续路径**：只有第一个节点用 `M`，其余都用 `C` / `L` 接上。
  *
- * * **数量**：按该入口的实测字节做对数映射，落在 5–15 之间。
- *   空车道也画几辆 —— 否则「在用但量小」和「根本不通」看起来一样。
- * * **颜色**：按出口类别的**全局份额**分配（蓝=节点、绿=直连、红=拦截）。
- *   每个非零类别至少一辆，这样「有没有被拦截」永远看得见。
- * * 这只表达「这条路上有多少货、大致都去哪儿」——**不是**「哪辆车去了哪条规则」，
- *   后者核心没有计数器，画出来就是编的。
+ * 这一点很关键：早先每段各写一个 `M`，于是路径里有三段互不相连的子路径，
+ * 而 `getPointAtLength` 是沿**一条**路径连续采样的 —— 货车会在段与段之间跳。
+ * （表现就是车停在车道两端不动、中间的路程被跳过。）
+ *
+ * 直线段也用三次贝塞尔表示（控制点取在两端，退化成直线），
+ * 这样整条路线是一条命令序列，长度与采样都可预期。
  */
-function Lane({ bytes, shares }: { bytes: number; shares: { kind: string; bytes: number }[] }) {
-  const count = vehicleCount(bytes);
-  const kinds = useMemo(() => allocateKinds(count, shares), [count, shares]);
-  const colorOf = (kind: string) => OUTBOUND_COLOR[kind] ?? "var(--accent)";
-
-  const [tick, setTick] = useState(0);
-  const raf = useRef<number | null>(null);
-  const start = useRef<number>(performance.now());
-
-  useEffect(() => {
-    const step = (now: number) => {
-      setTick((now - start.current) / 1000 / TRIP_SECONDS);
-      raf.current = requestAnimationFrame(step);
-    };
-    raf.current = requestAnimationFrame(step);
-    return () => {
-      if (raf.current !== null) cancelAnimationFrame(raf.current);
-    };
-  }, []);
-
-  if (count === 0) {
-    return (
-      <div className="lane">
-        <div className="lane__empty">这条路当前没有流量</div>
-      </div>
+function routeToD(segs: Seg[]): string {
+  if (segs.length === 0) return "";
+  const parts = [`M ${segs[0]!.x1.toFixed(1)} ${segs[0]!.y1.toFixed(1)}`];
+  for (const s of segs) {
+    const cx = s.kind === "line" ? s.x1 : (s.cx ?? (s.x1 + s.x2) / 2);
+    // 曲线的两个控制点：第一个贴着起点、第二个贴着终点，都取中间的 x
+    parts.push(
+      `C ${cx.toFixed(1)} ${s.y1.toFixed(1)}, ${cx.toFixed(1)} ${s.y2.toFixed(1)}, ${s.x2.toFixed(1)} ${s.y2.toFixed(1)}`,
     );
   }
-
-  return (
-    <div className="lane">
-      {kinds.map((kind, i) => {
-        // 每辆车速度略有差异，免得整排像一列火车一起动
-        const speed = 1 + ((i * 37) % 23) / 100;
-        const phase = (tick * speed + i / count) % 1;
-        return (
-          <span
-            key={i}
-            className="lane__truck"
-            style={{ left: `${(phase * 100).toFixed(2)}%`, background: colorOf(kind) }}
-            title={OUTBOUND_LABEL[kind] ?? kind}
-          />
-        );
-      })}
-    </div>
-  );
+  return parts.join(" ");
 }
 
-/** 出口类别 → 车道颜色。三色对应三种去向。 */
-const OUTBOUND_COLOR: Record<string, string> = {
-  node: "#4f8ef7",
-  direct: "#34d399",
-  block: "#f87171",
-};
-
-const OUTBOUND_LABEL: Record<string, string> = {
-  node: "经节点",
-  direct: "直连",
-  block: "已拦截",
-};
-
-/**
- * 车辆数：按字节做对数映射到 [MIN_VEHICLES, MAX_VEHICLES]。
- *
- * 用对数而不是线性：流量能跨好几个数量级（几 MB 到几十 GB），
- * 线性映射会让小流量永远只有 5 辆、大流量一直顶到 15 辆，中间全糊在一起。
- */
-function vehicleCount(bytes: number): number {
-  if (bytes <= 0) return MIN_VEHICLES;
-  const lo = Math.log10(VEHICLE_SCALE_MIN_BYTES);
-  const hi = Math.log10(VEHICLE_SCALE_MAX_BYTES);
-  const v = Math.log10(bytes);
-  const t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
-  return Math.round(MIN_VEHICLES + t * (MAX_VEHICLES - MIN_VEHICLES));
-}
-
-/**
- * 把 `count` 辆车按份额分配给各去向。
- *
- * 规则：每个非零去向先保底 1 辆（否则「有拦截但份额极小」时会一辆都不显示，
- * 用户会以为没拦截），剩下的按字节比例分。
- */
-function allocateKinds(count: number, shares: { kind: string; bytes: number }[]): string[] {
-  if (shares.length === 0) {
-    // 没有出口数据（核心没在跑）：不假装知道去向，用中性色
-    return Array.from({ length: count }, () => "node");
-  }
-  const total = shares.reduce((a, s) => a + s.bytes, 0);
-  const out: string[] = [];
-  let used = 0;
-  for (const s of shares) {
-    const quota = Math.max(1, Math.round((s.bytes / total) * count));
-    const take = Math.min(quota, count - used);
-    for (let i = 0; i < take; i++) out.push(s.kind);
-    used += take;
-    if (used >= count) break;
-  }
-  // 份额取整可能没分满，用占比最大的补齐
-  const biggest = shares.reduce((a, b) => (b.bytes > a.bytes ? b : a)).kind;
-  while (out.length < count) out.push(biggest);
-  return out.slice(0, count);
+/** 第 idx 条路线属于哪条车道（与路由分配保持一致）。 */
+function routeLane(idx: number, routeCount: number, laneCount: number): number {
+  if (laneCount <= 1) return 0;
+  const per = Math.ceil(routeCount / laneCount);
+  return Math.min(laneCount - 1, Math.floor(idx / Math.max(1, per)));
 }
 
 /**
