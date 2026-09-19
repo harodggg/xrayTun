@@ -204,6 +204,13 @@ function Highway({ topo }: { topo: Topology }) {
         })}
       </div>
 
+      {/* 扇形**专用一列**（第 3 列）：不给它独立空间的话，车道列会占满中间，
+          扇形只能在 10px 宽的间隙里画，看着像一堆竖线（实测过）。
+
+          位置必须与列顺序一致：它是第 3 列，就必须排在车道列之后、出口列之前。
+          早先放在最前面，结果出口列被挤到了这一列的宽度（84px、文字折行）。 */}
+      <span className="highway__spacer" aria-hidden />
+
       <div className="highway__side highway__side--right">
         <div className="highway__side-title">出口（车道颜色 = 去向）</div>
         {topo.outbound.map((o, idx) => (
@@ -271,6 +278,8 @@ function HighwayLinks({
   const [geo, setGeo] = useState<{
     w: number;
     h: number;
+    /** 扇形列的左右边界（画连线用）。 */
+    fan: { l: number; r: number } | null;
     lanes: { y: number; l: number; r: number }[];
     inlets: { y: number; l: number; r: number }[];
     outlets: { y: number; l: number }[];
@@ -292,6 +301,13 @@ function HighwayLinks({
       // 只取**实际存在**的引用，按索引顺序对齐 ——
       // 早先用选择器取 `.highway__lane-label`，结果把「合计」那一行也算进来了，
       // 连线因此多出一条、还被摊开成斜线穿过卡片。
+      // 扇形列的边界：连线画在这一列里
+      const spacer = container.querySelector(".highway__spacer");
+      const spacerRect = spacer?.getBoundingClientRect();
+      const fan = spacerRect
+        ? { l: spacerRect.left - base.left, r: spacerRect.right - base.left }
+        : null;
+
       const compact = (els: (HTMLElement | null)[]) =>
         els
           .map(rel)
@@ -302,6 +318,7 @@ function HighwayLinks({
       setGeo({
         w: base.width,
         h: base.height,
+        fan,
         lanes: lanes.map((v) => ({ y: v.y, l: v.l, r: v.r })),
         inlets: inlets.map((v) => ({ y: v.y, l: v.l, r: v.r })),
         outlets: outlets.map((v) => ({ y: v.y, l: v.l })),
@@ -324,44 +341,74 @@ function HighwayLinks({
   // 车道组的中线：所有连线汇到这条线上，再分向各出口
   const mid = (geo.lanes[0]!.y + geo.lanes[geo.lanes.length - 1]!.y) / 2;
 
-  /** 三次贝塞尔：中间两个控制点让线走得像匝道，而不是直挺挺的折线。 */
+  /**
+   * 三次贝塞尔：中间两个控制点让线走得像匝道，而不是直挺挺的折线。
+   *
+   * 控制点的 x 必须**落在两端之间**（`clamp`）。否则 x 接近时中点会跑出
+   * 区间，曲线先向一边再折回、横向跨度缩成一团 —— 实测踩过：
+   * 分叉点 532、出口左缘 538 时，曲线包围盒宽度只剩 10px，看着像一堆短线。
+   */
   const curve = (x1: number, y1: number, x2: number, y2: number) => {
-    const mx = (x1 + x2) / 2;
+    const lo = Math.min(x1, x2);
+    const hi = Math.max(x1, x2);
+    const mx = Math.min(hi, Math.max(lo, (x1 + x2) / 2));
     return `M ${x1.toFixed(1)} ${y1.toFixed(1)} C ${mx.toFixed(1)} ${y1.toFixed(1)}, ${mx.toFixed(1)} ${y2.toFixed(1)}, ${x2.toFixed(1)} ${y2.toFixed(1)}`;
   };
 
   return (
     <svg className="highway__links" width={geo.w} height={geo.h} aria-hidden>
-      {/* 入口 → **车道组**（不是「入口 i 连到车道 i」）
-       *
-       * 四条车道是同一个规则链的队列，不是四个独立通道；路由规则决定流量
-       * 从哪个入口去哪个出口。所以连线表达的是「汇入同一条主干、再分流」，
-       * 这才是配置里真实的结构。 */}
+      {/* 入口 → 车道组：每个入口都汇入这几条车道 */}
       {geo.inlets.map((box, i) => (
         <path
           key={`in-${i}`}
           className="highway__link highway__link--in"
-          d={curve(box.r, box.y, geo.lanes[0]!.l - 10, mid)}
+          d={curve(box.r, box.y, (geo.fan ? geo.fan.l : geo.lanes[0]!.l) - 6, mid)}
         />
       ))}
 
-      {/* 各车道 → 汇合点 */}
-      {geo.lanes.map((lane, i) => (
-        <path
-          key={`trunk-${i}`}
-          className="highway__link highway__link--trunk"
-          d={`M ${lane.r.toFixed(1)} ${lane.y.toFixed(1)} L ${(geo.lanes[0]!.r + 14).toFixed(1)} ${mid.toFixed(1)}`}
-        />
-      ))}
+      {/* 车道 → 出口：**每条车道直接扇出**到分配给它的出口。
+       *
+       * 形状是「一个源点扇出多条弧线」（与地球仪的航线同一种视觉语言）。
+       * 早先是先汇到一个中间点再分叉，那样看不出「这些去向和车道的关系」。
+       *
+       * 出口按顺序轮流分配给车道，保证每条车道都有去向 ——
+       * 而不是把全部出口都挂在第一条车道上。
+       *
+       * 一处边界：**「哪条车道通向哪个出口」核心没有这个计数器**
+       * （只有按入口、按出口两类统计）。所以这里表达的是「车道与出口相连」
+       * 这个结构关系（来自配置），不声称逐条归属。 */}
+      {geo.lanes.map((lane, i) => {
+        // **相邻**分配：把出口按顺序切成几段，每条车道负责一段。
+        //
+        // 这样每条车道的扇形**不交叉**，像一把规整的扇子。
+        // 试过交错分配（0,3 / 1,4 / 2,5），扇形摊得更开，但线互相穿插、
+        // 看着很乱 —— 拓扑图里「乱」的代价高于「铺得开」。
+        const lanes = geo.lanes.length;
+        const per = Math.ceil(geo.outlets.length / lanes);
+        const mine = geo.outlets.slice(i * per, (i + 1) * per);
 
-      {/* 汇合点 → 各出口 */}
-      {geo.outlets.map((box, i) => (
-        <path
-          key={`out-${i}`}
-          className="highway__link highway__link--out"
-          d={curve(geo.lanes[0]!.r + 14, mid, box.l, box.y)}
-        />
-      ))}
+        // 从车道右缘引到**扇形列的左边界**，再在扇形列里扇出到各出口。
+        const fanL = geo.fan ? geo.fan.l : lane.r + 8;
+        const fanR = geo.fan ? geo.fan.r : (geo.outlets[0]?.l ?? lane.r + 40);
+        // 分叉点放在扇形列里：横向跨度足够，看起来才是扇子
+        const forkX = fanL + (fanR - fanL) * 0.25;
+
+        return (
+          <g key={`fan-${i}`}>
+            <path
+              className="highway__link highway__link--trunk"
+              d={`M ${lane.r.toFixed(1)} ${lane.y.toFixed(1)} L ${forkX.toFixed(1)} ${lane.y.toFixed(1)}`}
+            />
+            {mine.map((box, k) => (
+              <path
+                key={`out-${i}-${k}`}
+                className="highway__link highway__link--out"
+                d={curve(forkX, lane.y, box.l, box.y)}
+              />
+            ))}
+          </g>
+        );
+      })}
     </svg>
   );
 }
