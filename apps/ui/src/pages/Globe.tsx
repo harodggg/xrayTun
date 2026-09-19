@@ -186,17 +186,125 @@ function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
  *
  * `1` 是整球可见的基准（球半径 = 画布短边的 0.42）。
  *
- * 上限 8：可以贴近看到城市级细节。代价要说清 —— 大陆轮廓是 2° 分辨率的
- * 位图（约 200 公里一格），放大到这个程度时海岸线会明显发虚；
- * 它给的是**方位感**，不是地图精度。
+ * **上限 40**（2026-09 从 8 提到 40）。为什么必须这么高：广州↔香港只有
+ * **1.163°** 角距，正交投影下两点的屏幕距离是 `2R·sin(θ/2)`，`R = 0.42·720·zoom`；
+ * zoom=8 时只有 **38 CSS px**，两个标记点、航线、飞机全糊成一团。要拉开到
+ * 约 200px 需要 zoom ≈ 41.9，所以取 40。
+ *
+ * **代价必须说清**（也写进了 `docs/ui/globe/README.md`）：大陆轮廓是 2° 分辨率
+ * 的海陆位图（约 200 公里一格），放大到 30–40× 时海岸线会明显发虚 —— 它给的是
+ * 方位感，不是地图精度。提高位图分辨率（1° 约 16KB）是后续可选项，本轮没做。
  *
  * 下限 0.55：跨半球时能把两端一起收进画面。
  */
 export const MIN_ZOOM = 0.55;
-export const MAX_ZOOM = 8;
+export const MAX_ZOOM = 40;
+
+/**
+ * 近处航线默认要拉开到的目标角距（弧度）：0.7 rad ≈ 40°。
+ *
+ * 含义是「两端之间的角距在默认视角里大约占 40°」——换算到 720px 画布上，
+ * 两点的屏幕距离约 200px，看得出是从哪飞到哪，而不是一个点。
+ */
+const TARGET_SPAN_RAD = 0.7;
 
 export function clampZoom(z: number): number {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+}
+
+/**
+ * 默认缩放：**既保证装得下，也保证两端分得开**。
+ *
+ * 正交投影下两点夹角 θ 的屏幕距离是 `2R·sin(θ/2)`。这里有两个相反的诉求：
+ *
+ * * **装得下**（上限）：跨半球时两端要同时进画面 —— 这是老逻辑，
+ *   `sin(θ/2)` 超过 0.7 就得缩小，且不超过 1。
+ * * **分得开**（下限）：近距离航线（广州↔香港 1.163°）在老逻辑下恒为 1，
+ *   屏幕上只有 **4.9 CSS px** —— 两个标记、航线、飞机全叠在一起，
+ *   用户说的「放大倍数不够」就是这个。所以要按「把 θ 拉到 TARGET_SPAN_RAD」
+ *   来放大：`zoom = TARGET_SPAN_RAD / θ`。
+ *
+ * 两者取「需要更大的那个」：近处用放大值，远处用缩小值，交接处（θ≈40°）
+ * 恰好都是 1，所以是连续的。两点重合时没有航线可言，保持整球可见。
+ */
+export function fitZoom(data: GlobeData): number {
+  const r = data.route;
+  if (!r) return 1;
+  const a = toVec(r.from.lat, r.from.lon);
+  const b = toVec(r.to.lat, r.to.lon);
+  const theta = angularDistance(a, b);
+  if (!(theta > 1e-6)) return 1; // 两点重合：不放大（也避免除以零）
+  // 装得下所需（≤1）
+  const fit = Math.min(1, 0.7 / Math.sin(theta / 2));
+  // 分得开所需（>1 表示要放大）
+  const want = TARGET_SPAN_RAD / theta;
+  return clampZoom(want > 1 ? want : fit);
+}
+
+/**
+ * 两点在画布上的屏幕距离（px）—— 正交投影 + 视角对准中点时的几何。
+ *
+ * `minSide` 是画布短边（本页固定 720）。导出是为了能测：这是「用户到底能不能
+ * 看见这条航线」的直接判据，改 `fitZoom` 时必须能立即验证它还在 200px 量级。
+ */
+export function separationCanvasPx(zoom: number, thetaRad: number, minSide = 720): number {
+  return 2 * minSide * 0.42 * zoom * Math.sin(thetaRad / 2);
+}
+
+/**
+ * 把视角对准某个点。
+ *
+ * **必须是严格对准**：正交投影里，要让 (lat, lon) 落在画布中心，得令
+ * `rotLon = -lon`、`rotLat = +lat`（先绕 Y 把经度转掉，再绕 X 把纬度转平）。
+ * 早先写的是 `lat * 0.6`，于是被对准的点停在中心**上方**约 `0.4·lat·R` 的地方 ——
+ * zoom=1 时只偏 50px 看不出来，但偏移量随 R 线性增长：zoom=8 时整个航线被推出
+ * 画布（实测两个标记点在画布上**完全找不到**，截图只剩一片海岸）。
+ *
+ * 导出是为了能测这条不变量（对准后该点必须落在画布中心）。
+ */
+export function viewForFocus(
+  focus: { lat: number; lon: number },
+  zoom: number,
+): { lon: number; lat: number; zoom: number } {
+  return { lon: -focus.lon * DEG, lat: focus.lat * DEG, zoom };
+}
+
+/**
+ * 初始/复位视角：对准哪里、缩放多少、**是否允许自转**。
+ *
+ * # 为什么放大时必须关闭自转
+ *
+ * 整球可见时自转只是让球慢慢转动，观感好。但放大之后视野张开角很小，
+ * 自转会把整个视野扫走 —— 实测：zoom=34.5（R=10424）时自转 13.5° 让两点
+ * 横向偏出 **2500px**，整屏空白、标记与航线全在画布外。
+ *
+ * 判据是两点跨过的角度：跨得越小、需要放得越大、自转的破坏越强。
+ * `ROTATE_MAX_SPAN_RAD` 约 3.4°，对应 zoom≈11。
+ */
+export const ROTATE_MAX_SPAN_RAD = 0.06;
+
+export function viewFor(data: GlobeData): {
+  lat: number;
+  lon: number;
+  zoom: number;
+  auto: boolean;
+} | null {
+  const focus = focusPoint(data);
+  if (!focus) return null;
+  const r = data.route;
+  // 没有航线时当作「看整球」，此时自转无妨
+  const span = r
+    ? angularDistance(toVec(r.from.lat, r.from.lon), toVec(r.to.lat, r.to.lon))
+    : Math.PI;
+  return {
+    // 居中：`rotX(+φ)` 把焦点转到正前方（数值验证 (0,0,1)）；经度取负。
+    // 早先纬度乘了 0.6，zoom=1 时只偏 48px 看不出，放大到 34.5× 后焦点
+    // 被推到画布上方 1287px —— 整屏空白。**不要乘系数。**
+    lat: focus.lat * DEG,
+    lon: -focus.lon * DEG,
+    zoom: fitZoom(data),
+    auto: span >= ROTATE_MAX_SPAN_RAD,
+  };
 }
 
 /**
@@ -217,34 +325,6 @@ export function focusPoint(data: GlobeData): { lat: number; lon: number } | null
   const p = r ? r.from : data.origin;
   return p ? { lat: p.lat, lon: p.lon } : null;
 }
-
-/**
- * 默认缩放：**先看全整个地球，只有航线跨得太远时才缩小**。
- *
- * 球面正交投影下，两点夹角为 θ 时屏幕上的间距是 `2R·sin(θ/2)`。要让两端都
- * 落在画布内，需要 `sin(θ/2)` 不超过约 0.7；据此算出「装得下」所需的缩放，
- * 但**不超过 1** —— 缩放 1 就是整球可见，正是地球仪打开时该有的样子。
- *
- * 所以：
- * * 近距离（本机与节点在同一片区域，例如广州↔香港 129 公里）：返回 **1**，
- *   看到整个地球，两端仍清楚标出；
- * * 跨半球（例如广州↔纽约）：返回小于 1 的值，缩小到两端都进画面。
- *
- * 这里刻意**不放大**：早先的公式会把 129 公里的近邻航线放大到接近上限，
- * 结果球占满画布、只剩一片海岸 —— 反而看不出「从哪飞到哪」。近距离不需要
- * 把那 1° 撑满屏幕；要看细节可以自己滚轮放大。
- */
-export function fitZoom(data: GlobeData): number {
-  const r = data.route;
-  if (!r) return 1;
-  const a = toVec(r.from.lat, r.from.lon);
-  const b = toVec(r.to.lat, r.to.lon);
-  const theta = angularDistance(a, b);
-  const half = Math.max(theta / 2, 1e-4);
-  // 0.7 是「两端各留约 30% 余量」的目标；min(1, …) 保证默认不放大
-  return clampZoom(Math.min(1, 0.7 / Math.sin(half)));
-}
-
 /** 两点大圆距离（公里）。 */
 function greatCircleKm(a: GeoLocation, b: GeoLocation): number {
   const R = 6371;
@@ -302,15 +382,14 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
   // 为什么是「最大」而不是固定的本机：用户关心的是流量去了哪儿。
   // 两地相距很远时（跨半球）需要缩小才能同时看到两端 —— 那个距离就是
   // 「最合适的观看位置」，而不是固定一个缩放值。
-  useEffect(() => {
-    if (!data) return;
-    const focus = focusPoint(data);
-    if (!focus) return;
-    view.current.lon = -focus.lon * DEG;
-    view.current.lat = focus.lat * DEG * 0.6;
-    view.current.zoom = fitZoom(data);
-    view.current.auto = true;
-  }, [data]);
+useEffect(() => {
+      const v = data ? viewFor(data) : null;
+      if (!v) return;
+      view.current.lon = v.lon;
+      view.current.lat = v.lat;
+      view.current.zoom = v.zoom;
+      view.current.auto = v.auto;
+    }, [data]);
 
   const land = useMemo(() => decodeLandMaskFlat(LAND_MASK_HEX), []);
 
@@ -401,19 +480,22 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
           className="globe__tool globe__tool--wide"
           title="复位到默认视角"
           onClick={() => {
-            const focus = data ? focusPoint(data) : null;
-            if (focus) {
-              view.current.lon = -focus.lon * DEG;
-              view.current.lat = focus.lat * DEG * 0.6;
+            const v = data ? viewFor(data) : null;
+            if (v) {
+              view.current.lon = v.lon;
+              view.current.lat = v.lat;
+              view.current.zoom = v.zoom;
+              view.current.auto = v.auto;
+            } else {
+              view.current.zoom = 1;
+              view.current.auto = true;
             }
-            view.current.zoom = data ? fitZoom(data) : 1;
-            view.current.auto = true;
           }}
         >
           复位
         </button>
       </div>
-      <div className="globe__hint">滚轮缩放（最多 8×）· 拖动旋转</div>
+      <div className="globe__hint">{`滚轮缩放（最多 ${MAX_ZOOM}×）· 拖动旋转`}</div>
     </div>
   );
 }
