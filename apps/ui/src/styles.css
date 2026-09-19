@@ -2125,3 +2125,10 @@ input[type="checkbox"] {
 .globe__tool--wide {
   font-size: 11.5px;
 }
+
+/* 位置数据源不一致时的提示（IP 定位本来就只是估算） */
+.fact__warn {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--warn);
+}

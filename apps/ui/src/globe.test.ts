@@ -11,7 +11,17 @@ import { MAX_ZOOM, MIN_ZOOM, clampZoom, fitZoom, focusPoint } from "./pages/Glob
 import type { GlobeData, GeoLocation } from "./types";
 
 function loc(lat: number, lon: number): GeoLocation {
-  return { ip: "1.2.3.4", country: "X", city: "Y", lat, lon, isp: "", source: "test" };
+  return {
+    ip: "1.2.3.4",
+    country: "X",
+    city: "Y",
+    lat,
+    lon,
+    isp: "",
+    source: "test",
+    consistent: true,
+    sources: ["test"],
+  };
 }
 
 function data(from: GeoLocation, to: GeoLocation, bytes: number): GlobeData {
@@ -27,6 +37,7 @@ describe("地球仪视角", () => {
     // 引用常量而不是写死数值：上限调整过两次，硬编码会让测试无意义地红
     expect(clampZoom(0.01)).toBe(MIN_ZOOM);
     expect(clampZoom(99)).toBe(MAX_ZOOM);
+    expect(MAX_ZOOM).toBeGreaterThanOrEqual(4); // 用户要求能放到城市级
     expect(clampZoom(1.4)).toBeCloseTo(1.4);
   });
 

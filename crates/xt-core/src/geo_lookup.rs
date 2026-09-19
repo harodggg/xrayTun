@@ -1,27 +1,22 @@
-//! IP → 地理位置（给地球仪用）。
+//! IP → 地理位置的**数据形状与合并逻辑**（不含网络请求）。
 //!
-//! # 数据来自外部，这一点必须在界面上说清
+//! # 为什么这里没有 HTTP 代码
 //!
-//! 项目自带的 `geoip.dat` **只有国别与网段，没有经纬度**（实测确认：整个文件里
-//! 没有任何 8 字节 double 字段）。要在地球上把位置点画出来，就必须另找坐标来源。
+//! 位置查询本来放在这个 crate 里、用自写 socket 发请求。但换成 https 需要 TLS，
+//! 而项目已有既定做法：**用系统的 `/usr/bin/curl`**（零依赖、走系统信任链、
+//! 支持 `--interface` 绑网卡），见 `commands/nodes.rs` 的订阅拉取。
 //!
-//! 当前用的是 `ip-api.com`（实测可用，精度到城市，并带 `lang=zh-CN` 让地名
-//! 用中文返回）。代价是**被查的 IP 会发给第三方** —— 对自建节点来说这等于把
-//! 「你在用哪台服务器」告诉对方。所以：
+//! 所以这里只留**纯逻辑**：响应形状、解析、双源合并。网络请求在
+//! `apps/desktop/src/commands/globe.rs`（那边有异步运行时与 curl 调用惯例）。
+//! 好处是这些判定不必发网络请求就能测。
 //!
-//! * 结果按 IP 缓存，同一个 IP 只查一次；
-//! * 界面上明确标注「位置来自 ip-api.com」，不假装是本地算出来的。
+//! # 关于「位置准不准」
 //!
-//! # 必须绕过隧道
-//!
-//! 隧道开着时直接发出请求会**从节点出去**，那样查到的会是「节点自己的位置」
-//! 而不是「被查 IP 的位置」—— 结果会静默地错，而且错得很像对的。
-//! 所以这里把出口 socket 绑到物理网卡（与 `xray/probe.rs` 的 RTT 探测同一手法）。
-
-use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+//! IP 地理定位是**尽力而为**：同一个 IP 不同服务可能给出不同城市，
+//! 运营商大内网（CGNAT）与省级骨干出口会让注册地偏离实际所在城市。
+//! 实测过一个反例：同一台机器的公网 IP 在 `ip-api.com` 上被判到广州、
+//! 而 `ipwho.is` 与 `ipinfo.io` 都指向大理。所以这里**同时问两个源**，
+//! 坐标不一致时把 `consistent` 标为 false，由界面如实说明。
 
 use serde::{Deserialize, Serialize};
 
@@ -35,74 +30,133 @@ pub struct GeoLocation {
     pub lon: f64,
     #[serde(default)]
     pub isp: String,
-    /// 数据来源，界面据此如实标注。
+    /// 坐标来源，界面据此如实标注。
     pub source: String,
+    /// 多个数据源对**同一个 IP** 的判定是否一致。
+    #[serde(default)]
+    pub consistent: bool,
+    /// 各数据源的判定摘要，便于界面展示分歧。
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
-/// ip-api.com 的响应（字段少，只取我们要的）。
-#[derive(Debug, Deserialize)]
-struct IpApiResponse {
-    status: String,
-    #[serde(default)]
-    country: String,
-    #[serde(default)]
-    city: String,
-    #[serde(default)]
-    lat: f64,
-    #[serde(default)]
-    lon: f64,
-    #[serde(default)]
-    isp: String,
-    #[serde(default)]
-    message: String,
-}
-
-const HOST: &str = "ip-api.com";
-const TIMEOUT: Duration = Duration::from_secs(6);
-
-/// 用物理网卡直连查一次。
+/// 两个源的地理位置相差超过这个度数就认为「不一致」。
 ///
-/// `interface` 为 `None` 时按系统默认路由出去（不推荐：隧道开着会查错）。
-pub fn lookup(ip: &str, interface: Option<&str>) -> Result<GeoLocation, String> {
-    // `lang=zh-CN`：地名用中文返回（实测支持，例如 香港 / 广州市）。
-    // 界面要显示「香港」「大理」这类具体地点，英文名对中文用户不友好。
-    let path = format!(
-        "/json/{ip}?fields=status,message,country,city,lat,lon,isp&lang=zh-CN"
-    );
-    let body = http_get(HOST, 80, &path, interface)?;
-    let parsed: IpApiResponse =
-        serde_json::from_str(&body).map_err(|e| format!("解析位置响应失败: {e}"))?;
-    if parsed.status != "success" {
-        return Err(if parsed.message.is_empty() {
-            "位置查询失败".into()
-        } else {
-            parsed.message
-        });
+/// 0.5° 约 55 公里：城市级判定的正常差异（不同服务的城市中心点不同）应当
+/// 小于它，而「判到另一个城市」通常远大于它。
+pub const CONSISTENT_TOLERANCE_DEG: f64 = 0.5;
+
+/// 合并两个数据源的判定。
+///
+/// * 坐标以 `primary`（ipwho.is）为准 —— 实测它对本机公网 IP 的判定与
+///   `ipinfo.io` 一致地指向用户实际所在的大理，而 `ip-api.com` 免费版
+///   对省级骨干 IP 的区级判定偏差更大；
+/// * **中文地名用 `secondary`（ip-api.com）** —— 它支持 `lang=zh-CN`，
+///   返回「大理」而不是 `Dali Baizu Zizhizhou`；
+/// * 两者坐标相差超过 [`CONSISTENT_TOLERANCE_DEG`] 时 `consistent = false`。
+pub fn merge_sources(
+    _ip: &str,
+    primary: Option<GeoLocation>,
+    secondary: Option<GeoLocation>,
+) -> Option<GeoLocation> {
+    match (primary, secondary) {
+        (None, None) => None,
+        (Some(mut a), None) => {
+            a.consistent = true;
+            a.sources = vec![format!("{}: {}", a.source, round2(a.lat))];
+            Some(a)
+        }
+        (None, Some(mut b)) => {
+            b.consistent = true;
+            b.sources = vec![format!("{}: {}", b.source, round2(b.lat))];
+            Some(b)
+        }
+        (Some(mut a), Some(b)) => {
+            let far = (a.lat - b.lat).abs() > CONSISTENT_TOLERANCE_DEG
+                || (a.lon - b.lon).abs() > CONSISTENT_TOLERANCE_DEG;
+            // 中文地名优先（判据是「含非 ASCII 字符」，与具体服务无关）
+            if !b.city.is_ascii() {
+                a.city = b.city.clone();
+            }
+            if !b.country.is_empty() {
+                a.country = b.country.clone();
+            }
+            if !b.isp.is_empty() {
+                a.isp = b.isp.clone();
+            }
+            a.consistent = !far;
+            a.sources = vec![
+                format!("{}: {}", a.source, round2(a.lat)),
+                format!("{}: {}", b.source, round2(b.lat)),
+            ];
+            Some(a)
+        }
     }
-    Ok(GeoLocation {
-        ip: ip.to_string(),
-        country: parsed.country,
-        city: parsed.city,
-        lat: parsed.lat,
-        lon: parsed.lon,
-        isp: parsed.isp,
-        source: "ip-api.com".into(),
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// 解析 `ipwho.is` 的响应。
+pub fn parse_who(body: &str, fallback_ip: &str) -> Option<GeoLocation> {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        success: bool,
+        #[serde(default)]
+        ip: String,
+        #[serde(default)]
+        city: String,
+        #[serde(default)]
+        country: String,
+        #[serde(default)]
+        latitude: f64,
+        #[serde(default)]
+        longitude: f64,
+        #[serde(default)]
+        connection: Option<WhoConn>,
+    }
+    #[derive(Deserialize)]
+    struct WhoConn {
+        #[serde(default)]
+        isp: String,
+        #[serde(default)]
+        org: String,
+    }
+    let p: Who = serde_json::from_str(body).ok()?;
+    if !p.success {
+        return None;
+    }
+    let isp = p.connection.map_or_else(String::new, |c| {
+        if c.isp.is_empty() {
+            c.org
+        } else {
+            c.isp
+        }
+    });
+    Some(GeoLocation {
+        ip: if p.ip.is_empty() {
+            fallback_ip.to_string()
+        } else {
+            p.ip
+        },
+        country: p.country,
+        city: p.city,
+        lat: p.latitude,
+        lon: p.longitude,
+        isp,
+        source: "ipwho.is".into(),
+        consistent: true,
+        sources: Vec::new(),
     })
 }
 
-/// 查**本机**的公网出口位置（绑物理网卡，避免查到节点的位置）。
-pub fn lookup_self(interface: Option<&str>) -> Result<GeoLocation, String> {
-    let body = http_get(
-        HOST,
-        80,
-        "/json/?fields=status,message,country,city,lat,lon,isp,query&lang=zh-CN",
-        interface,
-    )?;
+/// 解析 `ip-api.com` 的响应（`lang=zh-CN`，所以地名是中文）。
+pub fn parse_api(body: &str, fallback_ip: &str) -> Option<GeoLocation> {
     #[derive(Deserialize)]
-    struct WithQuery {
+    struct Api {
         status: String,
-        #[serde(default)]
-        message: String,
         #[serde(default)]
         query: String,
         #[serde(default)]
@@ -116,217 +170,37 @@ pub fn lookup_self(interface: Option<&str>) -> Result<GeoLocation, String> {
         #[serde(default)]
         isp: String,
     }
-    let p: WithQuery = serde_json::from_str(&body).map_err(|e| format!("解析响应失败: {e}"))?;
+    let p: Api = serde_json::from_str(body).ok()?;
     if p.status != "success" {
-        return Err(if p.message.is_empty() { "查询失败".into() } else { p.message });
+        return None;
     }
-    Ok(GeoLocation {
-        ip: p.query,
+    Some(GeoLocation {
+        ip: if p.query.is_empty() {
+            fallback_ip.to_string()
+        } else {
+            p.query
+        },
         country: p.country,
         city: p.city,
         lat: p.lat,
         lon: p.lon,
         isp: p.isp,
         source: "ip-api.com".into(),
+        consistent: true,
+        sources: Vec::new(),
     })
 }
 
-/// 极简 HTTP/1.1 GET。只用于这一处查询：响应是几十字节的 JSON，
-/// 引一个 HTTP 客户端依赖不划算（而且不涉及凭据，走明文没有额外暴露）。
-fn http_get(
-    host: &str,
-    port: u16,
-    path: &str,
-    interface: Option<&str>,
-) -> Result<String, String> {
-    let addr = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("解析 {host} 失败: {e}"))?
-        .next()
-        .ok_or_else(|| format!("{host} 没有可用地址"))?;
-
-    let mut socket = connect_bound(addr, interface)?;
-    socket
-        .set_read_timeout(Some(TIMEOUT))
-        .and_then(|_| socket.set_write_timeout(Some(TIMEOUT)))
-        .map_err(|e| format!("设置超时失败: {e}"))?;
-
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
-    );
-    socket
-        .write_all(req.as_bytes())
-        .map_err(|e| format!("发送请求失败: {e}"))?;
-
-    let mut raw = Vec::new();
-    socket
-        .read_to_end(&mut raw)
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| "响应格式异常".to_string())?;
-    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
-        return Err(format!("查询返回非 200：{}", head.lines().next().unwrap_or("")));
-    }
-    Ok(body.trim().to_string())
-}
-
-/// 建一个已连接、且（可选）绑定到指定网卡的 TCP socket。
+/// 位置缓存：同一个 IP 在一次查询内只查一次。
 ///
-/// 走 raw socket 而不是 `TcpStream::connect`：`IP_BOUND_IF` 必须在 `connect`
-/// **之前**设置，而标准库没有暴露「建 socket → 设置选项 → 连接」这条路径。
-fn connect_bound(addr: SocketAddr, interface: Option<&str>) -> Result<std::net::TcpStream, String> {
-    use std::os::unix::io::FromRawFd;
-
-    let family = if addr.is_ipv4() { libc::AF_INET } else { libc::AF_INET6 };
-    // SAFETY: socket(2) 返回 fd 或 -1，下面立刻检查
-    let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err("创建 socket 失败".into());
-    }
-    // SAFETY: fd 是刚由 socket(2) 新建的，所有权从此交给 stream
-    let stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-
-    if let Some(iface) = interface {
-        let cname = std::ffi::CString::new(iface).map_err(|_| "网卡名含 NUL".to_string())?;
-        // SAFETY: if_nametoindex 只读这个 C 字符串
-        let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
-        if index == 0 {
-            return Err(format!("找不到网卡 {iface}"));
-        }
-        // SAFETY: level/optname 与「4 字节的接口索引」这个长度完全对应
-        let rc = unsafe {
-            libc::setsockopt(
-                std::os::unix::io::AsRawFd::as_raw_fd(&stream),
-                libc::IPPROTO_IP,
-                libc::IP_BOUND_IF,
-                &index as *const u32 as *const libc::c_void,
-                std::mem::size_of::<u32>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            return Err(format!("绑定网卡 {iface} 失败"));
-        }
-    }
-
-    // connect：非阻塞 + poll 超时，避免系统默认的漫长等待
-    stream
-        .set_nonblocking(true)
-        .map_err(|e| format!("设置非阻塞失败: {e}"))?;
-    // 在同一作用域内构造 sockaddr 并借用它 —— 不堆分配、不泄漏。
-    let sa = SockAddr::new(addr);
-    let rc = {
-        // SAFETY: `sa` 覆盖本次调用的生命周期；指针与长度都来自同一个联合体
-        unsafe {
-            libc::connect(
-                std::os::unix::io::AsRawFd::as_raw_fd(&stream),
-                sa.as_ptr(),
-                sa.len(),
-            )
-        }
-    };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        let in_progress = err.raw_os_error() == Some(libc::EINPROGRESS);
-        if !in_progress {
-            return Err(format!("连接 {addr} 失败: {err}"));
-        }
-        let mut pfd = libc::pollfd {
-            fd: std::os::unix::io::AsRawFd::as_raw_fd(&stream),
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        // SAFETY: pfd 是合法且存活的栈上结构，长度 1
-        let n = unsafe { libc::poll(&mut pfd, 1, TIMEOUT.as_millis() as libc::c_int) };
-        if n <= 0 {
-            return Err(format!("连接 {addr} 超时"));
-        }
-    }
-    // 回到阻塞模式：后面的 read/write 用标准库的超时语义
-    stream
-        .set_nonblocking(false)
-        .map_err(|e| format!("恢复阻塞失败: {e}"))?;
-    Ok(stream)
-}
-
-/// 栈上的 `sockaddr` 存储：按地址族存 v4 或 v6，并给出指针与长度。
+/// 两层理由：外部服务有限流，而且每多查一次就多一次「把 IP 发给第三方」。
 ///
-/// 两个实现细节是刻意选的：
-///
-/// * 用联合体而不是 `Box::into_raw` —— 后者要靠「永不释放」来延长生命周期，
-///   那是有意的内存泄漏；
-/// * **长度单独存一个字段**，而不是事后从结构里读。早先读的是
-///   `sockaddr_in6.sin6_len`（两族里较大的那个），那是取巧：一旦两个结构
-///   的大小关系变化就会静默传错长度（系统调用会以 EINVAL 失败，
-///   表现成「查询偶尔失败」）。长度是构造时就知道的事实，直接存下来。
-#[repr(C)]
-union SockAddrStorage {
-    v4: std::mem::ManuallyDrop<libc::sockaddr_in>,
-    v6: std::mem::ManuallyDrop<libc::sockaddr_in6>,
-    // 保证联合体足够大以容纳两者（sockaddr_in 16 / sockaddr_in6 28）
-    _size: [u8; 28],
-}
-
-struct SockAddr {
-    storage: SockAddrStorage,
-    len: libc::socklen_t,
-}
-
-impl SockAddr {
-    fn new(addr: SocketAddr) -> Self {
-        match addr {
-            SocketAddr::V4(v4) => Self {
-                storage: SockAddrStorage {
-                    v4: std::mem::ManuallyDrop::new(libc::sockaddr_in {
-                        sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-                        sin_family: libc::AF_INET as u8,
-                        sin_port: v4.port().to_be(),
-                        sin_addr: libc::in_addr {
-                            // `s_addr` 要求网络字节序；`octets()` 已经是网络序
-                            s_addr: u32::from_ne_bytes(v4.ip().octets()),
-                        },
-                        sin_zero: [0; 8],
-                    }),
-                },
-                len: std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            },
-            SocketAddr::V6(v6) => Self {
-                storage: SockAddrStorage {
-                    v6: std::mem::ManuallyDrop::new(libc::sockaddr_in6 {
-                        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-                        sin6_family: libc::AF_INET6 as u8,
-                        sin6_port: v6.port().to_be(),
-                        sin6_flowinfo: v6.flowinfo(),
-                        sin6_addr: libc::in6_addr {
-                            s6_addr: v6.ip().octets(),
-                        },
-                        sin6_scope_id: v6.scope_id(),
-                    }),
-                },
-                len: std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
-            },
-        }
-    }
-
-    /// 传给 `connect(2)` 的通用指针。联合体的两个成员都以 `sockaddr` 开头。
-    fn as_ptr(&self) -> *const libc::sockaddr {
-        // SAFETY: `v4` 与 `v6` 都是 C 布局且首字段等同于 `sockaddr` 的前两字节
-        unsafe { &self.storage.v4 as *const _ as *const libc::sockaddr }
-    }
-
-    fn len(&self) -> libc::socklen_t {
-        self.len
-    }
-}
-
-/// 位置缓存：同一个 IP 只查一次。
-///
-/// 两层理由：外部服务有限流（ip-api 免费额度是每分钟 45 次），而且每多查一次
-/// 就多一次「把 IP 发给第三方」。
+/// **刻意不跨请求保留**：用户的公网 IP 会变（实测过
+/// `45.207.197.185` → `39.130.21.95` → `116.53.173.241`），
+/// 长期缓存会让界面一直显示上一个 IP 的位置。
 #[derive(Debug, Default)]
 pub struct GeoCache {
-    map: HashMap<String, GeoLocation>,
+    map: std::collections::HashMap<String, GeoLocation>,
 }
 
 impl GeoCache {
@@ -337,22 +211,6 @@ impl GeoCache {
     pub fn put(&mut self, key: &str, loc: GeoLocation) {
         self.map.insert(key.to_string(), loc);
     }
-
-    /// 取或查。`key` 与 `ip` 分开：本机那次的缓存键是固定的 `SELF_KEY`，
-    /// 而不是某个具体 IP。
-    pub fn get_or_lookup(
-        &mut self,
-        key: &str,
-        ip: &str,
-        interface: Option<&str>,
-    ) -> Result<GeoLocation, String> {
-        if let Some(hit) = self.get(key) {
-            return Ok(hit);
-        }
-        let loc = lookup(ip, interface)?;
-        self.put(key, loc.clone());
-        Ok(loc)
-    }
 }
 
 /// 本机位置的缓存键：它不是按被查 IP 缓存的，用一个固定键。
@@ -362,69 +220,81 @@ pub const SELF_KEY: &str = "__self__";
 mod tests {
     use super::*;
 
-    /// 传给系统调用的长度必须与地址族匹配 —— 传错会以 EINVAL 失败，
-    /// 而表现只是「查询偶尔失败」，很难查。
-    #[test]
-    fn sockaddr_length_matches_family() {
-        let v4: SocketAddr = "1.2.3.4:80".parse().unwrap();
-        let sa = SockAddr::new(v4);
-        assert_eq!(sa.len(), std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t);
-        // 首字节是长度（macOS 的 sockaddr 约定），家族紧随其后
-        let raw = sa.as_ptr() as *const u8;
-        // SAFETY: 指针指向刚构造的 sockaddr_in，前两字节一定可读
-        unsafe {
-            assert_eq!(*raw, std::mem::size_of::<libc::sockaddr_in>() as u8);
-            assert_eq!(*raw.add(1), libc::AF_INET as u8);
-        }
-
-        let v6: SocketAddr = "[::1]:80".parse().unwrap();
-        let sa6 = SockAddr::new(v6);
-        assert_eq!(sa6.len(), std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t);
-        let raw6 = sa6.as_ptr() as *const u8;
-        // SAFETY: 同上
-        unsafe {
-            assert_eq!(*raw6, std::mem::size_of::<libc::sockaddr_in6>() as u8);
-            assert_eq!(*raw6.add(1), libc::AF_INET6 as u8);
-        }
-    }
-
-    #[test]
-    fn parses_a_successful_response() {
-        let body = r#"{"status":"success","country":"香港","city":"香港",
-                       "lat":22.3193,"lon":114.169,"isp":"Vapeline Technology"}"#;
-        let p: IpApiResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(p.status, "success");
-        assert!((p.lat - 22.3193).abs() < 1e-9);
-        assert!((p.lon - 114.169).abs() < 1e-9);
-    }
-
-    /// 失败响应必须带出对方的说明，而不是变成「坐标 0,0」——
-    /// 那会在地球上画一个几内亚湾的点，看起来像真的。
-    #[test]
-    fn failure_response_carries_the_message() {
-        let body = r#"{"status":"fail","message":"reserved range","country":"","city":"","lat":0,"lon":0}"#;
-        let p: IpApiResponse = serde_json::from_str(body).unwrap();
-        assert_eq!(p.status, "fail");
-        assert_eq!(p.message, "reserved range");
-    }
-
-    #[test]
-    fn cache_avoids_repeat_lookups() {
-        let mut c = GeoCache::default();
-        assert!(c.get("1.2.3.4").is_none());
-        c.put("1.2.3.4", GeoLocation {
+    fn loc(source: &str, city: &str, lat: f64, lon: f64) -> GeoLocation {
+        GeoLocation {
             ip: "1.2.3.4".into(),
-            country: "X".into(),
-            city: "Y".into(),
-            lat: 1.0,
-            lon: 2.0,
+            country: "中国".into(),
+            city: city.into(),
+            lat,
+            lon,
             isp: String::new(),
-            source: "test".into(),
-        });
-        // 命中缓存时不会发起网络请求（这一步若去查会因无网络而失败）
-        let hit = c
-            .get_or_lookup("1.2.3.4", "1.2.3.4", None)
-            .expect("应当命中缓存");
-        assert_eq!(hit.city, "Y");
+            source: source.into(),
+            consistent: true,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parses_a_successful_who_response() {
+        let body = r#"{"success":true,"ip":"116.53.173.241","country":"China",
+                       "city":"Dali Baizu Zizhizhou","latitude":25.6074778,"longitude":100.2651597,
+                       "connection":{"isp":"CHINANET","org":"YunNan"}}"#;
+        let l = parse_who(body, "").expect("应当解析成功");
+        assert_eq!(l.ip, "116.53.173.241");
+        assert!((l.lat - 25.6074778).abs() < 1e-6);
+        assert_eq!(l.isp, "CHINANET");
+    }
+
+    #[test]
+    fn parses_a_successful_api_response_with_chinese_city() {
+        let body = r#"{"status":"success","query":"116.53.173.241","country":"中国",
+                       "city":"大理","lat":25.6886,"lon":100.159,"isp":"电信"}"#;
+        let l = parse_api(body, "").expect("应当解析成功");
+        assert_eq!(l.city, "大理");
+        assert_eq!(l.source, "ip-api.com");
+    }
+
+    #[test]
+    fn failure_responses_are_rejected() {
+        assert!(parse_api(r#"{"status":"fail","message":"private range"}"#, "").is_none());
+        assert!(parse_who(r#"{"success":false,"message":"invalid IP"}"#, "").is_none());
+        assert!(parse_api("not json", "").is_none());
+    }
+
+    /// 两个源一致：坐标取主源，**中文地名取次源** —— 这正是想要的组合
+    /// （ipwho.is 更准但只有英文，ip-api 支持中文）。
+    #[test]
+    fn merge_prefers_primary_coords_and_chinese_city() {
+        let who = loc("ipwho.is", "Dali Baizu Zizhizhou", 25.607, 100.265);
+        let api = loc("ip-api.com", "大理", 25.689, 100.159);
+        let m = merge_sources("1.2.3.4", Some(who), Some(api)).unwrap();
+        assert_eq!(m.city, "大理", "中文地名应当来自 ip-api");
+        assert!((m.lat - 25.607).abs() < 1e-6, "坐标应当来自 ipwho.is");
+        assert!(m.consistent);
+        assert_eq!(m.sources.len(), 2);
+    }
+
+    /// 两个源差得远：标注不一致，界面才能说明「按 IP 归属估算」。
+    #[test]
+    fn merge_flags_disagreement() {
+        let who = loc("ipwho.is", "Dali", 25.6, 100.2);
+        let api = loc("ip-api.com", "广州市", 23.1, 113.2);
+        let m = merge_sources("1.2.3.4", Some(who), Some(api)).unwrap();
+        assert!(!m.consistent, "相差十几度必须标为不一致");
+        assert_eq!(m.sources.len(), 2, "两个源的判定都要能展示出来");
+    }
+
+    /// 只有一个源时 sources 只有一条，界面据此说明来源单一。
+    #[test]
+    fn single_source_is_marked_by_source_list() {
+        let only = loc("ipwho.is", "Dali", 25.6, 100.2);
+        let m = merge_sources("1.2.3.4", Some(only), None).unwrap();
+        assert_eq!(m.sources.len(), 1);
+        assert!(m.sources[0].contains("ipwho.is"));
+    }
+
+    #[test]
+    fn both_missing_yields_none() {
+        assert!(merge_sources("1.2.3.4", None, None).is_none());
     }
 }

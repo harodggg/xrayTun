@@ -508,8 +508,12 @@ export interface GeoLocation {
   lat: number;
   lon: number;
   isp: string;
-  /** 数据来源，界面据此如实标注。 */
+  /** 坐标来源。 */
   source: string;
+  /** 多个数据源对同一 IP 的判定是否一致。 */
+  consistent: boolean;
+  /** 各数据源的判定摘要（便于展示分歧）。 */
+  sources: string[];
 }
 
 /** 地球仪上的一条航线：本机 → 出口节点。 */

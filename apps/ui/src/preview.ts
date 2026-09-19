@@ -392,12 +392,12 @@ export function installPreviewBridge(): () => void {
           // 用与 Rust 侧一致的形状；坐标取自实测（本机=大理，节点=香港）
           return {
             route: {
-              from: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ip-api.com" },
-              to: { ip: "45.207.197.185", country: "香港", city: "香港", lat: 22.3193, lon: 114.169, isp: "Vapeline Technology", source: "ip-api.com" },
+              from: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 25.61", "ip-api.com: 25.69"] },
+              to: { ip: "45.207.197.185", country: "香港", city: "香港", lat: 22.3193, lon: 114.169, isp: "Vapeline Technology", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 22.28", "ip-api.com: 22.32"] },
               bytes: 9_846_000_000,
               node_name: "Xray-45.207.197.185",
             },
-            origin: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ip-api.com" },
+            origin: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 25.61", "ip-api.com: 25.69"] },
             error: null,
           };
         case "explain_dest": {

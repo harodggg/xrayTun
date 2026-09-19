@@ -168,7 +168,15 @@ function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
         {loc.ip} · {loc.lat.toFixed(2)}, {loc.lon.toFixed(2)}
       </div>
       {loc.isp && <div className="fact__meta">{loc.isp}</div>}
-      <div className="fact__src">位置来源：{loc.source}</div>
+      {/* IP 地理定位是**尽力而为**：运营商大内网 / 省级骨干出口会让注册地
+          偏离实际城市。多个数据源结果不一致时必须说明，否则用户会以为
+          那是确定位置。 */}
+      {loc.consistent === false && (
+        <div className="fact__warn">数据源判定不一致，仅按 IP 归属估算</div>
+      )}
+      <div className="fact__src">
+        位置来源：{loc.sources.length > 0 ? loc.sources.join(" · ") : loc.source}
+      </div>
     </div>
   );
 }
@@ -177,11 +185,15 @@ function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
  * 缩放范围。
  *
  * `1` 是整球可见的基准（球半径 = 画布短边的 0.42）。
- * 上限 1.8：再大球缘就溢出画布了，只剩一片海岸、失去方位感。
+ *
+ * 上限 8：可以贴近看到城市级细节。代价要说清 —— 大陆轮廓是 2° 分辨率的
+ * 位图（约 200 公里一格），放大到这个程度时海岸线会明显发虚；
+ * 它给的是**方位感**，不是地图精度。
+ *
  * 下限 0.55：跨半球时能把两端一起收进画面。
  */
 export const MIN_ZOOM = 0.55;
-export const MAX_ZOOM = 1.8;
+export const MAX_ZOOM = 8;
 
 export function clampZoom(z: number): number {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
@@ -401,7 +413,7 @@ function GlobeCanvas({ data }: { data: GlobeData | null }) {
           复位
         </button>
       </div>
-      <div className="globe__hint">滚轮缩放 · 拖动旋转</div>
+      <div className="globe__hint">滚轮缩放（最多 8×）· 拖动旋转</div>
     </div>
   );
 }
