@@ -100,7 +100,6 @@ export default function Topology() {
 
 /** 入口 ↔ 出口之间的车流。 */
 function Highway({ topo }: { topo: Topology }) {
-  const laneRefs = useRef<(HTMLDivElement | null)[]>([]);
   const inletRefs = useRef<(HTMLDivElement | null)[]>([]);
   const outletRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
@@ -157,27 +156,8 @@ function Highway({ topo }: { topo: Topology }) {
         </div>
       </div>
 
-      <div className="highway__road">
-        {lanes.map((i, idx) => (
-          <div
-            key={i.tag}
-            className="lane-wrap"
-            ref={(el) => {
-              laneRefs.current[idx] = el;
-            }}
-          >
-            <div className="lane" />
-          </div>
-        ))}
-      </div>
-
-      {/* 扇形**专用一列**（第 3 列）：不给它独立空间的话，车道列会占满中间，
-          扇形只能在 10px 宽的间隙里画、看着像一堆竖线（实测：横向只跨 4px）。
-
-          位置必须与列顺序一致 —— 早先放在 DOM 最前，结果出口卡片被挤进
-          84px 的窄列、文字折行。 */}
-      <span className="highway__spacer" aria-hidden />
-
+      {/* 中间是流动区：连线本身就是车道、货车在线上走。
+          不再有单独的车道列 —— 用户要求「车道应该消失，线本身应该就是车道」。 */}
       <div className="highway__side highway__side--right">
         <div className="highway__side-title">出口（颜色 = 去向）</div>
         {topo.outbound.map((o, idx) => (
@@ -205,7 +185,6 @@ function Highway({ topo }: { topo: Topology }) {
         container={container}
         inbound={lanes}
         outbound={topo.outbound}
-        laneEls={laneRefs.current.slice(0, lanes.length)}
         inletEls={inletRefs.current.slice(0, lanes.length)}
         outletEls={outletRefs.current}
       />
@@ -253,6 +232,8 @@ interface Route {
   /** 货车颜色（按终点出口的去向）。 */
   color: string;
   label: string;
+  /** 这条路线属于哪个入口（货车数量按入口的字节数决定）。 */
+  inlet: number;
 }
 
 /**
@@ -277,14 +258,12 @@ function Flow({
   container,
   inbound,
   outbound,
-  laneEls,
   inletEls,
   outletEls,
 }: {
   container: HTMLElement | null;
   inbound: TopoInbound[];
   outbound: TopoOutbound[];
-  laneEls: (HTMLElement | null)[];
   inletEls: (HTMLElement | null)[];
   outletEls: (HTMLElement | null)[];
 }) {
@@ -311,62 +290,63 @@ function Flow({
           y: r.top - base.top + r.height / 2,
         };
       };
-      const spacer = container.querySelector(".highway__spacer")?.getBoundingClientRect();
-      const fan = spacer
-        ? { l: spacer.left - base.left, r: spacer.right - base.left }
-        : { l: 0, r: 0 };
-
-      const lanes = compact(laneEls.map(rel));
       const inlets = compact(inletEls.map(rel));
       const outlets = compact(outletEls.map(rel));
-      if (lanes.length === 0 || outlets.length === 0) {
+      if (inlets.length === 0 || outlets.length === 0) {
         setGeo({ w: base.width, h: base.height, routes: [] });
         return;
       }
 
+      // 路由分组：出口按相邻切段分给各入口（只为画得清楚，不声称归属）
+      const per = Math.ceil(outlets.length / inlets.length);
+      // 分叉点：放在入口与出口之间的**流动区**里、靠近出口那一侧，
+      // 给「扇出」留出弧线空间。它代表「规则链做出的去向判定」。
+      const gapStart = inlets[0]!.r;
+      const gapEnd = outlets[0]!.l;
+      // 分叉点放得靠出口一侧：入口→分叉留 ~70%（汇入弧线），
+      // 分叉→出口留 ~30%（扇出弧线）。两者都在流动区**内部**预留，
+      // 不占单独的列 —— 整页有 max-width，多一列就把流动区压没了。
+      const forkX = gapStart + (gapEnd - gapStart) * 0.7;
+
       const routes: Route[] = [];
-      const per = Math.ceil(outlets.length / lanes.length);
-      lanes.forEach((lane, i) => {
+      inlets.forEach((inlet, i) => {
         const mine = outlets.slice(i * per, (i + 1) * per);
-        if (mine.length === 0) return;
-        // 入口与车道一一对应时用同一行；数量不一致时轮流取，避免取不到
-        const inlet = inlets[i] ?? inlets[i % Math.max(1, inlets.length)];
-
-        // 车道 → 扇出列 → 出口的**分叉点**：放在扇出列里，
-        // 给曲线留出横向空间（早先贴着车道边缘，横向只跨 4px）
-        const forkX = fan.l + (fan.r - fan.l) * 0.3;
-
-        mine.forEach((box) => {
-          const segs: Seg[] = [];
-          // 1) 入口 → 车道左缘（弧线）
-          if (inlet) {
-            segs.push({
+        mine.forEach((box, k) => {
+          // 每个出口一条分支，但**共用同一个入口分叉点** ——
+          // 形状就是「一个源点扇出多条弧线」。
+          //
+          // 同一入口的多条分支合并成**一条连续路径**：中间是那条汇入的弧线，
+          // 之后依次往返每个出口。这样 getPointAtLength 能连续采样，
+          // 货车沿整条路线来回走（用户要的「看到车在线上走，整个流程」）。
+          const segs: Seg[] = [
+            {
               kind: "curve",
               x1: inlet.r,
               y1: inlet.y,
-              x2: lane.l,
-              y2: lane.y,
-              cx: (inlet.r + lane.l) / 2,
+              x2: forkX,
+              y2: inlet.y,
+              cx: (inlet.r + forkX) / 2,
+            },
+          ];
+          const ordered = k === 0 ? mine : [mine[0]!, ...mine.slice(1).filter((b) => b !== box), box];
+          ordered.forEach((b) => {
+            segs.push({
+              kind: "curve",
+              x1: forkX,
+              y1: inlet.y,
+              x2: b.l,
+              y2: b.y,
+              cx: clampMid(forkX, b.l),
             });
-          }
-          // 2) 沿车道走（直线）
-          segs.push({ kind: "line", x1: lane.l, y1: lane.y, x2: lane.r, y2: lane.y });
-          // 3) 车道右缘 → 分叉点（直线）
-          segs.push({ kind: "line", x1: lane.r, y1: lane.y, x2: forkX, y2: lane.y });
-          // 4) 分叉点 → 出口左缘（弧线）
-          segs.push({
-            kind: "curve",
-            x1: forkX,
-            y1: lane.y,
-            x2: box.l,
-            y2: box.y,
-            cx: clampMid(forkX, box.l),
           });
+          if (k > 0) return; // 同一入口只生成一条合并路径
           routes.push({
             d: routeToD(segs),
             segs,
-            color: OUTBOUND_COLOR[outbound[i * per + mine.indexOf(box)]?.kind ?? ""] ?? "#4f8ef7",
-            label: outbound[i * per + mine.indexOf(box)]?.kind ?? "",
+            color: OUTBOUND_COLOR[outbound[i * per]?.kind ?? ""] ?? "#4f8ef7",
+            label: "",
+            /** 这条路线属于哪个入口（货车数量按入口字节数决定）。 */
+            inlet: i,
           });
         });
       });
@@ -378,12 +358,12 @@ function Flow({
     // 流量每 2 秒刷新一次，卡片宽度会变 —— 持续跟随，而不是量一次就完
     const ro = new ResizeObserver(measure);
     ro.observe(container);
-    for (const el of [...laneEls, ...inletEls, ...outletEls]) {
+    for (const el of [...inletEls, ...outletEls]) {
       if (el) ro.observe(el);
     }
     return () => ro.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [container, laneEls.join("|"), inletEls.join("|"), outletEls.join("|")]);
+  }, [container, inletEls.join("|"), outletEls.join("|")]);
 
   // 沿路径行走：用 `getPointAtLength` 把货车摆到路上。
   // 不用 state 驱动（每帧 setState 会把整棵树重渲染），直接改 transform。
@@ -424,22 +404,16 @@ function Flow({
 
   if (!geo) return null;
 
-  // 每辆货车：按车道的字节数决定数量，分配在**同一条车道的各条路线**上
+  // 每辆货车：数量按**入口**的字节数决定，挂在属于该入口的路线（每条路线
+  // 已经合并了若干分支）上。一个入口的货就沿它自己那条路线来回走。
   const trucks: { route: number; phase: number }[] = [];
-  const byLane = new Map<number, number[]>();
-  geo.routes.forEach((_, idx) => {
-    const lane = routeLane(idx, geo.routes.length, inbound.length);
-    const list = byLane.get(lane) ?? [];
-    list.push(idx);
-    byLane.set(lane, list);
-  });
-  byLane.forEach((routeIdxs, lane) => {
-    const count = trucksOnLane(inbound[lane] ? inbound[lane]!.downlink_bytes + inbound[lane]!.uplink_bytes : 0);
+  geo.routes.forEach((r, idx) => {
+    const bytes = inbound[r.inlet]
+      ? inbound[r.inlet]!.downlink_bytes + inbound[r.inlet]!.uplink_bytes
+      : 0;
+    const count = trucksOnLane(bytes);
     for (let k = 0; k < count; k++) {
-      trucks.push({
-        route: routeIdxs[k % routeIdxs.length]!,
-        phase: (k / count + (k % 3) * 0.05) % 1,
-      });
+      trucks.push({ route: idx, phase: (k / count + (k % 3) * 0.04) % 1 });
     }
   });
 
@@ -502,13 +476,6 @@ function routeToD(segs: Seg[]): string {
     );
   }
   return parts.join(" ");
-}
-
-/** 第 idx 条路线属于哪条车道（与路由分配保持一致）。 */
-function routeLane(idx: number, routeCount: number, laneCount: number): number {
-  if (laneCount <= 1) return 0;
-  const per = Math.ceil(routeCount / laneCount);
-  return Math.min(laneCount - 1, Math.floor(idx / Math.max(1, per)));
 }
 
 /**
