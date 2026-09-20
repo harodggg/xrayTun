@@ -33,7 +33,7 @@
 │                                                          │
 │   [ 下载 macOS 版 (.dmg) ]   还有 .zip · 47.1 MB           │  ← CTA 行
 │                                                          │
-│   v0.8.26 · 仅 macOS · 通用包（arm64 + x86_64）· 44.9 MiB  │  ← 14px/--text-dim
+│   v0.8.28 · 仅 macOS · 通用包（arm64 + x86_64）· 45.0 MiB  │  ← 14px/--text-dim
 │                                                          │
 │   ┌────────────────────────────────────────────────┐     │
 │   │  应用截图（拓扑页）1080 × 720 CSS px            │     │  ← 见 §4
@@ -392,12 +392,12 @@ cd apps/ui && npx vite --port 5199 --strictPort
 
 ## 5. 下载区：按钮层级与未公证警告
 
-### 5.1 真实资产（`gh release view v0.8.26` 实测，`isDraft: false`）
+### 5.1 真实资产（`gh release view v0.8.28` 实测，`isDraft: false`）
 
 | 资产 | 大小（实测字节） | 换算 |
 |---|---|---|
-| `XrayTun_0.8.26_x86_64_arm64.dmg` | 47,128,987 | **47.1 MB（44.9 MiB）** |
-| `XrayTun_0.8.26_x86_64_arm64.zip` | 42,636,964 | **42.6 MB（40.7 MiB）** |
+| `XrayTun_0.8.28_x86_64_arm64.dmg` | 47,145,126 | **47.1 MB（45.0 MiB）** |
+| `XrayTun_0.8.28_x86_64_arm64.zip` | 42,647,148 | **42.6 MB（40.7 MiB）** |
 | `SHA256SUMS.txt` | 200 | 200 B |
 
 > 注意 `.dmg` **比** `.zip` **大 4.5 MB** —— 文案里不要把 dmg 写成「更小」。
