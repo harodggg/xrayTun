@@ -242,34 +242,6 @@ export function fitZoom(data: GlobeData): number {
 }
 
 /**
- * 两点在画布上的屏幕距离（px）—— 正交投影 + 视角对准中点时的几何。
- *
- * `minSide` 是画布短边（本页固定 720）。导出是为了能测：这是「用户到底能不能
- * 看见这条航线」的直接判据，改 `fitZoom` 时必须能立即验证它还在 200px 量级。
- */
-export function separationCanvasPx(zoom: number, thetaRad: number, minSide = 720): number {
-  return 2 * minSide * 0.42 * zoom * Math.sin(thetaRad / 2);
-}
-
-/**
- * 把视角对准某个点。
- *
- * **必须是严格对准**：正交投影里，要让 (lat, lon) 落在画布中心，得令
- * `rotLon = -lon`、`rotLat = +lat`（先绕 Y 把经度转掉，再绕 X 把纬度转平）。
- * 早先写的是 `lat * 0.6`，于是被对准的点停在中心**上方**约 `0.4·lat·R` 的地方 ——
- * zoom=1 时只偏 50px 看不出来，但偏移量随 R 线性增长：zoom=8 时整个航线被推出
- * 画布（实测两个标记点在画布上**完全找不到**，截图只剩一片海岸）。
- *
- * 导出是为了能测这条不变量（对准后该点必须落在画布中心）。
- */
-export function viewForFocus(
-  focus: { lat: number; lon: number },
-  zoom: number,
-): { lon: number; lat: number; zoom: number } {
-  return { lon: -focus.lon * DEG, lat: focus.lat * DEG, zoom };
-}
-
-/**
  * 初始/复位视角：对准哪里、缩放多少、**是否允许自转**。
  *
  * # 为什么放大时必须关闭自转
