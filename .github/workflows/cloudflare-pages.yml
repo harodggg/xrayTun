@@ -72,20 +72,31 @@ jobs:
         run: |
           set -eu
           auth="Authorization: Bearer $CF_TOKEN"
-          found=$(curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects?per_page=100" \
-            | jq -r --arg p "$CF_PROJECT" 'if any(.result[]?; .name == $p) then "yes" else "no" end')
-          if [ "$found" = "yes" ]; then echo "  · 项目 $CF_PROJECT 已存在"; exit 0; fi
-          echo "  · 项目不存在，尝试创建…"
+          listing=$(curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects?per_page=100")
+          found=$(echo "$listing" | jq -r --arg p "$CF_PROJECT" 'if any(.result[]?; .name == $p) then "yes" else "no" end')
+          if [ "$found" = "yes" ]; then
+            echo "  · 项目 $CF_PROJECT 已存在"
+            exit 0
+          fi
+          # 列不出来时把原始响应打出来，别把「列不出来」和「不存在」混为一谈
+          echo "  · 列表里没有 $CF_PROJECT（原始响应前 300 字符）：$(echo "$listing" | head -c 300)"
+          echo "  · 尝试创建…"
           out=$(curl -sS -X POST -H "$auth" -H "Content-Type: application/json" \
             "$API/accounts/$CF_ACCOUNT_ID/pages/projects" \
             -d "{\"name\":\"$CF_PROJECT\",\"production_branch\":\"main\"}")
           if [ "$(echo "$out" | jq -r '.success')" = "true" ]; then
             echo "  ✓ 已创建项目"
-          else
-            echo "  ✗ 创建项目失败：$(echo "$out" | jq -c '.errors')"
-            echo "  → token 需要 Account → Cloudflare Pages → Edit；否则只能读、不能建。" >&2
-            exit 1
+            exit 0
           fi
+          # **幂等**：已经有了就算成功（8000002 = already exists）。
+          # 上一版没处理这一条，于是「项目其实存在但列表没读到」直接把工作流判失败。
+          if [ "$(echo "$out" | jq -r '[.errors[]?.code] | index(8000002) != null')" = "true" ]; then
+            echo "  · 项目已存在（8000002），按成功处理"
+            exit 0
+          fi
+          echo "  ✗ 创建项目失败：$(echo "$out" | jq -c '.errors')"
+          echo "  → token 需要 Account → Cloudflare Pages → Edit；否则只能读、不能建。" >&2
+          exit 1
 
       - name: 部署 site/ 到 Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
