@@ -396,7 +396,10 @@ CDP 驱动：`node /tmp/interaction-review/cdp2.mjs <scenarios.json>`（支持**
   无 `tabIndex`、无键盘处理。放大/缩小/复位三个按钮（`:431,441,451`）是键盘唯一入口，**旋转无法键盘完成**。
   规格：至少给 canvas `tabIndex={0}` + `aria-label`，并把「＋/－/复位」标注为「键盘替代路径」；
   旋转可给方向键（低成本：方向键调 `view.lon/lat`）。
-* **A11Y-7（中）**：**没有 Escape 关闭**。全树 `Escape`/`keyCode === 27` 0 处。实测：打开节点导出模态后按 Esc，模态仍在（探针 `modalAfterEsc: false` 是**在** Esc 之前测的——重测的直接证据是 `Escape does nothing?`：连接高亮按 Esc 后 `{before: 1, after: 1}`，状态不变）。
+* **A11Y-7（中）**：**没有 Escape 关闭**。全树 `Escape`/`keyCode === 27` 0 处（grep）。
+  实测（真按键，CDP `Input.dispatchKeyEvent`）：拓扑页选中一条连接后按 Esc，`{before: 1, after: 1}` —— 高亮与详情面板**都不消失**。
+  **注**：节点导出模态的 Esc 行为在预览里**无法验证**——预览没有实现 `export_node`，点击「二维码」后模态并未真正打开
+  （探针 `modal: false`），所以这一条只有代码依据（`Nodes.tsx:159-165` 无键盘处理）。
   涉及：节点导出模态（`Nodes.tsx:159-165`）、拓扑连接详情（`Topology.tsx:657-663`）、日志诊断面板（`Logs.tsx:136-153`）。
   规格：三处都加 `useEffect` 监听 `keydown` 的 Escape → 关闭；模态额外加**焦点陷阱**与打开时 `focus()` 到标题/第一个按钮。
 * **A11Y-8（中）**：**日志滚动区不可聚焦**：`Logs.tsx:155` `<div className="logs" … onScroll=…>` + `styles.css:525 overflow: auto`，
