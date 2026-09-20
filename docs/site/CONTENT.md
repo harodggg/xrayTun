@@ -683,9 +683,13 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 > consecutive failures; after login, if the app was connected when it last exited, it retries in the
 > background for about two minutes so it can come up before Wi-Fi is ready. If rebuilding fails it
 > falls back to direct connection.
-> To be straightforward about a current limitation: **the UI only shows "connected" or
-> "disconnected" and does not display recovery progress**, so you may briefly see "disconnected"
-> while it recovers in the background.
+> To be straightforward about a version-specific limitation: **in v0.8.26 and earlier the UI only
+> shows "connected" or "disconnected" and does not display recovery progress**, so you may briefly
+> see "disconnected" while it recovers in the background.
+>
+> (Anchored to the version rather than "the current version": task-22 added a
+> "recovering (attempt N)" indicator, so "the current version" would become false at the next
+> release. Limiting the claim to v0.8.26 and earlier stays accurate forever.)
 
 **Is the auto-updater secure?**
 > The updater downloads the zip from the project's GitHub release and verifies it against

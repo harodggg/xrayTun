@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>XrayTun — A macOS GUI client for Xray with native TUN mode</title>
+    <meta
+      name="description"
+      content="XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.26, universal build (Apple Silicon + Intel), Xray core included."
+    />
+    <link rel="canonical" href="https://harodggg.github.io/xrayTun/en/" />
+    <link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/" />
+    <link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/" />
+    <link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/" />
+    <meta name="theme-color" content="#0f1420" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="XrayTun" />
+    <meta property="og:title" content="XrayTun — A macOS GUI client for Xray with native TUN mode" />
+    <meta
+      property="og:description"
+      content="An Xray GUI client for macOS 13+: native TUN inbound takes over system traffic. Universal build, Xray core included. Current v0.8.26."
+    />
+    <meta property="og:url" content="https://harodggg.github.io/xrayTun/en/" />
+    <meta property="og:locale" content="en" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="XrayTun — A macOS GUI client for Xray with native TUN mode" />
+    <meta
+      name="twitter:description"
+      content="An Xray GUI client for macOS 13+: native TUN inbound takes over system traffic. Universal build, Xray core included. Current v0.8.26."
+    />
+    <link rel="stylesheet" href="../assets/site.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <header class="site-header">
+      <div class="wrap site-header__inner">
+        <a class="brand" href="../">XrayTun</a>
+        <nav class="site-nav" aria-label="Page navigation">
+          <a href="#features">Features</a>
+          <a href="#download">Download</a>
+          <a href="#install">Install</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+        <nav class="lang-switch" aria-label="Language">
+          <a href="../" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+          <a href="./" aria-current="page" lang="en">English</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============================================================ #what -->
+      <section class="hero wrap" id="what">
+        <h1>XrayTun: an Xray GUI client for macOS that takes over system traffic with native TUN mode</h1>
+        <p class="lead">
+          XrayTun is an Xray GUI client for macOS. It uses Xray-core's native <code>tun</code> inbound (with a
+          built-in gVisor network stack) to create a utun interface, splits the default route with
+          <code>0.0.0.0/1</code> and <code>128.0.0.0/1</code>, and takes over system DNS so that traffic on the
+          Mac follows routing rules. Only three operations run with root privileges inside a privileged helper
+          — creating the utun interface, installing routes and changing DNS. The Xray core itself runs as your
+          normal user.
+        </p>
+
+        <p class="cta">
+          <a
+            class="btn btn--primary"
+            href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
+            >Download for macOS v0.8.26 · dmg · 44.9 MiB</a
+          >
+          <a
+            class="btn btn--secondary"
+            href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip"
+            >Alternative .zip · 40.7 MiB</a
+          >
+        </p>
+        <p class="meta">
+          v0.8.26 (released 2026-09-20) · macOS only · universal build (arm64 + x86_64) · dmg 44.9 MiB
+        </p>
+        <p class="meta meta--hint">
+          First launch needs one extra step. <a href="#install">See the install notes</a> (Gatekeeper will
+          block the app — that is expected).
+        </p>
+
+        <figure class="shot">
+          <img
+            src="../assets/shots/topology.png"
+            width="1080"
+            height="720"
+            alt="The XrayTun topology page: inbound cards (tun / socks / http) on the left, outbound cards (node, direct, block) on the right, with flow lines coloured by destination and trucks moving along them."
+          />
+          <figcaption>The topology page: the configured structure of inbounds → rule chain → outbounds.</figcaption>
+        </figure>
+      </section>
+
+      <!-- ============================================================= #why -->
+      <section class="wrap prose" id="why">
+        <h2>What it solves</h2>
+
+        <p>
+          <strong>macOS system proxy settings only cover apps that honour them.</strong>
+          The system proxy is an HTTP/HTTPS/SOCKS setting, and many apps — especially ones with their own
+          network stack, command line tools and games — never read it. XrayTun's TUN mode takes over the
+          default route at the network layer, so individual apps do not need proxy support.
+        </p>
+        <p>
+          <strong>Changing system network configuration is a risky operation.</strong>
+          TUN mode creates an interface, changes routes and changes DNS. If the process crashes or the machine
+          loses power mid-way, the Mac can be left without working networking. XrayTun writes a session
+          snapshot to disk before touching anything, updates it incrementally after each step, and rolls back
+          a leftover session on the next start. Quitting the app restores the network configuration as well.
+        </p>
+        <p>
+          <strong>"Connected" does not mean "working".</strong>
+          A node may complete a handshake but fail to forward traffic. XrayTun's watchdog sends a real request
+          through the tunnel every 10 seconds and rebuilds the tunnel after two consecutive failures. If
+          rebuilding fails, XrayTun falls back to direct connection instead of leaving you offline.
+        </p>
+        <p>
+          <strong>Routing decisions are usually guesswork.</strong>
+          XrayTun includes a rule checker: enter a domain or IP and it evaluates the live rules together with
+          geoip/geosite data to tell you which rule matched and which outbound the traffic uses.
+        </p>
+      </section>
+
+      <!-- ======================================================== #features -->
+      <section class="wrap prose" id="features">
+        <h2>Features</h2>
+        <p>
+          Every statement below can be checked against the documents in the GitHub repository (see
+          <a href="#links">links</a>). This section also states what XrayTun deliberately does not do, because
+          knowing the limits matters more than reading a feature list.
+        </p>
+
+        <h3>Protocols and subscriptions</h3>
+        <ul>
+          <li>Node protocols: <strong>vmess, vless, trojan, shadowsocks, socks, http</strong>.</li>
+          <li>
+            <strong>ShadowsocksR (<code>ssr://</code>) is not supported</strong>: parsing an
+            <code>ssr://</code> link produces an explicit error rather than being silently ignored.
+          </li>
+          <li>
+            Subscriptions: <strong>four formats</strong>, auto-detected — Xray JSON config, Clash / Mihomo
+            YAML, base64-encoded URI list, plain URI list.
+          </li>
+          <li>
+            One unsupported link (for example <code>hysteria2://</code>) inside a subscription does not fail
+            the whole subscription; it is skipped and logged.
+          </li>
+        </ul>
+
+        <h3>Routing</h3>
+        <ul>
+          <li>
+            <strong>Four routing presets</strong>: global proxy, bypass mainland China (default), whitelist
+            proxy, direct for everything.
+          </li>
+          <li><strong>Custom rules</strong> are supported and run <strong>after</strong> the presets, never before them.</li>
+          <li>
+            Rule <strong>order matters</strong>: Xray takes the first matching rule from top to bottom, so ad
+            blocking must be listed before mainland-China direct routing.
+          </li>
+          <li>
+            <strong>geoip / geosite matching</strong> is supported (for example <code>geoip:cn</code>,
+            <code>geosite:cn</code>); <code>geoip.dat</code> and <code>geosite.dat</code> ship with the app.
+          </li>
+          <li>
+            There is <strong>no visual rule editor</strong> yet: custom rules are shown read-only and must be
+            edited in the settings file.
+          </li>
+        </ul>
+
+        <h3>DNS</h3>
+        <ul>
+          <li>
+            <strong>Four DNS strategies</strong>: resolve everything through the proxy, split by rule
+            (default), resolve everything locally, or use custom servers.
+          </li>
+          <li><strong>Fake-IP</strong> is available and off by default.</li>
+          <li>
+            DNS resolver probing compares domestic and foreign resolvers separately, because the two groups
+            use different network paths.
+          </li>
+        </ul>
+
+        <h3>Traffic capture and privileges</h3>
+        <ul>
+          <li>Three modes: <strong>direct, system proxy and TUN</strong>.</li>
+          <li>
+            TUN mode uses <strong>Xray-core's native <code>tun</code> inbound</strong> (built-in gVisor
+            stack). There is no tun2socks sidecar process, and UDP/QUIC are handled by the same stack.
+          </li>
+          <li>
+            Routes use a <code>0.0.0.0/1</code> + <code>128.0.0.0/1</code> split instead of replacing the
+            default route: the worst case is some traffic taking the wrong path, not losing the default route
+            entirely.
+          </li>
+          <li>
+            <strong>System proxy mode does not modify macOS system proxy settings</strong> (as of v0.8.26). It
+            only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps
+            at those ports yourself. Use TUN mode to capture traffic automatically.
+          </li>
+          <li>
+            Least privilege: creating the utun interface, installing routes and changing DNS are done by a
+            privileged helper, while the <strong>Xray core runs as your normal user</strong>. The helper only
+            accepts connections from the app that pass code-signature validation.
+          </li>
+          <li>The privileged helper must be installed once from the app's settings, which asks for an administrator password.</li>
+        </ul>
+
+        <h3>Reliability and updates</h3>
+        <ul>
+          <li><strong>Launch at login</strong> through the macOS <code>SMAppService</code> login item.</li>
+          <li>
+            <strong>Automatic recovery</strong>: if the app was connected when it last exited, it retries in
+            the background up to 24 times with 5-second gaps (about 2 minutes); the tunnel watchdog probes
+            every 10 seconds and rebuilds after two consecutive failures, falling back to direct connection if
+            rebuilding fails. Switching Wi-Fi networks and waking from sleep use the same logic.
+          </li>
+          <li>
+            <strong>Crash safety</strong>: a session snapshot is written to disk before network changes,
+            updated incrementally, rolled back by the helper on next start, and reverted when the app quits.
+          </li>
+          <li>
+            <strong>Self-update</strong>: check GitHub releases, download the zip, compare against
+            <code>SHA256SUMS.txt</code>, replace the app and restart. To be explicit: XrayTun only verifies the
+            SHA256 checksum. There is <strong>no signature verification</strong>, so this protects against
+            corrupted downloads, not against a compromised upstream.
+          </li>
+          <li>
+            <strong>Traffic counters survive core restarts</strong>: restarting the Xray core resets its
+            counters, and XrayTun carries the previous totals forward and honestly reports "the core restarted
+            N times" instead of showing traffic dropping to zero.
+          </li>
+        </ul>
+
+        <h3>Visibility features (a deliberate design trade-off)</h3>
+        <ul>
+          <li>
+            <strong>Topology page</strong>: draws the structure of inbounds → rule chain → outbounds from the
+            live configuration. The lines describe <strong>configured structure</strong>, not which line a
+            particular flow actually took: Xray only exposes per-inbound and per-outbound aggregate counters,
+            with no per-rule counters.
+          </li>
+          <li>
+            <strong>Globe page</strong>: draws the great-circle route from your public egress to the exit node
+            and labels both ends with a city. Location lookup uses third parties (<code>ipwho.is</code> and
+            <code>ip-api.com</code>), and the queried IP addresses are sent to those services. The continent
+            outlines are a rough 2° raster, not navigational coastlines.
+          </li>
+          <li>
+            <strong>Recent connections</strong>: lists time, source, target, <code>[inbound → outbound]</code>
+            and domain from the Xray access log; selecting a row highlights that path on the topology. Domains
+            come from <strong>time-ordered pairing</strong> of <code>sniffed</code> lines with
+            <code>accepted</code> lines and <strong>can be wrong</strong>: the UI marks paired domains with
+            <code>*</code> and shows the pairing delta in microseconds. About half of all connections have no
+            domain at all.
+          </li>
+          <li>
+            <strong>Logs and diagnostics</strong>: level filters, source column, and a one-click diagnostics
+            report that is redacted on the backend (subscription URLs keep only the host, UUIDs become
+            <code>&lt;uuid&gt;</code>).
+          </li>
+        </ul>
+
+        <h3>What XrayTun deliberately does not do</h3>
+        <ul>
+          <li>
+            <strong>Per-connection byte counts and durations</strong>: Xray's stats service only has aggregate
+            counters, and the access log records connection setup but not teardown. These two numbers are not
+            shown anywhere.
+          </li>
+          <li>
+            <strong>Byte counters for <code>dns-out</code> and <code>api</code></strong>: Xray does not count
+            UDP outbound traffic or loopback traffic, so those counters stay at 0. XrayTun groups them
+            separately as "internal channels" and uses connection counts instead; the <code>block</code>
+            outbound really does carry 0 bytes.
+          </li>
+          <li>
+            <strong>"Active connection count"</strong>: a connection disappearing from the list does not mean
+            it closed; it may just have been evicted from the ring buffer.
+          </li>
+          <li>No Windows, Linux or mobile builds; the UI is currently Chinese only; no visual rule editor, node grouping or light theme.</li>
+        </ul>
+      </section>
+
+      <!-- ======================================================== #download -->
+      <section class="wrap prose" id="download">
+        <h2>Download</h2>
+        <p class="cta">
+          <a
+            class="btn btn--primary"
+            href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
+            >Download for macOS v0.8.26 · dmg · 44.9 MiB</a
+          >
+        </p>
+
+        <table class="facts-table">
+          <caption>
+            Release assets (v0.8.26, released 2026-09-20)
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">File</th>
+              <th scope="col">Size</th>
+              <th scope="col">Link</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">dmg (primary)</th>
+              <td>47,128,987 bytes (44.9 MiB)</td>
+              <td>
+                <a
+                  href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
+                  >XrayTun_0.8.26_x86_64_arm64.dmg</a
+                >
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">zip (alternative)</th>
+              <td>42,636,964 bytes (40.7 MiB)</td>
+              <td>
+                <a
+                  href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip"
+                  >XrayTun_0.8.26_x86_64_arm64.zip</a
+                >
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">Checksums</th>
+              <td>200 bytes</td>
+              <td>
+                <a href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/SHA256SUMS.txt">SHA256SUMS.txt</a>
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">All releases</th>
+              <td>—</td>
+              <td><a href="https://github.com/harodggg/xrayTun/releases/latest">GitHub Releases</a></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Requirements</h3>
+        <ul>
+          <li>macOS <strong>13.0 or later</strong>.</li>
+          <li>Apple Silicon and Intel are both supported natively (same universal build).</li>
+          <li>
+            <strong>No separate Xray installation is needed</strong>: the Xray-core binary,
+            <code>geoip.dat</code> and <code>geosite.dat</code> are inside the app bundle.
+          </li>
+          <li>You need your own Xray node or subscription URL. XrayTun does not ship nodes and does not provide a node service.</li>
+          <li>One administrator password is required once, to install the privileged helper.</li>
+        </ul>
+
+        <h3>Verify the download (optional)</h3>
+        <pre class="code"><code>grep XrayTun_0.8.26_x86_64_arm64.dmg SHA256SUMS.txt
+shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg</code></pre>
+        <p>
+          The two hashes should match. <code>SHA256SUMS.txt</code> is generated with
+          <code>shasum -a 256 ./*</code>, so each line starts with <code>./</code>; extracting the line with
+          <code>grep</code> and comparing it manually is more reliable than running <code>shasum -c</code> on
+          the file.
+        </p>
+      </section>
+
+      <!-- ========================================================= #install -->
+      <section class="wrap prose" id="install">
+        <h2>Install</h2>
+        <p>
+          The downloaded app <strong>will be blocked by macOS, and that does not mean the file is
+          corrupted</strong>. Step 3 below gives three ways to allow it — pick the one that matches your macOS
+          version.
+        </p>
+
+        <h3>Step 1 — Drag the app into Applications</h3>
+        <p>Open the downloaded dmg and drag <code>XrayTun.app</code> into your Applications folder.</p>
+
+        <h3>Step 2 — The first launch is blocked (expected, not a broken download)</h3>
+        <p>
+          You may see a message such as "cannot verify the developer" or "Apple cannot check it for malicious
+          software". XrayTun is <strong>ad-hoc signed and not notarized</strong>: the project has no Apple
+          Developer ID certificate, which requires a paid account, so macOS cannot verify the app the usual
+          way. The verification result is "rejected" — this is <strong>expected</strong>, not a download error.
+        </p>
+
+        <aside class="warn" aria-labelledby="install-gatekeeper">
+          <h3 class="warn__title" id="install-gatekeeper">⚠︎ First launch needs one extra step — this is expected</h3>
+          <p class="warn__body">
+            The app is ad-hoc signed and not notarized by Apple (there is no paid developer account), which is
+            why macOS blocks the first launch. <strong>Pick the option for your macOS version:</strong>
+          </p>
+
+          <div class="paths">
+            <div class="path">
+              <span class="path__badge">macOS 15+</span>
+              <div class="path__body">
+                <p>
+                  After the blocked launch, open <strong>System Settings → Privacy &amp; Security</strong>, find
+                  "XrayTun was blocked from use because it is not from an identified developer" in the Security
+                  section, click <strong>Open Anyway</strong>, confirm with Touch ID or your password, then
+                  double-click the app again.
+                </p>
+                <p class="path__note">Starting with macOS 15, Apple removed the Control-click workaround for Gatekeeper.</p>
+              </div>
+            </div>
+
+            <div class="path">
+              <span class="path__badge">macOS 14-</span>
+              <div class="path__body">
+                <p>
+                  In Finder, Control-click (or right-click) <code>XrayTun.app</code> and choose
+                  <strong>Open</strong>, then click <strong>Open</strong> again in the dialog.
+                </p>
+              </div>
+            </div>
+
+            <div class="path">
+              <span class="path__badge">Terminal</span>
+              <div class="path__body">
+                <p>Prefer the terminal, or the steps above did not work: open Terminal and run the command below, then double-click the app normally.</p>
+                <pre class="code"><code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code></pre>
+                <p class="path__note">
+                  This only removes the "downloaded from the internet" quarantine flag. Note it is
+                  <code>-d</code>, <strong>not</strong> <code>-dr</code>: current versions of
+                  <code>xattr</code> do not have a <code>-r</code> option, and <code>-dr</code> fails with
+                  <code>option -r not recognized</code>.
+                </p>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <h3>Step 4 — Install the privileged helper inside the app (TUN mode needs it)</h3>
+        <p>
+          Open XrayTun, go to Settings → Privileged helper → Install. This asks for an administrator password
+          once. Only interface creation, route installation and DNS changes run inside the helper; the Xray
+          core still runs as your normal user.
+        </p>
+
+        <h3>Step 5 — Confirm the installation worked</h3>
+        <p>
+          In Settings → Environment check, the helper should show "ready". Switch the mode in the top bar to
+          <strong>TUN</strong>, add a subscription or node, click Connect, and normal browsing means you are
+          done.
+        </p>
+
+        <h3>Removing it later</h3>
+        <p>
+          Quitting XrayTun restores the network configuration. Before deleting the app, quit it and uninstall
+          the helper (the helper's uninstall request rolls back the network configuration before removing
+          itself) so no routes or DNS settings pointing at the utun interface are left behind.
+        </p>
+      </section>
+
+      <!-- ============================================================= #faq -->
+      <section class="wrap prose" id="faq">
+        <h2>FAQ</h2>
+
+        <h3>Do I need to install Xray separately?</h3>
+        <p>
+          No. The app bundle already contains the Xray-core binary plus <code>geoip.dat</code> and
+          <code>geosite.dat</code> under <code>Contents/Resources/</code>. You only need a node or a
+          subscription URL.
+        </p>
+
+        <h3>Which macOS versions and CPUs are supported?</h3>
+        <p>
+          macOS 13.0 or later, on both Apple Silicon (arm64) and Intel (x86_64), from one universal build.
+          There is no Windows, Linux or mobile version.
+        </p>
+
+        <h3>The app says "cannot verify the developer". What should I do?</h3>
+        <p>
+          That is the expected prompt for a non-notarized app, not an installation failure. On macOS 15 and
+          later, use System Settings → Privacy &amp; Security → Open Anyway. On macOS 14 and earlier,
+          right-click (Control-click) the app and choose Open. Alternatively run
+          <code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code> in Terminal and open the app
+          again.
+        </p>
+
+        <h3>It says "XrayTun.app is damaged and can't be opened" — is the file really damaged?</h3>
+        <p>
+          No. Gatekeeper rejects ad-hoc signed, non-notarized apps, and the wording resembles a corruption
+          message. Run <code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code> first; if it still
+          fails, verify your download against <code>SHA256SUMS.txt</code> (see the download section).
+        </p>
+
+        <h3>Why is the app not signed with a Developer ID and notarized?</h3>
+        <p>
+          Because signing and notarization require a paid Apple developer account, and the project has no
+          Developer ID certificate. The trade-off is a manual approval on first launch, and it is documented
+          publicly in the release notes.
+        </p>
+
+        <h3>Why does XrayTun need to install a privileged helper?</h3>
+        <p>
+          Because creating the utun interface, changing the routing table and changing system DNS all require
+          root. The helper is a root daemon that does only those three things and only accepts connections
+          from the XrayTun app that pass code-signature validation. The Xray core itself keeps running as your
+          normal user.
+        </p>
+
+        <h3>Does "system proxy" mode configure the macOS system proxy automatically?</h3>
+        <p>
+          No (as of v0.8.26). System proxy mode only starts local SOCKS5 (127.0.0.1:10808) and HTTP
+          (127.0.0.1:10809) inbounds; you point your apps or system proxy settings at those ports yourself. To
+          capture all traffic automatically, use TUN mode.
+        </p>
+
+        <h3>Which node protocols and subscription formats are supported?</h3>
+        <p>
+          Node protocols: vmess, vless, trojan, shadowsocks, socks and http. Subscriptions: Xray JSON, Clash /
+          Mihomo YAML, base64-encoded URI lists and plain URI lists, auto-detected.
+        </p>
+
+        <h3>Is ShadowsocksR (<code>ssr://</code>) supported?</h3>
+        <p>
+          No. Xray-core does not support <code>ssr://</code>, so pasting an <code>ssr://</code> link produces
+          an explicit error instead of being silently ignored.
+        </p>
+
+        <h3>Why do some outbounds show 0 B of traffic?</h3>
+        <p>
+          Because that is a blind spot in Xray's statistics, not an absence of traffic. Xray does not count
+          UDP outbound traffic (<code>dns-out</code>) or loopback traffic (<code>api</code>), so those byte
+          counters stay at 0. XrayTun lists them separately as "internal channels" and uses connection counts
+          instead. The <code>block</code> outbound really is 0 bytes, because connections are rejected before
+          any data flows.
+        </p>
+
+        <h3>How accurate are the domains in "recent connections"?</h3>
+        <p>
+          They are approximate. In Xray's access log, the connection setup line (<code>accepted</code>)
+          carries no connection ID, while the domain appears on a separate <code>sniffed</code> line, so
+          domains can only be paired by time, and concurrent connections can be paired incorrectly. The UI
+          marks paired domains with <code>*</code> and shows the pairing delta in microseconds so you can
+          judge. About half of all connections have no domain at all, which is normal for IP-based and
+          internal traffic.
+        </p>
+
+        <h3>How much data did one connection transfer, and how long did it last?</h3>
+        <p>
+          Not available, because Xray does not provide either number. The stats service only exposes
+          per-inbound and per-outbound aggregate counters, and the access log records setup but not teardown.
+          XrayTun does not fill the gap with estimates.
+        </p>
+
+        <h3>Can a crash or power loss break my network configuration?</h3>
+        <p>
+          It can leave residue, and XrayTun is built to clean it up: a session snapshot is written before any
+          network change and updated incrementally, the helper rolls back any leftover session on start, and
+          quitting the app restores the configuration. If system DNS still points at the in-tunnel sentinel
+          address while the tunnel is gone, the app states the cause and gives you the exact fix command.
+        </p>
+
+        <h3>Do I have to reconnect manually after switching Wi-Fi or waking from sleep?</h3>
+        <p>
+          No. The watchdog sends a real request through the tunnel every 10 seconds and rebuilds after two
+          consecutive failures; after login, if the app was connected when it last exited, it retries in the
+          background for about two minutes so it can come up before Wi-Fi is ready. If rebuilding fails it
+          falls back to direct connection. To be straightforward about a limitation: <strong>in v0.8.26 and
+          earlier the UI only shows "connected" or "disconnected" and does not display recovery progress</strong>,
+          so you may briefly see "disconnected" while it recovers in the background.
+        </p>
+
+        <h3>Is the auto-updater secure?</h3>
+        <p>
+          The updater downloads the zip from the project's GitHub release and verifies it against
+          <code>SHA256SUMS.txt</code>, refusing to install if the checksum does not match. To be explicit:
+          there is <strong>no signature verification</strong>, so it protects against corrupted downloads, not
+          against a compromised upstream. Real signing and notarization require a Developer ID certificate.
+        </p>
+
+        <h3>What licence does XrayTun use?</h3>
+        <p>
+          The source is public on GitHub. To be explicit: the repository's <code>Cargo.toml</code> declares
+          <code>license = "MIT"</code>, but <strong>as of v0.8.26 the repository contains no LICENSE file</strong>,
+          so please do not treat XrayTun as MIT-licensed software; until a LICENSE file is added, treat the
+          licence as undeclared. The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate
+          process, not a derivative work); see the Xray-core repository for its licence.
+        </p>
+      </section>
+
+      <!-- =========================================================== #links -->
+      <section class="wrap prose" id="links">
+        <h2>Links</h2>
+        <ul class="link-list">
+          <li>Source repository: <a href="https://github.com/harodggg/xrayTun">github.com/harodggg/xrayTun</a></li>
+          <li>All releases: <a href="https://github.com/harodggg/xrayTun/releases">GitHub Releases</a></li>
+          <li>Changelog: <a href="https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md">CHANGELOG.md</a></li>
+          <li>Documentation: <a href="https://github.com/harodggg/xrayTun/tree/main/docs">docs/</a></li>
+          <li>
+            TUN and privileges:
+            <a href="https://github.com/harodggg/xrayTun/blob/main/docs/02-tun-and-privileges.md"
+              >docs/02-tun-and-privileges.md</a
+            >
+          </li>
+          <li>
+            Routing and DNS:
+            <a href="https://github.com/harodggg/xrayTun/blob/main/docs/04-routing-and-dns.md"
+              >docs/04-routing-and-dns.md</a
+            >
+          </li>
+          <li>AI summary for this site: <a href="../llms.txt">llms.txt</a></li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap prose">
+        <p>
+          The site content and the XrayTun source are public on GitHub. The XrayTun repository's
+          <code>Cargo.toml</code> declares <code>license = "MIT"</code>, but as of v0.8.26 no LICENSE file is
+          included, so XrayTun is not described here as MIT-licensed software. The bundled Xray-core is
+          licensed under MPL-2.0, and its licence ships with the Xray-core project.
+        </p>
+        <p class="site-footer__meta">
+          XrayTun v0.8.26 · macOS 13.0+ only · page last updated 2026-09-20 ·
+          <a href="#main">Back to top</a>
+        </p>
+      </div>
+    </footer>
+
+    <script src="../assets/site.js" defer></script>
+  </body>
+</html>
