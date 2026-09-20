@@ -129,6 +129,7 @@ check_site_ver() { # $1=文件  $2=sed 提取表达式  $3=可读标签
 check_site_ver scripts/gen-site-jsonld.py 's/^XRAYTUN_VERSION *= *"\([^"]*\)".*/\1/p' "gen-site-jsonld.py XRAYTUN_VERSION"
 check_site_ver scripts/gen-site-geo.py 's/^VERSION *= *"\([^"]*\)".*/\1/p' "gen-site-geo.py VERSION"
 check_site_ver site/assets/site.js 's/.*PAGE_VERSION *= *"\([^"]*\)".*/\1/p' "site.js PAGE_VERSION"
+check_site_ver scripts/gen-site-images.py 's/^SITE_VERSION *= *"\([^"]*\)".*/\1/p' "gen-site-images.py SITE_VERSION"
 check_site_ver site/index.html 's/.*XrayTun_\([0-9.]*\)_x86_64_arm64\.dmg.*/\1/p' "site/index.html 下载文件名"
 check_site_ver site/en/index.html 's/.*XrayTun_\([0-9.]*\)_x86_64_arm64\.dmg.*/\1/p' "site/en/index.html 下载文件名"
 

@@ -42,6 +42,13 @@ except ImportError:  # pragma: no cover - 环境问题，给出可执行的修�
 SITE = Path(__file__).resolve().parents[1] / "site"
 ASSETS = SITE / "assets"
 
+# 版本号：**必须与 Cargo.toml 的 [workspace.package] version 一致**（scripts/check.sh 会断言）。
+# 卡片的**文件名里带版本号**，原因是一次实测事故：og 卡片内容每个版本都会变，而 `_headers`
+# 给了长缓存；文件名不变时，改版后 CDN 继续发旧卡片（实测 `cf-cache-status: HIT`、`age: 1674`、
+# 旧字节数，图上还印着旧版本号）。用带版本的文件名 = 每次发版换 URL，缓存可以放心长。
+SITE_VERSION = "0.8.28"
+WASM_VERSION = "0.7.0"
+
 # 配色**逐字取自 site/assets/site.css 的 :root**（改这里等于改官网，不要另起一套）
 BG = "#0f1420"
 SURFACE_1 = "#161d2c"
@@ -150,7 +157,7 @@ def fit(d: ImageDraw.ImageDraw, s: str, f, max_w: float, where: str) -> float:
 
 CARDS = [
     {
-        "out": "og-image.png",
+        "out": f"og-image-{SITE_VERSION}.png",
         "fonts": "cjk",
         "brand": "XrayTun",
         "title": "macOS 上的 Xray 图形客户端",
@@ -159,7 +166,7 @@ CARDS = [
         "note": None,
     },
     {
-        "out": "og-image-en.png",
+        "out": f"og-image-en-{SITE_VERSION}.png",
         "fonts": "latin",
         "brand": "XrayTun",
         "title": "An Xray GUI client for macOS",
@@ -168,7 +175,7 @@ CARDS = [
         "note": None,
     },
     {
-        "out": "og-image-wasm.png",
+        "out": f"og-image-wasm-{WASM_VERSION}.png",
         "fonts": "cjk",
         "brand": "xray-wasm",
         "title": "纯 Rust 的 Xray 协议栈",
@@ -177,7 +184,7 @@ CARDS = [
         "note": "同一作者的独立项目 —— XrayTun 不使用 xray-wasm",
     },
     {
-        "out": "og-image-wasm-en.png",
+        "out": f"og-image-wasm-en-{WASM_VERSION}.png",
         "fonts": "latin",
         "brand": "xray-wasm",
         "title": "Xray's protocol stack in pure Rust",

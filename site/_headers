@@ -41,17 +41,12 @@
 /manifest.webmanifest
   Cache-Control: public, max-age=604800
 
-/og-image.png
-  Cache-Control: public, max-age=604800
-
-/og-image-en.png
-  Cache-Control: public, max-age=604800
-
-/og-image-wasm.png
-  Cache-Control: public, max-age=604800
-
-/og-image-wasm-en.png
-  Cache-Control: public, max-age=604800
+# 社交卡片：**文件名里带版本号**（og-image-<版本>.png），内容变则 URL 变，
+# 所以可以放心长缓存。原因是一次实测事故：文件名的版本不变时，改版后 CDN 继续发旧卡片
+# （`cf-cache-status: HIT`、`age: 1674`、旧字节数 —— 图上还印着旧版本号），
+# 而 canonical/正文都已经更新了，只有卡片是旧的。
+/og-image*.png
+  Cache-Control: public, max-age=31536000, immutable
 
 # 给 AI / 爬虫的索引产物：改得少但也别缓存一天，1 小时
 /llms.txt
