@@ -116,13 +116,15 @@
 <html lang="zh-Hans">
 <title>XrayTun — macOS 上的 Xray 图形客户端（原生 TUN 模式）</title>
 <meta name="description" content="XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.26，通用包（Apple Silicon + Intel），包内自带 Xray 核心。">
-<link rel="canonical" href="https://harodggg.github.io/xrayTun/">
-<link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/">
-<link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/">
-<link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/">
+<link rel="canonical" href="https://xraytun.top/">
+<link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/">
+<link rel="alternate" hreflang="en" href="https://xraytun.top/en/">
+<link rel="alternate" hreflang="x-default" href="https://xraytun.top/">
 ```
 
-> 域名/路径以 `task-20` 部署后的**实测**为准（`INTERACTION.md` INT-0-3/0-4：canonical/hreflang/sitemap 必须是绝对 URL，且大小写要按 `curl -I` 的结果写）。
+> 域名/路径以**线上实测**为准（`curl -I`）：canonical 已落地为 `https://xraytun.top/`（中文页）。
+> GitHub Pages 的 project 站点子路径只作**镜像**，不再作为 canonical（`INTERACTION.md` INT-0-3/0-4：
+> canonical/hreflang/sitemap 必须是绝对 URL，且大小写要按 `curl -I` 的结果写）。
 
 ### 2.1 `#what` — 一句话是什么
 
@@ -394,7 +396,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | 设计文档 | `https://github.com/harodggg/xrayTun/tree/main/docs` |
 | 安装与 TUN 权限说明 | `https://github.com/harodggg/xrayTun/blob/main/docs/02-tun-and-privileges.md` |
 | 分流与 DNS 说明 | `https://github.com/harodggg/xrayTun/blob/main/docs/04-routing-and-dns.md` |
-| 给 AI 的站点摘要 | `https://harodggg.github.io/xrayTun/llms.txt`（task-21 产出） |
+| 给 AI 的站点摘要 | `https://xraytun.top/llms.txt`（task-21 产出） |
 
 **页脚许可证声明（中文）**
 > 本页内容与 XrayTun 源码公开在 GitHub。XrayTun 以 **MIT** 许可发布
@@ -414,10 +416,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 <html lang="en">
 <title>XrayTun — A macOS GUI client for Xray with native TUN mode</title>
 <meta name="description" content="XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.26, universal build (Apple Silicon + Intel), Xray core included.">
-<link rel="canonical" href="https://harodggg.github.io/xrayTun/en/">
-<link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/">
-<link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/">
-<link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/">
+<link rel="canonical" href="https://xraytun.top/en/">
+<link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/">
+<link rel="alternate" hreflang="en" href="https://xraytun.top/en/">
+<link rel="alternate" hreflang="x-default" href="https://xraytun.top/">
 ```
 
 ### 3.1 `#what`
@@ -713,7 +715,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | Documentation | `https://github.com/harodggg/xrayTun/tree/main/docs` |
 | TUN and privileges | `https://github.com/harodggg/xrayTun/blob/main/docs/02-tun-and-privileges.md` |
 | Routing and DNS | `https://github.com/harodggg/xrayTun/blob/main/docs/04-routing-and-dns.md` |
-| AI summary for this site | `https://harodggg.github.io/xrayTun/llms.txt` (produced by task-21) |
+| AI summary for this site | `https://xraytun.top/llms.txt` (produced by task-21) |
 
 **Footer licence statement (English)**
 > The site content and the XrayTun source are public on GitHub. XrayTun is released under the
@@ -741,7 +743,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
   "fileSize": "47128987",
   "softwareRequirements": "macOS 13.0 or later; Apple Silicon or Intel; Xray node or subscription required",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
-  "url": "https://harodggg.github.io/xrayTun/",
+  "url": "https://xraytun.top/",
   "sameAs": ["https://github.com/harodggg/xrayTun"]
 }
 ```
@@ -815,9 +817,11 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 
 ## 7. 待补 / 未确认
 
-1. **域名与仓库元数据**：站点最终 URL 取决于 task-20 部署（project 站点子路径与大小写，见 INT-0-3/0-4）。
-   本文件里的 `harodggg.github.io/xrayTun/` 是**预期值**，部署后必须以 `curl -I` 实测为准，
-   并同步 canonical / hreflang / sitemap / `og:url`。
+1. **域名与仓库元数据**：**已落地** —— 站点 canonical 为 `https://xraytun.top/`
+   （中英两个首页与 `/wasm/`、`/en/wasm/` 各自 canonical + 三向 hreflang，
+   `x-default` 指中文页）。2026-09-20 已从**线上** `curl` 核对：4 页 canonical 与
+   `sitemap.xml` 的 4 个 `<loc>` 全部为 `xraytun.top`。
+   GitHub Pages 的 project 站点子路径仅作镜像（canonical 指向 apex）。
 2. **`llms.txt`（task-21）**：本文件提到它，但内容由 task-21 产出。要求：与本站 `#what`/`#features`/`#faq` 的
    事实**逐字不冲突**，版本号三处一致（INT-4-4）。
 3. **截图与界面语言**：`#install` 第 2 步建议配 dmg 窗口截图；应用界面是中文，

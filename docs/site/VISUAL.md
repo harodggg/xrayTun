@@ -632,7 +632,7 @@ header 右侧：   功能   下载   FAQ   │   中文 · EN
 **URL 策略**是 `interaction-designer` 的范围（`docs/site/INTERACTION.md`），
 但视觉上必须**假设** `/`（zh）与 `/en/`（en）是两个真实路径 ——
 切换器的 `href` 是绝对路径 `href="/en/"`，且**在子路径部署下要改成相对路径**
-（Pages 站点形如 `https://harodggg.github.io/xrayTun/`，见 task-20 的注意项）。
+（Pages 站点形如 `https://xraytun.top/`，见 task-20 的注意项）。
 
 ---
 
