@@ -26,11 +26,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use xt_core::model::{AppSettings, Node, ProxyMode};
+use xt_core::store::Store;
 use xt_core::xray::{
     self, CoreConfigInput, CoreEvent, InboundProfile, ProbeOptions, ProbeResult, XrayProcess,
     MIN_CORE_VERSION_NATIVE_TUN,
 };
-use xt_core::store::Store;
 use xt_proto::{DatapathPlan, DefaultRouteMode, DnsMode, Request, TunUpRequest};
 
 use crate::helper_client::HelperClient;
@@ -83,7 +83,11 @@ fn resolve_server_addrs(node: Option<&Node>) -> Result<Vec<std::net::IpAddr>, St
 }
 
 fn println_servers(addrs: &[std::net::IpAddr]) {
-    let list = addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+    let list = addrs
+        .iter()
+        .map(|a| a.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     tracing::info!(servers = %list, "已解析代理服务器地址，将为它们安装 bypass host 路由");
 }
 
@@ -219,11 +223,8 @@ impl Supervisor {
         self.physical_interface = physical.as_ref().map(|d| d.interface.clone());
 
         // ---- 2) 生成并落盘配置 ----
-        let profile: InboundProfile = profile_for(
-            settings,
-            self.physical_interface.as_deref(),
-            native_tun,
-        );
+        let profile: InboundProfile =
+            profile_for(settings, self.physical_interface.as_deref(), native_tun);
         let rules = xray::merge_rules(settings);
         let config = xray::build_pretty(&CoreConfigInput {
             settings,
@@ -234,7 +235,9 @@ impl Supervisor {
             // 物理网卡：TUN 模式下 direct 出站要靠它逃出隧道。
             physical_interface: self.physical_interface.as_deref(),
         });
-        let config_path = store.write_core_config(&config).map_err(|e| e.to_string())?;
+        let config_path = store
+            .write_core_config(&config)
+            .map_err(|e| e.to_string())?;
 
         // 静态校验：把明显非法的配置挡在进程启动之前，错误信息也更可读。
         xray::validate_config(&core_path, &config_path)
@@ -261,9 +264,11 @@ impl Supervisor {
                 .first()
                 .map(|ip| std::net::SocketAddr::new(*ip, selected.map(|n| n.port).unwrap_or(443)));
             let session_id = request.session_id.clone();
-            helper
-                .tun_up(request)
-                .map_err(|e| format!("helper 建立 TUN 失败：{}", e.message))?;
+            // 会话泄漏（运行期间留下，或上一个 App 进程未干净退出）会在这里撞上
+            // 「已有活跃会话」。走自愈：拆掉泄漏会话后**重试一次**，而不是把
+            // 「请先 tun_down」丢给用户 —— 那与本项目「开机后自动连上、
+            // 不需要点击」的目标直接冲突。
+            tun_up_with_self_heal(helper, request)?;
             self.session_id = Some(session_id.clone());
 
             let (info, fd) = helper
@@ -278,11 +283,15 @@ impl Supervisor {
         // geo 的退路：核心自己旁边没有就去包内资源目录 / 托管目录找。
         // 顺序与核心解析一致（包内优先于托管），但这里更宽松：
         // 只要哪个目录真的有 geo 文件就用哪个。
-        let geo_fallback: Vec<PathBuf> = [paths.app_resource_dir.clone(), paths.managed_core_dir.clone()]
-            .into_iter()
-            .flatten()
-            .collect();
-        let process = spawn_core(&core_path, &config_path, self.tun_fd, events, &geo_fallback).await?;
+        let geo_fallback: Vec<PathBuf> = [
+            paths.app_resource_dir.clone(),
+            paths.managed_core_dir.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let process =
+            spawn_core(&core_path, &config_path, self.tun_fd, events, &geo_fallback).await?;
 
         // ---- 5) 等待就绪 ----
         if let Err(e) = xray::wait_for_port(settings.socks_port, CORE_READY_TIMEOUT).await {
@@ -379,7 +388,90 @@ impl Supervisor {
             Err(errors.join("；"))
         }
     }
+}
 
+/// 建立 TUN 所需、且自愈要用到的最小 helper 操作集。
+///
+/// **抽成 trait 的唯一目的是让自愈链路可测。** `HelperClient` 是挂在
+/// Unix socket 上的具体类型，测试里没法让它「第一次返回会话冲突、
+/// 第二次成功」—— 只能注入一个假实现。除此之外不要把它当接口用。
+trait TunUpOps {
+    fn tun_up(&mut self, request: TunUpRequest) -> Result<(), xt_proto::HelperError>;
+    fn restore(&mut self) -> Result<(), xt_proto::HelperError>;
+}
+
+impl TunUpOps for HelperClient {
+    fn tun_up(&mut self, request: TunUpRequest) -> Result<(), xt_proto::HelperError> {
+        // 全限定调用，避免落到本 trait 自己的同名方法上造成递归。
+        HelperClient::tun_up(self, request)
+    }
+
+    fn restore(&mut self) -> Result<(), xt_proto::HelperError> {
+        self.call(&Request::Restore).map(|_| ())
+    }
+}
+
+/// 会话泄漏自愈：`tun_up` 撞上「已有活跃会话」时，自动拆掉泄漏会话并**重试一次**。
+///
+/// # 为什么值得自愈
+///
+/// 会话可能是**运行期间**泄漏的（一次连接中途失败留下会话，或上一个 App
+/// 进程未干净退出而本次已启动过）。启动期清理只跑一次，覆盖不到这种情况。
+/// 此时用户看到的是原始报错「请先 tun_down」—— 要求他手工介入。
+///
+/// # 触发条件刻意收窄
+///
+/// **只认** [`xt_proto::HelperError::is_session_conflict`]。其余错误
+/// （路径白名单、helper 未安装、权限不足）**原样上报**：这类「自动修复」
+/// 最常见的事故就是把自愈做得太宽，把本该暴露给用户的真实错误吃掉。
+///
+/// # 为什么「先 Restore 再重试」是安全的
+///
+/// 被拆的那条会话必然是**没人负责的**：如果它还有主人，helper 的 `tun_up`
+/// 本来就会把「另一个进程的合法会话」判成冲突并拒绝。
+/// 且 `Restore` 正是启动期清理遗留物所用的同一条路径
+/// （`tear_down_live_session()` + `controller::force_cleanup()`），
+/// 本来就为「处理遗留物」而存在。
+fn tun_up_with_self_heal(ops: &mut impl TunUpOps, request: TunUpRequest) -> Result<(), String> {
+    let failure = match ops.tun_up(request.clone()) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    if !failure.is_session_conflict() {
+        // 不是会话冲突：一行都不多管，原样上报。
+        return Err(format!("helper 建立 TUN 失败：{}", failure.message));
+    }
+
+    // 用户排障时要知道「发生过自动清理」，否则他只会看到一次莫名其妙的成功。
+    tracing::warn!(
+        code = ?failure.code,
+        error = %failure.message,
+        "TUN 建立撞上已有活跃会话，自动清理泄漏会话后重试一次"
+    );
+
+    if let Err(e) = ops.restore() {
+        // 连清理都失败 —— 必须如实说清是**哪一步**坏的，而不是把原始的
+        // 会话冲突再抛一遍（那会让用户以为自愈压根没触发）。
+        return Err(format!(
+            "helper 建立 TUN 失败：{}；尝试自动清理泄漏会话时又失败了：{}",
+            failure.message, e.message
+        ));
+    }
+
+    match ops.tun_up(request) {
+        Ok(()) => {
+            tracing::info!("自动清理泄漏会话后，TUN 建立成功");
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "helper 建立 TUN 失败：{}（已自动清理泄漏会话并重试一次，仍然失败）",
+            e.message
+        )),
+    }
+}
+
+impl Supervisor {
     fn rollback_tun(&mut self, helper: &mut HelperClient) {
         if let Err(e) = self.rollback_tun_inner(helper) {
             tracing::error!(error = %e, "TUN 回滚失败，helper 侧快照已保留，下次启动会重试");
@@ -460,7 +552,6 @@ impl Supervisor {
             Vec::new()
         };
 
-
         Ok(TunUpRequest {
             // 会话 id 用「启动时刻的纳秒」而不是随机数：它天然单调，
             // 且出问题时能从日志时间反查到是哪一次启动。
@@ -511,7 +602,8 @@ async fn spawn_core(
     // **注意 geo 和核心是两份独立的更新**：只更新了核心、托管目录里没有 geo
     // 文件是完全正常的状态。这时如果直接把 ASSET 指向托管目录，规则就会
     // 静默失效 —— 所以这里按「谁真的有 geo 文件」来选，而不是按「谁提供了核心」。
-    let has_geo = |d: &std::path::Path| d.join("geosite.dat").is_file() || d.join("geoip.dat").is_file();
+    let has_geo =
+        |d: &std::path::Path| d.join("geosite.dat").is_file() || d.join("geoip.dat").is_file();
     let asset_dir = core_path
         .parent()
         .filter(|d| has_geo(d))
@@ -570,7 +662,9 @@ pub async fn probe(
         interface: interface.map(str::to_string),
         ..Default::default()
     };
-    xray::probe_nodes(nodes, &opts, None).await.map_err(|e| e.to_string())
+    xray::probe_nodes(nodes, &opts, None)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 解析 `Xray 26.1.31 (go1.24.0 ...)` 这类版本串，判断是否 >= `min`。
@@ -638,7 +732,12 @@ pub fn rate_from(
             ((tx.saturating_sub(previous.tx_bytes)) as f64 / secs) as u64,
         )
     };
-    crate::state::TrafficSample { rx_bytes: rx, tx_bytes: tx, rx_rate, tx_rate }
+    crate::state::TrafficSample {
+        rx_bytes: rx,
+        tx_bytes: tx,
+        rx_rate,
+        tx_rate,
+    }
 }
 
 /// 等待核心可执行文件出现（用户在设置里改路径后的校验用）。
@@ -679,9 +778,10 @@ pub fn geo_dir(data_root: &Path) -> Option<PathBuf> {
         // 开发期：apps/desktop/binaries
         crate::dev_binaries_dir().unwrap_or_default(),
     ];
-    candidates
-        .into_iter()
-        .find(|d| !d.as_os_str().is_empty() && (d.join("geosite.dat").is_file() || d.join("geoip.dat").is_file()))
+    candidates.into_iter().find(|d| {
+        !d.as_os_str().is_empty()
+            && (d.join("geosite.dat").is_file() || d.join("geoip.dat").is_file())
+    })
 }
 
 #[cfg(test)]
@@ -728,7 +828,14 @@ mod tests {
         let settings = AppSettings::default(); // 默认代理模式，且未选节点
 
         let err = sup
-            .start(&store, &settings, &[], &mut helper, None, CoreSearchPaths::default())
+            .start(
+                &store,
+                &settings,
+                &[],
+                &mut helper,
+                None,
+                CoreSearchPaths::default(),
+            )
             .await
             .expect_err("没有节点时必须拒绝启动");
         assert!(err.contains("请先选择一个节点"), "错误文案变了: {err}");
@@ -874,11 +981,16 @@ mod tests {
     #[test]
     fn tun_request_always_bypasses_the_server_ip() {
         let sup = Supervisor::default();
-        let settings = AppSettings { mode: ProxyMode::Tun, ..Default::default() };
+        let settings = AppSettings {
+            mode: ProxyMode::Tun,
+            ..Default::default()
+        };
         let server: std::net::IpAddr = "203.0.113.10".parse().unwrap();
         let gw: std::net::IpAddr = "192.168.0.1".parse().unwrap();
 
-        let req = sup.build_tun_request(&settings, Some(gw), &[server]).unwrap();
+        let req = sup
+            .build_tun_request(&settings, Some(gw), &[server])
+            .unwrap();
         assert!(
             req.routes.bypass_hosts.contains(&server),
             "服务器 IP 必须在 bypass_hosts 里，否则会形成路由环"
@@ -890,7 +1002,10 @@ mod tests {
     #[test]
     fn tun_request_refuses_without_server_ips() {
         let sup = Supervisor::default();
-        let settings = AppSettings { mode: ProxyMode::Tun, ..Default::default() };
+        let settings = AppSettings {
+            mode: ProxyMode::Tun,
+            ..Default::default()
+        };
         let err = sup.build_tun_request(&settings, None, &[]);
         assert!(err.is_err(), "没有服务器 IP 就不能接管默认路由");
         let msg = err.unwrap_err();
@@ -905,10 +1020,15 @@ mod tests {
     #[test]
     fn server_host_route_precedes_default_capture_in_real_request() {
         let sup = Supervisor::default();
-        let settings = AppSettings { mode: ProxyMode::Tun, ..Default::default() };
+        let settings = AppSettings {
+            mode: ProxyMode::Tun,
+            ..Default::default()
+        };
         let server: std::net::IpAddr = "203.0.113.10".parse().unwrap();
         let gw: std::net::IpAddr = "192.168.0.1".parse().unwrap();
-        let req = sup.build_tun_request(&settings, Some(gw), &[server]).unwrap();
+        let req = sup
+            .build_tun_request(&settings, Some(gw), &[server])
+            .unwrap();
 
         let physical = xt_tun::plan::PhysicalUplink {
             interface: "en0".into(),
@@ -917,11 +1037,18 @@ mod tests {
         };
         let plan = xt_tun::plan::build_plan(&req, physical).unwrap();
 
-        let dests: Vec<String> = plan.routes.iter().map(|r| r.destination.to_string()).collect();
+        let dests: Vec<String> = plan
+            .routes
+            .iter()
+            .map(|r| r.destination.to_string())
+            .collect();
         let host_idx = dests.iter().position(|d| d == "203.0.113.10/32");
         let split_idx = dests.iter().position(|d| d == "0.0.0.0/1");
 
-        assert!(host_idx.is_some(), "plan 里必须有服务器 host 路由：{dests:?}");
+        assert!(
+            host_idx.is_some(),
+            "plan 里必须有服务器 host 路由：{dests:?}"
+        );
         assert!(split_idx.is_some(), "plan 里必须有 /1 接管路由");
         assert!(
             host_idx.unwrap() < split_idx.unwrap(),
@@ -940,7 +1067,10 @@ mod tests {
 
     #[test]
     fn version_extraction_is_strict() {
-        assert_eq!(extract_version("Xray 26.1.31 (go1.24.0)"), Some("26.1.31".into()));
+        assert_eq!(
+            extract_version("Xray 26.1.31 (go1.24.0)"),
+            Some("26.1.31".into())
+        );
         assert_eq!(extract_version("v26.9.9"), Some("26.9.9".into()));
         assert_eq!(extract_version("no version here"), None);
         // go1.24.0 含有 'o'，不应被误认为版本号
@@ -949,8 +1079,14 @@ mod tests {
 
     #[test]
     fn version_comparison_pads_short_versions() {
-        assert_eq!(compare_versions("26.1", "26.1.0"), std::cmp::Ordering::Equal);
-        assert_eq!(compare_versions("26.1.1", "26.1"), std::cmp::Ordering::Greater);
+        assert_eq!(
+            compare_versions("26.1", "26.1.0"),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("26.1.1", "26.1"),
+            std::cmp::Ordering::Greater
+        );
         assert_eq!(compare_versions("26", "26.0.1"), std::cmp::Ordering::Less);
     }
 
@@ -963,7 +1099,12 @@ mod tests {
     #[test]
     fn rate_from_ignores_short_intervals_and_counter_resets() {
         use crate::state::TrafficSample;
-        let prev = TrafficSample { rx_bytes: 1000, tx_bytes: 2000, rx_rate: 0, tx_rate: 0 };
+        let prev = TrafficSample {
+            rx_bytes: 1000,
+            tx_bytes: 2000,
+            rx_rate: 0,
+            tx_rate: 0,
+        };
 
         // 采样间隔过短 → 不报速率
         let r = rate_from(&prev, 2000, 4000, Duration::from_millis(10));
@@ -984,5 +1125,188 @@ mod tests {
     fn core_supports_native_tun_matches_min_version() {
         assert!(core_supports_native_tun("Xray 26.9.9 (go1.24.0)"));
         assert!(!core_supports_native_tun("Xray 26.1.18 (go1.24.0)"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 会话泄漏自愈（task-31 第 2 步）
+    // -----------------------------------------------------------------------
+
+    /// 假 helper：按脚本返回 `tun_up` 结果，并**记录真实调用序列**。
+    ///
+    /// 记录序列是刻意的：这组测试要证明的不只是「最终成功」，而是
+    /// 「**确实**先 Restore 再重试一次」，以及「非冲突错误**没有**触发 Restore」。
+    /// 只看最终返回值的话，一个「无条件 Restore 一次」的错误实现也能骗过测试。
+    struct FakeOps {
+        tun_up_queue: std::collections::VecDeque<Result<(), xt_proto::HelperError>>,
+        restore_fails: bool,
+        calls: Vec<&'static str>,
+    }
+
+    impl FakeOps {
+        fn new(tun_up: Vec<Result<(), xt_proto::HelperError>>, restore_fails: bool) -> Self {
+            Self {
+                tun_up_queue: tun_up.into(),
+                restore_fails,
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl TunUpOps for FakeOps {
+        fn tun_up(&mut self, _request: TunUpRequest) -> Result<(), xt_proto::HelperError> {
+            self.calls.push("tun_up");
+            self.tun_up_queue.pop_front().unwrap_or_else(|| {
+                Err(xt_proto::HelperError::new(
+                    xt_proto::ErrorCode::Internal,
+                    "测试脚本给的 tun_up 次数少于实际调用次数",
+                ))
+            })
+        }
+
+        fn restore(&mut self) -> Result<(), xt_proto::HelperError> {
+            self.calls.push("restore");
+            if self.restore_fails {
+                Err(xt_proto::HelperError::new(
+                    xt_proto::ErrorCode::Internal,
+                    "Restore 也失败了",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// 一个内容合法、可直接喂给自愈函数的 TUN 请求（复用真实构造路径）。
+    fn a_tun_request() -> TunUpRequest {
+        Supervisor::default()
+            .build_tun_request(
+                &AppSettings {
+                    mode: ProxyMode::Tun,
+                    ..Default::default()
+                },
+                Some("192.168.0.1".parse().unwrap()),
+                &["203.0.113.10".parse().unwrap()],
+            )
+            .expect("夹具请求应当能构造出来")
+    }
+
+    fn conflict(code: xt_proto::ErrorCode, msg: &str) -> Result<(), xt_proto::HelperError> {
+        Err(xt_proto::HelperError::new(code, msg))
+    }
+
+    /// 主链路：会话冲突 → 自动 Restore → 重试一次 → 成功。
+    #[test]
+    fn session_conflict_is_healed_by_restore_and_one_retry() {
+        let mut ops = FakeOps::new(
+            vec![
+                conflict(
+                    xt_proto::ErrorCode::SessionConflict,
+                    "已有活跃会话 s178…（接口 utun6），请先 tun_down",
+                ),
+                Ok(()),
+            ],
+            false,
+        );
+        let out = tun_up_with_self_heal(&mut ops, a_tun_request());
+        assert!(out.is_ok(), "清理泄漏会话后重试应当成功：{out:?}");
+        assert_eq!(
+            ops.calls,
+            ["tun_up", "restore", "tun_up"],
+            "顺序与次数是契约"
+        );
+    }
+
+    /// 用户机器上装的是**旧 helper**（单独安装的特权二进制，长期共存）：
+    /// 它只发 `InvalidRequest` + 那句中文，同样必须触发自愈。
+    #[test]
+    fn legacy_helper_conflict_also_triggers_self_heal() {
+        let mut ops = FakeOps::new(
+            vec![
+                conflict(
+                    xt_proto::ErrorCode::InvalidRequest,
+                    "已有活跃会话 s178…（接口 utun6），请先 tun_down",
+                ),
+                Ok(()),
+            ],
+            false,
+        );
+        let out = tun_up_with_self_heal(&mut ops, a_tun_request());
+        assert!(out.is_ok(), "旧 helper 的冲突也要能自愈：{out:?}");
+        assert_eq!(ops.calls, ["tun_up", "restore", "tun_up"]);
+    }
+
+    /// **反例（本卡重点）**：非会话冲突的错误必须**原样上报**，且**不得**触发 Restore。
+    ///
+    /// 路径白名单失败也是 `InvalidRequest` —— 判据若写成「所有 InvalidRequest
+    /// 都算冲突」，这里就会去拆一条**不相干**的会话，并把真实错误吞掉。
+    #[test]
+    fn non_conflict_error_is_reported_verbatim_and_never_restores() {
+        let mut ops = FakeOps::new(
+            vec![conflict(
+                xt_proto::ErrorCode::InvalidRequest,
+                "路径不在白名单内",
+            )],
+            false,
+        );
+        let err = tun_up_with_self_heal(&mut ops, a_tun_request())
+            .expect_err("白名单错误必须上报，不能被自愈吞掉");
+        assert!(err.contains("路径不在白名单内"), "原文必须保留：{err}");
+        assert_eq!(ops.calls, ["tun_up"], "非冲突错误不得触发 Restore");
+    }
+
+    /// 清理之后仍然失败：要如实写「已自动清理并重试过」，
+    /// 而不是把原始的会话冲突再抛一遍（那会让用户以为自愈压根没触发）。
+    #[test]
+    fn conflict_surviving_the_retry_is_reported_as_such() {
+        let mut ops = FakeOps::new(
+            vec![
+                conflict(
+                    xt_proto::ErrorCode::SessionConflict,
+                    "已有活跃会话 s1（接口 utun6），请先 tun_down",
+                ),
+                conflict(
+                    xt_proto::ErrorCode::SessionConflict,
+                    "已有活跃会话 s2（接口 utun6），请先 tun_down",
+                ),
+            ],
+            false,
+        );
+        let err =
+            tun_up_with_self_heal(&mut ops, a_tun_request()).expect_err("重试后仍失败就该失败");
+        assert!(
+            err.contains("已自动清理泄漏会话并重试一次"),
+            "要说清做过什么：{err}"
+        );
+        assert_eq!(
+            ops.calls,
+            ["tun_up", "restore", "tun_up"],
+            "只重试一次，不无限循环"
+        );
+    }
+
+    /// 连清理都失败：必须指出坏在哪一步，否则用户无从下手。
+    #[test]
+    fn restore_failure_is_reported_as_such() {
+        let mut ops = FakeOps::new(
+            vec![conflict(
+                xt_proto::ErrorCode::SessionConflict,
+                "已有活跃会话 s1",
+            )],
+            true,
+        );
+        let err = tun_up_with_self_heal(&mut ops, a_tun_request()).expect_err("清理失败就该失败");
+        assert!(
+            err.contains("尝试自动清理泄漏会话时又失败了"),
+            "要指出是哪一步：{err}"
+        );
+        assert_eq!(ops.calls, ["tun_up", "restore"]);
+    }
+
+    /// 一次就成功时不得多做任何动作 —— 否则自愈会给正常启动平白加一次 Restore。
+    #[test]
+    fn success_on_first_try_does_no_extra_work() {
+        let mut ops = FakeOps::new(vec![Ok(())], false);
+        assert!(tun_up_with_self_heal(&mut ops, a_tun_request()).is_ok());
+        assert_eq!(ops.calls, ["tun_up"]);
     }
 }
