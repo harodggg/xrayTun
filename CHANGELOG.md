@@ -1,5 +1,94 @@
 # 更新记录
 
+## 0.8.27
+
+> 自动恢复的过程在界面上可见了；官网（中文 + 英文）上线；**安装说明修正**
+> —— 原来那段照做是装不上的。
+
+### 新增：自动恢复过程在界面上可见
+
+看门狗重连核心时，界面以前把「正在自动恢复」显示成「未连接」——用户会以为
+必须自己点一次连接。现在：
+
+* 顶栏与仪表盘显示「正在自动恢复（第 N 次）」，连接按钮在此期间为
+  「正在恢复…」且 `disabled=true`；
+* 成功后回到「已连接」，并给一次性提示「已自动恢复连接（第 N 次）」；
+* 失败时如实显示「自动恢复失败」，按钮恢复可点（**不假装已连上**）；
+* 修掉「已自动恢复」与「恢复失败」同屏矛盾的残影（CDP 实测发现）；
+* 新增 11 条单测锁住 5 条界面不变量（recovering 时按钮绝非「连接」、
+  文案不退化成「未连接」、成功后不留残影、失败要说直连且按钮可点、
+  没有恢复信息时什么都不说）。
+
+### 新增：官网（中文 + 英文）
+
+`site/` 下的纯静态站：不用执行 JavaScript 就能读到全部关键内容（下载、安装、
+FAQ 都在原始 HTML 里），另有给 AI 检索用的 `llms.txt` / `llms-full.txt`、
+`robots.txt`（13 个 User-agent 块、0 条 Disallow）与 `sitemap.xml`（2 个 URL、
+三向 hreflang 互指）。已用 **GitHub Pages** 发布
+（`.github/workflows/pages.yml`），并对 **project 站点的子路径**
+（`harodggg.github.io/xrayTun/`）逐条实测：站内链接与资源（含 `/en/` 与 CSS 里的
+`url()`）全部 200；远端内容与仓库文件 sha256 逐个一致。
+
+### 修复：安装说明照做会失败（用户装不上）
+
+原来 README 与 Release Notes 都写「右键 →「打开」，或 `xattr -dr com.apple.quarantine …`」。
+实测两处都不成立：
+
+* 现在的 macOS 里 `xattr` **根本没有 `-r`**：`xattr -dr` 与 `xattr -cr` 都以
+  `option -r not recognized`（exit 64）失败 —— 看起来像清掉了，其实没有；
+* 只给 bundle 根路径的 `xattr -d com.apple.quarantine /Applications/XrayTun.app`
+  **只清掉根上那一个**：实测 13 个带 quarantine 的文件里还剩 **12 个**；
+* 「右键 →「打开」」**已被 Apple 在 macOS 15 移除**（2024-08-06 公告）。
+
+现在按版本给三条可执行路径：macOS 15+ 用「系统设置 → 隐私与安全性 → 仍要打开」、
+macOS 14 及更早右键「打开」、终端用
+`find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} +` 逐文件清；
+并写明**核心随包附带（`Contents/Resources/{xray, geoip.dat, geosite.dat}`），
+不需要自己安装 Xray**。
+
+### 修复：`codesign --verify --strict` 失败（会挡住将来的公证）
+
+发布的 App 里 **13 个文件**带 `com.apple.FinderInfo`，而 CI 用的是**非严格**的
+`codesign --verify --verbose=1`，所以一直显示成功。根因是 `hdiutil makehybrid -hfs`
+**会给镜像里每个文件补 FinderInfo** —— 用零 xattr 的干净源目录做对照实验也一样，
+而 `ditto` 打的 zip 不会。修法四步：① 签名前逐文件清；② dmg 生成后在可写镜像里
+再清一次（`makehybrid → UDRW → 挂载 → 清 → UDZO`）；③ 交付前断言镜像内 App 必须
+通过 `--strict`；④ CI 改 `--strict`（清不掉时 CI 直接失败，不静默放行）。
+
+### 修复：几处「陈述与事实不符」
+
+* **设置页 5 张卡锚点不可达**：`id` 重复（`set-dns`×3 / `set-sys`×2 / `set-core`×2 /
+  `set-conn`×2）→ 9 张卡各有唯一 id，4 个导航锚点实测跳转正确；
+* **地球仪**「飞机数量与快慢由实测速率决定」与实现不符：数量来自**累计流量**
+  （跨核心重启单调），快慢是固定视觉节奏；
+* **未定义 token `--line` 且无兜底** → `.highway__internal` 那条虚线分隔线
+  **从 v0.8.24 起一直没渲染出来**；同时确认 `--panel` 有兜底、渲染正常，
+  所以只修前者（不把「有降级路径」当 bug 修）。
+
+### 改进：「开机自启动」不再埋在折叠线下
+
+用户头号需求是「开机后自动连上、不用点连接」，而那个开关原先埋在「其他」卡最底下：
+1080×720 实测控件 `top=2997px`，完全在折叠线以下。现在独立成卡放在「代理入口」之后，
+实测 `top=402`（控件 `top=457`）—— **不滚动即完整可见**。
+
+### 其他
+
+* 补 MIT `LICENSE`（与 `Cargo.toml` 的 `license = "MIT"` 名实相符）；第三方组件声明
+  （Xray-core MPL-2.0、geoip/geosite）单独放 `THIRD-PARTY.md` —— 这样 GitHub 才能把
+  `LICENSE` 正确识别为 MIT，而不是 `Other`；
+* 跨语言契约测试覆盖 `connection` 系列与 `RecoveryState`；
+* 官网与文档中若干与实现不一致的表述按事实修正。
+
+### 已知边界（诚实清单）
+
+* **macOS 真机 GUI 无法自动化验证**：系统设置里的「仍要打开」、helper 安装的管理员
+  密码弹窗都只能人工点；本机无图形会话，未实测这两步。
+* **连接与域名的配对是时序近似**：`accepted` 行不带连接 ID，域名靠「时间最近的前一条
+  `sniffed`」配对；配对覆盖率与真实值未在真机统计。
+* **未跑完整真机端到端**：TUN 模式建卡/改路由/回滚只走了单测与协议层测试，
+  没有在真机上完成一次「下载 → 安装 → 连上 → 退出回滚」的全程。
+* `log-line--debug` 的可达性是按代码取值域推的，未在真机观测过。
+
 ## 0.8.26
 
 > **单连接可视化**：把核心访问日志里的每条连接与拓扑结合起来看。
