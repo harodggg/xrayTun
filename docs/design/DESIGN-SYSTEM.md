@@ -1,7 +1,9 @@
 # xray-tun 设计系统：token 收敛与跨页一致性
 
 > **任务**：task-12　**作者**：art-designer　**唯一写入文件**：本文件（不改任何源码）
-> **基线**：`apps/ui/src/styles.css` **2408 行**，工作区与 `HEAD` **干净**
+> **基线**：`apps/ui/src/styles.css` **2408 行** @ commit `55a4ad9`（首次审计时的版本）。
+> 审计后由 `e7ed509` 修掉了本文 §1.2 报告的 `--line` 未定义（+3 行），**当前为 2411 行**；
+> 本文所有行号已按 **2411 行**的当前版本重新核对（2026-09-20 复算）
 > （`git diff --stat HEAD -- apps/ui/src/styles.css` 输出为空，因此本文每个行号都能在当前版本直接复现）
 > **审计日期**：2026-09-20　**审计机型**：macOS，headless Chrome 153.0.8010.50
 
@@ -66,21 +68,26 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 得到 `--text` = 104 次这种**错误**数字（我第一次就踩了这个坑）。同一原因，
 `--border` 宽松匹配是 41 次，精确匹配是 **31** 次；`--bg` 宽松 25 次，精确 **2** 次。
 
-### 1.2 未使用的 token —— 一个都没有；但有两个**用了却没定义**的 token（真 bug）
+### 1.2 未使用的 token —— 一个都没有；但有 2 个 `var()` 指向了**不存在的 token**（性质不同）
 
 **没有 `uses == 0` 的 token。** 但有 3 个「近乎死掉」（≤4 次）：`--bg`(2)、`--accent-hover`(2)、`--bg-input`(4)。
 `--bg` 只用在 `body` 背景和滚动条描边各一次 —— 也就是说**整个应用的表面色几乎不用 `--bg`**，
 这是后面「14 种深色底」问题的直接后果。
 
-真正的问题在反方向，**两个 `var()` 指向了不存在的 token**：
+真正的问题在反方向，**2 个 `var()` 指向了不存在的 token**。
+两者**性质不同**，必须分开说（这个区分是 lead 独立复算时补上的，我采纳）：
 
-| 引用处 | 写法 | 后果（实测） |
-|---|---|---|
-| **第 1632 行** | `border-top: 1px dashed var(--line)` | `--line` **全文未定义**（`grep '--line\s*:' apps/ui/src` 和 `docs/` 都为空）→ 整个 `border-top` 简写 **invalid at computed-value time**，被整条丢弃。CDP 实测 `.highway__internal` 的 `borderTopStyle: "none"`、`borderTopWidth: "0px"`。**注释里说「分隔线用 border-top 而不是额外元素」，但这条线根本没画出来。** |
-| **第 619 行** | `background: var(--panel, #131a29)` | `--panel` 全文未定义 → **永远**走 fallback `#131a29`。弹窗底色是一个硬编码值伪装成 token。 |
+| 引用处 | 写法 | 有兜底？ | 后果（实测） | 性质 |
+|---|---|---|---|---|
+| **第 1635 行**<br>（修复前为 1632 行） | `border-top: 1px dashed var(--line)` | ❌ **无** | 整个 `border-top` 简写 **invalid at computed-value time**，被整条丢弃。CDP 实测 `.highway__internal` 的 `borderTopStyle: "none"`、`borderTopWidth: "0px"`。**注释里说「分隔线用 border-top 而不是额外元素」，但这条线根本没画出来。** | ✅ **真 bug** |
+| **第 619 行** | `background: var(--panel, #131a29)` | ✅ 有（`#131a29`） | `--panel` 全文未定义 → **永远**走 fallback。**渲染正常** | ⚠️ **不是 bug**，是「token 形状的硬编码」 |
 
-> `--line` 的失效是**静默**的：浏览器不报错，样式表不报错，只有量 `borderTopStyle` 才看得出来。
-> 这是本次审计里唯一一条「说了要做、实际没做」的视觉缺陷。
+> **`--line` 已在 `e7ed509` 修掉**：`var(--line)` → `var(--border)`，并加了 3 行注释说明原因。
+> 该提交是 lead 独立复算了本文这一条之后做的，修后复算「无兜底且未定义的 token = 0」。
+> **这条是本任务之外唯一一条被实际修掉的缺陷，也是本次审计最直接的产出。**
+>
+> **不要**把 `--panel` 一起说成 bug —— 它有降级路径，用户看到的是正确的弹窗底色。
+> 它的问题只是「弹窗底色这个值没有名字」，属于 §6 步骤 4.2 的表面色收敛范围。
 
 ### 1.3 硬编码值
 
@@ -99,7 +106,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | 2 | `#06101f` | 211, 259 | 强调色上的**文字**（primary 按钮 / 选中段） |
 | 2 | `#1b2740` | 105, 399 | 选中态表面（导航 / 列表行） |
 | 2 | `#57471f` | 455, 497 | `--warn` 的 border tint |
-| 2 | `#9ecbff` | 1753, 1866 | 连接高亮描边 |
+| 2 | `#9ecbff` | 1756, 1869 | 连接高亮描边 |
 | 1 | `#0b101a` | 57 | 侧栏底 |
 | 1 | `#1a2333` | 395 | 列表行 hover |
 | 1 | `#141c2b` | 100 | 导航 hover |
@@ -113,8 +120,8 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | 1 | `#1f5545` | 450 | `--ok` 的 border tint |
 | 1 | `#26456b` | 509 | `--info` 的 border tint |
 | 1 | `#2a3548` | 596 | 滚动条滑块 |
-| 1 | `#1b2a42` | 1755 | 焦点卡片底 |
-| 1 | `#cfe6ff` | 1762 | 高亮路径描边 |
+| 1 | `#1b2a42` | 1758 | 焦点卡片底 |
+| 1 | `#cfe6ff` | 1765 | 高亮路径描边 |
 | 1 | `#ffffff` | 640 | 二维码底（**有意为之**，深色底扫不出码，必须保留） |
 
 **结构性发现**：`--ok / --warn / --danger` 三个语义色**只有主色是 token**，
@@ -192,7 +199,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | `#1a2333` | 列表行 hover | 0.0166 | 硬编码 395 |
 | `#1c2436` | `--bg-input` | 0.0177 | token |
 | `#1b2740` | 导航/列表选中 | 0.0205 | 硬编码 105/399 |
-| `#1b2a42` | 焦点卡片底 | 0.0228 | 硬编码 1755 |
+| `#1b2a42` | 焦点卡片底 | 0.0228 | 硬编码 1758 |
 | `#263148` | `--border`（**也被当背景用**） | 0.0308 | token |
 | `#2a3548` | 滚动条 | 0.0351 | 硬编码 596 |
 | `#334155` | `--border-strong` | 0.0514 | token |
@@ -225,11 +232,11 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | 3 | `999px` | 胶囊（badge / count） |
 | 2 | `50%` | 圆点 |
 | 2 | **`5px`** | 第 251 行 `.segmented button.is-active`、第 597 行滚动条 |
-| 2 | **`3px`** | 第 1437 行 `.usage__bar`、第 1832 行 `.conn-note` |
-| 1 | **`1px`** | 第 1675 行 `.highway__legend-dot` |
+| 2 | **`3px`** | 第 1437 行 `.usage__bar`、第 1835 行 `.conn-scope` |
+| 1 | **`1px`** | 第 1678 行 `.highway__legend-dot` |
 | 1 | `0 var(--radius-sm) var(--radius-sm) 0` | `.note` 左侧竖条 |
 
-⚠️ **`.segmented` 的坑**：容器 `.segmented` 用 `border-radius: var(--radius-sm)` = **6px**（第 234 行），
+⚠️ **`.segmented` 的坑**：容器 `.segmented` 用 `border-radius: var(--radius-sm)` = **6px**（第 240 行），
 里面选中的按钮 `.segmented button` 用 `border-radius: 5px`（第 251 行）。
 **内圆角比外圆角小 1px**，而正确做法是「内圆角 = 外圆角 − 内边距」（6 − 2 = 4px）或直接相等。
 这不是审美问题，是渲染上能看出「边不贴合」。
@@ -269,7 +276,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 |---|---|---|---|
 | `.logs-page` | 10 | 第 934 行 1 个基块 + 第 1027/1040/1044/1054/1061/1066/1070/1074/1078 行 **9 个后代/上下文选择器**（`.logs-page .logs`、`.logs-page .log-line__ts` …） | **不是重复**（是作用域限定）。但**过度限定**：这些类名（`.log-line__ts` 等）只出现在日志页，加 `.logs-page` 前缀白白抬高特异性，导致要覆盖它必须写更长选择器 |
 | `.page__details` | 7 | 第 1219 行 1 个基块 + 1224/1236/1240/1247/1251/1255 行 **6 个 `>` / `::` / `[open]` 变体** | **不是重复** |
-| `.highway__side--right` | 7 | 第 1546 行 1 个基块 + 1571/1599/1602/1605/1608–1609 行 6 个后代选择器；另在 `@media (max-width: 880px)`（2042–2071）里出现 5 处 | **不是重复**，但有两处可合并（见下） |
+| `.highway__side--right` | 7 | 第 1546 行 1 个基块 + 1571/1599/1602/1605/1608–1609 行 6 个后代选择器；另在 `@media (max-width: 880px)`（2045–2074）里出现 5 处 | **不是重复**，但有两处可合并（见下） |
 | `.chain__row` | 6 | 第 **1957/1967/1971** 行与第 **2187/2197/2201** 行 —— **逐字节相同** | ✅ **是真重复** |
 
 #### 唯一被证实为真重复的整段：**190 行**
@@ -278,22 +285,22 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 
 | 原文行范围 | 重复位置 | 行数 | diff 结果 |
 |---|---|---|---|
-| **1947–2032**（含 `/* 规则链 */` `/* 判定结论 */` 注释头） | **2177–2262** | **86** | 逐字节相同 |
-| **2073–2176**（含 `/* 地球仪 */` 注释头） | **2263–2366** | **104** | 逐字节相同 |
+| **1950–2035**（含 `/* 规则链 */` `/* 判定结论 */` 注释头） | **2180–2265** | **86** | 逐字节相同 |
+| **2076–2179**（含 `/* 地球仪 */` 注释头） | **2266–2369** | **104** | 逐字节相同 |
 
-合计 **190 行 = 文件 2408 行的 7.9%**。受影响的**顶层规则块共 27 个**（每个出现 2 次）：
+合计 **190 行 = 文件 2411 行的 7.9%**。受影响的**顶层规则块共 27 个**（每个出现 2 次）：
 
 - 规则链 13 个：`.chain` `.chain__row` `.chain__row:last-child` `.chain__row:nth-child(odd)` `.chain__idx` `.chain__tag` `.chain__conds` `.chain__arrow` `.chain__out` `.verdict` `.verdict__head` `.verdict__reasons` `.verdict__unknown`
 - 地球仪 14 个：`.globe` `.globe__canvas` `.globe__canvas:active` `.globe__hint` `.facts` `.fact` `.fact__label` `.fact__place` `.fact__meta` `.fact__src` `.facts__mid` `.facts__km` `.facts__km--small` `.facts__hint`
 
 **为什么会这样**：文件结构是
-`…拓扑页(1506–1946) → 规则链(1947–2032) → @media 880(2042–2071) → 地球仪(2073–2176)`，
-然后**有人把「规则链」和「地球仪」两个章节原样粘贴到了文件末尾**（2177–2366），
-末尾只多了 4 组新规则（第 2367 行 `.highway{position:relative}`、`.globe__tools`、`.globe__tool`、`.fact__warn`，2367–2408）。
-`@media (max-width: 760px)` 也因此出现**两次**（第 2167 行、第 2357 行）。
+`…拓扑页(1506–1949) → 规则链(1950–2035) → @media 880(2045–2074) → 地球仪(2076–2179)`，
+然后**有人把「规则链」和「地球仪」两个章节原样粘贴到了文件末尾**（2180–2369），
+末尾只多了 4 组新规则（第 2370 行 `.highway{position:relative}`、`.globe__tools`、`.globe__tool`、`.fact__warn`，2370–2411）。
+`@media (max-width: 760px)` 也因此出现**两次**（第 2170 行、第 2360 行）。
 
 **为什么这是真问题**（不是「无害的重复」）：
-后一份在层叠里赢。所以**改前一份不生效**。第 2034–2041 行的注释正好记录了同类事故：
+后一份在层叠里赢。所以**改前一份不生效**。第 2037–2044 行的注释正好记录了同类事故：
 
 > 「本文件里这段媒体查询曾有**两份**完全相同的拷贝（改一处漏一处），已删掉后一份。」
 
@@ -307,7 +314,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | `.logs-bar` = `.nodes-bar` | 943 ↔ 1346 | **5 行声明体完全相同** | 两个页面的筛选栏同构 |
 | `.highway`（1513） vs `.highway`（2367） | 1513 / 2367 | 后者只加 `position: relative` | 合法层叠，但应合并到一处 |
 
-`@media (max-width: 880px)` 里的两处（第 2047 行与 2051 行）也是这个情况：
+`@media (max-width: 880px)` 里的两处（第 2050 行与 2051 行）也是这个情况：
 一个写 `grid-column/grid-row`，一个写 `align-items`，**可以合并成一个块**，但不是重复。
 
 ### 1.6 死代码：`.card` 是「定义了但从不生效」的 primitive
@@ -369,7 +376,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | `--surface-1` | `#161d2c` | 一级表面：列表行、标签卡、`select`、工具按钮 | = 现 `--bg-elevated`（19 次） |
 | `--surface-2` | `#1c2436` | 二级表面：输入框、按钮、分段控件、搜索框 | = 现 `--bg-input`（4 次） |
 | `--surface-hover` | `#1a2333` | **悬停**统一值 | 收敛 `#141c2b`(100) + `#1a2333`(395) |
-| `--surface-active` | `#1b2740` | **选中**统一值 | 收敛 `#1b2740`(105/399) + `#1b2a42`(1755) |
+| `--surface-active` | `#1b2740` | **选中**统一值 | 收敛 `#1b2740`(105/399) + `#1b2a42`(1758) |
 
 > **为什么选 `#1a2333` / `#1b2740` 而不是另一对**：它们在既有的 `.list__row:hover` / `.nav-item.is-active`
 > 上已经在用，且与 `--surface-1/#161d2c` 的距离分别是 10.0 / 13.6 —— 都能看出状态变化但不跳。
@@ -436,13 +443,13 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 
 | token | 值 | 用途 |
 |---|---|---|
-| `--highlight-stroke` | `#9ecbff` | 连接高亮描边 / 焦点轮廓（现硬编码 1753/1866） |
-| `--highlight-path` | `#cfe6ff` | 高亮路径描边（现硬编码 1762） |
+| `--highlight-stroke` | `#9ecbff` | 连接高亮描边 / 焦点轮廓（现硬编码 1756/1869） |
+| `--highlight-path` | `#cfe6ff` | 高亮路径描边（现硬编码 1765） |
 | `--scrollbar` | `#2a3548` | 滚动条滑块（现硬编码 596） |
 
 ### 2.3 字体
 
-**字体栈不变**（`body` 第 31 行已经是对的）：系统 UI 字体 + `--mono` 等宽。
+**字体栈不变**（`body` 第 34 行已经是对的）：系统 UI 字体 + `--mono` 等宽。
 
 **字阶：11 档收敛成 5 档。** 规则：**相邻档位至少差 1px**。
 
@@ -458,7 +465,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 > **`12px` 与 `12.5px` 合并到 `12px`、`13px` 保持**：两者只差 1px，但 `12px` 承载说明文字、
 > `13px` 承载正文，职责不同，且 13px 是 `body` 基准（改它会动全局）。所以保留两者，把 12.5 并进 12。
 >
-> **`15px` → `14px`**：第 24 行 `.sidebar__brand`(15px) 与第 1172 行 `.page__title`(14px) 是「品牌名 vs 标题」，
+> **`15px` → `14px`**：第 66 行 `.sidebar__brand`(15px) 与第 1172 行 `.page__title`(14px) 是「品牌名 vs 标题」，
 > 差 1px 无法形成层级。合并到 14px，靠字重（600 vs 600 时靠位置和颜色）区分。
 >
 > **`21px` → `20px`**：`.dash__state`(21px, 注释在 755) 与 `.stat__value`(20px, 360) 同在仪表盘，
@@ -497,8 +504,8 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | `--sp-7` | `24px` | 区块之间（`page__sec` 分隔） | `22px`, `24px`, `26px` |
 | `--sp-8` | `32px` | 大段留白、页面底部 | `28px`, `30px`, `32px`, `34px` |
 
-> ⚠️ 注意 `.content` 的 `padding: 18px 20px 32px`（第 177 行）和 `.topbar` 的
-> `padding: 34px 20px 12px`（第 133 行）里的 `20px` / `34px` 是**窗口级固定量**
+> ⚠️ 注意 `.content` 的 `padding: 18px 20px 32px`（第 181 行）和 `.topbar` 的
+> `padding: 34px 20px 12px`（第 135 行）里的 `20px` / `34px` 是**窗口级固定量**
 > （20px 是内容左右边距、34px 是 macOS 红绿灯按钮的安全区，见第 60–62 行注释），
 > 它们是唯一的合法例外，建议单列 `--gutter: 20px` / `--titlebar-safe: 34px`，不要塞进 sp 刻度。
 
@@ -514,7 +521,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 | `--radius-pill` | `999px` | 胶囊：badge、计数徽章 | 硬编码 `999px`(3) |
 
 **删除**：`5px`(2)、`1px`(1)。`.segmented button.is-active` 从 5px 改为 **4px**
-（= 外圆角 6px − 内边距 2px，实测 `.segmented { padding: 2px }` 第 233 行），使内圆角与外圆角几何贴合。
+（= 外圆角 6px − 内边距 2px，实测 `.segmented { padding: 2px }` 第 242 行），使内圆角与外圆角几何贴合。
 
 > 改名（`--radius` ↔ `--radius-sm` 语义互换）会让 26 处引用同时改变含义，
 > **建议不要改名**，只新增 `--radius-xs` / `--radius-pill`，把 `5px` / `1px` 消掉即可 ——
@@ -528,7 +535,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 |---|---|---|
 | 454 | `.dot--on { box-shadow: 0 0 0 3px rgba(52,211,153,.15) }` | 光晕（状态指示） |
 | 1599–1611 | `.highway__lane-label--* { box-shadow: inset ±2px 0 0 <色> }` | **左侧色条**（不是阴影） |
-| 1866 | `.conn-row--on { box-shadow: inset 2px 0 0 #9ecbff }` | **左侧色条** |
+| 1869 | `.conn-row--on { box-shadow: inset 2px 0 0 #9ecbff }` | **左侧色条** |
 
 深色主题下**真正的投影没有意义**（背景已经接近黑），所以规范是：
 
@@ -548,8 +555,8 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 
 | 类型 | 位置 | 定义 | 时长 |
 |---|---|---|---|
-| `@keyframes spin` | 584 | `animation: spin 0.7s linear infinite`（加载圈，578 行） | 700ms |
-| `@keyframes conn-dash` | 1769 | `animation: conn-dash 0.9s linear infinite`（拓扑高亮虚线流动，1766 行） | 900ms |
+| `@keyframes spin` | 584 | `animation: spin 0.7s linear infinite`（加载圈，581 行） | 700ms |
+| `@keyframes conn-dash` | 1772 | `animation: conn-dash 0.9s linear infinite`（拓扑高亮虚线流动，1770 行） | 900ms |
 | transition | 191 | `background 0.12s ease, color 0.12s ease`（`.set__nav a`） | 120ms |
 | transition | 251 附近 | `background 0.12s ease, color 0.12s ease`（分段控件） | 120ms |
 | transition | 251/917 | `transform 0.12s ease`（`.details summary::before` 三角） | 120ms |
@@ -575,7 +582,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 2. **无限循环动画只允许 2 个**（加载圈 700ms、高亮流动 900ms），且必须是 `linear` ——
    循环里用非线性的缓动会看出「一顿一顿」。
 3. **不允许给 `width/height/top/left` 以外的布局属性做过渡**；现有唯一例外是
-   `.usage__fill { transition: width 0.2s }`（第 1443 行），因为它是一次性状态变化、不在滚动热路径上，**保留**。
+   `.usage__fill { transition: width 0.2s }`（第 1445 行），因为它是一次性状态变化、不在滚动热路径上，**保留**。
 4. **动画时长必须能整除**：700ms/900ms 与 120ms 不成比例，这是有意的 ——
    循环动画要**下意识可见**，不能和交互反馈混淆。
 
@@ -583,7 +590,7 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 
 **现状：整个应用只有 1 处处理，而需要处理的有 4 处。**
 
-第 1774–1778 行（拓扑页先例，写法正确）：
+第 1777–1781 行（拓扑页先例，写法正确）：
 
 ```css
 @media (prefers-reduced-motion: reduce) {
@@ -597,13 +604,13 @@ HOME=/tmp/xraytun-home "/Applications/Google Chrome.app/Contents/MacOS/Google Ch
 
 | 未覆盖的动画 | 位置 | 为什么漏了 |
 |---|---|---|
-| 加载圈 `spin` | 578–586 行 | CSS 动画，但媒体查询里只列了 `.flow__highlight` |
+| 加载圈 `spin` | 581–584 行 | CSS 动画，但媒体查询里只列了 `.flow__highlight` |
 | `.details summary::before` 旋转 | 917 行附近 | 120ms transform，属于「装饰性动效」，也应降级 |
 | **拓扑货车 rAF** | `Topology.tsx:1267` | **JS 循环，CSS 媒体查询管不到** |
 | **地球仪自转 + 飞机 rAF** | `Globe.tsx:383` | 同上 |
 
 实测确认：`grep -rn 'prefers-reduced-motion\|matchMedia\|reducedMotion' apps/ui/src/`
-**只返回 `styles.css:1774` 一行**，TS 侧零命中。
+**只返回 `styles.css:1777` 一行**，TS 侧零命中。
 
 **规范（对齐拓扑页先例并补齐缺口）**：
 
@@ -693,7 +700,7 @@ const reduceMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)")
 
 **具体不一致**：
 - **settings 的区块标题有 6px 下外边距，其余 4 页是 0**（第 1150–1156 行 vs 第 1196–1201 行）。
-- **dashboard 用 12.5px/500/`--text-dim`**（第 897–906 行）表达区块标题 —— 比其它页**小 1.5px、轻 100 字重、暗一档**。
+- **dashboard 用 12.5px/500/`--text-dim`**（第 896–906 行）表达区块标题 —— 比其它页**小 1.5px、轻 100 字重、暗一档**。
   同样语义（「这是一个区块」），仪表盘看起来像次要说明。
 - **nodes / logs 完全没有区块标题**，靠 `.list` 的边框和 `.logs` 的面板边界分区。
 
@@ -704,28 +711,29 @@ const reduceMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)")
 | 1193 | `border-top: 1px solid var(--border)` | `.page__sec + .page__sec` | **24px** |
 | 892 | `border-top: 1px solid var(--border)` | `.dash__details` | **14px** |
 | 1220 | `border-top: 1px solid var(--border)` | `.page__details` | **18px** |
-| **1632** | `border-top: 1px dashed var(--line)` | `.highway__internal` | 10px |
+| **1635**（修复前 1632） | ~~`border-top: 1px dashed var(--line)`~~ → 已改为 `var(--border)` | `.highway__internal` | 10px |
 | 1856 | `border-bottom: 1px solid rgba(255,255,255,0.04)` | `.conn-row` | — |
 
 **具体不一致**：
 1. **同一个「分隔线 + 上边距」模式有 14 / 18 / 24 三个值**（行 892 / 1220 / 1193）。
-2. **第 1632 行的分隔线不渲染**（`--line` 未定义，见 §1.2），它是拓扑页「出口列表 / 内部通道」之间
+2. ~~第 1635 行的分隔线不渲染~~ —— **已在 `e7ed509` 修好**（`--line` 未定义，见 §1.2）。
+   它曾是拓扑页「出口列表 / 内部通道」之间
    唯一的视觉分隔 —— 现在两个区块直接贴在一起。
-3. **第 1856 行用 `rgba(255,255,255,0.04)` 而不是 `--border`**：实测这个值在 `--bg` 上
+3. **第 1859 行用 `rgba(255,255,255,0.04)` 而不是 `--border`**：实测这个值在 `--bg` 上
    对比度约 **1.12:1**，而 `--border #263148` 是 **1.42:1** —— 连接列表的行分隔线比全站其它
-   分隔线**弱 27%**（第 1856 行是全站唯一一处白 alpha 分隔线）。
+   分隔线**弱 27%**（第 1859 行是全站唯一一处白 alpha 分隔线）。
 
 ### 4.4 提示 / 状态块：2 套并存
 
 | 组件 | 位置 | 外观 |
 |---|---|---|
-| `.note` | routing（第 1250 行起） | `border-left: 2px solid var(--border-strong)` + `border-radius: 0 6px 6px 0` + `background: --bg-elevated` |
-| `.banner--warn/--error/--info` | settings（第 490 行起） | 四边 `1px solid <tint>` + `border-radius: 6px` + `background: <tint>` |
-| `.conn-note` | topology（第 1830 行） | `background: rgba(120,160,210,0.08)` + `border-left: 2px solid var(--border-strong)` + `radius: 3px` |
+| `.note` | routing（第 1260 行） | `border-left: 2px solid var(--border-strong)` + `border-radius: 0 6px 6px 0` + `background: --bg-elevated` |
+| `.banner--warn/--error/--info` | settings（第 496 / 502 / 508 行） | 四边 `1px solid <tint>` + `border-radius: 6px` + `background: <tint>` |
+| `.conn-scope` | topology（第 1827 行） | `background: rgba(120,160,210,0.08)` + `border-left: 2px solid var(--border-strong)` + `radius: 3px` |
 
 **具体不一致**：
-- `.note`（routing）与 `.conn-note`（topology）**都是「左侧竖条 + 淡底」**，但
-  `.note` 的 radius 是 **0 6px 6px 0**、`.conn-note` 是 **3px**，圆角不同；padding 是 **12px 14px** vs **4px 7px**。
+- `.note`（routing）与 `.conn-scope`（topology）**都是「左侧竖条 + 淡底」**，但
+  `.note` 的 radius 是 **0 6px 6px 0**、`.conn-scope` 是 **3px**，圆角不同；padding 是 **12px 14px** vs **4px 7px**。
 - `.banner`（settings）用**四边框**，`.note` 用**左竖条** —— 两种「信息提示」语言并存。
 
 ### 4.5 表面色：同一个角色在不同页用了不同的灰
@@ -741,7 +749,7 @@ const reduceMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)")
 | 按钮 | 全站 | `--bg-input` `#1c2436` |
 | `select`（拓扑） | topology | `--bg-elevated` `#161d2c` |
 
-**具体不一致**：`topology` 的 `.select` 用 `--surface-1`（19 次，第 1586 行附近），
+**具体不一致**：`topology` 的 `.select` 用 `--surface-1`（19 次，第 1803 行 `.conn-filter__field select`），
 而 `settings` 的 `select` 走通用 `input/select/textarea` 规则用 `--surface-2`（第 10 次）。
 同样是下拉框，**拓扑页比设置页暗一档**（实测 `rgb(22,29,44)` vs `rgb(28,36,54)`）。
 
@@ -789,12 +797,12 @@ const reduceMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)")
 | 1044 | `.logs-page .log-line__src` | 10.5px | 日志来源（xray / helper / app） |
 | 1581 附近 | `.highway__lane-meta` | 10.5px | **出口类别文字**（node / direct / block / dns / internal）—— 颜色之外唯一说明分类的文本 |
 | 1551 附近 | `.highway__side-title` | 11px | 「入口」/「出口」列标题 |
-| 1690 附近 | `.highway__legend-note` | 10.5px | 图例说明 |
+| 1723 | `.highway__legend-note` | 10.5px | 图例说明 |
 | 2162/2352 | `.facts__hint` | 10.5px | 地球仪事实面板脚注 |
 | 2139/2329 | `.fact__src` | 10.5px | 定位数据来源 |
-| 447 | `.list__meta` | 11px | 列表行副标题 |
-| 114 | `.nav-item__badge` | 11px | 导航计数 |
-| 78 | `.sidebar__footer` | 11px | 版本号 |
+| 418 | `.list__meta` | 11px | 列表行副标题 |
+| 110 | `.nav-item__badge` | 11px | 导航计数 |
+| 116 | `.sidebar__footer` | 11px | 版本号 |
 
 **修复**：`--text-faint: #64748b` → **`#7b8da6`**（实测 5.44 / 4.98 / 4.58，三处全过）。
 这一改会**同时修好 53 处引用**，不需要逐个改调用点。
@@ -904,7 +912,7 @@ WCAG 1.4.11（Non-text Contrast）要求「识别 UI 组件与状态所必需的
 
 理由（有依据）：文件里**真正跨页共享**的是 `布局(47–183) / 控件(184–316) / 列表(372–433) / 徽标(434–480) / 提示条(481–520)`
 共约 470 行；而**页面专属**的 7 段（仪表盘 725–931、日志 932–1082、设置 1083–1171、规则 1284–1343、
-节点 1344–1405、订阅 1406–1505、拓扑+地球仪 1506–2408）占 **1900 行**。
+节点 1344–1405、订阅 1406–1505、拓扑+地球仪 1506–2411）占 **1900 行**。
 按页面拆会得到 7 个「各自再造一遍按钮」的文件；按层拆能让 8 个页面共用一套 primitive。
 
 **目标结构**（`apps/ui/src/styles/`）：
@@ -924,7 +932,7 @@ styles/
   54-nodes.css          # 1344-1405
   55-subscriptions.css  # 1406-1505
   56-topology.css       # 1506-2072
-  57-globe.css          # 2073-2176 + 2367-2408 的 4 组新规则
+  57-globe.css          # 2076-2179 + 2370-2411 的 4 组新规则
   99-legacy.css         # 过渡期兜底（见步骤 5）
 ```
 
@@ -936,16 +944,18 @@ styles/
 | 删除第 **2357–2366** 行（第二份 `@media max-width:760px`） | 同上 | 窄窗（760px 以下）截图不变 |
 | 合并 `.logs-bar` / `.nodes-bar` 为公共 `--filter-bar` 组件（或保留两个类名、只留一份声明） | §1.5，5 行声明体相同 | 节点页与日志页筛选栏截图不变 |
 | 合并 `.dash__details > summary` / `.page__details > summary` | §1.5，2 条规则体相同 | 仪表盘「环境自检与诊断」折叠区截图不变 |
-| 合并第 2367 行 `.highway{position:relative}` 到第 1513 行的 `.highway` | §1.5 | 拓扑页 `.highway` 计算 `position` 仍为 `relative` |
+| 合并第 2370 行 `.highway{position:relative}` 到第 1513 行的 `.highway` | §1.5 | 拓扑页 `.highway` 计算 `position` 仍为 `relative` |
 
-**预期**：2408 → **约 2180 行**（−9.5%）。**这一步零风险、零视觉变化，且纯收益** —— 我觉得这是最该先做的一步。
+**预期**：2411 → **约 2221 行**（−7.9%）。**这一步零风险、零视觉变化，且纯收益** —— 我觉得这是最该先做的一步。
 
-### 步骤 2：补 `--line`，把断掉的分隔线修回来（1 行）
+### 步骤 2：`--line` 已修完；只剩 `--panel`（1 行）
 
-`--line` 加进 `:root`（值取 `--border` 的语义，如 `#263148`），或直接把第 1632 行改成 `var(--border)`。
-同时把第 619 行的 `var(--panel, #131a29)` 改成明确的 `--surface-1`。
+`--line` 那条**已由 `e7ed509` 完成**（`var(--line)` → `var(--border)`），不需要再做。
 
-验收：CDP 实测 `.highway__internal` 的 `borderTopStyle === "solid"/"dashed"`、`borderTopWidth === "1px"`（当前是 `none`/`0px`）。
+剩下的是第 619 行的 `var(--panel, #131a29)`：把 fallback 改成明确的 `--surface-1`。
+**但它不是 bug**（有兜底、渲染正常），所以这一步**不紧急**，可以并进 §6 步骤 4.2 的表面色收敛一起做。
+
+验收：`grep -n 'var(--panel' apps/ui/src/styles.css` 无输出；弹窗（节点二维码）底色仍为 `#161d2c`。
 
 ### 步骤 3：加 token（**纯新增，不改任何现有引用**）
 
@@ -969,7 +979,7 @@ styles/
 | 4.7 | 去掉第 1051 / 1080 行的 `opacity`，改用颜色表达层级 | 2 处 | 日志页 debug 行与来源列截图；对比度复算应 ≥4.5:1 |
 
 > ⚠️ **4.4 / 4.5 的正确做法不是全量 sed**：
-> `11px → 11.5px`（+4.5%）在拓扑页 `.highway__lane-label`（固定列宽 168px，第 1540 行
+> `11px → 11.5px`（+4.5%）在拓扑页 `.highway__lane-label`（固定列宽 168px，第 1529 行
 > `grid-template-columns: 168px minmax(0,1fr) 168px`）里可能把标签挤换行，
 > 而换行会让卡片变高 → 触发拓扑页的**几何重测**（`Topology.tsx` 里依赖 `getBoundingClientRect`）。
 > 所以这两步必须**逐页截图核对**，并复跑拓扑页的 `off_line_frac` 探针确认动画没被带偏。
@@ -1010,7 +1020,7 @@ styles/
 1. **行号已过时**。它测的是 commit `24eee9a`（v0.8.21）。当前是 **1947–2032 / 2177–2262 / 2073–2176 / 2263–2366**，
    共 **190 行**（该报告记的是 4 段共约 186 行）。
 2. **「零视觉收益」不准确**：后一份赢层叠，所以**改前一份的任何修改都不会生效**。
-   我在 §1.5 引的第 2034–2041 行注释正是它自己记的同类事故 —— **媒体查询那一份已经删了，两侧的 190 行没删**。
+   我在 §1.5 引的第 2037–2044 行注释正是它自己记的同类事故 —— **媒体查询那一份已经删了，两侧的 190 行没删**。
    留着它 = 留着同一个坑的其余部分。
 3. **「不值得做」的前提变了**：它说「本轮」不值得，因为当时没有设计系统重构。
    现在 task-14 要在**这个文件上**执行 token 收敛 —— 在 190 行重复存在时做 token 替换，
@@ -1037,7 +1047,7 @@ styles/
 
 `DESIGN-REVIEW.md` §D3 的原文：
 
-> **建议怎么改**：把这 4 处（`styles.css` 第 1581、1551、1690、1885 行附近）改用 `--text-dim #94a3b8`（6.57:1）。
+> **建议怎么改**：把这 4 处（`styles.css` 第 1581、1551、1693、1888 行附近）改用 `--text-dim #94a3b8`（6.57:1）。
 > **不要**改 `:root` 的 `--text-faint` 本身 —— 它全站 6 页共用，改 token 会波及无关页面。
 
 冲突点：它把「全站共用」当作**反对改 token 的理由**；而这恰恰是**支持改 token 的理由** ——
@@ -1059,7 +1069,7 @@ styles/
 | `.highway__lane-meta` 文字色不达标 | §D3 | §5.2 同 | 一致 |
 | F3 地球仪折叠线 | 数据面板在折叠线下 | `.facts top=756 > 636` | 一致 |
 
-**不重复的部分**：它没有涉及字号/间距/圆角 token 化、`--line` 未定义、`.card` 死代码、
+**不重复的部分**：它没有涉及字号/间距/圆角 token 化、`--line` 未定义（这条已由本文发现并修复）、`.card` 死代码、
 `prefers-reduced-motion` 只覆盖 1/4 处、跨 8 页的骨架不一致 —— 这些是本文件的增量。
 
 ---
@@ -1076,7 +1086,7 @@ styles/
    六个场景。异常态（`no-core`、`stale`）的视觉/对比度**没测** —— 那些状态会走 `.banner--error`、
    `.empty` 等分支，颜色相同，但**布局**可能不同。
 4. **`focus-visible` 样式没测**。我查了全文没有 `:focus-visible` 规则，只有 `input:focus { border-color: var(--accent) }`
-   （第 306 行）。**按钮的键盘焦点不可见**是一个**尚未确认**的疑点（可能要单独开任务实测）——
+   （第 293 行）。**按钮的键盘焦点不可见**是一个**尚未确认**的疑点（可能要单独开任务实测）——
    我把它列为疑点而不是结论，因为 `-webkit-app-region` 和 WebKit 默认 outline 我没实测。
 5. **`.logs-page` 去掉过度限定前缀的后果没验证**。这是行为相关改动（特异性变化可能影响层叠），
    我只指出问题，没给出验证过的方案。
@@ -1093,14 +1103,14 @@ styles/
 
 | 任务卡要求 | 本文位置 | 一句话答案 |
 |---|---|---|
-| token 全列出 + 使用次数 + 未使用 | §1.1 / §1.2 | 16 个 token、269 处引用；**没有 0 使用的**，但有 3 个 ≤4 次；**2 个 token 被引用却未定义**（`--line`、`--panel`），其中 `--line` 让一条分隔线**完全没渲染** |
+| token 全列出 + 使用次数 + 未使用 | §1.1 / §1.2 | 16 个 token、269 处引用；**没有 0 使用的**，但有 3 个 ≤4 次；**2 个 token 被引用却未定义**：`--line`（无兜底 → **让一条分隔线完全没渲染**，已由 `e7ed509` 修复）与 `--panel`（有兜底 → 渲染正常，不是 bug） |
 | 硬编码值 top 20 | §1.3 | 颜色**基本已 token 化**（22 个值 / 30 处）；真问题是 **478 个 px / 68 个值** 与 **113 条 font-size / 11 个值**。任务卡举例的 `#1a2332` **不存在** |
 | 近义重复 | §1.4 | **14 种深色底**（亮度带仅 0.0044–0.0228，其中 5 对 RGB 距离 ≤4.6）；**11 档字号**有 5 档挤在 1.5px 内；7 种圆角里 `5px`/`6px` 差 1px |
 | 同名规则块重复核实 | §1.5 | 任务卡给的 4 个数字**只有 `.chain__row` 是真重复**；另外发现**190 行整段重复**（1947–2032 ↔ 2177–2262，2073–2176 ↔ 2263–2366） |
-| 动效规范 + `prefers-reduced-motion` | §3 | 2 个 CSS 动画 + 2 处 rAF；**只有 1/4 处理了 reduced-motion**（第 1774 行），CSS 与 JS 都要补 |
+| 动效规范 + `prefers-reduced-motion` | §3 | 2 个 CSS 动画 + 2 处 rAF；**只有 1/4 处理了 reduced-motion**（第 1777 行），CSS 与 JS 都要补 |
 | 跨页一致性（具体） | §4 | 6 类具体不一致：页面骨架（3 页不用 `.page`）、区块标题（5 页 5 种写法）、分隔线（14/18/24px + 1 条没渲染）、提示块（`.note` vs `.banner`）、表面色（`select` 差一档）、`.card` 死代码 |
 | 对比度实算 | §5 | `--text-faint` **在全部 5 个背景上不达标**（3.26–4.06:1，53 处引用）；加 `opacity` 后最低 **1.85:1**；**所有非文字边界低于 3:1**（1.09–1.78） |
-| 拆分方案分几步 | §6 | 6 步：①删 190 行重复（零风险）②修 `--line` ③加 token 不改引用 ④按类别替换（唯一有视觉变化）⑤物理拆文件 ⑥删死代码 |
+| 拆分方案分几步 | §6 | 6 步：①删 190 行重复（零风险）②`--panel` 收尾（`--line` 已修）③加 token 不改引用 ④按类别替换（唯一有视觉变化）⑤物理拆文件 ⑥删死代码 |
 
 ---
 
@@ -1117,7 +1127,7 @@ styles/
 | 间距/px | **68 个不同值**（478 处 px） | **8 token + 2 窗口常量** | **−85%** |
 | 颜色字面量 | 30 处 hex + 10 处 rgba | 仅剩 `00-tokens.css` 内的定义 + 二维码白底 1 处 | **−97%** |
 | 死代码 | `.card` 5 条声明 100% 不生效；`--panel` 假 token | 0 | — |
-| 重复行 | **190 行**（7.9%） | 0 | **−190 行** |
+| 重复行 | **190 行**（2411 行中的 7.9%） | 0 | **−190 行** |
 
 ### 10.2 对比度不达标的具体位置（全部实算）
 
@@ -1129,29 +1139,31 @@ styles/
 | 4 | `.list__row.is-disabled`（403 行）`opacity .5` | **1.85:1** | 4.5 | 提到 ≥0.7 或改色 |
 | 5 | `.btn:disabled`（204 行）`opacity .45` | **3.80:1** | 4.5 | 提高或视为大字号 |
 | 6 | `.flow__route` 全部 4 色（1701 行 `opacity .3`） | **1.41–1.92:1** | 3（图形） | `.6` + 线型第二编码 |
-| 7 | `.flow__route--trunk`（1711 行 `opacity .22`） | **1.38:1** | 3 | 结构线可豁免，但要**明说** |
+| 7 | `.flow__route--trunk`（1714 行 `opacity .22`） | **1.38:1** | 3 | 结构线可豁免，但要**明说** |
 | 8 | 全部控件轮廓（`.btn`/`input`/`select` 的 `--border-strong`） | **1.50–1.78:1** | 3 | 拆 `--border-interactive: #5c7290` |
 | 9 | `.card` / 列表行 / 区块分隔（`--border`） | 1.19–1.42:1 | 3 | **装饰，建议豁免**（§5.4 方案 C） |
 | 10 | `.conn-row` 行分隔（1856 行 `rgba(255,255,255,.04)`） | ≈**1.12:1** | 3 | 改 `--border`（唯一一处白 alpha） |
 
-**另有一条与对比度无关但视觉上看得见的缺陷**：第 1632 行 `.highway__internal` 的分隔线
-因 `--line` 未定义而**完全没有渲染**（实测 `borderTopStyle: "none"`）。
+**另有一条与对比度无关但视觉上看得见的缺陷**：第 1635 行 `.highway__internal` 的分隔线
+因 `--line` 未定义而**完全没有渲染**（实测 `borderTopStyle: "none"`）。**该缺陷已由 `e7ed509` 修复**，
+下表第 6 项保留原始记录以便追溯。
 
 ### 10.3 我认为最该先动的一步
 
-**删掉第 2177–2366 行的 190 行整段重复**（§6 步骤 1）。
+**删掉第 2180–2369 行的 190 行整段重复**（§6 步骤 1）。
 
 理由，按重要性排序：
 1. **它是 task-14 的前置条件**。后一份赢层叠 → 在重复存在时做 token 替换，
    每一处要改两遍、**只有一遍生效**，把「改一处漏一处」的概率翻倍。
 2. **零风险、零视觉变化**。删的是层叠里生效的那一份的**副本**，行为等价；
    验收只需要「`git diff` 只有删除」+「8 页截图逐像素相同」。
-3. **它是活的隐患，不是历史包袱**。文件自己第 2034–2041 行的注释记录了同类事故，
+3. **它是活的隐患，不是历史包袱**。文件自己第 2037–2044 行的注释记录了同类事故，
    而那次**只修了媒体查询那一段，两侧的 190 行没修** —— 相当于拆了炸弹没拆雷管。
-4. **收益可量化**：2408 → 约 2180 行（−9.5%），且让后面 5 个步骤的每一处编辑都只作用于一处。
+4. **收益可量化**：2411 → 约 2221 行（−7.9%），且让后面 5 个步骤的每一处编辑都只作用于一处。
 
-**紧接着（同一批）做步骤 2**：给 `--line` 定义 → 拓扑页那条「出口 / 内部通道」分隔线**立刻出现**。
-这是审计里唯一一条「说了要做、实际没做」的缺陷，一行就能修好，且不需要任何设计决策。
+**步骤 2 的一半已经做完了**：`--line` 那条已由 `e7ed509` 修复（本审计的直接产出），
+拓扑页「出口 / 内部通道」的分隔线已经出现。剩下的只有 `--panel`，且它**不是 bug**（有兜底），
+可以并进步骤 4.2 一起做。
 
 **唯一需要你先拍板的**是 §5.4 的控件边界：`--border-strong` 要不要为满足 WCAG 1.4.11 的 3:1
 从 `#334155` 提到 `#5c7290`。这会**明显提高按钮和输入框的描边亮度**，
