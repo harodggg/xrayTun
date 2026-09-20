@@ -24,6 +24,12 @@ pub struct LogPayload {
     pub level: String,
 }
 
+/// `runtime://changed` 的载荷。
+///
+/// 这里**没有**单独的 `recovery` 字段：自动恢复状态就在
+/// [`CoreRuntime::recovery`]（`apps/desktop/src/state.rs`）里，而 `runtime`
+/// 是整体下发的 —— 这样事件与快照（`snapshot.runtime`）两条路上的恢复状态
+/// 是同一份，刷新快照时不会丢。前端读 `payload.runtime.recovery`。
 #[derive(Clone, Serialize)]
 pub struct RuntimePayload {
     pub runtime: CoreRuntime,

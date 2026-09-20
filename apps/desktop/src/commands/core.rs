@@ -462,6 +462,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             let code = tunnel_probe(port, 6).await;
             if !tunnel_is_dead(&code) {
                 failures = 0;
+                sync_probe_failures(&handle, &state, 0);
                 continue;
             }
             failures += 1;
@@ -469,6 +470,8 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                 // 唤醒这一次失败几乎必然是"隧道真的死了"，不必再等第二次。
                 failures = failures.max(FAILURES_BEFORE_REBUILD);
             }
+            // 让界面能看见「连续 N 次不通」——恢复可能在几步之后才开始。
+            sync_probe_failures(&handle, &state, failures);
 
             // **用户可能就在刚才点了「关闭」。** 探测是异步的，等它回来时
             // 意图可能已经变了 —— 那就什么都别做，否则就是
@@ -482,16 +485,23 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                 continue;
             }
 
-            state.with(|i| {
-                i.push_log(
-                    "app",
-                    "warn",
-                    format!(
-                        "隧道连续 {failures} 次不通（熄屏/换网/节点抖动，当前节点「{node_name}」），正在自动重建…"
-                    ),
-                );
-                i.last_notice = Some("网络中断，正在自动恢复…".into());
-            });
+            // **开始恢复。** 这一刻起 `recovery.recovering = true`，界面据此
+            // 显示「正在自动恢复（第 N 次）」并改写连接按钮 —— 不再出现
+            // 「未连接 + 可点的连接按钮」，用户也就不会去和看门狗抢。
+            let started = xt_core::util::now_unix();
+            let attempt = state
+                .with(|i| {
+                    i.push_log(
+                        "app",
+                        "warn",
+                        format!(
+                            "隧道连续 {failures} 次不通（熄屏/换网/节点抖动，当前节点「{node_name}」），正在自动重建…"
+                        ),
+                    );
+                    i.last_notice = Some(crate::state::RECOVERING_NOTICE.into());
+                    i.runtime.recovery.begin(started)
+                })
+                .unwrap_or(0);
             events::runtime_changed(&handle, &state);
 
             // 重建：用**当前**的物理出口重新算路由与 DNS。熄屏唤醒后网关
@@ -499,7 +509,18 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             if stop_core(&handle, &state).await.is_ok()
                 && start_core(&handle, &state).await.is_ok()
             {
-                state.log("app", "info", "隧道已自动恢复");
+                state.with(|i| {
+                    i.runtime.recovery.succeeded(xt_core::util::now_unix());
+                    // **清掉恢复中的提示条**（逻辑在 state.rs，有单测：
+                    // `recovery_success_clears_only_our_own_notice`）。
+                    // 不清的话下一次快照刷新会把过期的「正在自动恢复…」带回来，
+                    // 从「该显示时看不见」变成「恢复完了还一直显示恢复中」。
+                    crate::state::clear_recovering_notice(&mut i.last_notice);
+                });
+                state.log("app", "info", format!("隧道已自动恢复（第 {attempt} 次自动重建）"));
+                // 显式推一次：让界面收到 `recovering=false` + `last_outcome=recovered`，
+                // 这样「恢复成功」是**可感知的结束**，不是静默变回「已连接」。
+                events::runtime_changed(&handle, &state);
                 // start_core 会 spawn 新的看门狗，这里退出即可。
                 return;
             }
@@ -513,12 +534,28 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                     "error",
                     "自动重建失败，已退回直连：网络可用，但流量不再走代理",
                 );
-                i.last_notice = Some("自动恢复失败，已退回直连（不再走代理）".into());
+                i.runtime.recovery.fell_back_to_direct(xt_core::util::now_unix());
+                // 失败时 notice **保留**，并说清下一步能做什么。
+                i.last_notice =
+                    Some("自动恢复失败，已退回直连：网络可用，但流量不再走代理。可在节点页重新连接".into());
             });
             events::runtime_changed(&handle, &state);
             return;
         }
     });
+}
+
+/// 把「连续探测失败次数」同步进 `recovery`，**只在值变化时**发事件。
+///
+/// 每 10 秒的探测都推一次事件是纯噪音；而恢复可能还要再等一拍才开始，
+/// 所以这个数字值得单独同步一次（界面可据此提前显示「连接不稳定」）。
+fn sync_probe_failures(app: &AppHandle, state: &AppState, failures: u32) {
+    let changed = state
+        .with(|i| i.runtime.recovery.set_probe_failures(failures))
+        .unwrap_or(false);
+    if changed {
+        events::runtime_changed(app, state);
+    }
 }
 
 pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
