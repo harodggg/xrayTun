@@ -174,6 +174,34 @@ export interface LoginItemState {
   needs_approval: boolean;
 }
 
+/** 自动重建（看门狗自愈）的结局。 */
+export type RecoveryOutcome = "recovered" | "direct_fallback";
+
+/**
+ * 看门狗自动重建隧道的状态（`CoreRuntime.recovery`）。
+ *
+ * **`recovering` 是后端真实状态**，不是前端按时间猜的；只在看门狗真的在
+ * `stop_core` + `start_core` 期间为 `true`。
+ *
+ * 刻意**没有**「预计下次重试时间」：看门狗探测固定 10 秒一跳，判定要重建就
+ * 立刻做，失败后直接退回直连并退出 —— 后端不知道「下次重试在什么时候」，
+ * 编一个数字（或一个恒为 null 的字段）都是无意义的语义。
+ */
+export interface RecoveryState {
+  /** 看门狗正在重建隧道。 */
+  recovering: boolean;
+  /** 自 App 启动以来第几次自动重建（含进行中的这次，从 1 开始）；0 = 从未发生。 */
+  attempt: number;
+  /** 触发这次重建的连续探测失败次数（每 10 秒探测一次）。 */
+  probe_failures: number;
+  /** 本次（没在恢复时 = 最近一次）自动重建的开始时刻，Unix 秒。 */
+  started_unix: number | null;
+  /** 最近一次自动重建的结局；null = 还没结束过任何一次。 */
+  last_outcome: RecoveryOutcome | null;
+  /** 最近一次自动重建的结束时刻，Unix 秒。 */
+  finished_unix: number | null;
+}
+
 export interface CoreRuntime {
   running: boolean;
   pid: number | null;
@@ -183,6 +211,13 @@ export interface CoreRuntime {
   tun_interface: string | null;
   routes_committed: boolean;
   last_error: string | null;
+  /** 上一次真正验证过能用的节点 id（Rust 侧一直有，此前 TS 漏声明）。 */
+  last_good_node: string | null;
+  /**
+   * 自动恢复状态。界面据此显示「正在自动恢复（第 N 次）」，
+   * 并在 `recovering === true` 期间改写/禁用连接按钮。
+   */
+  recovery: RecoveryState;
 }
 
 export type HelperState =
