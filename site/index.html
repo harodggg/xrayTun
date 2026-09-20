@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>XrayTun — macOS 上的 Xray 图形客户端（原生 TUN 模式）</title>
+    <meta
+      name="description"
+      content="XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.26，通用包（Apple Silicon + Intel），包内自带 Xray 核心。"
+    />
+    <link rel="canonical" href="https://harodggg.github.io/xrayTun/" />
+    <link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/" />
+    <link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/" />
+    <link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/" />
+    <meta name="theme-color" content="#0f1420" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="XrayTun" />
+    <meta property="og:title" content="XrayTun — macOS 上的 Xray 图形客户端（原生 TUN 模式）" />
+    <meta
+      property="og:description"
+      content="macOS 13+ 的 Xray 图形客户端：用 Xray-core 原生 TUN 入站接管系统流量。通用包，包内自带 Xray 核心。当前 v0.8.26。"
+    />
+    <meta property="og:url" content="https://harodggg.github.io/xrayTun/" />
+    <meta property="og:locale" content="zh_Hans" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="XrayTun — macOS 上的 Xray 图形客户端（原生 TUN 模式）" />
+    <meta
+      name="twitter:description"
+      content="macOS 13+ 的 Xray 图形客户端：用 Xray-core 原生 TUN 入站接管系统流量。通用包，包内自带 Xray 核心。当前 v0.8.26。"
+    />
+    <link rel="stylesheet" href="assets/site.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header">
+      <div class="wrap site-header__inner">
+        <a class="brand" href="./">XrayTun</a>
+        <nav class="site-nav" aria-label="页面导航">
+          <a href="#features">功能</a>
+          <a href="#download">下载</a>
+          <a href="#install">安装</a>
+          <a href="#faq">常见问题</a>
+        </nav>
+        <nav class="lang-switch" aria-label="语言">
+          <a href="./" aria-current="page" lang="zh-Hans">中文</a>
+          <a href="en/" hreflang="en" lang="en">English</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============================================================ #what -->
+      <section class="hero wrap" id="what">
+        <h1>XrayTun：macOS 上的 Xray 图形客户端，用原生 TUN 模式接管系统流量</h1>
+        <p class="lead">
+          XrayTun 是一个面向 macOS 的 Xray 图形客户端。它调用 Xray-core 的原生
+          <code>tun</code> 入站（内置 gVisor 协议栈）创建 utun 网卡，用
+          <code>0.0.0.0/1</code> 与 <code>128.0.0.0/1</code> 两条路由拆分默认路由，并接管系统
+          DNS，从而让整台 Mac 的流量按规则走代理。只有「建网卡、装路由、改 DNS」这三件事在特权
+          helper（root 守护进程）里执行，Xray 核心本身以普通用户身份运行。
+        </p>
+
+        <!-- CTA 行：链接与版本信息**全在 HTML 里**，禁 JS 也能下载 -->
+        <p class="cta">
+          <a
+            class="btn btn--primary"
+            href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
+            >下载 macOS 版 v0.8.26 · dmg · 44.9 MiB</a
+          >
+          <a
+            class="btn btn--secondary"
+            href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip"
+            >备用 .zip · 40.7 MiB</a
+          >
+        </p>
+        <p class="meta">
+          v0.8.26（2026-09-20 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dmg 44.9 MiB
+        </p>
+        <p class="meta meta--hint">
+          首次打开需要多一步？<a href="#install">看安装说明</a>（Gatekeeper 会拦截，这是预期行为）。
+        </p>
+
+        <figure class="shot">
+          <img
+            src="assets/shots/topology.png"
+            width="1080"
+            height="720"
+            alt="XrayTun 拓扑页：左侧是入口卡片（tun / socks / http），右侧是出口卡片（节点、直连、拦截），中间的车流连线按去向着色，货车沿连线行走。"
+          />
+          <figcaption>拓扑页：入口 → 规则链 → 出口的结构关系，连线按出口类别着色。</figcaption>
+        </figure>
+      </section>
+
+      <!-- ============================================================= #why -->
+      <section class="wrap prose" id="why">
+        <h2>它解决什么问题</h2>
+
+        <p>
+          <strong>macOS 的「系统代理」只覆盖遵守代理设置的应用。</strong>
+          系统代理是一个 HTTP/HTTPS/SOCKS 设置项，很多应用（尤其是自带网络栈的应用、命令行工具、游戏）
+          不会读它。XrayTun 的 TUN 模式在网络层接管默认路由，因此不需要每个应用单独支持代理。
+        </p>
+        <p>
+          <strong>改系统网络配置是有风险的操作。</strong>
+          TUN 模式要创建网卡、改路由、改 DNS；如果中途崩溃或断电，机器可能就断网了。XrayTun
+          在动手之前先把「我要开始改了」写进磁盘快照，每改一步增量更新，启动时如果发现上次留下没回滚的
+          会话就立刻回滚；退出应用时也会还原网络配置。
+        </p>
+        <p>
+          <strong>「连上了」不等于「能用」。</strong>
+          节点可能握手成功却转发不了流量。XrayTun 的看门狗每 10 秒经隧道发一次真实请求，连续 2
+          次失败就自动重建隧道；重建失败时退回直连，而不是把你留在断网状态。
+        </p>
+        <p>
+          <strong>分流规则是否命中，通常只能猜。</strong>
+          XrayTun 内置一个判定器：输入域名或 IP，用运行中的真实规则与 geoip/geosite
+          数据算出它命中哪条规则、从哪个出口出去。
+        </p>
+      </section>
+
+      <!-- ======================================================== #features -->
+      <section class="wrap prose" id="features">
+        <h2>核心能力</h2>
+        <p>
+          下面每一条都能在 GitHub 仓库的文档里逐条核对（见<a href="#links">链接</a>）。这一节同时也说明
+          <strong>本应用刻意不做的事情</strong>，因为知道边界比看功能清单更能帮你判断它是否适合你。
+        </p>
+
+        <h3>协议与订阅</h3>
+        <ul>
+          <li>节点协议支持 <strong>vmess、vless、trojan、shadowsocks、socks、http</strong>。</li>
+          <li>
+            <strong>不支持 ShadowsocksR（<code>ssr://</code>）</strong>：解析到
+            <code>ssr://</code> 会明确报错，不会静默忽略。
+          </li>
+          <li>
+            订阅支持 <strong>4 种格式</strong>，自动嗅探：Xray JSON 配置、Clash / Mihomo YAML、
+            整体 base64 的链接列表、明文链接列表。
+          </li>
+          <li>
+            订阅正文里混入一两条不支持的链接（例如 <code>hysteria2://</code>）不会导致整个订阅失败，
+            只跳过并记入日志。
+          </li>
+        </ul>
+
+        <h3>分流</h3>
+        <ul>
+          <li>内置 <strong>4 个分流预设</strong>：全局代理、绕过大陆（默认）、白名单代理、全部直连。</li>
+          <li>支持 <strong>自定义规则</strong>；自定义规则<strong>追加在预设之后</strong>执行，不会插到预设前面。</li>
+          <li>
+            规则<strong>顺序敏感</strong>：Xray 自上而下取第一条命中的规则，所以「广告拦截」必须排在
+            「大陆直连」之前。
+          </li>
+          <li>
+            支持 <strong>geoip / geosite 匹配</strong>（如 <code>geoip:cn</code>、<code>geosite:cn</code>）；
+            <code>geoip.dat</code> 与 <code>geosite.dat</code> 随包附带。
+          </li>
+          <li>规则的界面编辑<strong>目前没有</strong>：自定义规则以只读列表展示，需要直接编辑设置文件。</li>
+        </ul>
+
+        <h3>DNS</h3>
+        <ul>
+          <li>
+            <strong>4 种 DNS 策略</strong>：全部走代理解析、按规则分流解析（默认）、全部本地直连解析、
+            自定义服务器。
+          </li>
+          <li>支持 <strong>Fake-IP</strong>，默认关闭。</li>
+          <li>提供 DNS 解析器探测与国内外分组对比（两组走的是不同路径，因此分开测量、分开显示）。</li>
+        </ul>
+
+        <h3>接管方式与权限</h3>
+        <ul>
+          <li>三种模式：<strong>直连 / 系统代理 / TUN</strong>。</li>
+          <li>
+            TUN 模式使用 <strong>Xray-core 原生 <code>tun</code> 入站</strong>（内置 gVisor
+            协议栈），不依赖 tun2socks 等旁路进程，UDP 与 QUIC 由同一协议栈处理。
+          </li>
+          <li>
+            路由用 <code>0.0.0.0/1</code> 与 <code>128.0.0.0/1</code>
+            拆分而不是替换默认路由：最坏情况是「一部分流量走错路」，而不是「完全没有默认路由」。
+          </li>
+          <li>
+            <strong>系统代理模式不会修改 macOS 的系统代理设置</strong>（截至 v0.8.26）。它只在本机启动
+            SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你自己把应用指向这两个端口；
+            要自动接管请用 TUN 模式。
+          </li>
+          <li>
+            权限最小化：建 utun、装路由、改 DNS 由特权 helper 完成，
+            <strong>Xray 核心以普通用户身份运行</strong>；helper 只接受来自本应用、通过代码签名校验的连接。
+          </li>
+          <li>首次使用需要在设置里安装特权 helper（会要求一次管理员密码）。</li>
+        </ul>
+
+        <h3>可靠性与更新</h3>
+        <ul>
+          <li><strong>开机自启</strong>：通过 macOS 的 <code>SMAppService</code> 登录项注册。</li>
+          <li>
+            <strong>自动恢复</strong>：开机后若上次是连接状态，会在后台最多重试 24 次 × 5 秒（约 2
+            分钟）；隧道看门狗每 10 秒探测一次，连续 2 次失败自动重建，重建失败退回直连。换 Wi-Fi
+            与合盖唤醒属于同一套自愈逻辑。
+          </li>
+          <li>
+            <strong>崩溃安全</strong>：改网络配置前先落盘会话快照，每步增量更新；helper
+            启动时先回滚遗留会话；退出应用会还原网络配置。
+          </li>
+          <li>
+            <strong>自更新</strong>：检查 GitHub Release → 下载 zip → 比对
+            <code>SHA256SUMS.txt</code> → 替换应用并重启。这里要如实说明：只校验 SHA256，<strong>没有签名校验</strong>，
+            因此它能防「下载损坏」，防不了「上游被换掉」。
+          </li>
+          <li>
+            <strong>流量计数跨核心重启续接</strong>：核心重启会让 Xray 的累计计数器归零，XrayTun
+            把归零前的量接上并如实显示「核心重启过 N 次」，而不是把流量显示成突然清零。
+          </li>
+        </ul>
+
+        <h3>观测（这一块是本项目的设计取舍）</h3>
+        <ul>
+          <li>
+            <strong>拓扑页</strong>：按运行中的真实配置画出入口 → 规则链 → 出口的结构关系。
+            连线表达的是<strong>配置上的结构关系</strong>，不是「某条流量实际走了哪条线」——Xray
+            只有按入口、按出口的聚合计数器，没有逐条规则的计数器。
+          </li>
+          <li>
+            <strong>地球仪</strong>：画出本机公网出口到出口节点的大圆航线，两端标出城市。位置查询来自第三方（<code>ipwho.is</code>
+            与 <code>ip-api.com</code>），查询会把被查的 IP 发给这些服务；大陆轮廓是 2°
+            分辨率的粗略示意，不是导航级海岸线。
+          </li>
+          <li>
+            <strong>最近连接</strong>：从 Xray 访问日志里取每条连接的时间、来源、目标、<code>[入站 → 出站]</code>、域名，
+            点一条就在拓扑上高亮它经过的路径。域名来自日志的<strong>时序配对</strong>（<code>sniffed</code>
+            行与 <code>accepted</code> 行按时间就近配对），<strong>可能配错</strong>：界面用 <code>*</code>
+            标注并显示精确到微秒的配对时延；约一半连接本来就没有域名。
+          </li>
+          <li>
+            <strong>日志与诊断</strong>：等级筛选、来源区分、一键生成诊断报告（在后端脱敏：订阅 URL
+            只保留 host，UUID 替换为 <code>&lt;uuid&gt;</code>）。
+          </li>
+        </ul>
+
+        <h3>本应用刻意不做（也不打算假装能做）</h3>
+        <ul>
+          <li>
+            <strong>每条连接用了多少字节、持续多久</strong>：Xray
+            的统计服务只有聚合计数器，访问日志只记录连接建立、不记录结束。界面里没有这两个数字。
+          </li>
+          <li>
+            <strong><code>dns-out</code> 与 <code>api</code> 的字节数</strong>：Xray
+            不统计 UDP 出站流量与本机回环流量，这两个出口的字节计数器恒为 0。XrayTun
+            把它们单独列为「内部通道」，改用<strong>连接数</strong>表示活跃度；而 <code>block</code>
+            出口的 0 是真的 0。
+          </li>
+          <li>
+            <strong>「当前活跃连接数」</strong>：连接从列表里消失不等于已关闭（可能只是被滚动缓冲区挤掉）。
+          </li>
+          <li>没有 Windows / Linux / 移动端版本；界面目前只有中文；没有规则可视化编辑、节点分组、浅色主题。</li>
+        </ul>
+      </section>
+
+      <!-- ======================================================== #download -->
+      <section class="wrap prose" id="download">
+        <h2>下载</h2>
+        <p class="cta">
+          <a
+            class="btn btn--primary"
+            href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
+            >下载 macOS 版 v0.8.26 · dmg · 44.9 MiB</a
+          >
+        </p>
+
+        <table class="facts-table">
+          <caption>
+            真实资产（v0.8.26，2026-09-20 发布）
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">文件</th>
+              <th scope="col">大小</th>
+              <th scope="col">链接</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">dmg（主）</th>
+              <td>47,128,987 字节（44.9 MiB）</td>
+              <td>
+                <a
+                  href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
+                  >XrayTun_0.8.26_x86_64_arm64.dmg</a
+                >
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">zip（备用）</th>
+              <td>42,636,964 字节（40.7 MiB）</td>
+              <td>
+                <a
+                  href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip"
+                  >XrayTun_0.8.26_x86_64_arm64.zip</a
+                >
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">校验和</th>
+              <td>200 字节</td>
+              <td>
+                <a href="https://github.com/harodggg/xrayTun/releases/download/v0.8.26/SHA256SUMS.txt"
+                  >SHA256SUMS.txt</a
+                >
+              </td>
+            </tr>
+            <tr>
+              <th scope="row">所有版本</th>
+              <td>—</td>
+              <td><a href="https://github.com/harodggg/xrayTun/releases/latest">GitHub Releases</a></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>运行要求</h3>
+        <ul>
+          <li>macOS <strong>13.0 或更高</strong>。</li>
+          <li>Apple Silicon 与 Intel 都原生支持（同一个通用包）。</li>
+          <li>
+            <strong>不需要另外安装 Xray 核心</strong>：包内已包含 Xray-core、<code>geoip.dat</code>、<code>geosite.dat</code>。
+          </li>
+          <li>需要一个可用的 Xray 节点或订阅链接（本应用不自带节点，也不提供节点服务）。</li>
+          <li>首次使用需要一次管理员密码（安装特权 helper）。</li>
+        </ul>
+
+        <h3>校验下载文件（可选，防止下载被截断）</h3>
+        <pre class="code"><code># 与 release 里的 SHA256SUMS.txt 对比
+grep XrayTun_0.8.26_x86_64_arm64.dmg SHA256SUMS.txt
+shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg</code></pre>
+        <p>
+          两行的哈希应当一致。注意 <code>SHA256SUMS.txt</code> 由
+          <code>shasum -a 256 ./*</code> 生成，行里带 <code>./</code>
+          前缀，所以用 <code>grep</code> 取行再肉眼比对，比直接 <code>shasum -c</code> 更稳。
+        </p>
+      </section>
+
+      <!-- ========================================================= #install -->
+      <section class="wrap prose" id="install">
+        <h2>安装</h2>
+        <p>
+          下载下来的包<strong>一定会被 macOS 拦下，这不是文件损坏</strong>。下面第 3 步给出三条放行路径，
+          按你的系统版本任选一条。
+        </p>
+
+        <h3>第 1 步：拖进「应用程序」</h3>
+        <p>打开下载到的 dmg，把 <code>XrayTun.app</code> 拖进「应用程序」文件夹。</p>
+
+        <h3>第 2 步：首次打开会被拦住（预期行为，不是包坏了）</h3>
+        <p>
+          你会看到类似「无法验证开发者」或「Apple 无法检查其是否包含恶意软件」的提示。原因是 XrayTun
+          的安装包是 <strong>ad-hoc 签名、未公证</strong>的：项目仓库里没有 Apple 的 Developer ID
+          证书（那需要付费开发者账号），所以 macOS 无法用常规方式验证它。校验结果就是「被拒绝」——这是<strong>预期</strong>的，
+          不是下载出错。
+        </p>
+
+        <!-- 琥珀色警告块：**不用红色**（这是预期内、一次性、用户自己能解决的情况），
+             且三条路径**全部在 HTML 里**（不许用 tabs/UA 判断，禁 JS 也要能读）。 -->
+        <aside class="warn" aria-labelledby="install-gatekeeper">
+          <h3 class="warn__title" id="install-gatekeeper">⚠︎ 首次打开需要多一步，这是预期行为</h3>
+          <p class="warn__body">
+            安装包是 ad-hoc 签名、未经 Apple 公证的（没有付费开发者账号），macOS
+            因此会在第一次打开时拦截。<strong>按你的系统版本选一种：</strong>
+          </p>
+
+          <div class="paths">
+            <div class="path">
+              <span class="path__badge">macOS 15+</span>
+              <div class="path__body">
+                <p>
+                  双击 XrayTun 被拦下后，打开<strong>系统设置 → 隐私与安全性</strong>，在「安全性」一栏找到「已阻止使用『XrayTun』，
+                  因为来自身份不明的开发者」，点「<strong>仍要打开</strong>」，用 Touch ID
+                  或密码确认，然后<strong>再双击一次</strong>应用。
+                </p>
+                <p class="path__note">
+                  从 macOS 15 开始，Apple 已移除「按 Control 点按图标绕过 Gatekeeper」的做法。
+                </p>
+              </div>
+            </div>
+
+            <div class="path">
+              <span class="path__badge">macOS 14-</span>
+              <div class="path__body">
+                <p>
+                  在「访达」里按 Control 点按（或右键）<code>XrayTun.app</code> 图标 → 选「打开」→
+                  在弹窗里再点一次「打开」。
+                </p>
+              </div>
+            </div>
+
+            <div class="path">
+              <span class="path__badge">终端</span>
+              <div class="path__body">
+                <p>不想点图形界面 / 上面两步都不成功：打开「终端」，执行下面这条命令，然后正常双击应用。</p>
+                <pre class="code"><code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code></pre>
+                <p class="path__note">
+                  这条命令只删除系统给下载文件打的「来自互联网」标记。<strong>注意是 <code>-d</code>，不是 <code>-dr</code></strong>：
+                  现代 macOS 的 <code>xattr</code> 没有 <code>-r</code> 选项，写成 <code>-dr</code>
+                  会报 <code>option -r not recognized</code>。
+                </p>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <h3>第 4 步：在应用里安装特权 helper（TUN 模式需要）</h3>
+        <p>
+          打开 XrayTun → 设置 → 特权助手 → 「安装」。这一步会要求一次管理员密码。只有「创建 utun
+          网卡、安装路由、修改 DNS」这三件事由 helper 执行，Xray 核心本身以你的普通用户身份运行。
+        </p>
+
+        <h3>第 5 步：确认装好了</h3>
+        <p>
+          在「设置 → 环境自检」里，helper 应显示「已就绪」；把顶栏的模式切到 <strong>TUN 模式</strong>，
+          添加订阅或节点后点「连接」，能正常上网即安装成功。
+        </p>
+
+        <h3>如果不想要了</h3>
+        <p>
+          退出 XrayTun 会还原网络配置；卸载前先退出应用并卸载 helper（helper
+          的卸载请求会先回滚网络配置再删文件），避免留下指向 utun 的路由或 DNS。
+        </p>
+      </section>
+
+      <!-- ============================================================= #faq -->
+      <section class="wrap prose" id="faq">
+        <h2>常见问题</h2>
+
+        <h3>XrayTun 需要我另外安装 Xray 核心吗？</h3>
+        <p>
+          不需要。安装包内已包含 Xray-core 以及 <code>geoip.dat</code>、<code>geosite.dat</code>，位于应用的
+          <code>Contents/Resources/</code> 目录。XrayTun 从 v0.8.26 起随包分发核心，你只需要准备节点或订阅链接。
+        </p>
+
+        <h3>XrayTun 支持哪些 macOS 版本和处理器？</h3>
+        <p>
+          支持 macOS 13.0 或更高版本，Apple Silicon（arm64）与 Intel（x86_64）都原生支持，两者共用同一个通用安装包。
+          目前只有 macOS 版本，没有 Windows、Linux 或移动端版本。
+        </p>
+
+        <h3>打开时提示「无法验证开发者」，怎么办？</h3>
+        <p>
+          这是未公证应用的预期提示，不是安装出错。macOS 15 及以后请走「系统设置 → 隐私与安全性 →
+          仍要打开」；macOS 14 及更低版本可以右键（Control 点按）应用选「打开」；也可以直接在终端执行
+          <code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code> 后正常打开。
+        </p>
+
+        <h3>提示「XrayTun.app 已损坏，无法打开」，是真的损坏了吗？</h3>
+        <p>
+          不是。ad-hoc 签名且未公证的应用会被 Gatekeeper 判定为「被拒绝」，系统用的话术与「损坏」类似。先执行
+          <code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code>
+          再打开；如果仍然打不开，用 <code>SHA256SUMS.txt</code> 校验你下载的文件是否完整（见下载区）。
+        </p>
+
+        <h3>为什么不用 Apple 的开发者签名与公证？</h3>
+        <p>
+          因为签名与公证需要付费的 Apple 开发者账号，项目目前没有 Developer ID
+          证书。代价就是每次首次安装都要手动放行一次——这是已知且公开的取舍，见仓库的 Release 说明。
+        </p>
+
+        <h3>为什么一定要安装特权 helper？</h3>
+        <p>
+          因为 TUN 模式必须创建 utun 网卡、修改路由表和系统 DNS，这三件事需要 root 权限。helper
+          是一个只做这三件事的 root 守护进程，且只接受来自 XrayTun
+          本应用、通过代码签名校验的连接；Xray 核心本身仍然以你的普通用户身份运行。
+        </p>
+
+        <h3>「系统代理」模式会自动设置 macOS 的系统代理吗？</h3>
+        <p>
+          不会（截至 v0.8.26）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）
+          入站，需要你手动把应用或系统代理指向这两个端口。要让整机流量自动按规则走，请使用 TUN 模式。
+        </p>
+
+        <h3>支持哪些节点协议和订阅格式？</h3>
+        <p>
+          节点协议支持 vmess、vless、trojan、shadowsocks、socks、http；订阅支持 Xray JSON、Clash /
+          Mihomo YAML、base64 链接列表、明文链接列表四种格式，会自动识别。
+        </p>
+
+        <h3>支持 ShadowsocksR（<code>ssr://</code>）吗？</h3>
+        <p>
+          不支持。Xray-core 不提供 <code>ssr://</code> 支持，粘贴 <code>ssr://</code>
+          链接时 XrayTun 会明确报错，而不是静默忽略。
+        </p>
+
+        <h3>为什么有的出口流量显示 0 B？</h3>
+        <p>
+          因为那是 Xray 统计接口的盲区，不是「没流量」。Xray 不统计 UDP 出站流量（<code>dns-out</code>）与本机回环流量（<code>api</code>），
+          这两个出口的字节计数器恒为 0；XrayTun 把它们单独列为「内部通道」，改用连接数表示活跃度。而
+          <code>block</code>（拦截）出口的 0 是真的 0，因为连接被拒绝，本来就没有字节。
+        </p>
+
+        <h3>「最近连接」里的域名准确吗？</h3>
+        <p>
+          是近似值。Xray 的访问日志里，连接建立行（<code>accepted</code>）不带连接 ID，域名出现在另一行（<code>sniffed</code>），
+          所以只能按时间就近配对，并发时可能配错。界面用 <code>*</code>
+          标注配对来的域名，并显示这条的配对时延（微秒），由你判断。另外约一半连接本来就没有域名（IP
+          直连与内部通道没有 <code>sniffed</code> 行），这是正常状态。
+        </p>
+
+        <h3>一条连接用了多少流量、持续了多久？</h3>
+        <p>
+          看不到，因为 Xray 没有提供这两个数据。统计服务只有按入口、按出口的聚合计数器，访问日志也只记录连接建立、不记录结束。XrayTun
+          不会用推测值填补这个空缺。
+        </p>
+
+        <h3>崩溃或断电会不会把系统网络配置改坏？</h3>
+        <p>
+          会留下残留，但能被自动清掉——这正是本项目投入最多的地方。XrayTun
+          在修改网络之前先把会话快照落盘，每改一步增量更新；helper
+          每次启动的第一件事就是回滚磁盘上遗留的会话；正常退出应用时也会还原网络配置。另外如果系统 DNS
+          还指向隧道内的哨兵地址而隧道已经不在了，界面会明确告诉你原因并给出修复命令。
+        </p>
+
+        <h3>换 Wi-Fi、合盖唤醒之后需要手动点「连接」吗？</h3>
+        <p>
+          不需要。看门狗每 10 秒经隧道发一次真实请求，连续 2 次失败就自动重建隧道；开机时若上次是连接状态，
+          会在后台最多重试约 2 分钟，因此开机时 Wi-Fi 还没就绪也能自动连上。重建失败时会退回直连以保证你能上网。
+          需要如实说明的是：<strong>v0.8.26 及更早版本</strong>的界面只显示「已连接／未连接」，不会显示
+          「正在自动恢复」的进度，这段时间你会看到状态短暂变成「未连接」——功能是自动的，
+          只是界面还没把过程画出来。
+        </p>
+
+        <h3>自动更新安全吗？</h3>
+        <p>
+          自动更新会从项目的 GitHub Release 下载压缩包，并用 release 里的 <code>SHA256SUMS.txt</code>
+          校验完整性，校验不通过会拒绝安装。需要如实说明的是：这只校验校验和，<strong>没有签名校验</strong>，
+          因此它能防「下载损坏」，但防不了「上游被替换」。真正的签名 + 公证需要 Developer ID 证书。
+        </p>
+
+        <h3>XrayTun 的许可证是什么？</h3>
+        <p>
+          源码在 GitHub 上公开。需要如实说明：仓库的 <code>Cargo.toml</code> 里写的是
+          <code>license = "MIT"</code>，但<strong>截至 v0.8.26 仓库还没有附带 LICENSE 文件</strong>，
+          所以请不要把它当作已声明 MIT 许可的软件使用；在补上 LICENSE 之前请按「许可证未声明」对待。随包分发的
+          Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库。
+        </p>
+      </section>
+
+      <!-- =========================================================== #links -->
+      <section class="wrap prose" id="links">
+        <h2>链接</h2>
+        <ul class="link-list">
+          <li>源码仓库：<a href="https://github.com/harodggg/xrayTun">github.com/harodggg/xrayTun</a></li>
+          <li>全部 Release：<a href="https://github.com/harodggg/xrayTun/releases">GitHub Releases</a></li>
+          <li>
+            更新记录：<a href="https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md">CHANGELOG.md</a>
+          </li>
+          <li>设计文档：<a href="https://github.com/harodggg/xrayTun/tree/main/docs">docs/</a></li>
+          <li>
+            安装与 TUN 权限说明：<a href="https://github.com/harodggg/xrayTun/blob/main/docs/02-tun-and-privileges.md"
+              >docs/02-tun-and-privileges.md</a
+            >
+          </li>
+          <li>
+            分流与 DNS 说明：<a href="https://github.com/harodggg/xrayTun/blob/main/docs/04-routing-and-dns.md"
+              >docs/04-routing-and-dns.md</a
+            >
+          </li>
+          <li>给 AI 的站点摘要：<a href="llms.txt">llms.txt</a></li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap prose">
+        <p>
+          本页内容与 XrayTun 源码公开在 GitHub。XrayTun 仓库的 <code>Cargo.toml</code> 声明
+          <code>license = "MIT"</code>，但截至 v0.8.26 尚未附带 LICENSE 文件，因此我们不把它表述为 MIT
+          许可软件。随包分发的 Xray-core 为 MPL-2.0，其许可证随 Xray-core 项目分发。
+        </p>
+        <p class="site-footer__meta">
+          XrayTun v0.8.26 · 仅 macOS 13.0+ · 页面最后更新 2026-09-20 ·
+          <a href="#main">回到顶部</a>
+        </p>
+      </div>
+    </footer>
+
+    <script src="assets/site.js" defer></script>
+  </body>
+</html>
