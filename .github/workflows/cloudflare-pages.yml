@@ -1,0 +1,103 @@
+name: Cloudflare Pages
+
+# 把 `site/` 部署到 Cloudflare Pages（canonical 站点 `https://xraytun.top`）。
+#
+# 与 `pages.yml`（GitHub Pages）的关系：
+#   * Cloudflare Pages = **canonical**（自定义域 xraytun.top）；
+#   * GitHub Pages     = **镜像/回退**（harodggg.github.io/xrayTun），保留；
+#   * 两边的 canonical 由 `site/` 自己声明，所以不能出现「同一个内容两个域名互相竞争」。
+#
+# 凭据**只通过 GitHub Secrets 注入**，工作流里只写 `${{ secrets.… }}`：
+#   CLOUDFLARE_API_TOKEN   —— 需要 Account → Cloudflare Pages → Edit；
+#                             以及 Zone → DNS → Edit（绑自定义域要创建 DNS 记录）；
+#                             若要远程开启 Always Use HTTPS，还需要 Zone → Zone Settings → Edit
+#   CLOUDFLARE_ACCOUNT_ID
+# **不要把 token 写进这里、也不要 echo 出来。**
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/cloudflare-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一时间只跑一个部署；不取消进行中的（避免半发布状态）
+concurrency:
+  group: cloudflare-pages
+  cancel-in-progress: false
+
+env:
+  CF_PROJECT: xraytun
+  CF_ZONE_ID: d5c9855127ff057a8f2c640f51024663 # xraytun.top 的 zone（不是密钥）
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 站点静态检查（必需文件 + 相对路径）
+        run: |
+          set -eu
+          fail=0
+          for f in index.html en/index.html llms.txt llms-full.txt robots.txt sitemap.xml \
+                   assets/site.css assets/site.js; do
+            [ -e "site/$f" ] && echo "  ✓ site/$f" || { echo "  ✗ 缺 site/$f" >&2; fail=1; }
+          done
+          if grep -rInE '(href|src)="/([^/]|$)' site --include='*.html' >/tmp/abs.txt; then
+            echo "  ✗ 发现根绝对路径（GH Pages 镜像上会 404）：" >&2; cat /tmp/abs.txt >&2; fail=1
+          else
+            echo "  ✓ 没有根绝对路径"
+          fi
+          [ "$fail" = 0 ] || exit 1
+
+      # 项目可能还不存在（首次部署）。已存在时这条会报错，忽略即可。
+      - name: 确保 Pages 项目存在
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create ${{ env.CF_PROJECT }} --production-branch=main
+
+      - name: 部署 site/ 到 Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # `--branch=main` 会让这次部署成为 **production** 部署（而不是 preview）
+          command: pages deploy site --project-name=${{ env.CF_PROJECT }} --branch=main
+
+      - name: 绑定自定义域 + 开启 Always Use HTTPS（幂等）
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -eu
+          API=https://api.cloudflare.com/client/v4
+          auth="Authorization: Bearer $CF_TOKEN"
+
+          echo "== 当前已绑定的域 =="
+          curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains" \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  " + (", ".join(x["name"] for x in d.get("result",[])) or "(无)"))'
+
+          existing=$(curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains" \
+            | python3 -c 'import sys,json; print(" ".join(x["name"] for x in json.load(sys.stdin).get("result",[])))')
+
+          for d in xraytun.top www.xraytun.top; do
+            case " $existing " in
+              *" $d "*) echo "  · $d 已绑定，跳过"; continue ;;
+            esac
+            out=$(curl -sS -X POST -H "$auth" -H "Content-Type: application/json" \
+              "$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains" \
+              -d "{\"name\":\"$d\"}")
+            echo "$out" | python3 -c 'import sys,json; r=json.load(sys.stdin); print("  ✓ 已绑定 " if r.get("success") else "  ✗ 绑定失败：", "" if r.get("success") else json.dumps(r.get("errors"), ensure_ascii=False))'
+          done
+
+          echo "== Always Use HTTPS =="
+          out=$(curl -sS -X PATCH -H "$auth" -H "Content-Type: application/json" \
+            "$API/zones/$CF_ZONE_ID/settings/always_use_https" -d '{"value":"on"}')
+          echo "$out" | python3 -c 'import sys,json; r=json.load(sys.stdin); print("  ✓ 已开启" if r.get("success") else "  ⚠ 开启失败（可能缺 Zone Settings:Edit 权限）：" + json.dumps(r.get("errors"), ensure_ascii=False))'
