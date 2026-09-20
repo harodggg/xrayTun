@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="XrayTun">
+  <title>XrayTun</title>
+  <rect width="64" height="64" rx="14.08" fill="#0f1420"/>
+  <rect x="0.992" y="0.992" width="62.016" height="62.016" rx="13.088" fill="none" stroke="#263148" stroke-width="1.984"/>
+  <path d="M17.92 17.92 L46.08 46.08 M46.08 17.92 L17.92 46.08" stroke="#4f8ef7" stroke-width="8" stroke-linecap="round"/>
+</svg>

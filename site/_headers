@@ -1,0 +1,67 @@
+# Cloudflare Pages 响应头（语法：路径行 + 缩进的 Header 行）
+#
+# 一个路径一个块，避免「多个规则同时命中时谁生效」的歧义。
+#
+# 取向：**静态资源长缓存；HTML 与索引产物短缓存 + 必须重新验证**。
+# 为什么 HTML 不能长缓存：本站没有构建步骤、文件名也不变，长缓存会让改版在
+# 用户那里迟迟不生效。
+#
+# 为什么 /assets/* 用 7 天而不是 max-age=31536000, immutable：
+# 这些文件名**没有内容指纹**（site.css / site.js / shots/*.png 名字是固定的）。
+# 一年 immutable 意味着改版后老访客可能在一年内一直吃旧 CSS —— 那是真实的
+# 陈旧风险，不能用「长缓存」换来。7 天 + stale-while-revalidate 是这里的取舍：
+# 少请求，且改版最多一天内被换掉。**若将来给资源名加内容指纹，再改成 immutable。**
+
+/assets/*
+  Cache-Control: public, max-age=604800, stale-while-revalidate=86400
+
+# HTML：短缓存 + 必须重新验证（配合 ETag，正常访问是 304，不重新下载）
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/en/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/wasm/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/en/wasm/
+  Cache-Control: public, max-age=0, must-revalidate
+
+# 图标与社交卡片：内容稳定，给 7 天
+/favicon.ico
+  Cache-Control: public, max-age=604800
+
+/favicon.svg
+  Cache-Control: public, max-age=604800
+
+/apple-touch-icon.png
+  Cache-Control: public, max-age=604800
+
+/manifest.webmanifest
+  Cache-Control: public, max-age=604800
+
+/og-image.png
+  Cache-Control: public, max-age=604800
+
+/og-image-en.png
+  Cache-Control: public, max-age=604800
+
+/og-image-wasm.png
+  Cache-Control: public, max-age=604800
+
+/og-image-wasm-en.png
+  Cache-Control: public, max-age=604800
+
+# 给 AI / 爬虫的索引产物：改得少但也别缓存一天，1 小时
+/llms.txt
+  Cache-Control: public, max-age=3600
+
+/llms-full.txt
+  Cache-Control: public, max-age=3600
+
+/robots.txt
+  Cache-Control: public, max-age=3600
+
+/sitemap.xml
+  Cache-Control: public, max-age=3600

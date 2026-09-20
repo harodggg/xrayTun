@@ -358,7 +358,9 @@ def write_llms_full() -> None:
 
 > 站点：{BASE}/ ｜ 版本：v{VERSION}（{LAST_PUB}）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
-> 结构化数据见各页面 `<head>` 里的 JSON-LD（SoftwareApplication + FAQPage）。
+> 结构化数据见各页面 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是 SoftwareApplication，
+> xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与 `/en/wasm/`
+> 另有 BreadcrumbList。
 >
 > **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**官网所有页面的完整正文**
 > 与官网里的「事实与边界」清单。仓库 `docs/` 下的**完整设计文档（数千行规范）没有逐字复制**

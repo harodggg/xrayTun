@@ -1,0 +1,18 @@
+{
+  "name": "XrayTun",
+  "short_name": "XrayTun",
+  "description": "macOS 13 及以上的 Xray 图形客户端：用 Xray-core 原生 TUN 入站接管系统流量，包内自带 Xray 核心。",
+  "lang": "zh-Hans",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0f1420",
+  "theme_color": "#0f1420",
+  "icons": [
+    { "src": "favicon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" },
+    { "src": "apple-touch-icon.png", "type": "image/png", "sizes": "180x180", "purpose": "any" },
+    { "src": "assets/icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any" },
+    { "src": "assets/icon-512.png", "type": "image/png", "sizes": "512x512", "purpose": "any" }
+  ]
+}

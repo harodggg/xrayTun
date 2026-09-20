@@ -139,6 +139,23 @@ def alternates(page: dict) -> list[tuple[str, str]]:
     return [("zh-Hans", sibs["zh-Hans"]), ("en", sibs["en"]), ("x-default", sibs["zh-Hans"])]
 
 
+def site_url(page: dict) -> str:
+    """该**语言版本**的站点根。
+
+    WebSite 实体的 url 必须是站点根，不能指向某个子页面 ——
+    把 `/wasm/` 说成站点 URL 是不实陈述（那是页面，不是站点）。
+    """
+    return f"{BASE}/" if page["lang"] == "zh-Hans" else f"{BASE}/en/"
+
+
+def breadcrumb(page: dict) -> list[tuple[str, str]] | None:
+    """面包屑条目；**首页返回 None**（首页没有上一级，不编造层级）。"""
+    if page["pair"] == "home":
+        return None
+    first = "XrayTun 首页" if page["lang"] == "zh-Hans" else "XrayTun home"
+    return [(first, site_url(page)), (page["name"], page["url"])]
+
+
 def build_ld(page: dict, faqs: list[tuple[str, str]]) -> list[dict]:
     if page["type"] == "SoftwareApplication":
         software = {
@@ -174,7 +191,7 @@ def build_ld(page: dict, faqs: list[tuple[str, str]]) -> list[dict]:
             "license": f"{page['repo']}/blob/main/LICENSE",
             "inLanguage": page["lang"],
         }
-    return [
+    blocks = [
         software,
         {
             "@context": "https://schema.org",
@@ -189,7 +206,29 @@ def build_ld(page: dict, faqs: list[tuple[str, str]]) -> list[dict]:
                 for q, a in faqs
             ],
         },
+        # WebSite：站点实体。没有站内搜索，所以**不写 SearchAction**（那会声称一个不存在的能力）。
+        {
+            "@context": "https://schema.org",
+            "@type": "WebSite",
+            "name": "XrayTun",
+            "url": site_url(page),
+            "inLanguage": page["lang"],
+        },
     ]
+    bc = breadcrumb(page)
+    if bc:
+        # 只给**有多级**的页面（子页面）；首页不编造上一级。
+        blocks.append(
+            {
+                "@context": "https://schema.org",
+                "@type": "BreadcrumbList",
+                "itemListElement": [
+                    {"@type": "ListItem", "position": i + 1, "name": n, "item": u}
+                    for i, (n, u) in enumerate(bc)
+                ],
+            }
+        )
+    return blocks
 
 
 def inject(path: Path, blocks: list[dict]) -> None:
@@ -221,8 +260,12 @@ def check() -> int:
         rel = page["path"].relative_to(SITE)
         problems: list[str] = []
         blocks = re.findall(r'<script type="application/ld\+json">([\s\S]*?)</script>', src)
-        if len(blocks) != 2:
-            print(f"✗ {rel}: JSON-LD 块数 {len(blocks)}（期望 2）")
+        # 期望的块集合：软件块 + FAQPage + WebSite（+ 子页面才有 BreadcrumbList）。
+        expected_types = [page["type"], "FAQPage", "WebSite"]
+        if breadcrumb(page):
+            expected_types.append("BreadcrumbList")
+        if len(blocks) != len(expected_types):
+            print(f"✗ {rel}: JSON-LD 块数 {len(blocks)}（期望 {len(expected_types)}：{expected_types}）")
             bad += 1
             continue
         parsed = []
@@ -231,12 +274,34 @@ def check() -> int:
                 parsed.append(json.loads(b))
             except json.JSONDecodeError as e:
                 problems.append(f"JSON 解析失败 {e}")
-        software = next((p for p in parsed if p.get("@type") == page["type"]), None)
-        faq = next((p for p in parsed if p.get("@type") == "FAQPage"), None)
-        if not software or not faq:
-            print(f"✗ {rel}: 缺 {page['type']} 或 FAQPage（实际 {[p.get('@type') for p in parsed]}）")
+        actual_types = [p.get("@type") for p in parsed if isinstance(p, dict)]
+        if sorted(actual_types) != sorted(expected_types):
+            print(f"✗ {rel}: JSON-LD 类型 {actual_types}（期望 {expected_types}）")
             bad += 1
             continue
+        software = next((p for p in parsed if p.get("@type") == page["type"]), None)
+        faq = next((p for p in parsed if p.get("@type") == "FAQPage"), None)
+        website = next((p for p in parsed if p.get("@type") == "WebSite"), None)
+        if not software or not faq or not website:
+            print(f"✗ {rel}: 缺 {page['type']} / FAQPage / WebSite（实际 {actual_types}）")
+            bad += 1
+            continue
+
+        # ---- WebSite / BreadcrumbList 与登记值一致（不许把子页面说成站点根）----
+        if website.get("url") != site_url(page):
+            problems.append(f"WebSite.url 应为 {site_url(page)}")
+        if website.get("inLanguage") != page["lang"]:
+            problems.append(f"WebSite.inLanguage 应为 {page['lang']}")
+        bc = breadcrumb(page)
+        if bc:
+            bcl = next((p for p in parsed if p.get("@type") == "BreadcrumbList"), None)
+            items = [
+                (i.get("name"), i.get("item"), i.get("position"))
+                for i in (bcl or {}).get("itemListElement", [])
+            ]
+            want = [(n, u, i + 1) for i, (n, u) in enumerate(bc)]
+            if items != want:
+                problems.append(f"BreadcrumbList 与登记值不一致：{items} != {want}")
 
         visible = strip_tags(src)
 

@@ -1,0 +1,10 @@
+# Cloudflare Pages 重定向（语法：from  to  status）
+#
+# 只做一件事：把 www 子域 301 到 apex（canonical 是 https://xraytun.top）。
+#
+# ⚠️ 需要**重新部署后**才生效：部署前 `curl -sI https://www.xraytun.top/` 看到 200
+#    不是失败，只是这份文件还没上线。
+#
+# 方向是**单向**的：apex 为 canonical，所以这里绝不写 apex → www 的反向跳
+# （那会让 canonical 与跳转互相矛盾）。
+https://www.xraytun.top/* https://xraytun.top/:splat 301
