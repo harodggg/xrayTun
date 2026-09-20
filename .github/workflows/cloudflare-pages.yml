@@ -5,12 +5,22 @@ name: Cloudflare Pages
 # 与 `pages.yml`（GitHub Pages）的关系：
 #   * Cloudflare Pages = **canonical**（自定义域 xraytun.top）；
 #   * GitHub Pages     = **镜像/回退**（harodggg.github.io/xrayTun），保留；
-#   * 两边的 canonical 由 `site/` 自己声明，所以不能出现「同一个内容两个域名互相竞争」。
+#   * 两个域名同时可访问时必须保证 canonical 唯一（由 `site/` 自己声明）。
 #
-# 凭据**只通过 GitHub Secrets 注入**，工作流里只写 `${{ secrets.… }}`：
-#   CLOUDFLARE_API_TOKEN   —— 需要 Account → Cloudflare Pages → Edit；
-#                             以及 Zone → DNS → Edit（绑自定义域要创建 DNS 记录）；
-#                             若要远程开启 Always Use HTTPS，还需要 Zone → Zone Settings → Edit
+# # 本工作流的原则：**读回验证，而不是「调用没报错」**
+#
+# 踩过的两次坑，别再犯：
+#   1. 绑了自定义域但 **zone 里没有对应 DNS 记录** —— CF 不一定会自动创建。
+#      只报「绑定成功」的话域名根本解析不了。所以绑完必须 `GET /dns_records`
+#      读回确认，缺了自己建（幂等）。
+#   2. `PATCH /settings/always_use_https` 在 token 缺 `Zone → Zone Settings → Edit`
+#      时会返回 `Authentication error`。若只打印「已开启」就是假成功。
+#      所以必须 **PATCH 之后 GET 读回**，按读到的 `value` 如实报告。
+#
+# 凭据**只通过 GitHub Secrets 注入**：
+#   CLOUDFLARE_API_TOKEN   —— Account → Cloudflare Pages → Edit（建项目/部署/绑域）
+#                             + Zone → DNS → Edit（补 CNAME）
+#                             + Zone → Zone Settings → Edit（才能远程开 Always Use HTTPS）
 #   CLOUDFLARE_ACCOUNT_ID
 # **不要把 token 写进这里、也不要 echo 出来。**
 on:
@@ -36,6 +46,10 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      API: https://api.cloudflare.com/client/v4
     steps:
       - uses: actions/checkout@v4
 
@@ -54,14 +68,24 @@ jobs:
           fi
           [ "$fail" = 0 ] || exit 1
 
-      # 项目可能还不存在（首次部署）。已存在时这条会报错，忽略即可。
-      - name: 确保 Pages 项目存在
-        continue-on-error: true
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project create ${{ env.CF_PROJECT }} --production-branch=main
+      - name: 确保 Pages 项目存在（读回确认；建不了就给出可操作提示）
+        run: |
+          set -eu
+          auth="Authorization: Bearer $CF_TOKEN"
+          found=$(curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects?per_page=100" \
+            | jq -r --arg p "$CF_PROJECT" 'if any(.result[]?; .name == $p) then "yes" else "no" end')
+          if [ "$found" = "yes" ]; then echo "  · 项目 $CF_PROJECT 已存在"; exit 0; fi
+          echo "  · 项目不存在，尝试创建…"
+          out=$(curl -sS -X POST -H "$auth" -H "Content-Type: application/json" \
+            "$API/accounts/$CF_ACCOUNT_ID/pages/projects" \
+            -d "{\"name\":\"$CF_PROJECT\",\"production_branch\":\"main\"}")
+          if [ "$(echo "$out" | jq -r '.success')" = "true" ]; then
+            echo "  ✓ 已创建项目"
+          else
+            echo "  ✗ 创建项目失败：$(echo "$out" | jq -c '.errors')"
+            echo "  → token 需要 Account → Cloudflare Pages → Edit；否则只能读、不能建。" >&2
+            exit 1
+          fi
 
       - name: 部署 site/ 到 Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
@@ -71,33 +95,63 @@ jobs:
           # `--branch=main` 会让这次部署成为 **production** 部署（而不是 preview）
           command: pages deploy site --project-name=${{ env.CF_PROJECT }} --branch=main
 
-      - name: 绑定自定义域 + 开启 Always Use HTTPS（幂等）
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: 绑定自定义域 + 补 DNS + 开 Always Use HTTPS（全部读回验证）
         run: |
           set -eu
-          API=https://api.cloudflare.com/client/v4
           auth="Authorization: Bearer $CF_TOKEN"
+          DOMAINS="$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains"
 
-          echo "== 当前已绑定的域 =="
-          curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains" \
-            | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  " + (", ".join(x["name"] for x in d.get("result",[])) or "(无)"))'
-
-          existing=$(curl -sS -H "$auth" "$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains" \
-            | python3 -c 'import sys,json; print(" ".join(x["name"] for x in json.load(sys.stdin).get("result",[])))')
-
+          echo "== 1) 绑定 apex 与 www（幂等）=="
+          existing=$(curl -sS -H "$auth" "$DOMAINS" | jq -r '[.result[]?.name] | join(" ")')
+          echo "  已绑定：${existing:-（无）}"
           for d in xraytun.top www.xraytun.top; do
             case " $existing " in
-              *" $d "*) echo "  · $d 已绑定，跳过"; continue ;;
+              *" $d "*) echo "  · $d 已绑定，跳过" ;;
+              *)
+                out=$(curl -sS -X POST -H "$auth" -H "Content-Type: application/json" "$DOMAINS" -d "{\"name\":\"$d\"}")
+                if [ "$(echo "$out" | jq -r '.success')" = "true" ]; then
+                  echo "  ✓ 已绑定 $d"
+                else
+                  echo "  ✗ 绑定 $d 失败：$(echo "$out" | jq -c '.errors')"
+                fi
+                ;;
             esac
-            out=$(curl -sS -X POST -H "$auth" -H "Content-Type: application/json" \
-              "$API/accounts/$CF_ACCOUNT_ID/pages/projects/$CF_PROJECT/domains" \
-              -d "{\"name\":\"$d\"}")
-            echo "$out" | python3 -c 'import sys,json; r=json.load(sys.stdin); print("  ✓ 已绑定 " if r.get("success") else "  ✗ 绑定失败：", "" if r.get("success") else json.dumps(r.get("errors"), ensure_ascii=False))'
           done
 
-          echo "== Always Use HTTPS =="
-          out=$(curl -sS -X PATCH -H "$auth" -H "Content-Type: application/json" \
-            "$API/zones/$CF_ZONE_ID/settings/always_use_https" -d '{"value":"on"}')
-          echo "$out" | python3 -c 'import sys,json; r=json.load(sys.stdin); print("  ✓ 已开启" if r.get("success") else "  ⚠ 开启失败（可能缺 Zone Settings:Edit 权限）：" + json.dumps(r.get("errors"), ensure_ascii=False))'
+          echo "== 2) 自定义域状态（读回）=="
+          curl -sS -H "$auth" "$DOMAINS" \
+            | jq -r '.result[]? | "  · \(.name): status=\(.status) validation=\(.validation_data.status // "-")"'
+
+          echo "== 3) DNS（读回；缺则创建）=="
+          target="$CF_PROJECT.pages.dev"
+          for rec in xraytun.top www.xraytun.top; do
+            got=$(curl -sS -H "$auth" "$API/zones/$CF_ZONE_ID/dns_records?type=CNAME&name=$rec" | jq -r '.result[0].content // ""')
+            if [ -n "$got" ]; then
+              echo "  · $rec 已存在 → $got"
+            else
+              echo "  · $rec 缺记录，创建 CNAME → $target"
+              out=$(curl -sS -X POST -H "$auth" -H "Content-Type: application/json" \
+                "$API/zones/$CF_ZONE_ID/dns_records" \
+                -d "{\"type\":\"CNAME\",\"name\":\"$rec\",\"content\":\"$target\",\"proxied\":true,\"ttl\":1}")
+              if [ "$(echo "$out" | jq -r '.success')" = "true" ]; then
+                echo "  ✓ 已创建"
+              else
+                echo "  ✗ 创建失败：$(echo "$out" | jq -c '.errors')"
+              fi
+              got=$(curl -sS -H "$auth" "$API/zones/$CF_ZONE_ID/dns_records?type=CNAME&name=$rec" | jq -r '.result[0].content // ""')
+              echo "    读回：${got:-（仍为空）}"
+            fi
+          done
+
+          echo "== 4) Always Use HTTPS（PATCH 后读回 value）=="
+          curl -sS -o /dev/null -X PATCH -H "$auth" -H "Content-Type: application/json" \
+            "$API/zones/$CF_ZONE_ID/settings/always_use_https" -d '{"value":"on"}' || true
+          val=$(curl -sS -H "$auth" "$API/zones/$CF_ZONE_ID/settings/always_use_https" \
+            | jq -r 'if .success then (.result.value // "unknown") else ("ERR:" + (.errors|tostring)) end')
+          if [ "$val" = "on" ]; then
+            echo "  ✓ 已开启（读回 value=on）"
+          else
+            echo "  ✗ **未开启**（读回 value=$val）"
+            echo "    token 缺 Zone → Zone Settings → Edit，或该 zone 不允许远程改此设置；"
+            echo "    需要用户到控制台 SSL/TLS → Edge Certificates 手动打开。**此处如实记为未完成。**"
+          fi
