@@ -1,0 +1,54 @@
+# XrayTun
+
+> XrayTun 是 macOS 13.0+ 的 Xray 图形客户端，用 Xray-core 原生 TUN 入站接管系统流量（整机按规则走代理）。
+> 当前版本 v0.8.26（2026-09-20），通用包（Apple Silicon + Intel），**包内自带 Xray 核心**。
+> 安装包是 ad-hoc 签名、**未公证**的，首次打开会被 Gatekeeper 拦截，需按系统版本手动放行。
+> 仅支持 macOS；没有 Windows / Linux / 移动端版本。本页所有断言都可在仓库文档里逐条核对。
+
+## 官网
+
+- [中文站（完整正文）](https://harodggg.github.io/xrayTun/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
+- [English site (equivalent content)](https://harodggg.github.io/xrayTun/en/)：与中文站逐段等价，不是半份翻译
+- [本站全文（供一次性摄取）](https://harodggg.github.io/xrayTun/llms-full.txt)：中英两个页面的完整文本 + 事实与边界清单
+
+## 下载
+
+- [XrayTun_0.8.26_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg)：47,128,987 字节（44.9 MiB），主下载
+- [XrayTun_0.8.26_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip)：42,636,964 字节（40.7 MiB），备用
+- [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases/download/v0.8.26/SHA256SUMS.txt)：校验和（200 字节）
+- [所有版本](https://github.com/harodggg/xrayTun/releases/latest)
+
+## 安装（要点）
+
+安装包 **ad-hoc 签名、未公证**，首次打开会被 macOS 拦截 —— 这是预期行为，不是文件损坏。
+三条放行路径（任选一条，完整说明见官网 `#install`）：
+
+- **macOS 15 及以后**：系统设置 → 隐私与安全性 → 「仍要打开」→ 再双击一次
+- **macOS 14 及更早**：Finder 里 Control 点按（右键）应用 → 「打开」→ 再点一次「打开」
+- **终端（全版本可用）**：`xattr -d com.apple.quarantine /Applications/XrayTun.app`
+  —— 注意是 `-d`，**不是** `-dr`（现代 macOS 的 `xattr` 没有 `-r`，会报 `option -r not recognized`）
+
+TUN 模式还需要在应用内安装一次特权 helper（要求一次管理员密码）。
+
+## 文档与源码
+
+- [源码仓库](https://github.com/harodggg/xrayTun)
+- [更新记录](https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md)
+- [设计文档目录](https://github.com/harodggg/xrayTun/tree/main/docs)
+- [安装与 TUN 权限说明](https://github.com/harodggg/xrayTun/blob/main/docs/02-tun-and-privileges.md)
+- [分流与 DNS 说明](https://github.com/harodggg/xrayTun/blob/main/docs/04-routing-and-dns.md)
+
+## 事实与边界（引用时请保留）
+
+- 支持 macOS 13.0+；通用包（arm64 + x86_64）；**不需要自己安装 Xray 核心**（包内含 Xray-core 与 geoip/geosite 数据）。
+- 节点协议：vmess / vless / trojan / shadowsocks / socks / http；**不支持 ShadowsocksR（`ssr://`）**。
+- 订阅：Xray JSON / Clash-Mihomo YAML / base64 链接列表 / 明文链接列表，自动识别。
+- 分流：4 个预设 + 自定义规则（追加在预设之后）；规则顺序敏感；支持 geoip/geosite。
+- DNS：4 种策略；Fake-IP 可选（默认关闭）。
+- **「系统代理」模式不修改 macOS 的系统代理设置** —— 只启动本机 SOCKS5(10808)/HTTP(10809)。
+- 自动恢复：看门狗每 10 秒探测，连续 2 次失败自动重建隧道；重建失败退回直连。
+- 自更新：比对 `SHA256SUMS.txt`，**只校验 SHA256、没有签名校验**。
+- **拿不到的（上游没有，不要替它推算）**：每条连接的字节数与持续时间；`dns-out`（UDP 出站）与 `api`（本机回环）的字节计数恒为 0，那是统计盲区。
+- 「最近连接」的域名是**时序配对**的近似值（可能配错，界面标 `*`）；约一半连接本来就没有域名。
+- 许可证：仓库 `Cargo.toml` 写 `license = "MIT"`，但**截至 v0.8.26 仓库没有 LICENSE 文件**，请按「许可证未声明」对待；随包分发的 Xray-core 是 MPL-2.0。
+- 仅 macOS；界面目前只有中文。
