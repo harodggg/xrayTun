@@ -21,7 +21,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseRecovery, recoveryView } from "./ipc";
-import type { RecoveryState } from "./ipc";
+import type { RecoveryState } from "./types";
 
 function rec(over: Partial<RecoveryState> = {}): RecoveryState {
   return {

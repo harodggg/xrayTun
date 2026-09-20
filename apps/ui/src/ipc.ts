@@ -9,6 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isObject } from "./eventGuards";
 import type {
   GlobeData,
+  RecoveryState,
   NodeExport,
   RecentConnections,
   RouteExplanation,
@@ -118,35 +119,6 @@ export interface RuntimePayload {
   // 因此这个接口本身不需要新增字段。
 }
 
-/** 最近一次自动重建的结局。 */
-export type RecoveryOutcome = "recovered" | "direct_fallback";
-
-/**
- * 「看门狗正在自动重建隧道」的**结构化**状态（读取路径 `runtime.recovery`）。
- *
- * 必须来自后端，**不许前端按时间猜、也不许去解析 notice 文案** —— 用户最初的抱怨
- * 正是界面把「正在恢复」显示成「未连接」，还留一个可点的「连接」按钮；
- * 用户去点就等于和看门狗抢（`core.rs` 注释提过启动会被多处并发调用）。
- *
- * ⚠️ 这个接口是 `types.ts` 里 `CoreRuntime.recovery` 的**镜像**。backend-dev 一落地，
- * 这里就改成 `import type { RecoveryState } from "./types"` 并删掉本地定义
- * （避免两处漂移 —— 我在 task-10 就是这么收敛 `ConnectionRecord` 的）。
- */
-export interface RecoveryState {
-  /** 看门狗正在重建。后端真实状态，不猜时间。 */
-  recovering: boolean;
-  /** 自 App 启动以来第几次自动重建（含进行中的这次，从 1 起）。后端保证拿得到。 */
-  attempt: number;
-  /** 触发这次重建的连续探测失败次数（每 10s 一次探测）。 */
-  probe_failures: number;
-  /** 本次（未在恢复时 = 最近一次）自动重建的开始时刻，Unix 秒。 */
-  started_unix: number | null;
-  /** 最近一次自动重建的结局；null = 还没结束过任何一次。 */
-  last_outcome: RecoveryOutcome | null;
-  /** 最近一次自动重建的结束时刻，Unix 秒。 */
-  finished_unix: number | null;
-}
-
 /** 恢复状态怎么呈现（纯函数，便于单测「恢复中不得显示为未连接」）。 */
 export interface RecoveryView {
   /** 三态：正在恢复 / 上次恢复失败（已退回直连）/ 不在恢复流程里。 */
@@ -203,10 +175,8 @@ export function recoveryView(
 }
 
 /**
- * 从任意载荷里安全取出 `recovery`（畸形/缺席都当没有：不抛、不猜）。
- *
- * 走 `runtime` 这个**已知**对象，但用可选属性读法 —— 后端还没把字段加进
- * `CoreRuntime` 时这里也不会红，落地后自动生效。
+ * 从事件载荷里安全取出 `recovery`：事件是**运行时**数据，必须校验而不是信任类型。
+ * 畸形/缺席一律当「没有恢复信息」（不抛、不猜、不反推「未在恢复」）。
  */
 export function parseRecovery(runtime: unknown): RecoveryState | null {
   if (!isObject(runtime)) return null;

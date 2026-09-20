@@ -22,7 +22,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, errorText, parseRecovery, subscribe } from "./ipc";
-import type { RecoveryState } from "./ipc";
+import type { RecoveryState } from "./types";
 import { isCount, isObject, isText, rejectPayload } from "./eventGuards";
 import type { AppSnapshot, LogEntry, ProbeResult } from "./types";
 
@@ -83,11 +83,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // `onRuntime` 与 `refresh()` 两条路都会整体更新 `snapshot.runtime` ——
   // 所以从 snapshot 派生即可，事件与快照天然一致、刷新也不会丢。
   // 这里只额外维护两件 snapshot 表达不了的事：
-  //   1) 「刚恢复成功」的一次性提示（可感知的结束，8 秒后自己消失）；
-  //   2) 兼容期兜底：载荷里还没有 recovery 时，靠一次快照把 notice 读出来。
+  //   只有一件：「刚恢复成功」的一次性提示（可感知的结束，8 秒后自己消失）。
+  //   曾经还有一条「载荷里没有 recovery 就补拉快照读 notice」的兼容兜底 ——
+  //   后端已下发 `runtime.recovery`，那条**已删除**（它会让每次 running 跳变都多拉一次完整快照）。
   const [recoveredAttempt, setRecoveredAttempt] = useState<number | null>(null);
   const prevRecovering = useRef<boolean | null>(null);
-  const prevRunning = useRef<boolean | null>(null);
   const recoveredTimer = useRef<number | null>(null);
 
   const dismissRecovered = useCallback(() => {
@@ -156,7 +156,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
         // 恢复状态是**结构化**的（在 runtime.recovery 里）。畸形就当作没有 —— 不猜。
         const rec = parseRecovery(payload.runtime);
-        const runningNow = payload.runtime.running === true;
 
         // 结束必须「可感知」：从「正在恢复」变成「不在恢复」且结局是成功时，
         // 给一次性提示。没有它，用户只会看到界面悄悄变回「已连接」。
@@ -177,14 +176,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           recoveredTimer.current = null;
           setRecoveredAttempt(null);
         }
-
-        // ---- 兼容期兜底（backend 落地 `runtime.recovery` 后应删掉）----------
-        // 字段还没下发时，唯一能看到看门狗状态的地方是 `snapshot.notice`，而它只走
-        // snapshot 命令。所以在「从在跑到没在跑」这一次跳变时补拉一次快照。
-        // 只在跳变时拉，不是每次事件都拉（快照组装要读文件、问核心版本，很贵）。
-        const wasRunning = prevRunning.current;
-        prevRunning.current = runningNow;
-        if (!rec && wasRunning === true && !runningNow) void refresh();
 
         // 增量更新运行时与流量：这两个字段高频变化，全量刷新会很浪费。
         setSnapshot((prev) =>
