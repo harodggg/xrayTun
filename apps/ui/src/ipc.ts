@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { isObject } from "./eventGuards";
 import type {
   GlobeData,
   NodeExport,
@@ -112,6 +113,117 @@ export const EVENTS = {
 export interface RuntimePayload {
   runtime: CoreRuntime;
   traffic: TrafficSample;
+  // 恢复状态在 `runtime.recovery` 里（backend-dev 2026-09-20 定稿）：`runtime`
+  // 在**事件与快照两条路**上都整体传输，所以放里面刷新后不会丢；放顶层则会丢。
+  // 因此这个接口本身不需要新增字段。
+}
+
+/** 最近一次自动重建的结局。 */
+export type RecoveryOutcome = "recovered" | "direct_fallback";
+
+/**
+ * 「看门狗正在自动重建隧道」的**结构化**状态（读取路径 `runtime.recovery`）。
+ *
+ * 必须来自后端，**不许前端按时间猜、也不许去解析 notice 文案** —— 用户最初的抱怨
+ * 正是界面把「正在恢复」显示成「未连接」，还留一个可点的「连接」按钮；
+ * 用户去点就等于和看门狗抢（`core.rs` 注释提过启动会被多处并发调用）。
+ *
+ * ⚠️ 这个接口是 `types.ts` 里 `CoreRuntime.recovery` 的**镜像**。backend-dev 一落地，
+ * 这里就改成 `import type { RecoveryState } from "./types"` 并删掉本地定义
+ * （避免两处漂移 —— 我在 task-10 就是这么收敛 `ConnectionRecord` 的）。
+ */
+export interface RecoveryState {
+  /** 看门狗正在重建。后端真实状态，不猜时间。 */
+  recovering: boolean;
+  /** 自 App 启动以来第几次自动重建（含进行中的这次，从 1 起）。后端保证拿得到。 */
+  attempt: number;
+  /** 触发这次重建的连续探测失败次数（每 10s 一次探测）。 */
+  probe_failures: number;
+  /** 本次（未在恢复时 = 最近一次）自动重建的开始时刻，Unix 秒。 */
+  started_unix: number | null;
+  /** 最近一次自动重建的结局；null = 还没结束过任何一次。 */
+  last_outcome: RecoveryOutcome | null;
+  /** 最近一次自动重建的结束时刻，Unix 秒。 */
+  finished_unix: number | null;
+}
+
+/** 恢复状态怎么呈现（纯函数，便于单测「恢复中不得显示为未连接」）。 */
+export interface RecoveryView {
+  /** 三态：正在恢复 / 上次恢复失败（已退回直连）/ 不在恢复流程里。 */
+  phase: "recovering" | "failed" | "idle";
+  /** 状态文案；`idle` 时为 **null**（不编「未在恢复」）。 */
+  text: string | null;
+  /** 按钮语义：connect=可点的「连接」；disconnect=可点的「断开」；recovering=禁用。 */
+  button: "connect" | "disconnect" | "recovering";
+  /** 恢复刚刚成功（用于「可感知的结束」提示）。 */
+  justRecovered: boolean;
+}
+
+/**
+ * 把（后端给的）恢复状态翻译成界面语义。
+ *
+ * 五条不变量（测试锁着）：
+ * 1. `recovering` 时**按钮绝不是 `connect`** —— 不允许出现「看起来未连接 + 可点的连接按钮」；
+ * 2. 文案永远带「恢复」二字，不会退化成「未连接」；
+ * 3. **成功之后不留残影**：`last_outcome === "recovered"` 且不在恢复时 phase 回到 `idle`
+ *    （只给一次性 `justRecovered`），不会一直显示「正在恢复」；
+ * 4. **失败≠断网**：`direct_fallback` 要说清「已退回直连、流量不再走代理」，
+ *    并且按钮保持可点（= 手动重连），不留一个无事可做的禁用按钮；
+ * 5. 没有任何倒计时：后端没有「计划中的下次重试」（失败即退回直连并退出），
+ *    所以**不渲染**倒计时 —— 编一个恒为空的时间字段本身就是编语义。
+ */
+export function recoveryView(
+  recovery: RecoveryState | null | undefined,
+  running: boolean,
+): RecoveryView {
+  const rec = recovery ?? null;
+  if (rec?.recovering) {
+    return {
+      phase: "recovering",
+      text: `正在自动恢复（第 ${rec.attempt} 次）`,
+      button: "recovering",
+      justRecovered: false,
+    };
+  }
+  if (rec?.last_outcome === "direct_fallback") {
+    return {
+      phase: "failed",
+      text: `自动恢复失败（第 ${rec.attempt} 次），已退回直连 —— 流量不再走代理`,
+      button: running ? "disconnect" : "connect",
+      justRecovered: false,
+    };
+  }
+  return {
+    phase: "idle",
+    text: null,
+    button: running ? "disconnect" : "connect",
+    // 「可感知的结束」：后端明确说上次自动重建成功了，且现在确实在跑
+    justRecovered: running && rec?.last_outcome === "recovered",
+  };
+}
+
+/**
+ * 从任意载荷里安全取出 `recovery`（畸形/缺席都当没有：不抛、不猜）。
+ *
+ * 走 `runtime` 这个**已知**对象，但用可选属性读法 —— 后端还没把字段加进
+ * `CoreRuntime` 时这里也不会红，落地后自动生效。
+ */
+export function parseRecovery(runtime: unknown): RecoveryState | null {
+  if (!isObject(runtime)) return null;
+  const v = runtime.recovery;
+  if (!isObject(v)) return null;
+  const num = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
+  const outcome = v.last_outcome === "recovered" || v.last_outcome === "direct_fallback"
+    ? v.last_outcome
+    : null;
+  return {
+    recovering: v.recovering === true,
+    attempt: num(v.attempt) ?? 0,
+    probe_failures: num(v.probe_failures) ?? 0,
+    started_unix: num(v.started_unix),
+    last_outcome: outcome,
+    finished_unix: num(v.finished_unix),
+  };
 }
 
 export interface LogPayload {
