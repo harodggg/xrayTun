@@ -1,10 +1,42 @@
-# Cloudflare Pages 重定向（语法：from  to  status）
+# Cloudflare Pages `_redirects` —— 本文件目前**故意不包含任何规则**。
 #
-# 只做一件事：把 www 子域 301 到 apex（canonical 是 https://xraytun.top）。
+# ============================================================================
+# 为什么这里不写 www → apex（重要）
+# ============================================================================
 #
-# ⚠️ 需要**重新部署后**才生效：部署前 `curl -sI https://www.xraytun.top/` 看到 200
-#    不是失败，只是这份文件还没上线。
+# 已查证 Cloudflare Pages 官方文档（Redirects → 「Advanced redirects」支持表）：
+# **Domain-level redirects 明确标注为「不支持」**
+# （文档里给的例子就是 `workers.example.com/* ... 301` 这种整域跳转）。
 #
-# 方向是**单向**的：apex 为 canonical，所以这里绝不写 apex → www 的反向跳
-# （那会让 canonical 与跳转互相矛盾）。
-https://www.xraytun.top/* https://xraytun.top/:splat 301
+# 所以下面这条**永远不会触发**，已经被删掉：
+#
+#     https://www.xraytun.top/* https://xraytun.top/:splat 301
+#
+# 为什么删而不是留着：它写得没错、注释也很清楚，但永远不生效 ——
+# 后来人看到它会得出「www 已经处理好了」的结论，而线上仍然是 200。
+# 这属于「看起来能用、实际永远不生效」，比空文件更危险。
+#
+# **正解**：在 Cloudflare **zone 层**配 Redirect Rule（Rules → Redirect Rules）
+# 或 Bulk Redirect（www → apex 301）。该配置由 **lead** 负责执行
+# —— 本仓库内没有任何人能拿到 CF 凭据。
+#
+# 现状（2026-09-20 实测）：`https://www.xraytun.top/` 返回 **HTTP 200**（不是 301），
+# 内容是**与 apex 同一份 HTML**，其 `<link rel="canonical">` 指向 `https://xraytun.top/`。
+# 即：重复内容这一层已由 canonical 兜住，**缺的只有 301**。
+# **不要在本文件里写「www 已 301」** —— 那是与实测不符的断言。
+#
+# ============================================================================
+# 这个文件为什么保留
+# ============================================================================
+#
+# CF Pages 的 `_redirects` **支持路径级跳转**：
+#   · `/home / 301`
+#   · `/blog/* /posts/:splat`
+#   · 代理：`/blog/* /news/:splat 200`
+# 只是**不支持整域跳转**。将来需要路径级跳转（例如旧路径迁移）时，规则写在这里即可，
+# 所以位置留着。
+#
+# 另外注意：本文件**不会被当作静态资源提供**（官方文档原文：
+# "This file will not itself be served as a static asset"）。
+# 因此 `curl https://xraytun.top/_redirects` 返回的是站点 HTML ——
+# 那是**预期行为**，不能用来证明「文件已部署」（同理适用于 `_headers`）。
