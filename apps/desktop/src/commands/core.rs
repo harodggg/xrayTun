@@ -154,6 +154,15 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
         while let Some(event) = rx.recv().await {
             let level = classify_log(&event.line);
             if let Some(state) = app_handle.try_state::<AppState>() {
+                // 顺手统计各出口的连接数。放在这里而不是另起一个日志 tail：
+                // 这是核心输出的**单点**，重复读取会带来两份不一致的时间线。
+                //
+                // 为什么需要连接数：`dns-out`（UDP）与 `api`（本机回环）的
+                // 字节计数器恒为 0，那是测量盲区 —— 只显示 `0 B` 会让人以为
+                // 这两个出口没在用（本机实测各有 4769 / 5374 条连接）。
+                state.with(|i| {
+                    i.connections.observe(&event.line);
+                });
                 state.log("core", level, event.line.clone());
             }
             let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: event.line, level: level.into() });
@@ -171,6 +180,9 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
             if stale.0 && stale.1 == forward_pid {
                 state.with(|i| {
                     i.runtime.running = false;
+                    // 核心退出了 → 连接计数也失去意义（下一个核心从 0 重新计）。
+                    // 清掉而不是留着旧值，否则界面会显示上一轮核心的连接数。
+                    i.connections.reset();
                     i.push_log("app", "error", "核心进程已退出，隧道不再有效");
                 });
                 events::runtime_changed(&app_handle, &state);

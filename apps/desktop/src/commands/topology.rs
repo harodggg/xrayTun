@@ -53,6 +53,23 @@ pub struct TopoOutbound {
     /// 固定为 0，**不是**真实读数。
     pub uplink_bytes: u64,
     pub downlink_bytes: u64,
+    /// 从核心访问日志累计到的那条出口的**连接数**。
+    ///
+    /// # 什么时候需要看它
+    ///
+    /// 有两类出口的**字节计数器恒为 0**，那是测量盲区而非事实：
+    ///
+    /// * `dns-out`（协议 `dns`）—— UDP 出站流量不计入 `StatsService`；
+    /// * `api`（本机回环）—— 回环流量不计入统计。
+    ///
+    /// 本机实测这两者分别有 4769 / 5374 条连接，而字节一直是 0。界面如果
+    /// 只显示 `0 B`，会让人以为「这两个出口没在用」。连接数是它们唯一可得
+    /// 的活跃度指标。
+    ///
+    /// `None` 表示**没有观察到**（核心没跑、日志里还没有连接行），
+    /// 与 `Some(0)`（观察到 0 条）不同 —— 界面应显示「—」而不是 `0`。
+    #[serde(default)]
+    pub connections: Option<u64>,
 }
 
 /// 规则链上的一条规则。
@@ -260,6 +277,7 @@ fn assemble_topology(
     rules: &[Rule],
     traffic: &TrafficRead,
     geo_available: bool,
+    connections: &HashMap<String, u64>,
 ) -> Topology {
     let inbound = inbounds
         .into_iter()
@@ -285,6 +303,8 @@ fn assemble_topology(
                 protocol,
                 uplink_bytes: up,
                 downlink_bytes: down,
+                // 没观察到就是 `None`（界面显示「—」），不是 `Some(0)`。
+            connections: connections.get(&tag).copied(),
             }
         })
         .collect();
@@ -335,12 +355,19 @@ pub async fn routing_topology(
         read_traffic(stats, &mut counters)
     };
 
+    // 连接数来自访问日志解析（`dns-out` / `api` 的字节计数器恒为 0，
+    // 只能靠它体现活跃度）。取一份快照，避免在锁内做别的事。
+    let connections = state
+        .with(|i| i.connections.snapshot())
+        .unwrap_or_default();
+
     Ok(assemble_topology(
         inbounds,
         outbounds,
         &rules,
         &traffic,
         crate::supervisor::geo_dir(state.store.root()).is_some(),
+        &connections,
     ))
 }
 
@@ -487,7 +514,7 @@ mod tests {
         let cfg = cfg_with(serde_json::json!([]));
         let (inbounds, outbounds) = endpoints_from_config(&cfg);
         let rules = rules_from_config(&cfg).unwrap();
-        assemble_topology(inbounds, outbounds, &rules, read, true)
+        assemble_topology(inbounds, outbounds, &rules, read, true, &Default::default())
     }
 
     /// 某个出口的 (上行, 下行)。
@@ -502,6 +529,60 @@ mod tests {
 
     fn exit_stat(name: &str, value: i64) -> StatEntry {
         StatEntry { name: name.to_string(), value }
+    }
+
+    /// 带连接数的组装（默认空 = 没有观察到任何连接行）。
+    ///
+    /// 配置里**必须带上 `dns-out` / `api`** —— 这两条出口正是本测试要覆盖的
+    /// 对象（它们的字节计数器恒为 0，只能靠连接数体现活跃度）。
+    fn topo_with_connections(read: &TrafficRead, conns: &HashMap<String, u64>) -> Topology {
+        let cfg = serde_json::json!({
+            "inbounds": [
+                { "tag": "tun", "protocol": "tun" },
+                { "tag": "api", "protocol": "dokodemo-door", "port": 10085 }
+            ],
+            "outbounds": [
+                { "tag": "node-abc", "protocol": "vless" },
+                { "tag": "direct", "protocol": "freedom" },
+                { "tag": "block", "protocol": "blackhole" },
+                { "tag": "dns-out", "protocol": "dns" },
+                { "tag": "api", "protocol": "freedom" }
+            ],
+            "routing": { "rules": [] }
+        });
+        let (inbounds, outbounds) = endpoints_from_config(&cfg);
+        let rules = rules_from_config(&cfg).unwrap();
+        assemble_topology(inbounds, outbounds, &rules, read, true, conns)
+    }
+
+    /// **本次修复的核心语义**：`dns-out` / `api` 的字节计数器恒为 0
+    /// （`StatsService` 不统计 UDP 出站与本机回环），界面只能靠连接数
+    /// 体现它们的活跃度。所以连接数必须能传到接口层。
+    #[test]
+    fn connection_counts_reach_the_outbound_payload() {
+        let read = TrafficRead::default();
+        let mut conns: HashMap<String, u64> = HashMap::new();
+        conns.insert("dns-out".into(), 4769);
+        conns.insert("api".into(), 5374);
+        let topo = topo_with_connections(&read, &conns);
+        let get = |tag: &str| {
+            topo.outbound
+                .iter()
+                .find(|o| o.tag == tag)
+                .and_then(|o| o.connections)
+        };
+        assert_eq!(get("dns-out"), Some(4769));
+        assert_eq!(get("api"), Some(5374));
+    }
+
+    /// 没观察到（核心没跑 / 日志里还没有连接行）必须是 `None`，**不能是
+    /// `Some(0)`** —— 界面据此显示「—」而不是 `0`。显示成 0 会让人以为
+    /// 「一个连接都没有」，而事实是「不知道」。
+    #[test]
+    fn unobserved_connection_count_is_none_not_zero() {
+        let topo = topo_with_connections(&TrafficRead::default(), &HashMap::new());
+        let dns = topo.outbound.iter().find(|o| o.tag == "dns-out").unwrap();
+        assert_eq!(dns.connections, None);
     }
 
     /// **本次要修的核心语义**：查统计失败时接口必须能表达「不可用」，

@@ -310,11 +310,13 @@ const MOCK_TOPOLOGY = {
     { index: 7, tag: "internal-fallback", outbound: "node-n1d232c6b8c7a5004", conditions: ["网络 tcp,udp"] },
   ],
   outbound: [
-    { tag: "node-n1d232c6b8c7a5004", protocol: "vless", kind: "node", uplink_bytes: 1_246_000_000, downlink_bytes: 8_600_000_000 },
-    { tag: "direct", protocol: "freedom", kind: "direct", uplink_bytes: 900_000, downlink_bytes: 120_000_000 },
-    { tag: "block", protocol: "blackhole", kind: "block", uplink_bytes: 12_000, downlink_bytes: 0 },
-    { tag: "dns-out", protocol: "dns", kind: "dns", uplink_bytes: 300_000, downlink_bytes: 300_000 },
-    { tag: "api", protocol: "freedom", kind: "internal", uplink_bytes: 4_000, downlink_bytes: 8_000 },
+    { tag: "node-n1d232c6b8c7a5004", protocol: "vless", kind: "node", uplink_bytes: 1_246_000_000, downlink_bytes: 8_600_000_000, connections: 6227 },
+    { tag: "direct", protocol: "freedom", kind: "direct", uplink_bytes: 900_000, downlink_bytes: 120_000_000, connections: 1222 },
+    { tag: "block", protocol: "blackhole", kind: "block", uplink_bytes: 12_000, downlink_bytes: 0, connections: 201 },
+    // 内部通道：字节计数器恒为 0（StatsService 不统计 UDP 出站），只能看连接数
+    { tag: "dns-out", protocol: "dns", kind: "dns", uplink_bytes: 0, downlink_bytes: 0, connections: 4769 },
+    // 内部通道：字节计数器恒为 0（StatsService 不统计本机回环）
+    { tag: "api", protocol: "freedom", kind: "internal", uplink_bytes: 0, downlink_bytes: 0, connections: 5374 },
   ],
   traffic_error: null as string | null,
   traffic_ok: true,

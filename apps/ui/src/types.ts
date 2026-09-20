@@ -481,6 +481,21 @@ export interface TopoOutbound {
    */
   uplink_bytes: number;
   downlink_bytes: number;
+  /**
+   * 该出口的**连接数**（从核心访问日志累计）。
+   *
+   * # 为什么需要它
+   *
+   * `dns-out`（协议 `dns`，UDP）与 `api`（本机回环）的**字节计数器恒为 0** ——
+   * 那是 `StatsService` 的测量盲区，不是事实：本机实测两者各有 4769 / 5374 条
+   * 连接。界面只显示 `0 B` 会让人以为「这两个出口没在用」。
+   *
+   * 连接数是这两类出口**唯一可得**的活跃度指标。
+   *
+   * `null` 表示**没观察到**（核心没跑、日志里还没连接行），与 `0` 不同 ——
+   * 应当显示「—」而不是 `0`。
+   */
+  connections: number | null;
 }
 
 export interface TopoRule {

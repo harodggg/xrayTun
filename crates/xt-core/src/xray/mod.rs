@@ -3,6 +3,7 @@
 pub mod config;
 pub mod probe;
 pub mod process;
+pub mod access_log;
 pub mod stats;
 
 pub use config::{

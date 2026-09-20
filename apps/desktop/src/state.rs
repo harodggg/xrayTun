@@ -82,6 +82,16 @@ pub struct Inner {
     pub last_notice: Option<String>,
     /// 日志落盘目录。为什么需要落盘见 [`Inner::push_log`]。
     pub logs_dir: PathBuf,
+    /// 按出口 tag 的连接数（从核心访问日志的 `accepted ... [in -> out]` 行累计）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// `dns-out`（UDP）与 `api`（本机回环）的**字节**计数器恒为 0 —— 那是
+    /// 测量盲区，不是事实：本机实测它们各有 4769 / 5374 条连接。界面若只显示
+    /// `0 B`，用户会以为「这两个出口没在用」。
+    ///
+    /// 连接数是这两类出口**唯一可得**的活跃度指标。
+    pub connections: xt_core::xray::access_log::ConnectionCounters,
 }
 
 /// DNS 探测状态。
@@ -118,8 +128,24 @@ pub struct UpdateStatus {
     pub geo_installed_at: Option<u64>,
     pub latest_core: Option<xt_core::update::Available>,
     pub latest_geo: Option<xt_core::update::Available>,
-    /// 客户端**自己**的最新版。仓库是私有的，所以这一步需要 token。
+    /// 客户端**自己**的最新版。
+    ///
+    /// **有这个字段不等于有新版可装** —— 它是「GitHub 上的最新版」，
+    /// 查到了就一定有值。界面要判断是否该显示「更新」按钮，请看
+    /// [`UpdateStatus::app_update_available`]。
     pub latest_app: Option<xt_core::update::Available>,
+
+    /// 是否**确实**有比当前版本更新的客户端版本。
+    ///
+    /// 由后端用 `xt_core::update::compare_versions` 算出（逐段数值比较，
+    /// `0.9.0 > 0.10.0` 这类字符串比较会判错的情况由它负责）。
+    ///
+    /// 为什么不让前端自己比：版本比较是**一处实现、一处测试**的逻辑，
+    /// 而且 `latest_app` 一定有值是常态（你装的就是最新版时也是），
+    /// 前端只看它的存在性就会永远显示「更新」按钮 —— 实测踩过：
+    /// 客户端与 GitHub 都是 0.8.23 时，按钮仍然出现、点了白跑一趟。
+    #[serde(default)]
+    pub app_update_available: bool,
     pub checked_at: Option<u64>,
     /// 检查更新时的错误（核心 / geo / 客户端共用一条）。
     pub check_error: Option<String>,
@@ -153,6 +179,7 @@ impl Inner {
             dns: DnsStatus::default(),
             last_notice: None,
             logs_dir: store.logs_dir(),
+            connections: xt_core::xray::access_log::ConnectionCounters::new(),
         }
     }
 

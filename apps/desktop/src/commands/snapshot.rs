@@ -570,6 +570,13 @@ pub(crate) fn update_status(app: &AppHandle, state: &AppState) -> crate::state::
     state
         .with(|i| {
             let mut u = i.update.clone();
+            // 是否**确实**有新版：`latest_app` 有值只说明「查到了 GitHub 上的最新版」，
+            // 你装的就是它时也有值。必须比较版本，否则界面永远显示「更新」按钮。
+            let current = app.package_info().version.to_string();
+            u.app_update_available = u
+                .latest_app
+                .as_ref()
+                .is_some_and(|a| xt_core::update::compare_versions(&a.version, &current).is_gt());
             u.core_version = core_version;
             u.core_managed = core_managed;
             u.core_managed_version = meta.core_version;

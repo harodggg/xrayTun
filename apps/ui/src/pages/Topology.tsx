@@ -126,7 +126,14 @@ function Highway({ topo }: { topo: Topology }) {
    * 但任一个说「不可用」就按不可用处理，不赌后端不会只填其中一个。
    */
   const trafficOk = topo.traffic_ok !== false && !topo.traffic_error;
-  const outTotal = topo.outbound.reduce((a, o) => a + o.uplink_bytes + o.downlink_bytes, 0);
+  // **内部通道与用户流向分开列**：`dns-out`（UDP）与 `api`（本机回环）的字节
+  // 计数器恒为 0，那是 `StatsService` 的测量盲区而非事实（本机实测各有
+  // 4769 / 5374 条连接）。把它们混在流向图里显示 `0 B`，会让人以为
+  // 「这两个出口没在用」。所以它们单独一组，并改用**连接数**表示活跃度。
+  const internal = topo.outbound.filter((o) => INTERNAL_KINDS.has(o.kind));
+  const userOutbound = topo.outbound.filter((o) => !INTERNAL_KINDS.has(o.kind));
+  // 合计只算用户流向，不把内部通道的占位 0 混进来
+  const outTotal = userOutbound.reduce((a, o) => a + o.uplink_bytes + o.downlink_bytes, 0);
   const inTotal = lanes.reduce((a, i) => a + i.uplink_bytes + i.downlink_bytes, 0);
 
   return (
@@ -185,7 +192,7 @@ function Highway({ topo }: { topo: Topology }) {
           不再有单独的车道列 —— 用户要求「车道应该消失，线本身应该就是车道」。 */}
       <div className="highway__side highway__side--right">
         <div className="highway__side-title">出口（颜色 = 去向）</div>
-        {topo.outbound.map((o, idx) => (
+        {userOutbound.map((o, idx) => (
           <div
             className={`highway__lane-label highway__lane-label--${o.kind}`}
             key={o.tag}
@@ -206,12 +213,33 @@ function Highway({ topo }: { topo: Topology }) {
             {trafficOk ? `出入 ${formatBytes(outTotal)}` : "流量不可用"}
           </span>
         </div>
+
+        {internal.length > 0 && (
+          <div className="highway__internal">
+            <div className="highway__side-title">内部通道（不计入合计）</div>
+            {internal.map((o) => (
+              <div className="highway__lane-label highway__lane-label--internal" key={o.tag}>
+                <span className="highway__lane-tag">{shortTag(o.tag)}</span>
+                <span className="highway__lane-meta">{o.kind}</span>
+                <span className="highway__lane-bytes">
+                  {o.connections != null ? `${o.connections} 条连接` : "—"}
+                </span>
+              </div>
+            ))}
+            <div className="highway__note">
+              这几个出口的<strong>字节数读不到</strong>：核心只在{" "}
+              <span className="mono">StatsService</span> 里报流量，而它不统计 UDP 出站
+              与本机回环。所以这里显示<strong>连接数</strong> —— 那是它们唯一可得的
+              活跃度指标。（{internal.map((o) => o.tag).join("、")}）
+            </div>
+          </div>
+        )}
       </div>
 
       <Flow
         container={container}
         inbound={lanes}
-        outbound={topo.outbound}
+        outbound={userOutbound}
         inletRefs={inletRefs}
         outletRefs={outletRefs}
         trafficOk={trafficOk}
@@ -225,6 +253,18 @@ function shortTag(t: string): string {
   if (t.startsWith("node-")) return `节点 ${t.slice(5, 13)}…`;
   return t;
 }
+
+/**
+ * 哪些出口属于**内部通道**（不是流向用户的去向）。
+ *
+ * * `dns` —— 核心的 `dns-out`，处理被劫持的 DNS 查询（UDP）；
+ * * `internal` —— `api`，本机回环，用于读统计与自更新。
+ *
+ * 这两类的字节计数器**恒为 0**（`StatsService` 不统计 UDP 出站与本机回环），
+ * 所以不能与 `node` / `direct` / `block` 并列显示 `0 B` —— 那是把测量盲区
+ * 画成了「没在用」。它们单独分组，并改用从访问日志解析出的**连接数**。
+ */
+const INTERNAL_KINDS = new Set(["dns", "internal"]);
 
 /**
  * 出口类别 → 颜色。

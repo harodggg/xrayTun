@@ -460,7 +460,9 @@ function inbound(tag: string, up: number, down: number, port: number | null = 44
 }
 
 function outbound(tag: string, kind: string, up: number, down: number): TopoOutbound {
-  return { tag, protocol: "freedom", kind, uplink_bytes: up, downlink_bytes: down };
+  // `connections` 是内部通道（dns / api）的活跃度指标 —— 它们的字节计数器
+  // 恒为 0。测试里给 0，只要字段存在即可。
+  return { tag, protocol: "freedom", kind, uplink_bytes: up, downlink_bytes: down, connections: 0 };
 }
 
 /** 4 个出口：node / direct / block / dns（dns 是内部灰，也走一条分支）。 */
@@ -810,7 +812,13 @@ describe("刷新重排时的位置连续性", () => {
     const before = truckMap();
     const l0 = meanPathLength();
 
-    await refresh(topoWith({ outbound: outlets().slice(0, 3) }));
+    // 删掉 `block-ads`（一个**用户可见**的出口）。
+    //
+    // 早先这里删的是 `dns` —— 那时 dns 也画在流向图里。现在 dns / api 属
+    // **内部通道**、不再进流向图（它们的字节计数器恒为 0，混进来会被误读成
+    // 「没在用」），所以删 dns 不会改变流向几何、这条断言会失去意义。
+    // 删一个真正参与扇出的出口，才测得到「脱挂元素被当成锚点」这个故障。
+    await refresh(topoWith({ outbound: outlets().filter((o) => o.tag !== "block-ads") }));
     fireResize();
     runFrame(1000 / 60);
 
@@ -969,3 +977,57 @@ describe("字节数字的连续性", () => {
  *    修复后若用别的方式实现稳定身份但不在 DOM 暴露 key，测试可能仍报跳变，
  *    这属于**测试契约未满足**，不是环境问题（见文件头「货车身份」）。
  */
+
+// ---------------------------------------------------------------------------
+// 6. 内部通道与用户流向分离
+// ---------------------------------------------------------------------------
+
+describe("内部通道（dns-out / api）与用户流向分离", () => {
+  /**
+   * **防「把测量盲区画成没在用」。**
+   *
+   * `dns-out`（UDP）与 `api`（本机回环）的字节计数器恒为 0 —— `StatsService`
+   * 不统计它们。本机实测这两者各有 4769 / 5374 条连接，而字节一直是 0。
+   *
+   * 若把它们与 `node` / `direct` 并列在流向图里显示 `0 B`，用户会以为
+   * 「这两个出口没在用」，或者反过来怀疑「是不是坏了」。所以：
+   * 它们**不进流向图**，单独分组，并用连接数表示活跃度。
+   */
+  it("dns 出口不得出现在流向图里（它是内部通道）", async () => {
+    await mount(baseTopo());
+    // 流向图里应只有 3 条扇出路径（node / direct / block），不含 dns
+    const guides = document.querySelectorAll("path.flow__guide");
+    expect(guides.length).toBe(3);
+  });
+
+  it("内部通道单独分组，并改用连接数表示活跃度", async () => {
+    // 给 dns 一个**非 0** 的连接数：如果界面还在显示字节，就会显示
+    // `↓0 B ↑0 B`（因为它的字节恒为 0），而不是「4769 条连接」。
+    const topo = baseTopo();
+    topo.outbound = topo.outbound.map((o) =>
+      o.tag === "dns" ? { ...o, connections: 4769 } : o,
+    );
+    await mount(topo);
+
+    const box = document.querySelector(".highway__internal");
+    expect(box, "内部通道应当单独分组渲染").not.toBeNull();
+    const text = box!.textContent ?? "";
+    expect(text).toContain("4769");
+    expect(text).toContain("连接");
+    // 且不得在内部通道里画成「字节 0」——那正是要消除的误导
+    expect(text).not.toContain("0 B");
+    expect(text).not.toContain("↓0");
+  });
+
+  it("连接数没观察到时显示「—」而不是 0", async () => {
+    // `connections: null` 表示**没观察到**（核心没跑 / 日志里还没连接行），
+    // 与「观察到 0 条」不同。显示成 0 会让人以为「一个连接都没有」。
+    const topo = baseTopo();
+    topo.outbound = topo.outbound.map((o) =>
+      o.tag === "dns" ? { ...o, connections: null } : o,
+    );
+    await mount(topo);
+    const text = document.querySelector(".highway__internal")?.textContent ?? "";
+    expect(text).toContain("—");
+  });
+});
