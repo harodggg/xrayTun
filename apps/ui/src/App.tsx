@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "./ipc";
+import { api, recoveryView } from "./ipc";
 import { StoreProvider, useStore } from "./store";
 import { MODE_LABEL, formatBytes, formatRate, type ProxyMode } from "./types";
 import Dashboard from "./pages/Dashboard";
@@ -47,7 +47,7 @@ function initialViewFromUrl(): View | undefined {
 
 function Shell({ initialView }: { initialView?: View }) {
   const [view, setView] = useState<View>(initialView ?? "dashboard");
-  const { snapshot, error, clearError } = useStore();
+  const { snapshot, error, clearError, recoveredAttempt, dismissRecovered } = useStore();
 
   const nodeCount = snapshot?.nodes.length ?? 0;
   const subCount = snapshot?.subscriptions.length ?? 0;
@@ -114,6 +114,20 @@ function Shell({ initialView }: { initialView?: View }) {
               </button>
             </div>
           )}
+          {/* 「可感知的结束」：自动恢复成功后不能悄悄变回「已连接」——
+              给一次明确的完成提示，8 秒后自己消失（也可手动关掉）。
+              只在**恢复真的发生过**时出现（后端 `last_outcome === "recovered"`）。 */}
+          {recoveredAttempt !== null && (
+            <div className="banner banner--info">
+              <span>✓</span>
+              <div style={{ flex: 1 }}>
+                已自动恢复连接（第 {recoveredAttempt} 次自动重建成功）—— 隧道已重建，无需手动操作。
+              </div>
+              <button className="btn btn--ghost" onClick={dismissRecovered}>
+                知道了
+              </button>
+            </div>
+          )}
           {view === "dashboard" && <Dashboard onNavigate={(v) => setView(v as View)} />}
           {view === "nodes" && <Nodes />}
           {view === "subscriptions" && <Subscriptions />}
@@ -129,12 +143,18 @@ function Shell({ initialView }: { initialView?: View }) {
 }
 
 function TopBar({ view }: { view: View }) {
-  const { snapshot, busy, run } = useStore();
+  const { snapshot, busy, run, recovery } = useStore();
   const [pending, setPending] = useState<ProxyMode | null>(null);
 
   const title = NAV.find((n) => n.id === view)?.label ?? "";
   const mode = snapshot?.settings.mode ?? "system_proxy";
   const running = snapshot?.runtime.running ?? false;
+  /**
+   * 自动恢复（task-22）：看门狗在自愈时，顶栏**不能**看起来像「没连接、快来点」——
+   * 点了就是和看门狗抢（`core.rs` 注释提过启动会被多处并发调用）。
+   * 三态由 `recoveryView` 这个纯函数决定（有单测锁着「恢复中不得显示为未连接」）。
+   */
+  const rv = recoveryView(recovery, running);
   const traffic = snapshot?.traffic;
   // 窗口用的是 `hiddenTitle`（见 tauri.conf.json），macOS 的标题栏文字是
   // 隐藏的 —— 这条顶栏才是用户真正看到的「标题栏」。所以网速要显示在这里，
@@ -199,15 +219,35 @@ function TopBar({ view }: { view: View }) {
         ))}
       </div>
 
-      <span className={`dot${running ? " dot--on" : ""}`} />
+      {/* 自动恢复中的状态：必须是**可读的一句话**，而不是一个沉默的灰点 */}
+      {rv.phase === "recovering" && (
+        <span className="badge badge--ok topbar__recovery" title="看门狗正在自动重建隧道，不需要手动点「连接」">
+          {rv.text}
+        </span>
+      )}
+      {rv.phase === "failed" && (
+        <span className="badge badge--unknown topbar__recovery" title={rv.text ?? undefined}>
+          自动恢复失败
+        </span>
+      )}
+
+      <span className={`dot${rv.phase === "recovering" || rv.phase === "failed" ? " dot--warn" : running ? " dot--on" : ""}`} />
       <button
-        className={`btn ${running ? "" : "btn--primary"}`}
-        disabled={runBusy || mode === "direct"}
+        className={`btn ${rv.button === "connect" ? "btn--primary" : ""}`}
+        disabled={runBusy || mode === "direct" || rv.button === "recovering"}
         onClick={() => void toggleRun()}
-        title={mode === "direct" ? "直连模式下无需启动核心" : ""}
+        title={
+          mode === "direct"
+            ? "直连模式下无需启动核心"
+            : rv.button === "recovering"
+              ? "正在自动恢复 —— 现在点「连接」会打断看门狗的重建，所以先禁用；恢复会自动完成"
+              : rv.phase === "failed"
+                ? "自动恢复失败，已退回直连；点这里可手动重连"
+                : ""
+        }
       >
         {runBusy ? <span className="spin" /> : null}
-        {running ? "断开" : "连接"}
+        {rv.button === "recovering" ? "正在恢复…" : running ? "断开" : "连接"}
       </button>
     </header>
   );
