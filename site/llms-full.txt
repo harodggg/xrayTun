@@ -132,6 +132,14 @@ v0.8.26（2026-09-20 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dm
 
 - 没有 Windows / Linux / 移动端版本；界面目前只有中文；没有规则可视化编辑、节点分组、浅色主题。
 
+## 相关项目：xray-wasm
+
+**xray-wasm** 是**同一个作者的另一个项目**（独立仓库，不在这里）： 把 Xray 的 **VLESS + XTLS-Vision + REALITY** 协议栈用**纯 Rust** 重写， 编译成 **wasm32-wasip2**，在 **wasmtime** 下运行真实的 TCP 代理。 客户端（socket → REALITY）与服务端（REALITY → socket）两个方向都已实现。
+
+**XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。 两者面向的场景不同：XrayTun 是 macOS 图形客户端，xray-wasm 面向容器与服务端。
+
+[xray-wasm 是什么、怎么用 →](wasm/)
+
 ## 下载
 
 下载 macOS 版 v0.8.26 · dmg · 44.9 MiB
@@ -557,6 +565,14 @@ Every statement below can be checked against the documents in the GitHub reposit
 - **"Active connection count"**: a connection disappearing from the list does not mean it closed; it may just have been evicted from the ring buffer.
 
 - No Windows, Linux or mobile builds; the UI is currently Chinese only; no visual rule editor, node grouping or light theme.
+
+## Related project: xray-wasm
+
+**xray-wasm** is **a separate project by the same author** (its own repository, not this one). It reimplements Xray's **VLESS + XTLS-Vision + REALITY** stack in **pure Rust**, compiles it to **wasm32-wasip2**, and runs a real TCP proxy under **wasmtime**. Both directions are implemented: client (socket → REALITY) and server (REALITY → socket).
+
+**XrayTun does not use it** — XrayTun bundles the official Go Xray-core. The two target different scenarios: XrayTun is a macOS GUI client, while xray-wasm targets containers and servers.
+
+[What xray-wasm is and how to run it →](wasm/)
 
 ## Download
 

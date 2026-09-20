@@ -198,6 +198,7 @@
           <a href="#download">Download</a>
           <a href="#install">Install</a>
           <a href="#faq">FAQ</a>
+            <a href="wasm/">xray-wasm</a>
         </nav>
         <nav class="lang-switch" aria-label="Language">
           <a href="../" hreflang="zh-Hans" lang="zh-Hans">中文</a>
@@ -441,7 +442,26 @@
         </ul>
       </section>
 
-      <!-- ======================================================== #download -->
+      <!-- ===================================================== #related -->
+        <section class="wrap prose" id="related">
+          <h2>Related project: xray-wasm</h2>
+          <p>
+            <strong>xray-wasm</strong> is <strong>a separate project by the same author</strong>
+            (its own repository, not this one). It reimplements Xray's
+            <strong>VLESS + XTLS-Vision + REALITY</strong> stack in <strong>pure Rust</strong>,
+            compiles it to <strong>wasm32-wasip2</strong>, and runs a real TCP proxy under
+            <strong>wasmtime</strong>. Both directions are implemented: client
+            (socket &rarr; REALITY) and server (REALITY &rarr; socket).
+          </p>
+          <p>
+            <strong>XrayTun does not use it</strong> &mdash; XrayTun bundles the official Go
+            Xray-core. The two target different scenarios: XrayTun is a macOS GUI client,
+            while xray-wasm targets containers and servers.
+          </p>
+          <p><a href="wasm/">What xray-wasm is and how to run it &rarr;</a></p>
+        </section>
+
+        <!-- ======================================================== #download -->
       <section class="wrap prose" id="download">
         <h2>Download</h2>
         <p class="cta">

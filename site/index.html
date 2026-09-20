@@ -198,6 +198,7 @@
           <a href="#download">下载</a>
           <a href="#install">安装</a>
           <a href="#faq">常见问题</a>
+            <a href="wasm/">xray-wasm</a>
         </nav>
         <nav class="lang-switch" aria-label="语言">
           <a href="./" aria-current="page" lang="zh-Hans">中文</a>
@@ -415,7 +416,23 @@
         </ul>
       </section>
 
-      <!-- ======================================================== #download -->
+      <!-- ===================================================== #related -->
+        <section class="wrap prose" id="related">
+          <h2>相关项目：xray-wasm</h2>
+          <p>
+            <strong>xray-wasm</strong> 是<strong>同一个作者的另一个项目</strong>（独立仓库，不在这里）：
+            把 Xray 的 <strong>VLESS + XTLS-Vision + REALITY</strong> 协议栈用<strong>纯 Rust</strong> 重写，
+            编译成 <strong>wasm32-wasip2</strong>，在 <strong>wasmtime</strong> 下运行真实的 TCP 代理。
+            客户端（socket → REALITY）与服务端（REALITY → socket）两个方向都已实现。
+          </p>
+          <p>
+            <strong>XrayTun 并不使用它</strong> —— XrayTun 随包附带的是官方 Go 版 Xray-core。
+            两者面向的场景不同：XrayTun 是 macOS 图形客户端，xray-wasm 面向容器与服务端。
+          </p>
+          <p><a href="wasm/">xray-wasm 是什么、怎么用 →</a></p>
+        </section>
+
+        <!-- ======================================================== #download -->
       <section class="wrap prose" id="download">
         <h2>下载</h2>
         <p class="cta">
