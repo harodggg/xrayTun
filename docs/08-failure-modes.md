@@ -164,6 +164,7 @@
 | CI 全绿、资产齐全，**但客户端永远收不到这个版本** | 那个 Release 是 **draft** —— **匿名用户看不到草稿**，于是 `check_app` 认为最新版还是上一个 | 上传后 `gh release edit --draft=false`，并断言 `isDraft == false` |
 
 | 发布成功但**端到端校验跑不完**：40MB 的包能下完，取 `SHA256SUMS.txt` 却超时 | GitHub 的**资产 CDN**（`release-assets.githubusercontent.com`）不通 —— 元数据 API 正常（`api.github.com` 200），重定向也正常发出，跟随重定向取**任意**资产都超时 | 先分清「发布问题」与「网络问题」：`gh release view` 看 draft/资产、`git tag` 看 tag；**不要**因为校验超时就去重发版本。CDN 恢复后重跑 `app_update_check` 即可 |
+| 仓库 `robots.txt` 3745 B，线上 `xraytun.top/robots.txt` **7004 B**（+3259 B），且多出 Baiduspider 等 UA 组 | **Cloudflare 托管策略会在我们的文件之前注入 managed robots 段** —— 平台会改写你部署的东西 | **必须验证线上产物**：逐 UA 对照「CF 段 / 我们那份 / 是否矛盾」（Baiduspider 是已裁决的已知例外）；只看仓库文件会漏 |
 
 ### E.1 一条贯穿这一整轮的元教训
 
@@ -184,6 +185,10 @@ cargo run -p xraytun-desktop --example app_update_check   # 走真实 release �
 
 **共同教训**：**先量环境，再读代码。** 这一条我犯过：花了几轮读 DNS 代码路径，
 而真正的原因是磁盘满了。
+
+**同理，派生陈述的漂移要靠机器检查堵死**：发布改了版本号而官网漏改时，页面上的
+版本号 / 字节数 / canonical 会悄悄变成错的（这类漂移只能由 `scripts/check.sh` 的断言挡住，
+不能靠自觉；本卡只量到修复后的最终态，历史态不在此断言）。
 
 ---
 
