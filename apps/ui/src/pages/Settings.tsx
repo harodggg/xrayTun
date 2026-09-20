@@ -136,6 +136,46 @@ export default function Settings() {
       </section>
 
       {/* ------------------------------------------------------- TUN */}
+      {/* 用户的头号需求是「开机后自动连上，不需要点连接」，而开机自启动正是
+          让这件事成立的开关 —— 所以它必须在上半屏。此前它在最底下的「其他」卡里，
+          720px 窗口实测 top≈2997px（完全在折叠线下）。实测放在这里 top≈402px，抬头可见。 */}
+      <section className="card set__sec" id="set-autostart">
+        <h2 className="card__title">开机自启动</h2>
+        <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            // 勾选状态来自**系统**（snapshot.login_item），不是 settings 字段。
+            // 用户可以在「系统设置 → 通用 → 登录项」里直接删掉这一项，
+            // 那种情况下 settings 说「开着」而现实是「不会自启」。
+            checked={snapshot.login_item.status === "enabled" ||
+              snapshot.login_item.status === "requires_approval"}
+            disabled={busy === "login-item"}
+            onChange={(e) =>
+              void run("login-item", () => api.setLaunchAtLogin(e.target.checked))
+            }
+          />
+          开机自启动
+          <span className="field__hint" style={{ marginLeft: 6 }}>
+            {snapshot.login_item.detail}
+          </span>
+        </label>
+        {snapshot.login_item.needs_approval && (
+          <div className="banner banner--warn" style={{ marginBottom: 10 }}>
+            <span>⚠︎</span>
+            <div style={{ flex: 1 }}>
+              系统已登记，但还需要你在「系统设置 → 通用 → 登录项与扩展」里允许它。
+            </div>
+            <button
+              className="btn btn--ghost"
+              onClick={() => void runVoid("open-login-items", () => api.openLoginItemSettings())}
+            >
+              打开设置
+            </button>
+          </div>
+        )}
+
+      </section>
+
       <section className="card set__sec" id="set-tun">
         <h2 className="card__title">TUN 模式</h2>
         <p className="card__desc">
@@ -629,39 +669,6 @@ export default function Settings() {
       {/* ------------------------------------------------------- 杂项 */}
       <section className="card set__sec" id="set-misc">
         <h2 className="card__title">其他</h2>
-        <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
-          <input
-            type="checkbox"
-            // 勾选状态来自**系统**（snapshot.login_item），不是 settings 字段。
-            // 用户可以在「系统设置 → 通用 → 登录项」里直接删掉这一项，
-            // 那种情况下 settings 说「开着」而现实是「不会自启」。
-            checked={snapshot.login_item.status === "enabled" ||
-              snapshot.login_item.status === "requires_approval"}
-            disabled={busy === "login-item"}
-            onChange={(e) =>
-              void run("login-item", () => api.setLaunchAtLogin(e.target.checked))
-            }
-          />
-          开机自启动
-          <span className="field__hint" style={{ marginLeft: 6 }}>
-            {snapshot.login_item.detail}
-          </span>
-        </label>
-        {snapshot.login_item.needs_approval && (
-          <div className="banner banner--warn" style={{ marginBottom: 10 }}>
-            <span>⚠︎</span>
-            <div style={{ flex: 1 }}>
-              系统已登记，但还需要你在「系统设置 → 通用 → 登录项与扩展」里允许它。
-            </div>
-            <button
-              className="btn btn--ghost"
-              onClick={() => void runVoid("open-login-items", () => api.openLoginItemSettings())}
-            >
-              打开设置
-            </button>
-          </div>
-        )}
-
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
           <input
             type="checkbox"
