@@ -15,12 +15,153 @@
  * 我们不会把车流硬画在某条规则上，那会是编的。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 
 import { api, errorText } from "../ipc";
 import { formatBytes } from "../types";
-import type { RouteExplanation, TopoInbound, TopoOutbound, Topology } from "../types";
+import type {
+  ConnectionRecord,
+  PairingStats,
+  RecentConnections,
+  RouteExplanation,
+  TopoInbound,
+  TopoOutbound,
+  Topology,
+} from "../types";
+
+// ---------------------------------------------------------------------------
+// 单连接可视化（设计说明：docs/ui/topology/CONNECTIONS.md）
+// ---------------------------------------------------------------------------
+//
+// # 数据现实（写进代码，也写进界面文案）
+//
+// 一条连接 = 访问日志里的一行 `accepted`。**没有字节数、没有持续时间、没有
+// 连接 ID** —— Xray 的 `StatsService` 只有聚合计数器，日志只记建立。所以这里
+// 用到的字段就是「能拿到的全部」，界面上不会出现任何推算出来的流量数字。
+//
+// 域名来自**另一行** `sniffed domain: …`，实测 p50 相差 26µs（p95 129µs），
+// 按时序配对得到 —— 是**近似**，所以带 `domain_paired` 标记，界面必须标注。
+// 而且**只有约一半连接配得到域名**（IP 直连与内部通道本来就没有 sniffed 行），
+// 所以 `domain === null` 是**正常态**，不是错误。
+
+/** 列表行的稳定 key：日志里没有连接 ID，只能用字段拼。 */
+export function connectionKey(c: ConnectionRecord): string {
+  return `${c.ts_ms}|${c.from}|${c.target_host}:${c.target_port ?? "?"}|${c.inbound_tag}|${c.outbound_tag}`;
+}
+
+/** 拓扑里可用的 tag 集合（用于把连接的 `[入站 → 出站]` 映射到卡片）。 */
+export interface TopologyTags {
+  /** 流向图里的入口（不含 `api` 这类内部入站）。 */
+  flowInlets: string[];
+  /** 内部入站 tag（`api`）。 */
+  internalInlets: string[];
+  /** 流向图里的出口（不含 `dns`/`internal`）。 */
+  flowOutlets: string[];
+  /** 内部通道出口（`dns-out` / `api`）。 */
+  internalOutlets: string[];
+}
+
+/** 一条连接与拓扑的匹配结果。 */
+export interface ConnectionMatch {
+  /** 命中的入口卡片 tag；null = 没有对应卡片。 */
+  inlet: string | null;
+  /** 命中的出口卡片 tag；null = 没有对应卡片。 */
+  outlet: string | null;
+  /** **能不能在流向图上画线**：入口与出口都在流向图里才行。 */
+  inFlow: boolean;
+  /** 入站是内部通道（不在流向图里）。 */
+  internalInbound: boolean;
+  /** 出站是内部通道（不在流向图里）。 */
+  internalOutbound: boolean;
+  /** 给用户看的解释；一切正常时为 null。 */
+  note: string | null;
+}
+
+/**
+ * 把连接的 `[入站 → 出站]` 映射到拓扑卡片。
+ *
+ * 这是「日志连接 × 拓扑」的**唯一耦合点**：两侧用的是同一套 tag。
+ * 匹配不到时**必须给出解释**（内部通道 / 配置刚换过），不能静默什么都不高亮 ——
+ * 「什么都没发生」和「这条连接走的是内部通道」是两件事。
+ */
+export function matchConnectionToTopology(
+  c: ConnectionRecord,
+  tags: TopologyTags,
+): ConnectionMatch {
+  const inlet = tags.flowInlets.includes(c.inbound_tag) ? c.inbound_tag : null;
+  const outletInFlow = tags.flowOutlets.includes(c.outbound_tag) ? c.outbound_tag : null;
+  const outletInternal = tags.internalOutlets.includes(c.outbound_tag) ? c.outbound_tag : null;
+  const internalInbound = inlet === null && tags.internalInlets.includes(c.inbound_tag);
+  const internalOutbound = outletInternal !== null;
+  const outlet = outletInFlow ?? outletInternal;
+  const inFlow = inlet !== null && outletInFlow !== null;
+
+  let note: string | null = null;
+  if (inlet === null && !internalInbound) {
+    note = `入口「${c.inbound_tag}」不在当前拓扑里（配置可能刚变过）`;
+  } else if (internalInbound && internalOutbound) {
+    note = `这条连接走的是内部通道（${c.inbound_tag} → ${c.outbound_tag}），不在流向图里`;
+  } else if (internalInbound) {
+    note = `入站「${c.inbound_tag}」是内部通道，不在流向图里；出站「${c.outbound_tag}」已高亮`;
+  } else if (internalOutbound) {
+    note = `出站「${c.outbound_tag}」是内部通道（${c.outbound_tag === "dns-out" ? "DNS 劫持" : "本机回环"}），不在流向图里`;
+  } else if (outlet === null) {
+    note = `出站「${c.outbound_tag}」不在当前拓扑里（配置可能刚变过）`;
+  }
+  return { inlet, outlet, inFlow, internalInbound, internalOutbound, note };
+}
+
+/** 连接列表的过滤条件。空字符串 = 不过滤。 */
+export interface ConnectionFilter {
+  inbound: string;
+  outbound: string;
+  /** 域名或目标（`ip:port`）的子串，大小写不敏感。 */
+  query: string;
+}
+
+/** 过滤最近连接。纯函数，便于单测（密集连接下这是最容易被写错的一处）。 */
+export function filterConnections(
+  items: ConnectionRecord[],
+  f: ConnectionFilter,
+): ConnectionRecord[] {
+  const q = f.query.trim().toLowerCase();
+  if (!f.inbound && !f.outbound && !q) return items;
+  return items.filter((c) => {
+    if (f.inbound && c.inbound_tag !== f.inbound) return false;
+    if (f.outbound && c.outbound_tag !== f.outbound) return false;
+    if (q) {
+      const target = `${c.target_host}:${c.target_port ?? ""}`;
+      const hay = `${c.domain ?? ""} ${target}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+/** 列表最多渲染多少行（连接可达每秒数十条，全渲染会卡）。 */
+export const CONNECTION_ROW_LIMIT = 100;
+
+/** `HH:MM:SS.mmm` —— 日志是毫秒级，秒级不够用（同一秒很多条）。 */
+function formatConnTime(tsMs: number): string {
+  const d = new Date(tsMs);
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+
+/**
+ * 列表里显示的时间：优先用**日志原样墙钟**（`ts_text`，微秒精度里取毫秒）——
+ * 那是用户能在日志文件里对上的那一串；`ts_ms` 只是本进程收到的时刻。
+ */
+function connClock(c: ConnectionRecord): string {
+  const m = /(\d{2}:\d{2}:\d{2})\.(\d{3})/.exec(c.ts_text);
+  return m ? `${m[1]}.${m[2]}` : formatConnTime(c.ts_ms);
+}
+
+/** 配对率（%）。`accepted === 0` 时给 0，不产生 NaN。 */
+function pairingPercent(p: PairingStats): number {
+  return p.accepted > 0 ? Math.round((p.paired / p.accepted) * 100) : 0;
+}
 
 export default function Topology() {
   const [topo, setTopo] = useState<Topology | null>(null);
@@ -35,12 +176,64 @@ export default function Topology() {
     }
   }, []);
 
+  // ---- 最近连接（单连接可视化）-------------------------------------------
+  //
+  // 连接每秒可达数十条，但**不订阅逐条事件** —— 那会让 React 每秒重渲染几十次。
+  // 与拓扑**共用同一个 2s interval**（见下面的 effect）：既够人眼读，也让渲染
+  // 次数有上界。
+  const [conns, setConns] = useState<RecentConnections | null>(null);
+  const [connErr, setConnErr] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ConnectionRecord | null>(null);
+
+  /** 取最近连接。走 `ipc.ts`（那里规定「invoke 只能在 ipc.ts」）。 */
+  const loadConnections = useCallback(async (): Promise<RecentConnections> => {
+    return api.recentConnections();
+  }, []);
+
+  const pollConnections = useCallback(async () => {
+    try {
+      setConns(await loadConnections());
+      setConnErr(null);
+    } catch (e) {
+      setConnErr(errorText(e));
+    }
+  }, [loadConnections]);
+
   useEffect(() => {
     void load();
-    // 流量是累计值，2 秒刷新一次足够看出「在动」而不至于刷屏。
-    const t = window.setInterval(() => void load(), 2000);
+    void pollConnections();
+    // **只有一个 interval**，同时刷拓扑与连接。
+    //
+    // 为什么刻意不注册第二个：本页的回归测试用 `window.setInterval` 桩**只保留
+    // 最后一个回调**，多注册一个就会把拓扑刷新挤掉 —— 实测导致 4 条几何/数字
+    // 回归测试变红（`refresh()` 调的不再是 `routingTopology`）。
+    // 2s 对累计流量够用；连接按同一节奏取，渲染次数有上界。
+    const t = window.setInterval(() => {
+      void load();
+      void pollConnections();
+    }, 2000);
     return () => window.clearInterval(t);
-  }, [load]);
+  }, [load, pollConnections]);
+
+  /**
+   * 拓扑里的 tag 集合。连接的 `[入站 → 出站]` 就是用这对 tag 去匹配卡片的，
+   * 所以流向图与内部通道要**分开列**（内部通道没有连线，匹配到也不能画线）。
+   */
+  const tags = useMemo<TopologyTags>(() => {
+    const inb = topo?.inbound ?? [];
+    const out = topo?.outbound ?? [];
+    return {
+      flowInlets: inb.filter((i) => i.tag !== "api").map((i) => i.tag),
+      internalInlets: inb.filter((i) => i.tag === "api").map((i) => i.tag),
+      flowOutlets: out.filter((o) => !INTERNAL_KINDS.has(o.kind)).map((o) => o.tag),
+      internalOutlets: out.filter((o) => INTERNAL_KINDS.has(o.kind)).map((o) => o.tag),
+    };
+  }, [topo]);
+
+  const selectedMatch = useMemo(
+    () => (selected ? matchConnectionToTopology(selected, tags) : null),
+    [selected, tags],
+  );
 
   if (loadError) {
     return (
@@ -63,7 +256,12 @@ export default function Topology() {
           入口是流量进来的地方，规则链按真实顺序决定去哪，出口是最终去向。
           车上的货物是字节；车辆数量由累计流量决定（累计值只增不减，不代表当前速率）。
         </p>
-        <Highway topo={topo} />
+        <MemoHighway topo={topo} match={selectedMatch} />
+        {selectedMatch?.note && (
+          <div className="note">
+            单连接高亮：{selectedMatch.note}
+          </div>
+        )}
         {topo.traffic_error && (
           <div className="note">
             取不到实时流量：{topo.traffic_error}
@@ -80,6 +278,14 @@ export default function Topology() {
       </section>
 
       <DestChecker geoAvailable={topo.geo_available} />
+
+      <RecentConnections
+        payload={conns}
+        error={connErr}
+        tags={tags}
+        selected={selected}
+        onSelect={setSelected}
+      />
 
       <section className="page__sec">
         <h2 className="page__title">规则链（{topo.rule.length} 条，自上而下判定）</h2>
@@ -106,7 +312,7 @@ export default function Topology() {
 }
 
 /** 入口 ↔ 出口之间的车流。 */
-function Highway({ topo }: { topo: Topology }) {
+function Highway({ topo, match }: { topo: Topology; match: ConnectionMatch | null }) {
   const inletRefs = useRef<(HTMLElement | null)[]>([]);
   const outletRefs = useRef<(HTMLElement | null)[]>([]);
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
@@ -137,7 +343,11 @@ function Highway({ topo }: { topo: Topology }) {
   const inTotal = lanes.reduce((a, i) => a + i.uplink_bytes + i.downlink_bytes, 0);
 
   return (
-    <div className="highway" ref={containerRef}>
+    <div
+      className={`highway${match && (match.inlet || match.outlet) ? " highway--focused" : ""}`}
+      ref={containerRef}
+      data-focused={match && (match.inlet || match.outlet) ? "1" : undefined}
+    >
       <div className="highway__legend">
         <span className="highway__legend-item">
           <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.node }} />
@@ -162,7 +372,7 @@ function Highway({ topo }: { topo: Topology }) {
         <div className="highway__side-title">入口</div>
         {lanes.map((i, idx) => (
           <div
-            className="highway__lane-label"
+            className={`highway__lane-label${match?.inlet === i.tag ? " highway__lane-label--match" : ""}`}
             key={i.tag}
             ref={(el) => {
               inletRefs.current[idx] = el;
@@ -194,7 +404,7 @@ function Highway({ topo }: { topo: Topology }) {
         <div className="highway__side-title">出口（颜色 = 去向）</div>
         {userOutbound.map((o, idx) => (
           <div
-            className={`highway__lane-label highway__lane-label--${o.kind}`}
+            className={`highway__lane-label highway__lane-label--${o.kind}${match?.outlet === o.tag ? " highway__lane-label--match" : ""}`}
             key={o.tag}
             ref={(el) => {
               outletRefs.current[idx] = el;
@@ -218,7 +428,10 @@ function Highway({ topo }: { topo: Topology }) {
           <div className="highway__internal">
             <div className="highway__side-title">内部通道（不计入合计）</div>
             {internal.map((o) => (
-              <div className="highway__lane-label highway__lane-label--internal" key={o.tag}>
+              <div
+                className={`highway__lane-label highway__lane-label--internal${match?.outlet === o.tag ? " highway__lane-label--match" : ""}`}
+                key={o.tag}
+              >
                 <span className="highway__lane-tag">{shortTag(o.tag)}</span>
                 <span className="highway__lane-meta">{o.kind}</span>
                 <span className="highway__lane-bytes">
@@ -243,6 +456,7 @@ function Highway({ topo }: { topo: Topology }) {
         inletRefs={inletRefs}
         outletRefs={outletRefs}
         trafficOk={trafficOk}
+        highlight={match?.inlet && match.outlet ? { inlet: match.inlet, outlet: match.outlet } : null}
       />
     </div>
   );
@@ -252,6 +466,284 @@ function Highway({ topo }: { topo: Topology }) {
 function shortTag(t: string): string {
   if (t.startsWith("node-")) return `节点 ${t.slice(5, 13)}…`;
   return t;
+}
+
+/**
+ * 车流图只在 `topo` 或高亮变化时重渲染。
+ *
+ * 连接列表每 1.5s 刷新一次，若把 `Highway` 一起拖进重渲染，React 每次都要
+ * reconcile 整棵 SVG（几十条线 + 十几辆车）—— 动画虽然跑在 effect 里不受影响，
+ * 但这份 reconcile 是纯浪费。`memo` 之后连接轮询与车流图解耦。
+ */
+const MemoHighway = memo(Highway);
+
+/**
+ * 最近连接：列表 + 过滤 + 详情。
+ *
+ * # 两条必须守住的边界
+ *
+ * 1. **只渲染最近 `CONNECTION_ROW_LIMIT` 行**（连接可达每秒数十条），并且
+ *    在标题里写出「共 N 条 / 已隐藏 M 条」—— 不偷偷截断。
+ * 2. **不显示日志里没有的字段**：没有每连接字节数、没有持续时间。
+ *    详情面板用灰字把这件事说明白，而不是留白让人以为「加载中」。
+ */
+function RecentConnections({
+  payload,
+  error,
+  tags,
+  selected,
+  onSelect,
+}: {
+  payload: RecentConnections | null;
+  error: string | null;
+  tags: TopologyTags;
+  selected: ConnectionRecord | null;
+  onSelect: (c: ConnectionRecord | null) => void;
+}) {
+  const [filter, setFilter] = useState<ConnectionFilter>({ inbound: "", outbound: "", query: "" });
+  const items = payload?.items ?? [];
+  const filtered = useMemo(() => filterConnections(items, filter), [items, filter]);
+  const shown = filtered.slice(0, CONNECTION_ROW_LIMIT);
+  const hidden = filtered.length - shown.length;
+  const selectedKey = selected ? connectionKey(selected) : null;
+
+  const inboundOptions = [...tags.flowInlets, ...tags.internalInlets];
+  const outboundOptions = [...tags.flowOutlets, ...tags.internalOutlets];
+
+  return (
+    <section className="page__sec">
+      <h2 className="page__title">最近连接</h2>
+      <p className="page__desc">
+        每条连接 = 核心访问日志里的一行 <span className="mono">accepted</span>。
+        点一条，就会在上面那张车流图上高亮它走的那条路（入口 → 出站）。
+        域名带 <span className="conn__star">*</span> 的是<strong>时序配对</strong>得到
+        的近似值。
+      </p>
+
+      {error ? (
+        <div className="note">
+          取不到最近连接：{error}
+          <br />
+          （访问日志由核心写入 —— 核心没在跑时没有新行可读。）
+        </div>
+      ) : !payload ? (
+        <div className="empty">正在读取访问日志…</div>
+      ) : (
+        <>
+          <div className="conn-filter">
+            <label className="conn-filter__field">
+              <span>入站</span>
+              <select
+                value={filter.inbound}
+                onChange={(e) => setFilter((f) => ({ ...f, inbound: e.target.value }))}
+              >
+                <option value="">全部</option>
+                {inboundOptions.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="conn-filter__field">
+              <span>出站</span>
+              <select
+                value={filter.outbound}
+                onChange={(e) => setFilter((f) => ({ ...f, outbound: e.target.value }))}
+              >
+                <option value="">全部</option>
+                {outboundOptions.map((t) => (
+                  <option key={t} value={t}>
+                    {shortTag(t)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="conn-filter__field conn-filter__field--grow">
+              <span>域名 / 目标</span>
+              <input
+                type="text"
+                placeholder="例如 google 或 194.221.250.50"
+                value={filter.query}
+                onChange={(e) => setFilter((f) => ({ ...f, query: e.target.value }))}
+              />
+            </label>
+            {(filter.inbound || filter.outbound || filter.query) && (
+              <button
+                className="btn btn--ghost"
+                onClick={() => setFilter({ inbound: "", outbound: "", query: "" })}
+              >
+                清除过滤
+              </button>
+            )}
+            {selected && (
+              <button className="btn btn--ghost" onClick={() => onSelect(null)}>
+                取消高亮
+              </button>
+            )}
+          </div>
+          {/* 过滤范围必须写出来：下面只过滤**已经取到的这批**，不是全量搜索。
+              不说清楚会让人以为「搜遍了所有连接」——那是另一种「把局部当全部」的不诚实。
+              另外**挤掉过才提挤掉**：一条都没挤掉过时说「更早的已被挤掉」没有指代对象，
+              和「查不到就画 0 B」一样，是把不存在的事说成事实。 */}
+          <div className="conn-scope">
+            过滤范围：已取到的<strong>最近 {items.length} 条</strong>（不是全量搜索
+            {payload.dropped > 0
+              ? `；更早的连接已被环形缓冲挤掉，累计 ${payload.dropped} 条`
+              : ""}
+            ）
+          </div>
+
+          <div className="conn-summary">
+            最近 {items.length} 条连接
+            {filtered.length !== items.length && <> · 其中匹配 {filtered.length} 条</>}
+            {hidden > 0 && <> · 列表只显示最近 {CONNECTION_ROW_LIMIT} 条（另有 {hidden} 条已隐藏）</>}
+            {payload.pairing.accepted > 0 && (
+              <>
+                {" "}
+                · 配到域名 {payload.pairing.paired} / {payload.pairing.accepted} 条（
+                {pairingPercent(payload.pairing)}%）—— 配不到是正常的：IP 直连与内部通道
+                本来就没有 sniffed 行
+              </>
+            )}
+          </div>
+
+          {shown.length === 0 ? (
+            <div className="note">
+              {items.length === 0
+                ? "还没有连接记录（核心刚启动时正常）。"
+                : `在已取到的最近 ${items.length} 条里没有匹配的连接（不是全量搜索）。`}
+            </div>
+          ) : (
+            <div className="conn-list" role="list">
+              {shown.map((c) => {
+                const k = connectionKey(c);
+                const on = k === selectedKey;
+                return (
+                  <button
+                    type="button"
+                    role="listitem"
+                    key={k}
+                    className={`conn-row${on ? " conn-row--on" : ""}`}
+                    onClick={() => onSelect(on ? null : c)}
+                  >
+                    <span className="conn-row__time mono">{connClock(c)}</span>
+                    <span className="conn-row__target">
+                      {c.domain ? (
+                        <>
+                          {c.domain}
+                          {c.domain_paired && (
+                            <span className="conn__star" title="域名由日志两行时序配对得到，可能不准">
+                              *
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="conn-row__ip mono">
+                          {c.target_host}
+                          {c.target_port != null ? `:${c.target_port}` : ""}
+                        </span>
+                      )}
+                    </span>
+                    <span className="conn-row__route mono">
+                      {c.inbound_tag} → {shortTag(c.outbound_tag)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {selected && (
+            <ConnectionDetail
+              c={selected}
+              match={matchConnectionToTopology(selected, tags)}
+              payload={payload}
+            />
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/** 选中连接的详情。**只显示日志里真的有的字段**，并把缺什么写清楚。 */
+function ConnectionDetail({
+  c,
+  match,
+  payload,
+}: {
+  c: ConnectionRecord;
+  match: ConnectionMatch;
+  payload: RecentConnections | null;
+}) {
+  return (
+    <div className="conn-detail">
+      <div className="conn-detail__head">
+        选中的连接
+        {match.inlet && match.outlet && !match.note && (
+          <span className="conn-detail__ok">已在车流图上高亮</span>
+        )}
+      </div>
+      <dl className="conn-detail__grid">
+        <dt>时间</dt>
+        {/* 日志原样墙钟（毫秒精度）；`ts_ms` 是本进程收到该行的时刻 */}
+        <dd className="mono">{c.ts_text}</dd>
+        <dt>入站 → 出站</dt>
+        <dd className="mono">
+          {c.inbound_tag} → {c.outbound_tag}
+        </dd>
+        <dt>目标</dt>
+        <dd className="mono">
+          {c.target_host}
+          {c.target_port != null ? `:${c.target_port}` : "（日志没给端口）"}
+        </dd>
+        <dt>协议</dt>
+        <dd className="mono">{c.network}</dd>
+        <dt>域名</dt>
+        <dd>
+          {c.domain ? (
+            <>
+              {c.domain}
+              {c.domain_paired && <span className="conn__star">*</span>}
+            </>
+          ) : (
+            <span className="conn-detail__muted">
+              未配到（IP 直连 / 内部通道本来就没有 sniffed 行，这是正常态）
+            </span>
+          )}
+        </dd>
+        <dt>来源</dt>
+        <dd className="mono">{c.from}</dd>
+      </dl>
+
+      {c.domain_paired && (
+        <div className="conn-detail__caveat">
+          <span className="conn__star">*</span> 域名是<strong>时序配对</strong>的结果：
+          `sniffed` 与 `accepted` 是日志里两行，只能按时间就近配对
+          {c.domain_pair_delta_us != null && <>（这条相差 {c.domain_pair_delta_us}µs）</>}，
+          <strong>并发时可能对不上</strong>。
+        </div>
+      )}
+
+      {match.note && <div className="note">{match.note}</div>}
+
+      <div className="conn-detail__caveat">
+        本视图<strong>没有</strong>这条连接的<strong>字节数</strong>与<strong>持续时间</strong>：
+        Xray 的 <span className="mono">StatsService</span> 只有聚合计数器（没有 per-connection 流量），
+        访问日志也只记建立（<span className="mono">accepted</span>）不记结束。所以这里不显示，
+        也不推算。
+      </div>
+
+      {payload && payload.pairing.accepted > 0 && (
+        <div className="conn-detail__meta">
+          已观察 {payload.pairing.accepted} 条连接 · 配到域名 {payload.pairing.paired} 条（
+          {pairingPercent(payload.pairing)}%）· 拒配（超时/乱序）{payload.pairing.rejected_stale} 次
+          {payload.dropped > 0 && <> · 环形缓冲已挤掉 {payload.dropped} 条</>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -333,8 +825,16 @@ interface Route {
   segs: Seg[];
   /** 这条路线属于哪个入口（货车数量按入口的字节数决定），下标对应 `inbound`。 */
   inlet: number;
-  /** 每个出口分支的起点累计比例与颜色，用于让货车跟着当前去向变色。 */
-  branches: { startFrac: number; color: string }[];
+  /**
+   * 主干段（入口 → 分叉）。单连接高亮要拼「入口 → 分叉 → 该出口」这条**简单路径**，
+   * 用 `routeToD([trunk, branch.fwd])` —— 而不是整条巡回路径。
+   */
+  trunk: Seg;
+  /**
+   * 每个出口分支：起点的整圈累计比例 + 颜色（车走到这里就换色）+
+   * 目的出口的 tag（单连接高亮靠它匹配）+ 去程那一段本身（拼高亮路径用）。
+   */
+  branches: { startFrac: number; color: string; tag: string; fwd: Seg }[];
   /**
    * **去程**的长度（px）：主干 + 各分支。之后是等长的回程段，用于把路径闭合。
    *
@@ -412,6 +912,7 @@ function Flow({
   inletRefs,
   outletRefs,
   trafficOk,
+  highlight,
 }: {
   container: HTMLElement | null;
   inbound: TopoInbound[];
@@ -425,6 +926,11 @@ function Flow({
   outletRefs: MutableRefObject<(HTMLElement | null)[]>;
   /** 流量是否可信；`false` 时字节字段是占位 0，不能当读数用。 */
   trafficOk: boolean;
+  /**
+   * 单连接高亮：`{ inlet, outlet }` 是入口/出口 tag。两者都命中时画一条
+   * 加亮弧线（主干 + 那一段分支）。**不参与动画**，纯粹是叠加层。
+   */
+  highlight: { inlet: string; outlet: string } | null;
 }) {
   const [geo, setGeo] = useState<{
     w: number;
@@ -537,13 +1043,15 @@ function Flow({
           y2: inlet.y,
           cx: (inlet.r + forkX) / 2,
         };
-        const pairs: { fwd: Seg; back: Seg; color: string }[] = [];
+        const pairs: { fwd: Seg; back: Seg; color: string; tag: string }[] = [];
         outlets.forEach((b, k) => {
           if (!b) return;
           // 类别要取**出口对象**上的 kind（位置矩形里没有这个信息）
           const color = OUTBOUND_COLOR[outbound[k]?.kind ?? ""] ?? NEUTRAL;
           pairs.push({
             color,
+            // 单连接高亮按这个 tag 找分支（与日志 `[入站 -> 出站]` 右侧同一个值）
+            tag: outbound[k]?.tag ?? "",
             fwd: {
               kind: "curve",
               x1: forkX,
@@ -567,10 +1075,10 @@ function Flow({
         // 每一段的终点就是下一段的起点，所以合并路径等于**可见线的并集**，
         // 且首尾重合（闭环）—— 车走完一圈不会瞬移回起点。
         const segs: Seg[] = [trunk];
-        const branches: { startFrac: number; color: string }[] = [];
+        const branches: Route["branches"] = [];
         let acc = segApproxLen(trunk);
         for (const p of pairs) {
-          branches.push({ startFrac: 0, color: p.color }); // 比例稍后按整圈总长归一化
+          branches.push({ startFrac: 0, color: p.color, tag: p.tag, fwd: p.fwd }); // 比例稍后按整圈总长归一化
           segs.push(p.fwd, p.back);
           acc += segApproxLen(p.fwd) + segApproxLen(p.back);
         }
@@ -590,6 +1098,7 @@ function Flow({
           segs,
           /** 这条路线属于哪个入口（货车数量按入口字节数决定）。 */
           inlet: i,
+          trunk,
           branches,
           // 去程 = 主干 + 各分支（去/回成对插入，所以分支里偶数下标是去程）。
             outboundLen: (() => {
@@ -799,6 +1308,16 @@ function Flow({
     }
   });
 
+  // 单连接高亮路径：主干 + 该出口那一段。**在 render 里按 tag 现算**，
+  // 不进 geo（几何测量与动画核心完全不碰它）。
+  const highlightD = (() => {
+    if (!highlight) return null;
+    const route = geo.routes.find((r) => r.key === highlight.inlet);
+    const branch = route?.branches.find((b) => b.tag === highlight.outlet);
+    if (!route || !branch) return null;
+    return routeToD([route.trunk, branch.fwd]);
+  })();
+
   return (
     <svg className="flow" width={geo.w} height={geo.h} aria-hidden>
       {/* 连线本体：主干中性，各扇出分支按**目的地的出口类别**着色。
@@ -815,6 +1334,8 @@ function Flow({
           ))}
         </g>
       ))}
+      {/* 单连接高亮：画在连线之上、货车之下。虚线动画给出「往哪边走」的方向感。 */}
+      {highlightD && <path className="flow__highlight" d={highlightD} data-highlight="1" />}
       {/* 唯一一条**完整**的合并路径：只用于给货车算位置（隐藏不显示） */}
       {geo.routes.map((r) => (
         <path key={`guide-${r.key}`} className="flow__guide" d={r.d} />

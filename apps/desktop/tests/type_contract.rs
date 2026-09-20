@@ -239,3 +239,87 @@ fn helper_and_core_shapes_match_the_frontend_types() {
         );
     }
 }
+
+/// 单连接可视化（`recent_connections` 命令）的三个返回类型。
+///
+/// 它们不走 `AppSnapshot`，所以必须单独比对；而这条链路**没有任何编译器
+/// 检查**：字段缺失不会让前端编不过，界面只会静默读到 `undefined`。
+///
+/// 夹具刻意用**真实解析出来的**记录（而不是手工搓一个空结构）：
+/// `ConnectionRecord` 的字段全部由 `parse_connection_line` 填充，
+/// 手搓的空结构将来漏填字段时这条测试会看不出来。
+#[test]
+fn connection_shapes_match_the_frontend_types() {
+    use xt_core::xray::access_log::{
+        parse_connection_line, ConnectionFilter, ConnectionLog, PairingStats,
+    };
+
+    let src = types_ts();
+    let accepted = "2026/09/20 13:30:58.560364 from tcp:198.18.0.1:49712 accepted tcp:194.221.250.50:443 [tun -> node-n1d232c6b8c7a5004]";
+    let sniffed = "2026/09/20 13:30:58.560290 [Info] [3163266252] app/dispatcher: sniffed domain: www.google.com";
+
+    let record = parse_connection_line(accepted, 1_700_000_000_000).expect("真实访问行应当能解析");
+    let mut log = ConnectionLog::new();
+    log.observe(sniffed);
+    log.observe(accepted);
+    let recent = log.recent(&ConnectionFilter::new(10));
+    assert_eq!(recent.items.len(), 1, "夹具应当产生一条连接记录");
+
+    // 刻意用**全非零**的值而不是 `Default`：将来若有人给某个字段加上
+    // `skip_serializing_if`（跳过 0 / None），`Default` 的键集合会悄悄缩水，
+    // 这条契约就会静默失效。`recent` 里的 `pairing` 同理（它必然有 0 字段）。
+    let pairing = PairingStats {
+        accepted: 1,
+        paired: 1,
+        unpaired: 1,
+        sniffed: 1,
+        rejected_stale: 1,
+        sniffed_superseded: 1,
+    };
+    let recent_all_set = xt_core::xray::access_log::RecentConnections {
+        items: recent.items.clone(),
+        dropped: 1,
+        pairing,
+    };
+
+    // 第 4 项是**预期字段数**：`ts_interface_fields` 只认「恰好 2 空格缩进」的
+    // 顶层成员，若 TS 侧某个字段被误缩进、而 Rust 恰好也没有它，双向比对会
+    // 一起漏报。钉住数量能把那个盲区变成一条明确的失败信息。
+    for (label, value, interface, expected_fields) in [
+        (
+            "ConnectionRecord",
+            serde_json::to_value(&record).unwrap(),
+            "ConnectionRecord",
+            12,
+        ),
+        (
+            "PairingStats",
+            serde_json::to_value(pairing).unwrap(),
+            "PairingStats",
+            6,
+        ),
+        (
+            "RecentConnections",
+            serde_json::to_value(&recent_all_set).unwrap(),
+            "RecentConnections",
+            3,
+        ),
+    ] {
+        let rust = assert_ts_is_covered_by_rust(label, &value, interface, &src);
+        let ts = ts_interface_fields(&src, interface);
+        assert_eq!(
+            ts.len(),
+            expected_fields,
+            "\n{label}: 从 types.ts 只解析出 {} 个字段，预期 {expected_fields} 个。\n\
+             若 Rust 侧字段数确实变了，请更新这个常量；若是某一个字段被误缩进\n\
+             （解析器只认恰好 2 空格缩进），它会从这里暴露出来。实际解析到: {ts:?}",
+            ts.len()
+        );
+        let extra: Vec<_> = rust.difference(&ts).collect();
+        assert!(
+            extra.is_empty(),
+            "\n{label}: Rust 提供了前端未声明的字段 {extra:?}\n\
+             界面若需要就补进 types.ts。"
+        );
+    }
+}

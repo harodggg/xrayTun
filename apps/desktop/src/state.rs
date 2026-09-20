@@ -82,7 +82,7 @@ pub struct Inner {
     pub last_notice: Option<String>,
     /// 日志落盘目录。为什么需要落盘见 [`Inner::push_log`]。
     pub logs_dir: PathBuf,
-    /// 按出口 tag 的连接数（从核心访问日志的 `accepted ... [in -> out]` 行累计）。
+    /// 连接日志：按出口 tag 的连接数 + 最近若干条**结构化连接**（环形缓冲）。
     ///
     /// # 为什么需要它
     ///
@@ -90,8 +90,15 @@ pub struct Inner {
     /// 测量盲区，不是事实：本机实测它们各有 4769 / 5374 条连接。界面若只显示
     /// `0 B`，用户会以为「这两个出口没在用」。
     ///
-    /// 连接数是这两类出口**唯一可得**的活跃度指标。
-    pub connections: xt_core::xray::access_log::ConnectionCounters,
+    /// 连接数是这两类出口**唯一可得**的活跃度指标；结构化记录则支撑
+    /// 「单连接可视化」（点一条连接 → 在拓扑上高亮它的入口/出口）。
+    ///
+    /// # 拿不到的字段（硬约束）
+    ///
+    /// 访问日志只记连接**建立**（`accepted`），没有每连接字节数、没有结束时间、
+    /// 没有连接 ID；域名靠 `sniffed` 时序配对，是**近似**。
+    /// 详见 [`xt_core::xray::access_log`] 模块头注释。
+    pub connections: xt_core::xray::access_log::ConnectionLog,
 }
 
 /// DNS 探测状态。
@@ -179,7 +186,7 @@ impl Inner {
             dns: DnsStatus::default(),
             last_notice: None,
             logs_dir: store.logs_dir(),
-            connections: xt_core::xray::access_log::ConnectionCounters::new(),
+            connections: xt_core::xray::access_log::ConnectionLog::new(),
         }
     }
 

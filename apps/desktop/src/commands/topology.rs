@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 
 use xt_core::routing::explain::{explain, DestQuery, Rule, RouteExplanation};
 use xt_core::routing::geo::GeoData;
+use xt_core::xray::access_log::{ConnectionFilter, ConnectionLog, RecentConnections};
 use xt_core::xray::stats::{monotonic_traffic_by_tag, MonotonicCounters};
 use xt_core::xray::{query_stats, StatEntry, API_PORT};
 
@@ -369,6 +370,41 @@ pub async fn routing_topology(
         crate::supervisor::geo_dir(state.store.root()).is_some(),
         &connections,
     ))
+}
+
+/// 界面一次最多要多少条「最近连接」（环形缓冲里最多留
+/// [`ConnectionLog::DEFAULT_CAPACITY`] 条）。
+const RECENT_CONNECTIONS_LIMIT: usize = 200;
+
+/// 最近连接（最新在前），可按出站 / 入站 / 域名过滤。
+///
+/// # 数据来源与硬约束（不得假装有）
+///
+/// 每条连接就是核心访问日志里的一行 `accepted`：
+/// 时间 / 来源 / 目标 / `[入站 -> 出站]`。**没有**每连接字节数（`StatsService`
+/// 只有聚合计数器）、**没有**持续时间（日志只记建立）、**没有**连接 ID。
+/// 域名是 `sniffed` 行的**时序配对**结果（近似），响应里的 `pairing` 统计
+/// 供界面如实标注。详见 [`xt_core::xray::access_log`] 模块头注释。
+#[tauri::command]
+pub fn recent_connections(
+    state: State<'_, AppState>,
+    outbound: Option<String>,
+    inbound: Option<String>,
+    domain: Option<String>,
+    limit: Option<usize>,
+) -> Result<RecentConnections, String> {
+    let limit = limit
+        .unwrap_or(RECENT_CONNECTIONS_LIMIT)
+        .clamp(1, ConnectionLog::DEFAULT_CAPACITY);
+    let filter = ConnectionFilter {
+        outbound,
+        inbound,
+        domain,
+        limit,
+    };
+    state
+        .with(|i| i.connections.recent(&filter))
+        .ok_or_else(|| "读取连接日志失败（状态不可用）".to_string())
 }
 
 /// 判定一个目的地会走哪条规则（用真实规则 + 真实 geosite/geoip 数据）。

@@ -571,3 +571,78 @@ export interface GlobeData {
   /** 拿不到位置时的原因。 */
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// 单连接可视化（核心访问日志 × 拓扑）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一条连接 = 核心访问日志里的一行 `accepted`。
+ *
+ * ⚠️ **没有**每连接字节数（`StatsService` 只有聚合计数器）、**没有**持续时间
+ * （日志只记建立）、**没有**连接 ID（`accepted` 行不带 ID）。界面不得显示这些。
+ */
+export interface ConnectionRecord {
+  /**
+   * 本进程**收到**该日志行的 Unix 毫秒（≈连接建立时刻，通常只差个位数毫秒）。
+   * 不是从日志墙钟换算的：日志是本地时间且不带时区；原样时间见 `ts_text`。
+   */
+  ts_ms: number;
+  /** 日志里原样的本地墙钟时间，例如 `2026/09/20 13:30:58.560364`。 */
+  ts_text: string;
+  /** 来源 socket（去掉 `tcp:`/`udp:` 前缀）：`198.18.0.1:49712`；DoH 行是 `DNS`。 */
+  from: string;
+  /** `tcp` | `udp` | `https`（DoH 形态）。 */
+  network: string;
+  /**
+   * 目标主机。**多数是 IP，但日志里也会直接给域名**（实测 `github.com`、
+   * `cp.cloudflare.com`），所以不是 `target_ip`。
+   */
+  target_host: string;
+  /** 目标端口；日志没给就是 `null`（**不是 0** —— 0 是合法端口，语义不同）。 */
+  target_port: number | null;
+  /** `[入站 -> 出站]` 左边。`api` 是内部通道，不在流向图里。 */
+  inbound_tag: string;
+  /** 右边 —— 用来匹配拓扑里的出口卡片。 */
+  outbound_tag: string;
+  /** `sniffed` 时序配对到的域名；配不到为 `null`（约一半连接本来就没有）。 */
+  domain: string | null;
+  /**
+   * 域名是否来自 `sniffed` **时序配对**（近似），而不是日志直给。
+   * 当前实现里恒等于 `domain !== null`：`accepted` 行本身不带域名。
+   */
+  domain_paired: boolean;
+  /**
+   * 配对到的那条 `sniffed` 与本行的日志时间差（**微秒**）；未配对为 `null`。
+   * 用微秒是因为实测 p50 = 26µs，毫秒会四舍五入成 0。
+   */
+  domain_pair_delta_us: number | null;
+  /** 配对到的那条 `sniffed` 里的连接 ID；未配对为 `null`。 */
+  sniff_id: string | null;
+}
+
+/** 域名配对统计：界面据此如实标注「域名是时序配对、可能不准」。 */
+export interface PairingStats {
+  /** 观察到的 `accepted` 行总数。 */
+  accepted: number;
+  /** 配到域名的条数。 */
+  paired: number;
+  /** 没配到的条数（恒有 `paired + unpaired === accepted`）。 */
+  unpaired: number;
+  /** 观察到的 `sniffed` 行总数。 */
+  sniffed: number;
+  /** 有 `sniffed` 候选但时间差超出 200ms（含乱序）而拒配的次数。 */
+  rejected_stale: number;
+  /** 被下一条 `sniffed` 覆盖、最终没配上任何 `accepted` 的 `sniffed` 数。 */
+  sniffed_superseded: number;
+}
+
+/** `recent_connections` 的返回。 */
+export interface RecentConnections {
+  /** 最近连接，**最新在前**。 */
+  items: ConnectionRecord[];
+  /** 环形缓冲建好以来被挤掉的条数（累计）——界面据此说明「只保留最近 N 条」。 */
+  dropped: number;
+  /** 配对统计。 */
+  pairing: PairingStats;
+}

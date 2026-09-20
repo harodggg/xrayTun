@@ -1723,6 +1723,227 @@ input[type="checkbox"] {
   color: var(--text-faint);
 }
 
+/* ------------------------------------------------------- 单连接可视化
+ *
+ * 设计说明：docs/ui/topology/CONNECTIONS.md
+ *
+ * 高亮是**叠加层**：选中一条日志连接后，只把它的入口卡片 → 出口卡片那条路
+ * 加亮，其余压暗。压暗全用这一个 class（`highway--focused`）驱动，
+ * 不在 JS 里逐个元素改 style —— 少一次 DOM 写，也便于将来加过渡。
+ */
+
+/* 未选中的元素压暗，但仍看得见（要保留「还有别的连接」这个上下文） */
+.highway--focused .flow__route {
+  opacity: 0.07;
+}
+.highway--focused .flow__route--trunk {
+  opacity: 0.05;
+}
+.highway--focused .flow__truck {
+  opacity: 0.15;
+}
+.highway--focused .highway__lane-label {
+  opacity: 0.35;
+}
+
+/* 选中的两张卡片：用 outline 而不是 box-shadow —— 类别色条本身就用
+   box-shadow 画（inset 2px），再叠一个会让色条变形。 */
+.highway--focused .highway__lane-label--match {
+  opacity: 1;
+  outline: 1.5px solid #9ecbff;
+  outline-offset: 1px;
+  background: #1b2a42;
+}
+
+/* 高亮路径：画在连线之上、货车之下（见 Topology.tsx 的渲染顺序）。
+   虚线 + 位移动画给「这条连接往哪个方向走」的方向感。 */
+.flow__highlight {
+  fill: none;
+  stroke: #cfe6ff;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-dasharray: 10 7;
+  opacity: 0.95;
+  animation: conn-dash 0.9s linear infinite;
+}
+@keyframes conn-dash {
+  to {
+    stroke-dashoffset: -17;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow__highlight {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------- 最近连接列表 */
+
+.conn-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+  margin: 10px 0 6px;
+}
+.conn-filter__field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+.conn-filter__field--grow {
+  flex: 1;
+  min-width: 180px;
+}
+.conn-filter__field select,
+.conn-filter__field input {
+  padding: 4px 6px;
+  font-size: 11.5px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+/* 过滤器里的按钮小一号；只作用于这一行，不动全局 .btn */
+.conn-filter .btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.conn-summary {
+  margin: 0 0 6px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 过滤范围提示：必须比摘要更显眼一点，因为它表达的是一条**边界**
+   （只过滤已取到的这批，不是全量），而不是统计数字。 */
+.conn-scope {
+  margin: 6px 0 4px;
+  padding: 4px 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  background: rgba(120, 160, 210, 0.08);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 3px;
+}
+
+/* 固定高度 + 滚动：连接很密（每秒数十条），列表不能把页面撑长 */
+.conn-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.conn-row {
+  display: grid;
+  grid-template-columns: 92px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  text-align: left;
+  color: var(--text-dim);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+.conn-row:hover {
+  background: rgba(120, 160, 210, 0.08);
+}
+/* 选中行：左侧强调条 + 提亮，和拓扑上高亮的那条路形成呼应 */
+.conn-row--on {
+  color: var(--text);
+  background: rgba(79, 142, 247, 0.16);
+  box-shadow: inset 2px 0 0 #9ecbff;
+}
+.conn-row__time {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.conn-row__target {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conn-row__ip {
+  color: var(--text-dim);
+}
+.conn-row__route {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* 域名是「时序配对」得到的近似值 —— 星号必须显眼，否则用户会当成确定信息 */
+.conn__star {
+  margin-left: 3px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.conn-detail {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+.conn-detail__head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.conn-detail__ok {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--ok);
+}
+.conn-detail__grid {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 3px 10px;
+  margin: 0;
+  font-size: 11.5px;
+}
+.conn-detail__grid dt {
+  color: var(--text-faint);
+}
+.conn-detail__grid dd {
+  margin: 0;
+  color: var(--text);
+  word-break: break-all;
+}
+.conn-detail__muted {
+  color: var(--text-faint);
+}
+/* 缺字段的说明要看得见，但不能像报错那样抢注意力 */
+.conn-detail__caveat {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+.conn-detail__meta {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------------------------------------------------------- 规则链 */
 
 .chain {

@@ -9,6 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   GlobeData,
   NodeExport,
+  RecentConnections,
   RouteExplanation,
   Topology,
   AppSnapshot,
@@ -54,6 +55,17 @@ export const api = {
   routingTopology: () => invoke<Topology>("routing_topology"),
   /** 判定某个目的地会走哪条规则（真实规则 + 真实 geosite/geoip 数据）。 */
   explainDest: (dest: string) => invoke<RouteExplanation>("explain_dest", { dest }),
+
+  /**
+   * 最近连接（单连接可视化，见 `docs/ui/topology/CONNECTIONS.md`）。
+   *
+   * 参数全部可选，过滤也可以放到后端做；前端默认只取最近一批，
+   * 再在本地做即时过滤（输入框每敲一个字都往返一次太浪费）。
+   * `limit` 默认 200，上限 1000（后端环形缓冲容量）。
+   */
+  recentConnections: (
+    opts: { inbound?: string; outbound?: string; domain?: string; limit?: number } = {},
+  ) => invoke<RecentConnections>("recent_connections", opts),
 
   testLatency: (nodeIds?: string[]) =>
     invoke<AppSnapshot>("test_latency", { nodeIds: nodeIds ?? null }),
