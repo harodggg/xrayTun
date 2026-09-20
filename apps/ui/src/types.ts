@@ -190,7 +190,10 @@ export type RecoveryOutcome = "recovered" | "direct_fallback";
 export interface RecoveryState {
   /** 看门狗正在重建隧道。 */
   recovering: boolean;
-  /** 自 App 启动以来第几次自动重建（含进行中的这次，从 1 开始）；0 = 从未发生。 */
+  /**
+   * 自 App 启动以来第几次自动重建（含进行中的这次，从 1 开始）；0 = 从未发生。
+   * **刻意不持久化**：App 重启后从 0 重新计（这是语义，不是 bug）。
+   */
   attempt: number;
   /** 触发这次重建的连续探测失败次数（每 10 秒探测一次）。 */
   probe_failures: number;
