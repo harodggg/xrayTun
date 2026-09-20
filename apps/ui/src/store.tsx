@@ -169,6 +169,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             recoveredTimer.current = null;
             setRecoveredAttempt(null);
           }, RECOVERED_NOTICE_MS);
+        } else if (rec && (rec.recovering || rec.last_outcome === "direct_fallback")) {
+          // **不能出现自相矛盾的同屏**：又开始了新一次恢复、或这次失败了，
+          // 上一次那条「已自动恢复」就必须立刻收掉 —— 否则「已恢复」会和
+          // 「正在恢复」/「恢复失败」同时挂着（实测复现过）。
+          if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current);
+          recoveredTimer.current = null;
+          setRecoveredAttempt(null);
         }
 
         // ---- 兼容期兜底（backend 落地 `runtime.recovery` 后应删掉）----------

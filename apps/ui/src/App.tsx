@@ -221,12 +221,12 @@ function TopBar({ view }: { view: View }) {
 
       {/* 自动恢复中的状态：必须是**可读的一句话**，而不是一个沉默的灰点 */}
       {rv.phase === "recovering" && (
-        <span className="badge badge--ok topbar__recovery" title="看门狗正在自动重建隧道，不需要手动点「连接」">
+        <span className="badge badge--ok" title="看门狗正在自动重建隧道，不需要手动点「连接」">
           {rv.text}
         </span>
       )}
       {rv.phase === "failed" && (
-        <span className="badge badge--unknown topbar__recovery" title={rv.text ?? undefined}>
+        <span className="badge badge--unknown" title={rv.text ?? undefined}>
           自动恢复失败
         </span>
       )}
