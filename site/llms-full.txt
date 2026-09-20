@@ -3,6 +3,12 @@
 > 站点：https://harodggg.github.io/xrayTun/ ｜ 版本：v0.8.26（2026-09-20）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
 > 结构化数据见两个页面 `<head>`里的 JSON-LD（SoftwareApplication + FAQPage）。
+>
+> **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**两个语言页面的完整正文**
+> 与官网里的「事实与边界」清单。仓库 `docs/` 下的**完整设计文档（数千行规范）没有逐字复制**
+> 到这里 —— 那样既膨胀、又必然与仓库文档不同步，反而更糟。需要细节请看绝对链接：
+> <https://github.com/harodggg/xrayTun/tree/main/docs>
+> （安装与 TUN 权限：docs/02-tun-and-privileges.md；分流与 DNS：docs/04-routing-and-dns.md）
 
 来源：https://harodggg.github.io/xrayTun/（中文）与 https://harodggg.github.io/xrayTun/en/（英文）。
 这是同一份内容的两种语言，段落一一对应；任一处不一致以对应语言页面为准。

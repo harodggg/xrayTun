@@ -9,7 +9,7 @@
 
 - [中文站（完整正文）](https://harodggg.github.io/xrayTun/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
 - [English site (equivalent content)](https://harodggg.github.io/xrayTun/en/)：与中文站逐段等价，不是半份翻译
-- [本站全文（供一次性摄取）](https://harodggg.github.io/xrayTun/llms-full.txt)：中英两个页面的完整文本 + 事实与边界清单
+- [本站全文（供一次性摄取）](https://harodggg.github.io/xrayTun/llms-full.txt)：中英两个页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
 
 ## 下载
 
