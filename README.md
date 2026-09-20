@@ -177,9 +177,16 @@ x86_64 的 App + arm64 的核心）；而且核心上游按架构分发，要出
 
 ## 许可证
 
-本项目代码 MIT。运行时依赖：
+本项目**源码**采用 **MIT**，正文见 [`LICENSE`](LICENSE)。
+
+发布产物（dmg / zip）里**随包分发**的第三方二进制**各有其许可、不受 MIT 覆盖**：
 
 * **Xray-core** —— MPL-2.0（以独立进程调用，不构成衍生作品）
+* `geoip.dat` / `geosite.dat` —— 随 Xray-core 发布
 * 界面依赖见 `apps/ui/package.json`
 
-`docs/07-roadmap-and-risks.md` 里有完整的第三方清单与注意事项。
+完整说明见 [`THIRD-PARTY.md`](THIRD-PARTY.md)；`docs/07-roadmap-and-risks.md` 里有第三方清单与注意事项。
+
+> **为什么第三方声明不在 `LICENSE` 里**：GitHub 的许可证识别只看标准模板，
+> 在 `LICENSE` 里附加段落会让整个仓库被识别成 `Other` 而不是 MIT。
+> 拆文件之后 `LICENSE` 是纯 MIT 正文，第三方声明也完整保留。

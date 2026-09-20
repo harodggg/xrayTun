@@ -19,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## 第三方组件
-
-本仓库的**源码**（Rust / TypeScript / 配置与脚本）采用上面的 MIT 许可。
-
-发布产物里**随包分发**了以下第三方二进制，它们各有自己的许可，**不受本文件覆盖**：
-
-| 组件 | 许可 | 说明 |
-|---|---|---|
-| Xray-core（`binaries/xray`） | **MPL-2.0** | 以**独立进程**调用，不构成衍生作品；许可证见 Xray-core 官方仓库 |
-| `geoip.dat` / `geosite.dat` | 随 Xray-core 发布 | 同上 |
-
-界面与官网必须如实标注这一点，不要让人以为整个产物都是 MIT。
