@@ -22,7 +22,7 @@
 
 import { useState } from "react";
 
-import { api } from "../ipc";
+import { api, recoveryView } from "../ipc";
 import { useStore } from "../store";
 import type { AppSnapshot } from "../types";
 import {
@@ -46,7 +46,7 @@ interface Notice {
 }
 
 export default function Dashboard({ onNavigate }: { onNavigate: (view: string) => void }) {
-  const { snapshot, busy, run, probing } = useStore();
+  const { snapshot, busy, run, probing, recovery } = useStore();
   const [showAllNotices, setShowAllNotices] = useState(false);
   if (!snapshot) return <div className="empty">正在加载…</div>;
 
@@ -55,16 +55,37 @@ export default function Dashboard({ onNavigate }: { onNavigate: (view: string) =
   const selectedLatency = selected ? latency[selected.id] : undefined;
   const rtt = selectedLatency?.server_rtt_ms ?? null;
   const connected = runtime.running;
+  /**
+   * 自动恢复（task-22）：看门狗在自愈时**不能说成「未连接」** —— 那会让用户以为
+   * 网络断了、去点「连接」，正好和看门狗抢。三态由结构化状态（`runtime.recovery`）
+   * 驱动，**不解析 notice 文案**。
+   */
+  const rv = recoveryView(recovery, connected);
 
   // ---- 状态词：把「进程在跑」与「流量真的走代理了吗」合成一个结论 ----
   // 这是规范第 2 条要求的精确表达：中间态不能说成「已连接」。
+  // 自动恢复的两态排在「未连接」**之前**，否则又会被盖成「未连接」。
   const state = !core.path
     ? { tone: "bad", dot: "", label: "未找到核心", sub: "缺少 Xray 可执行文件" }
-    : !connected
-      ? { tone: "off", dot: "", label: "未连接", sub: "核心没有在运行" }
-      : !runtime.routes_committed
-        ? { tone: "warn", dot: "dot--warn", label: "隧道已建立", sub: "默认路由尚未接管，流量还没有走代理" }
-        : { tone: "on", dot: "dot--on", label: "已连接", sub: null };
+    : rv.phase === "recovering"
+      ? {
+          tone: "warn",
+          dot: "dot--warn",
+          label: rv.text!,
+          sub: "看门狗正在重建隧道，不需要手动点「连接」（点了会打断它）",
+        }
+      : rv.phase === "failed"
+        ? {
+            tone: "warn",
+            dot: "dot--warn",
+            label: "自动恢复失败",
+            sub: "已退回直连：网络可用，但流量不再走代理 —— 可手动重连，或换一个节点",
+          }
+        : !connected
+          ? { tone: "off", dot: "", label: "未连接", sub: "核心没有在运行" }
+          : !runtime.routes_committed
+            ? { tone: "warn", dot: "dot--warn", label: "隧道已建立", sub: "默认路由尚未接管，流量还没有走代理" }
+            : { tone: "on", dot: "dot--on", label: "已连接", sub: null };
 
   const notices = collectNotices(snapshot, run, onNavigate);
   const [primary, ...rest] = notices;
