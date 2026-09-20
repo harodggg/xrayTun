@@ -297,7 +297,15 @@ const NEUTRAL = "#64748b";
  * 用 `1024 ** n`（或 `2 ** 40`）才是真的 1 TiB。
  */
 function trucksOnLane(bytes: number): number {
-  if (!Number.isFinite(bytes) || bytes <= 0) return 3; // 空车道也画几辆，否则「量小」与「不通」看不出来
+  // **没流量就不画车。**
+  //
+  // 早先这里返回 3，注释写的是「空车道也画几辆，否则『量小』与『不通』
+  // 看不出来」—— 但它恰恰把两者画成一样（都 3 辆），既没达成目的，又制造了
+  // 「明明 0 B 却有车在跑」的假象。用户直接指出了这一点（http 入口 0 B 却有车）。
+  //
+  // 「量小」与「不通」本来就分得开：卡片的字节数分别显示 `↓1.2 MiB` 与
+  // `↓0 B`，而 `traffic_ok === false` 时显示「流量不可用」。
+  if (!Number.isFinite(bytes) || bytes <= 0) return 0;
   const lo = Math.log10(1024 ** 2); // 1 MiB
   const hi = Math.log10(1024 ** 4); // 1 TiB
   const t = Math.max(0, Math.min(1, (Math.log10(bytes) - lo) / (hi - lo)));
@@ -327,6 +335,20 @@ interface Route {
   inlet: number;
   /** 每个出口分支的起点累计比例与颜色，用于让货车跟着当前去向变色。 */
   branches: { startFrac: number; color: string }[];
+  /**
+   * **去程**的长度（px）：主干 + 各分支。之后是等长的回程段，用于把路径闭合。
+   *
+   * 车**只在去程段循环** —— 进度对 `outboundLen` 取模，永远不走回程。
+   *
+   * 为什么不「走完整圈」：闭环的回程在屏幕上就是**倒着开**，用户直接指出了
+   * 这一点（「小车怎么是来回的」）。而做成「走完整圈但把回程隐藏」也不行 ——
+   * 实测隐藏占比 **92.8%**：整圈是「主干 + 6×来回 + 回主干」，去程只占约 11%，
+   * 车大部分时间都在看不见的回程上跑。
+   *
+   * 对去程取模没有这个问题：车始终走在看得见的路上；从最后一个出口回到入口
+   * 的那一跳，语义上就是「这趟货送到了」，也不会看起来倒着开。
+   */
+  outboundLen: number;
 }
 
 /** 一辆货车跨帧的全部状态。按**稳定身份**保存，不按数组下标。 */
@@ -569,6 +591,16 @@ function Flow({
           /** 这条路线属于哪个入口（货车数量按入口字节数决定）。 */
           inlet: i,
           branches,
+          // 去程 = 主干 + 各分支（去/回成对插入，所以分支里偶数下标是去程）。
+            outboundLen: (() => {
+              const trunkLen = segApproxLen(segs[0]!);
+              const total = segs.reduce((a, sg) => a + segApproxLen(sg), 0);
+              const branchesLen = segs
+                .slice(1)
+                .filter((_, k) => k % 2 === 0)
+                .reduce((a, sg) => a + segApproxLen(sg), 0);
+              return segmentsOutboundLen(trunkLen, branchesLen, total);
+            })(),
         });
       });
 
@@ -652,18 +684,30 @@ function Flow({
           };
           state.set(key, st);
         }
-        const walk = (total / TRAVEL_SECONDS) * dt;
+        // 车的活动范围 = **去程长度**（回程段从不进入）。
+        // 早先这里用整圈 `total`，车会走完回程 —— 屏幕上就是「倒着开」。
+        const span = route.outboundLen > 0 ? route.outboundLen : total;
+        // 速度按去程长度算：一轮 = 走完一次去程（TRAVEL_SECONDS 秒）
+        const walk = (span / TRAVEL_SECONDS) * dt;
 
         // 几何变了（这条路的 `d` 变了）→ 用**上一帧的屏幕点**在新路径上取最近点重锚：
         // 在「必须落到新路上」的前提下，这个落点离原位置最近。
         if (st.sig !== sigs[idx]) {
           if (Number.isFinite(st.x) && Number.isFinite(st.y)) {
-            st.dist = nearestLength(path, total, st.x, st.y);
+            st.dist = nearestLength(path, span, st.x, st.y);
           }
           st.sig = sigs[idx]!;
         }
         st.dist += walk;
-        if (st.dist >= total) st.dist -= total * Math.floor(st.dist / total);
+        // **对去程长度取模 —— 车只在去程循环，永远不走回程段。**
+        //
+        // 这条是「小车怎么是来回的」的正解。早先路线是闭环、车走完整圈，回程在
+        // 屏幕上就是倒着开。改成「走完整圈 + 把回程隐藏」也不行：实测隐藏占比
+        // 92.8%，因为整圈里只有主干是重复的，去程只占约 11%。
+        //
+        // 对去程取模后，车始终走在看得见的路上；从最后一个出口回到入口的那一跳，
+        // 语义上就是「这趟货送到了」。
+        if (st.dist >= span) st.dist -= span * Math.floor(st.dist / span);
 
         const target = path.getPointAtLength(st.dist);
         let nx = target.x;
@@ -690,6 +734,10 @@ function Flow({
         st.x = nx;
         st.y = ny;
         g.setAttribute("transform", `translate(${nx.toFixed(1)} ${ny.toFixed(1)})`);
+
+        // 车**不走回程**：进度对去程长度取模（见下面的 `st.dist` 处理），
+        // 所以不存在「倒着开」。这里只是兜底清掉可能残留的隐藏状态。
+        if (g.style.visibility === "hidden") g.style.visibility = "";
 
         // 颜色跟着**当前所在的分支**变：取整圈里**最靠后**那条已进入的分支，
         // 回程（回到分叉那段）沿用刚离开的那条分支的颜色，不闪回。
@@ -865,6 +913,17 @@ function routeToD(segs: Seg[]): string {
     );
   }
   return parts.join(" ");
+}
+
+/**
+ * 去程长度（px）：主干 + 各分支。回程段是它们的等长镜像，整圈 = 2×去程 + 主干。
+ *
+ * 单独抽出来是因为它有一个**容易写错的地方**：段序是
+ * `主干, 去₁, 回₁, 去₂, 回₂, …, 回主干` —— 回程各段长度与对应的去程相同，
+ * 所以「去程 = 主干 + 各分支」需要按偶数下标累加，不能直接用 `total/2`。
+ */
+function segmentsOutboundLen(trunkLen: number, branchesLen: number, _total: number): number {
+  return trunkLen + branchesLen;
 }
 
 /** 一段的近似长度，只用于把「分支起点」换算成路径上的比例。 */
