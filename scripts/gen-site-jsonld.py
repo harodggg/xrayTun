@@ -32,7 +32,7 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 
 # 站点绝对基址：**与 gen-site-geo.py 的 BASE 必须一致**。
 # 域名迁移时两处一起改（生成器里各只有一处，产物由脚本重写，别手改产物）。
-BASE = "https://harodggg.github.io/xrayTun"
+BASE = "https://xraytun.top"
 
 XRAYTUN_VERSION = "0.8.26"
 XRAYTUN_DL = f"https://github.com/harodggg/xrayTun/releases/download/v{XRAYTUN_VERSION}/XrayTun_{XRAYTUN_VERSION}_x86_64_arm64.dmg"

@@ -1,44 +1,174 @@
-# XrayTun 官网：内容就是给人（和 AI）读的，所以明确允许抓取。
-# 站点是纯静态 HTML —— 关键内容（下载、安装、FAQ）都在原始响应里，
-# 不需要执行 JavaScript 就能读到。
+# XrayTun 官网 robots.txt —— 由 scripts/gen-site-geo.py 生成；别手改（重跑会覆盖）。
+#
+# 本文件与 Cloudflare 托管段**逐条对齐**（快照 2026-09-20）。原因：
+#   canonical 域名 xraytun.top 由 Cloudflare 托管，其托管策略会**注入在本文件之前**：
+#   线上实测 3984 B = CF 托管段 3259 B + 本文件 725 B（镜像站上只有本文件）。
+#   同一 UA 两边一边 Allow 一边 Disallow 时，谁生效取决于抓取实现 ——
+#   对齐之前线上有 10 个 UA 处于这种矛盾状态，本文件事实上在替训练爬虫开脱。
+#
+# 你在线上文件里看到本行之前的托管段，那是平台注入，**不是文件被篡改**。
+#
+# Cloudflare managed robots.txt **不支持按爬虫例外**（已查证官方文档：只有
+# 「block training」一个总开关，且是 prepend），所以本文件不能替某个爬虫开例外。
+#
+# Baiduspider：本文件**刻意不单列**它。用户希望放行百度，但 CF 托管段对它单独
+#   `Disallow: /`，而 CF managed 开启时无法为它开例外。不单列时我们这份落到
+#   `User-agent: *` = Allow（镜像上百度可抓），canonical 域名上 CF 的更具体规则生效。
+#   要真正放行需在 CF 关闭 managed robots.txt，代价是失去 CF 对训练爬虫的拦截；
+#   该决定待 lead 与用户确认。**不要写成「已放行百度」。**
+#
+# 本文件不写 Content-Signal 行（CF 托管段已提供，两边都写可能不一致）。
 
 User-agent: *
 Allow: /
 
-User-agent: GPTBot
+# ---- 检索与引用类：显式放行（CF 托管段未单列它们，落到其 `*` = Allow，故无矛盾）----
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
 Allow: /
 
 User-agent: OAI-SearchBot
 Allow: /
 
-User-agent: ChatGPT-User
-Allow: /
-
-User-agent: ClaudeBot
-Allow: /
-
-User-agent: Claude-Web
-Allow: /
-
-User-agent: anthropic-ai
-Allow: /
-
 User-agent: PerplexityBot
 Allow: /
 
-User-agent: Google-Extended
+User-agent: DuckDuckBot
 Allow: /
 
-User-agent: CCBot
-Allow: /
+# ---- 训练 / 批量抓取类：显式禁止（逐条取自 CF 托管段；镜像站上这就是全部策略）----
+User-agent: Amazonbot
+Disallow: /
+
+User-agent: Amzn-User
+Disallow: /
 
 User-agent: Applebot-Extended
-Allow: /
+Disallow: /
+
+User-agent: AwarioRssBot
+Disallow: /
+
+User-agent: BorderxBot
+Disallow: /
 
 User-agent: Bytespider
-Allow: /
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: ChatGPT-User
+Disallow: /
+
+User-agent: ChathiveCrawler
+Disallow: /
+
+User-agent: CitibotSiteCrawler
+Disallow: /
+
+User-agent: Claude-User
+Disallow: /
+
+User-agent: Claude-Web
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: Cotoyogi
+Disallow: /
+
+User-agent: Diffbot
+Disallow: /
+
+User-agent: FireCrawl
+Disallow: /
+
+User-agent: FirecrawlAgent
+Disallow: /
+
+User-agent: FishBot
+Disallow: /
+
+User-agent: GPTBot
+Disallow: /
+
+User-agent: Google-Agent
+Disallow: /
+
+User-agent: Google-CloudVertexBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /
+
+User-agent: Google-NotebookLM
+Disallow: /
+
+User-agent: GoogleOther
+Disallow: /
+
+User-agent: ICC-Crawler
+Disallow: /
+
+User-agent: Instapaper
+Disallow: /
+
+User-agent: Kimi-User
+Disallow: /
+
+User-agent: KimiBot
+Disallow: /
+
+User-agent: MistralAI-Training
+Disallow: /
+
+User-agent: MistralAI-User
+Disallow: /
+
+User-agent: NavuBot
+Disallow: /
+
+User-agent: Perplexity-User
+Disallow: /
+
+User-agent: PetalBot
+Disallow: /
+
+User-agent: QualifiedBot
+Disallow: /
+
+User-agent: Retool
+Disallow: /
+
+User-agent: SemrushBot-SWA
+Disallow: /
+
+User-agent: WARDBot
+Disallow: /
+
+User-agent: anthropic-ai
+Disallow: /
+
+User-agent: atlassian-bot
+Disallow: /
+
+User-agent: cohere-ai
+Disallow: /
+
+User-agent: magpie-crawler
+Disallow: /
 
 User-agent: meta-externalagent
-Allow: /
+Disallow: /
 
-Sitemap: https://harodggg.github.io/xrayTun/sitemap.xml
+User-agent: meta-externalfetcher
+Disallow: /
+
+User-agent: omgili
+Disallow: /
+
+Sitemap: https://xraytun.top/sitemap.xml

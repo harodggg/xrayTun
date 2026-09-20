@@ -2,39 +2,39 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
         xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>https://harodggg.github.io/xrayTun/</loc>
+    <loc>https://xraytun.top/</loc>
     <lastmod>2026-09-20</lastmod>
     <changefreq>weekly</changefreq>
     <priority>1.0</priority>
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/"/>
-    <xhtml:link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/"/>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/"/>
   </url>
   <url>
-    <loc>https://harodggg.github.io/xrayTun/en/</loc>
+    <loc>https://xraytun.top/en/</loc>
     <lastmod>2026-09-20</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.9</priority>
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/"/>
-    <xhtml:link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/"/>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/"/>
   </url>
   <url>
-    <loc>https://harodggg.github.io/xrayTun/wasm/</loc>
+    <loc>https://xraytun.top/wasm/</loc>
     <lastmod>2026-09-20</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/wasm/"/>
-    <xhtml:link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/wasm/"/>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/wasm/"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/wasm/"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/wasm/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/wasm/"/>
   </url>
   <url>
-    <loc>https://harodggg.github.io/xrayTun/en/wasm/</loc>
+    <loc>https://xraytun.top/en/wasm/</loc>
     <lastmod>2026-09-20</lastmod>
     <changefreq>weekly</changefreq>
     <priority>0.7</priority>
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://harodggg.github.io/xrayTun/wasm/"/>
-    <xhtml:link rel="alternate" hreflang="en" href="https://harodggg.github.io/xrayTun/en/wasm/"/>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://harodggg.github.io/xrayTun/wasm/"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/wasm/"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/wasm/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/wasm/"/>
   </url>
 </urlset>

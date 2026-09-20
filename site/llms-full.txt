@@ -1,6 +1,6 @@
 # XrayTun — 全文（llms-full.txt）
 
-> 站点：https://harodggg.github.io/xrayTun/ ｜ 版本：v0.8.26（2026-09-20）｜ 生成方式：由页面 HTML 直接转换，
+> 站点：https://xraytun.top/ ｜ 版本：v0.8.26（2026-09-20）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
 > 结构化数据见各页面 `<head>` 里的 JSON-LD（SoftwareApplication + FAQPage）。
 >
@@ -16,10 +16,10 @@
 
 收录页面（4 个，中英各 2）：
 
-- 中文：XrayTun 主页面 → https://harodggg.github.io/xrayTun/
-- 中文：xray-wasm（同一作者的另一个项目） → https://harodggg.github.io/xrayTun/wasm/
-- English: XrayTun home → https://harodggg.github.io/xrayTun/en/
-- English: xray-wasm (a separate project by the same author) → https://harodggg.github.io/xrayTun/en/wasm/
+- 中文：XrayTun 主页面 → https://xraytun.top/
+- 中文：xray-wasm（同一作者的另一个项目） → https://xraytun.top/wasm/
+- English: XrayTun home → https://xraytun.top/en/
+- English: xray-wasm (a separate project by the same author) → https://xraytun.top/en/wasm/
 
 ---
 
@@ -28,7 +28,7 @@
 
 # 中文：XrayTun 主页面
 
-来源：https://harodggg.github.io/xrayTun/
+来源：https://xraytun.top/
 
 # XrayTun：macOS 上的 Xray 图形客户端，用原生 TUN 模式接管系统流量
 
@@ -312,7 +312,7 @@ xattr -d com.apple.quarantine /Applications/XrayTun.app
 
 # 中文：xray-wasm（同一作者的另一个项目）
 
-来源：https://harodggg.github.io/xrayTun/wasm/
+来源：https://xraytun.top/wasm/
 
 # xray-wasm：把 Xray 的 VLESS + XTLS-Vision + REALITY 协议栈用纯 Rust 重写，编译成 WebAssembly 跑真实 TCP 代理
 
@@ -462,7 +462,7 @@ docker run --rm -p 8443:8443 \
 
 # English: XrayTun home
 
-来源：https://harodggg.github.io/xrayTun/en/
+来源：https://xraytun.top/en/
 
 # XrayTun: an Xray GUI client for macOS that takes over system traffic with native TUN mode
 
@@ -745,7 +745,7 @@ The source is public on GitHub and released under the **MIT** licence: the repos
 
 # English: xray-wasm (a separate project by the same author)
 
-来源：https://harodggg.github.io/xrayTun/en/wasm/
+来源：https://xraytun.top/en/wasm/
 
 # xray-wasm: Xray's VLESS + XTLS-Vision + REALITY protocol stack rewritten in pure Rust, compiled to WebAssembly, running a real TCP proxy
 

@@ -7,15 +7,15 @@
 
 ## 官网
 
-- [中文站（完整正文）](https://harodggg.github.io/xrayTun/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
-- [English site (equivalent content)](https://harodggg.github.io/xrayTun/en/)：与中文站逐段等价，不是半份翻译
-- [本站全文（供一次性摄取）](https://harodggg.github.io/xrayTun/llms-full.txt)：官网所有页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
+- [中文站（完整正文）](https://xraytun.top/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
+- [English site (equivalent content)](https://xraytun.top/en/)：与中文站逐段等价，不是半份翻译
+- [本站全文（供一次性摄取）](https://xraytun.top/llms-full.txt)：官网所有页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
 
 ## 相关项目：xray-wasm（**独立项目，XrayTun 不使用它**）
 
-- [xray-wasm 页面（中文）](https://harodggg.github.io/xrayTun/wasm/)：把 Xray 的 VLESS + XTLS-Vision + REALITY 协议栈用**纯 Rust** 重写，
+- [xray-wasm 页面（中文）](https://xraytun.top/wasm/)：把 Xray 的 VLESS + XTLS-Vision + REALITY 协议栈用**纯 Rust** 重写，
   编译成 **wasm32-wasip2**，在 **wasmtime** 下跑真实 TCP 代理；客户端与服务端两个方向都已实现
-- [xray-wasm page (English)](https://harodggg.github.io/xrayTun/en/wasm/)：与中文页逐段等价
+- [xray-wasm page (English)](https://xraytun.top/en/wasm/)：与中文页逐段等价
 - [xray-wasm 仓库](https://github.com/harodggg/xray-wasm)（**另一个仓库**，不是本仓库的子目录）
 
 ## 下载

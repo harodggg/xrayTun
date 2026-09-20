@@ -15,25 +15,92 @@ from pathlib import Path
 # （早先它在仓库外的 .scratch/ 里，那时是 parents[1]/"xray-tun"/"site" ——
 #  那样脚本不可持续：.scratch/ 是 gitignore 的，别人拿不到它。）
 SITE = Path(__file__).resolve().parents[1] / "site"
-BASE = "https://harodggg.github.io/xrayTun"
+# 站点绝对基址：**与 gen-site-jsonld.py 的 BASE 必须一致**。
+# 域名迁移时两处一起改（生成器里各只有一处；产物由脚本重写，别手改产物）。
+BASE = "https://xraytun.top"
 LAST_PUB = "2026-09-20"
 VERSION = "0.8.26"
 DL = f"https://github.com/harodggg/xrayTun/releases/download/v{VERSION}"
 
-AI_BOTS = [
-    "GPTBot",
+# robots.txt 的两组 UA —— **与 Cloudflare 托管段逐条对齐**（原因见 write_robots 的注释）。
+#
+# 检索与引用类：CF 托管段没有单列它们（落到它的 `User-agent: *` → Allow），
+# 所以这里显式放行只是把取向写清楚，不构成矛盾；
+# OAI-SearchBot 与 PerplexityBot 在 CF 段本身就是显式 Allow。
+CITATION_BOTS = [
+    "Googlebot",
+    "Bingbot",
     "OAI-SearchBot",
-    "ChatGPT-User",
-    "ClaudeBot",
-    "Claude-Web",
-    "anthropic-ai",
     "PerplexityBot",
-    "Google-Extended",
-    "CCBot",
-    "Applebot-Extended",
-    "Bytespider",
-    "meta-externalagent",
+    "DuckDuckBot",
 ]
+
+# 训练 / 批量抓取类：**逐条取自 CF 托管段的 `Disallow: /`**。
+# 快照来源：2026-09-20 从 https://xraytun.top/robots.txt 抓下的 3259 字节托管段
+# （线上共 3984 B，其中 725 B 是本文件），解析出 45 个被 CF 单独 Disallow 的 UA。
+#
+# 为什么要在我们这份文件里列全：GitHub Pages 镜像（harodggg.github.io/xrayTun）
+# 与 *.pages.dev 上**没有 CF 注入**，我们这份文件就是完整策略 ——
+# 不列全就会在这些镜像上把训练爬虫放行（改之前正是如此：线上 10 个 UA 一边 Disallow
+# 一边 Allow，等于我们替训练爬虫开脱）。
+#
+# CF 更新名单后需要重新抓取同步；快照日期见下。
+CF_SNAPSHOT = "2026-09-20"
+TRAINING_BOTS = [
+    "Amazonbot",
+    "Amzn-User",
+    "Applebot-Extended",
+    "AwarioRssBot",
+    "Baiduspider",
+    "BorderxBot",
+    "Bytespider",
+    "CCBot",
+    "ChatGPT-User",
+    "ChathiveCrawler",
+    "CitibotSiteCrawler",
+    "Claude-User",
+    "Claude-Web",
+    "ClaudeBot",
+    "Cotoyogi",
+    "Diffbot",
+    "FireCrawl",
+    "FirecrawlAgent",
+    "FishBot",
+    "GPTBot",
+    "Google-Agent",
+    "Google-CloudVertexBot",
+    "Google-Extended",
+    "Google-NotebookLM",
+    "GoogleOther",
+    "ICC-Crawler",
+    "Instapaper",
+    "Kimi-User",
+    "KimiBot",
+    "MistralAI-Training",
+    "MistralAI-User",
+    "NavuBot",
+    "Perplexity-User",
+    "PetalBot",
+    "QualifiedBot",
+    "Retool",
+    "SemrushBot-SWA",
+    "WARDBot",
+    "anthropic-ai",
+    "atlassian-bot",
+    "cohere-ai",
+    "magpie-crawler",
+    "meta-externalagent",
+    "meta-externalfetcher",
+    "omgili",
+]
+
+# 刻意**不在本文件里单列** Baiduspider（它在上面那份 CF 快照里）。
+# 理由：用户希望放行百度，而 CF 托管段对它单独 Disallow。本文件保持沉默 →
+# 我们这份落到 `User-agent: *` = Allow（GitHub 镜像上百度可抓），
+# 而 canonical 域名上 CF 的更具体规则仍然生效 —— 两边都不矛盾。
+# 要让 canonical 域名也放行百度，只能在 CF 关闭 managed robots.txt，代价是失去 CF 对训练爬虫的
+# 拦截；**该决定待 lead 与用户确认，本文件不替用户做这个选择**。
+BAIDU_NOT_LISTED = "Baiduspider"
 
 
 def inline(s: str) -> str:
@@ -87,20 +154,75 @@ def html_to_md(src: str, lang: str) -> str:
 
 
 def write_robots() -> None:
+    """robots.txt：**本站自己完整表达策略**（镜像站上没有任何注入兜底）。
+
+    ## 为什么必须与 Cloudflare 托管段逐条对齐
+
+    canonical 域名 `xraytun.top` 由 Cloudflare 托管，它会把托管策略**注入在我们这份文件之前**
+    （2026-09-20 实测：线上 3984 字节 = CF 托管段 3259 B + 本文件 725 B；
+    GitHub Pages 镜像与 `*.pages.dev` 上只有本文件）。
+    同一 UA、同一路径，两段一边 Allow 一边 Disallow 时**结果取决于抓取实现** ——
+    改之前线上就有 **10 个 UA 处于这种矛盾状态**（Applebot-Extended / Bytespider / CCBot /
+    ChatGPT-User / Claude-Web / ClaudeBot / GPTBot / Google-Extended / anthropic-ai /
+    meta-externalagent），等于我们这份文件在替训练爬虫开脱。现在按 CF 快照逐条对齐。
+
+    ## CF managed robots.txt 不支持按爬虫例外
+
+    已查证 Cloudflare 官方文档：整个功能只有一个总开关
+    （Security Settings → Bot traffic → *Set your preference to block training in robots.txt*），
+    **没有**「把某个爬虫从名单里拿掉」这个选项；而且它是 prepend。
+
+    ## Baiduspider（如实记录，不替用户做决定）
+
+    用户希望放行百度，但 CF 托管段对它单独 `Disallow: /`，而 CF managed 开启时无法为它开例外。
+    所以本文件**不单列** Baiduspider（见 BAIDU_NOT_LISTED 的注释）：我们这份落到
+    `User-agent: *` = Allow（镜像上百度可抓），CF 的更具体规则在 canonical 域名上继续生效。
+    **不要在这里写「已放行百度」** —— 那是未经证实的断言。
+
+    ## Content-Signal
+
+    本文件**不写** `Content-Signal:` 行：CF 托管段已经给了 content signals，两边都写可能不一致。
+    """
     lines = [
-        "# XrayTun 官网：内容就是给人（和 AI）读的，所以明确允许抓取。",
-        "# 站点是纯静态 HTML —— 关键内容（下载、安装、FAQ）都在原始响应里，",
-        "# 不需要执行 JavaScript 就能读到。",
+        "# XrayTun 官网 robots.txt —— 由 scripts/gen-site-geo.py 生成；别手改（重跑会覆盖）。",
+        "#",
+        f"# 本文件与 Cloudflare 托管段**逐条对齐**（快照 {CF_SNAPSHOT}）。原因：",
+        "#   canonical 域名 xraytun.top 由 Cloudflare 托管，其托管策略会**注入在本文件之前**：",
+        "#   线上实测 3984 B = CF 托管段 3259 B + 本文件 725 B（镜像站上只有本文件）。",
+        "#   同一 UA 两边一边 Allow 一边 Disallow 时，谁生效取决于抓取实现 ——",
+        "#   对齐之前线上有 10 个 UA 处于这种矛盾状态，本文件事实上在替训练爬虫开脱。",
+        "#",
+        "# 你在线上文件里看到本行之前的托管段，那是平台注入，**不是文件被篡改**。",
+        "#",
+        "# Cloudflare managed robots.txt **不支持按爬虫例外**（已查证官方文档：只有",
+        "# 「block training」一个总开关，且是 prepend），所以本文件不能替某个爬虫开例外。",
+        "#",
+        "# Baiduspider：本文件**刻意不单列**它。用户希望放行百度，但 CF 托管段对它单独",
+        "#   `Disallow: /`，而 CF managed 开启时无法为它开例外。不单列时我们这份落到",
+        "#   `User-agent: *` = Allow（镜像上百度可抓），canonical 域名上 CF 的更具体规则生效。",
+        "#   要真正放行需在 CF 关闭 managed robots.txt，代价是失去 CF 对训练爬虫的拦截；",
+        "#   该决定待 lead 与用户确认。**不要写成「已放行百度」。**",
+        "#",
+        "# 本文件不写 Content-Signal 行（CF 托管段已提供，两边都写可能不一致）。",
         "",
         "User-agent: *",
         "Allow: /",
         "",
+        "# ---- 检索与引用类：显式放行（CF 托管段未单列它们，落到其 `*` = Allow，故无矛盾）----",
     ]
-    for bot in AI_BOTS:
+    for bot in CITATION_BOTS:
         lines += [f"User-agent: {bot}", "Allow: /", ""]
+    lines += ["# ---- 训练 / 批量抓取类：显式禁止（逐条取自 CF 托管段；镜像站上这就是全部策略）----"]
+    for bot in TRAINING_BOTS:
+        if bot == BAIDU_NOT_LISTED:
+            continue  # 见 BAIDU_NOT_LISTED 的注释：保持沉默，避免与 CF 打架
+        lines += [f"User-agent: {bot}", "Disallow: /", ""]
     lines += [f"Sitemap: {BASE}/sitemap.xml", ""]
     (SITE / "robots.txt").write_text("\n".join(lines), encoding="utf-8")
-    print("  写出 robots.txt：显式允许", len(AI_BOTS), "个 AI 爬虫")
+    print(
+        f"  写出 robots.txt：`*` 放行 + 显式放行 {len(CITATION_BOTS)} 个检索/引用类 + "
+        f"显式禁止 {len(TRAINING_BOTS) - 1} 个训练/抓取类（Baiduspider 按注释刻意不列）"
+    )
 
 
 def write_sitemap() -> None:
