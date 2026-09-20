@@ -82,6 +82,41 @@ npm --prefix apps/ui run dev     # 另开一个终端
 cargo run -p xraytun-desktop
 ```
 
+## 安装（普通用户）
+
+从 [Releases](https://github.com/harodggg/xrayTun/releases) 下载 `XrayTun_<版本>_<架构>.dmg`
+（或同名 `.zip`），把 `XrayTun.app` 拖进「应用程序」。
+
+**不需要自己安装 Xray 核心**：核心与规则数据随包附带，开箱即用 ——
+`Contents/Resources/{xray, geoip.dat, geosite.dat}`。不用另外下载 Xray，
+也不用配 `XRAY_LOCATION_ASSET`。
+
+首次打开会被 Gatekeeper 拦下（这个包是 **ad-hoc 签名、未公证**的）。
+**放行方式按 macOS 版本分**：
+
+* **macOS 15 及以上**：右键「打开」**已被 Apple 移除**（2024-08-06 公告）。
+  先双击一次让它被拦下，再打开「系统设置 → 隐私与安全性」，在「安全性」区域找到
+  关于 XrayTun 的提示，点「仍要打开」，然后确认。
+* **macOS 14 及更早**：在「应用程序」里右键（或 Control-点击）`XrayTun.app` →「打开」，
+  在弹窗里再点一次「打开」。
+* **终端（两个版本都适用）**：
+
+  ```bash
+  # 逐文件清掉这个 App 的 quarantine
+  find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
+  ```
+
+  ⚠️ 两个坑都是本机 macOS 26.6.2 实测的，照旧写法做会失败：
+
+  * 这台 macOS 的 `xattr` **没有 `-r`**：`xattr -dr` 与 `xattr -cr` 都以
+    `option -r not recognized`（exit 64）失败 —— 看起来像清掉了，其实没有；
+  * `xattr -d com.apple.quarantine /Applications/XrayTun.app`（只给 bundle 根路径）
+    **只会清掉根上那一个**：实测 13 个带 quarantine 的文件里还剩 **12 个**，
+    所以要像上面那样逐文件清。`xattr -c` 同理（对目录不递归）。
+
+TUN 模式还需要装一次特权 helper：侧栏「设置」→「特权助手（helper）」→
+「安装 helper」（会弹一次管理员密码）。**系统代理模式不需要它。**
+
 ## 打包 macOS 发行版
 
 ```bash
@@ -100,11 +135,8 @@ cargo run -p xraytun-desktop
   取的是核心二进制的父目录。放错位置不会报错，只会让 `geoip:cn` /
   `geosite:cn` 规则**静默不命中**，「绕过大陆」预设看起来完全没生效。
 
-包是 **ad-hoc 签名**、未公证的，别人下载后 Gatekeeper 会拦，需要右键「打开」：
-
-```bash
-xattr -dr com.apple.quarantine /Applications/XrayTun.app
-```
+包是 **ad-hoc 签名**、未公证的：用户首次打开会被 Gatekeeper 拦，
+放行方式见上面的 [安装（普通用户）](#安装普通用户)。
 
 正式分发需要付费开发者账号，用 Developer ID 重签并 `notarytool` 公证。
 

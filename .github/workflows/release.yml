@@ -125,7 +125,19 @@ jobs:
             esac
           done
 
-          codesign --verify --verbose=1 "$APP"
+          # **必须带 --strict。**
+          #
+          # 非严格的 `codesign --verify` 会放过带 `com.apple.FinderInfo` 的二进制：
+          # v0.8.26 的产物里 App 的 13 个文件（含 `Contents/MacOS/xraytun-helper`
+          # 与 `xraytun-desktop`）全都带着它，而这一行用的是非严格校验 →
+          # 一直显示成功。实测：
+          #   codesign --verify --verbose=1  → exit 0
+          #   codesign --verify --strict     → exit 1
+          #     "resource fork, Finder information, or similar detritus not allowed"
+          #     "Disallowed xattr com.apple.FinderInfo found on .../xraytun-helper"
+          # 现在它不阻塞启动，但**公证与 Developer ID 分发必然被挡住**。
+          # 清 xattr 的动作在 `scripts/package-macos.sh` 签名之前（逐文件，见该脚本）。
+          codesign --verify --strict --verbose=1 "$APP"
 
       - name: 收集产物
         id: collect
@@ -160,11 +172,34 @@ jobs:
           ## 安装
 
           1. 下载 `.dmg` 或 `.zip`，把 `XrayTun.app` 拖进「应用程序」
-          2. 首次打开会被 Gatekeeper 拦下（见下），右键 →「打开」，或：
+          2. 首次打开会被 Gatekeeper 拦下（这个包是 **ad-hoc 签名、未公证**的）。
+             按你的 macOS 版本选一条放行方式：
+
+             **macOS 15 及以上**：右键「打开」**已被 Apple 移除**（2024-08-06 公告）。
+             先双击一次让它被拦下，再打开「系统设置 → 隐私与安全性」，
+             在「安全性」区域找到关于 XrayTun 的提示，点「仍要打开」，然后确认。
+
+             **macOS 14 及更早**：在「应用程序」里右键（或 Control-点击）
+             `XrayTun.app` →「打开」，在弹窗里再点一次「打开」。
+
+             **终端（两个版本都适用）**：
              ```bash
-             xattr -dr com.apple.quarantine /Applications/XrayTun.app
+             find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
              ```
-          3. 打开后到「设置」里安装特权 helper（需要一次管理员密码），TUN 模式才能用
+             两个实测过的坑：这台 macOS 的 `xattr` **没有 `-r`**，`xattr -dr` /
+             `xattr -cr` 都会以 `option -r not recognized`（exit 64）失败；
+             而只给 bundle 根路径的
+             `xattr -d com.apple.quarantine /Applications/XrayTun.app`
+             只清掉根上那一个（实测 13 个里还剩 12 个），所以要逐文件清。
+
+          3. 打开后：侧栏「设置」→「特权助手（helper）」→点「安装 helper」
+             （会弹一次管理员密码）。**只有 TUN 模式需要它**，系统代理模式不需要。
+
+          ## 不需要自己安装 Xray 核心
+
+          核心与规则数据**随包附带**，开箱即用：
+          `Contents/Resources/{xray, geoip.dat, geosite.dat}`。
+          不用另外下载 Xray，也不用配 `XRAY_LOCATION_ASSET`。
 
           ## 关于 Gatekeeper
 

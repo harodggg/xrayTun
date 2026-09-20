@@ -27,9 +27,20 @@
 #
 # 这里只做 **ad-hoc 签名**（`codesign -s -`）。它能保证 App 在本机
 # 完整性校验通过；但因为不是 Developer ID 签名，也没有公证（notarize），
-# 别人从网上下载后 Gatekeeper 仍会拦截，需要右键「打开」或：
+# 别人从网上下载后 Gatekeeper 仍会拦截。放行方式**按 macOS 版本分**：
 #
-#   xattr -dr com.apple.quarantine /Applications/XrayTun.app
+#   * macOS 15 及以上：右键「打开」**已被 Apple 移除**（2024-08-06 公告），
+#     只能去「系统设置 → 隐私与安全性」里对被拦的 App 点「仍要打开」；
+#   * macOS 14 及更早：右键（或 Control-点击）→「打开」；
+#   * 终端（两者皆可）：逐文件清 quarantine（macOS 的 xattr 没有 -r）：
+#       find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
+#
+# ⚠️ 这里**必须**逐文件清，两个坑都是本机（macOS 26.6.2）实测的：
+#   * `xattr -dr` / `xattr -cr` 会以 exit 64 失败并打印 `option -r not recognized`
+#     （这台 macOS 的 xattr 用法里根本没有 -r）；
+#   * 只给 bundle 根路径的 `xattr -d com.apple.quarantine /Applications/XrayTun.app`
+#     只清掉根上那一个 —— 实测 13 个带 quarantine 的文件里还剩 12 个。
+# README 与 Release Notes 里的说法必须与这里一致。
 #
 # 要真正免打扰分发，必须有付费开发者账号，然后：
 #   codesign --deep --force --options runtime --sign "Developer ID Application: ..." \
@@ -200,8 +211,26 @@ fi
 
 # 未签名的话，本机 macOS 也可能拒绝启动（尤其带 helper 安装流程时）。
 # ad-hoc 签名不解决分发问题，但能让本机跑起来。
+#
+# **签名前必须先清掉多余 xattr。** v0.8.26 的真实产物里，App 的 **13 个文件**
+# （含 `Contents/MacOS/xraytun-helper`、`xraytun-desktop`、`Resources/xray`）
+# 全都带着 `com.apple.FinderInfo`，于是：
+#
+#   codesign --verify --verbose=1  → 通过（CI 一直在用这条，所以从没发现）
+#   codesign --verify --strict     → **失败**：
+#     "resource fork, Finder information, or similar detritus not allowed"
+#     "Disallowed xattr com.apple.FinderInfo found on .../xraytun-helper"
+#
+# 现在不阻塞启动，但**公证与 Developer ID 分发一定会被挡住**，而且是非严格
+# 校验看不见的静默失效。所以这里逐文件清掉（macOS 的 `xattr -c` 不递归，
+# 且没有 `-r`，不能用 `xattr -cr`）。
+#
+# 清完 `com.apple.provenance` 可能仍在（系统加的、不可删），但 codesign
+# 容忍它 —— 实测上述 13 个 FinderInfo 清掉后 `--strict` 即通过。
+find "$APP" -exec xattr -c {} + 2>/dev/null || true
+
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 \
-  && echo "  ✓ 已 ad-hoc 签名" \
+  && echo "  ✓ 已 ad-hoc 签名（签名前已逐文件清 xattr）" \
   || { echo "  ⚠ ad-hoc 签名失败（本机仍可能能用）" >&2; }
 
 # 产物名里的架构必须取**主程序真实的架构**，而不是 `uname -m`。
@@ -219,9 +248,17 @@ echo "  · App 架构 $APP_ARCH / 核心架构 ${CORE_ARCH:-未知}"
 # 它内部要把临时镜像**挂载**起来才能拷文件，而在没有图形会话、
 # 或设备挂载被禁止的环境里必定失败，报错还只有一句
 # `hdiutil: create failed - 目录非空`，完全指不到真正的原因。
-# 改成两步，全程不挂载：
+# 改成两步，先不挂载：
 #   1. makehybrid 直接从目录生成 HFS 镜像
 #   2. convert 把它压成 UDZO
+#
+# ⚠️ 但 HFS 这一步会**给镜像里每个文件写 `com.apple.FinderInfo`**，即使源目录
+# 一个 xattr 都没有 —— 实测同一份干净源目录：
+#     makehybrid -hfs    → 挂载后每个文件都带 FinderInfo，`codesign --verify --strict` 失败
+#     ditto -c -k (zip)  → 解出来干净，`--strict` 通过
+# 所以「签名前清 xattr」只能保证**构建树里的 .app**干净（CI 校验的是它），
+# 用户从 dmg 装出来的 App 仍会带 FinderInfo。要在**交付物**上也干净，必须对
+# 可写镜像再清一次：makehybrid(UDRW) → 挂载 RW → 逐文件 xattr -c → 卸载 → 转 UDZO。
 DMG_DIR="$RELEASE_DIR/bundle/dmg"
 # **先清空。** 这个目录会被 CI 的 cargo 缓存带着跨版本存活，而收集步骤是
 # `cp *.dmg *.zip` —— 不清的话上一版的包会被一起打进这一版的 Release。
@@ -232,7 +269,8 @@ mkdir -p "$DMG_DIR"
 mkdir -p "$DMG_DIR"
 DMG="$DMG_DIR/XrayTun_${APP_VERSION}_$APP_ARCH.dmg"
 RAW="$DMG_DIR/.xraytun-raw.dmg"
-rm -f "$DMG" "$RAW"
+RW="$DMG_DIR/.xraytun-rw.dmg"
+rm -f "$DMG" "$RAW" "$RW"
 # 必须先搭一个**暂存目录**，且这个目录里要放 .app 本身。
 #
 # `makehybrid -srcfolder <dir>` 是把 dir 的**内容**当作镜像根目录。
@@ -247,12 +285,58 @@ cp -R "$APP" "$STAGE/XrayTun.app"
 # 没有它，用户面对一个孤零零的 .app 只能自己猜该放哪。
 ln -s /Applications "$STAGE/Applications"
 
-if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$STAGE" \
-   && hdiutil convert -quiet "$RAW" -format UDZO -o "$DMG"; then
-  rm -f "$RAW"
-  echo "  ✓ 已生成 dmg（含 helper 与 /Applications 快捷方式）"
+# 造镜像 → 在可写镜像里逐文件清 `com.apple.FinderInfo` → 转 UDZO。
+#
+# 为什么不能只靠「签名前清一次」：见上面那段 —— makehybrid 的 HFS 文件系统
+# 会给镜像内每个文件补 FinderInfo。这里多挂载一次正是为了把它清掉。
+# （本脚本后面本来就会挂载镜像做交付前实检，所以挂载不是新增的环境要求；
+#   挂不上时退化为旧行为，但在 CI 里按**错误**处理，不再静默发出带 detritus 的 dmg。）
+CLEANED=0
+if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$STAGE"; then
+  RMNT="$(mktemp -d)"
+  if hdiutil convert -quiet "$RAW" -format UDRW -o "$RW" \
+     && hdiutil attach -nobrowse -mountpoint "$RMNT" "$RW" >/dev/null 2>&1; then
+    # 逐文件：这台 macOS 的 `xattr` **没有 -r**，而且 `-c` 对目录不递归，
+    # 所以 `xattr -cr` / `xattr -c <目录>` 都不行（前者还会 exit 64）。
+    find "$RMNT" -exec xattr -c {} + 2>/dev/null || true
+    hdiutil detach "$RMNT" >/dev/null 2>&1 || hdiutil detach "$RMNT" -force >/dev/null 2>&1 || true
+    CLEANED=1
+  fi
+  rmdir "$RMNT" 2>/dev/null || true
+
+  if [ "$CLEANED" != "1" ]; then
+    echo "  ⚠ 本环境无法挂载可写镜像 → dmg 内仍会带 com.apple.FinderInfo（用户装出来的 App 严格校验会失败）" >&2
+    # **CI 下宁可失败，也不放过。**
+    #
+    # 这不是「环境挑剔」，而是取舍：清不掉 = **无法验证交付物**；而「无法验证时放行」
+    # 正是本项目反复踩的那一类坑（`$arg（` 未定义、`xattr -dr` 不存在、探针看不见 B1、
+    # `codesign --verify` 不带 `--strict`）—— 全是「看起来做了、其实没做」。
+    #
+    # GitHub 的 macOS runner 有完整的 hdiutil 与挂载能力，所以正常 CI 不会误伤；
+    # 万一将来遇到挂载受限的环境，**失败是诚实的输出**：那时应该改流程，
+    # 而不是把这条去掉让 CI 变绿。
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+      echo "  ✗ CI 下不再静默发出这种 dmg（zip 那条路不受影响）" >&2
+      fail=1
+    fi
+  fi
+
+  SRC_IMG="$RAW"
+  [ "$CLEANED" = "1" ] && SRC_IMG="$RW"
+  if hdiutil convert -quiet "$SRC_IMG" -format UDZO -o "$DMG"; then
+    rm -f "$RAW" "$RW"
+    if [ "$CLEANED" = "1" ]; then
+      echo "  ✓ 已生成 dmg（含 helper 与 /Applications 快捷方式；已逐文件清 xattr）"
+    else
+      echo "  ✓ 已生成 dmg（含 helper 与 /Applications 快捷方式；⚠ 未清 xattr）"
+    fi
+  else
+    rm -f "$RAW" "$RW"
+    DMG=""
+    echo "  ⚠ 打 dmg 失败（本环境可能禁止挂载镜像），.app 仍然可用" >&2
+  fi
 else
-  rm -f "$RAW"
+  rm -f "$RAW" "$RW"
   DMG=""
   echo "  ⚠ 打 dmg 失败（本环境可能禁止挂载镜像），.app 仍然可用" >&2
 fi
@@ -277,6 +361,17 @@ if [ -n "$DMG" ] && [ -f "$DMG" ]; then
     else
       echo "  ✗ 缺 /Applications 快捷方式（用户不知道往哪拖）" >&2
       fail=1
+    fi
+    # 镜像里的 App 必须是「严格校验能过」的：HFS 会给每个文件补
+    # com.apple.FinderInfo，只清构建树里的 .app 是挡不住它的。
+    if [ -e "$MP/XrayTun.app" ]; then
+      if codesign --verify --strict "$MP/XrayTun.app" >/dev/null 2>&1; then
+        echo "  ✓ 镜像内 App 的 codesign --strict 校验通过"
+      else
+        echo "  ✗ 镜像内 App 未通过 codesign --strict（多半又带上了 com.apple.FinderInfo）" >&2
+        codesign --verify --strict --verbose=1 "$MP/XrayTun.app" 2>&1 | head -3 >&2 || true
+        fail=1
+      fi
     fi
     hdiutil detach "$MP" >/dev/null 2>&1 || hdiutil detach "$MP" -force >/dev/null 2>&1 || true
   else
@@ -308,9 +403,13 @@ cat <<EOF
   ZIP : ${ZIP:-（生成失败）}
 
 注意：这是 **ad-hoc 签名**的包，没有公证。别人下载后 Gatekeeper 会拦，
-需要右键「打开」，或者：
+放行方式**按 macOS 版本分**（详见 README「安装（普通用户）」）：
 
-  xattr -dr com.apple.quarantine /Applications/XrayTun.app
+  * macOS 15+：右键「打开」已被 Apple 移除，去「系统设置 → 隐私与安全性」
+    对被拦的 App 点「仍要打开」；
+  * macOS 14-：右键（或 Control-点击）→「打开」；
+  * 终端（都适用）：xattr -d com.apple.quarantine /Applications/XrayTun.app
+    （**不是** `xattr -dr`：这台 macOS 的 xattr 没有 -r，会 exit 64）
 
 架构：App 是 ${APP_ARCH}，核心是 ${CORE_ARCH:-未知}。
 两者不一致时（本机就是：x86_64 的 App + arm64 的核心），
