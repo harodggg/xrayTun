@@ -172,12 +172,13 @@ def write_robots() -> None:
     （Security Settings → Bot traffic → *Set your preference to block training in robots.txt*），
     **没有**「把某个爬虫从名单里拿掉」这个选项；而且它是 prepend。
 
-    ## Baiduspider（如实记录，不替用户做决定）
+    ## Baiduspider（已裁决：保持 CF managed，本文件不单列）
 
-    用户希望放行百度，但 CF 托管段对它单独 `Disallow: /`，而 CF managed 开启时无法为它开例外。
-    所以本文件**不单列** Baiduspider（见 BAIDU_NOT_LISTED 的注释）：我们这份落到
-    `User-agent: *` = Allow（镜像上百度可抓），CF 的更具体规则在 canonical 域名上继续生效。
-    **不要在这里写「已放行百度」** —— 那是未经证实的断言。
+    用户已裁决（选 A）：**保持 Cloudflare managed robots.txt 开启**，本文件与托管段逐条对齐。
+    因此 Baiduspider 继续被 CF 托管段拦截 —— 这是该裁决的**已知限制（known limitation）**，
+    不是本文件的遗漏。本文件不单列它（见 BAIDU_NOT_LISTED 的注释）。
+    **不要在这里写「已放行百度」** —— 那是不成立的断言；唯一放行办法是在 CF 关闭 managed
+    robots.txt，代价是失去 CF 对训练爬虫的拦截。
 
     ## Content-Signal
 
@@ -197,11 +198,12 @@ def write_robots() -> None:
         "# Cloudflare managed robots.txt **不支持按爬虫例外**（已查证官方文档：只有",
         "# 「block training」一个总开关，且是 prepend），所以本文件不能替某个爬虫开例外。",
         "#",
-        "# Baiduspider：本文件**刻意不单列**它。用户希望放行百度，但 CF 托管段对它单独",
-        "#   `Disallow: /`，而 CF managed 开启时无法为它开例外。不单列时我们这份落到",
-        "#   `User-agent: *` = Allow（镜像上百度可抓），canonical 域名上 CF 的更具体规则生效。",
-        "#   要真正放行需在 CF 关闭 managed robots.txt，代价是失去 CF 对训练爬虫的拦截；",
-        "#   该决定待 lead 与用户确认。**不要写成「已放行百度」。**",
+        "# Baiduspider：本文件**刻意不单列**它 —— known limitation，不是本文件的遗漏。",
+        "#   用户已裁决（选 A）：保持 CF managed robots.txt 开启，本文件与托管段逐条对齐；",
+        "#   因此 Baiduspider 继续被 CF 托管段拦截，这是该裁决的已知代价。",
+        "#   不单列时我们这份落到 `User-agent: *` = Allow（GitHub 镜像与 pages.dev 上百度可抓），",
+        "#   canonical 域名上 CF 的更具体规则生效。唯一放行办法是在 CF 关闭 managed robots.txt，",
+        "#   代价是失去 CF 对训练爬虫的拦截。**不要写成「已放行百度」。**",
         "#",
         "# 本文件不写 Content-Signal 行（CF 托管段已提供，两边都写可能不一致）。",
         "",
