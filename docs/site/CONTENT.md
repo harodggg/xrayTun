@@ -52,7 +52,7 @@
 | F34 | 日志/诊断报告在**后端脱敏**：订阅 URL 只留 host、UUID 替换成 `<uuid>` | `docs/05 §3.5`；`apps/desktop/src/commands/diagnostics.rs` |
 | F35 | 日志里**不会出现完整订阅 URL**（含 token） | `Subscriptions.tsx` 页面说明；`docs/05 §3.3` |
 | F36 | 地球仪的位置查询会把被查的 IP 发给**第三方**（`ipwho.is` 与 `ip-api.com`） | `crates/xt-core/src/geo_lookup.rs`；`docs/05 §3.8` |
-| F37 | **仓库当前没有 LICENSE 文件**（`Cargo.toml` 里 `license = "MIT"`，但 GitHub 的 license 识别为空） | `ls LICENSE*` 无输出；`Cargo.toml:15`；`docs/site/INTERACTION.md` §0 |
+| F37 | 仓库**已附带 `LICENSE`（MIT，版权 harodggg 2026）**，与 `Cargo.toml:15` 的 `license = "MIT"` 名实相符（2026-09-20 补上，commit `12c523d`） | `LICENSE` 文件存在；`Cargo.toml:15` |
 | F38 | 分发的 Xray-core 采用 **MPL-2.0**，以独立进程调用、不构成衍生作品 | `docs/07 §4.1` |
 | F39 | 仅 macOS：**没有 Windows / Linux / 移动端** | `tauri.conf.json` bundle 只产出 macOS 包；`README.md` 打包脚本 |
 | F40 | 界面语言目前只有**中文**；规则可视化编辑、节点分组、浅色主题**未实现** | `docs/05 §9 尚未实现` |
@@ -61,7 +61,7 @@
 
 * 不许写「自动配置 macOS 系统代理」——`系统代理` 模式不写系统代理设置（F16）。
 * 不许写「每条连接用了多少流量 / 持续多久」——上游没有（F31）。
-* 不许写「MIT 许可 / MIT 开源」——仓库没有 LICENSE 文件（F37）；可以写「源码公开」。
+* **XrayTun 自身是 MIT**（仓库有 `LICENSE`，F37）——不许再写「许可证未声明」；但**不许把随包分发的 Xray-core 说成 MIT**，它是 MPL-2.0（F38）。
 * 不许写「已签名 / 已公证 / 安装无提示」——恰恰相反（F9/F10）。
 * 不许写「加速 / 解锁流媒体 / 免费节点 / 突破封锁」这类**本产品不提供也不承诺**的效果。
 * 不许写「不需要管理员权限」——首次装 helper 要一次管理员密码（F33）。
@@ -144,7 +144,7 @@
 | 处理器 | Apple Silicon 与 Intel，通用包（arm64 + x86_64） |
 | 安装包 | dmg 44.9 MiB（47,128,987 字节） |
 | Xray 核心 | **包内自带**（构建使用 Xray-core v26.9.9），不需要另外安装 |
-| 价格/授权 | 源码公开在 GitHub；许可证状态见 `#links`（**尚未附 LICENSE 文件**） |
+| 价格/授权 | 源码公开在 GitHub，以 **MIT** 许可发布（仓库有 `LICENSE`，见 `#links`） |
 
 ### 2.2 `#why` — 它解决什么问题
 
@@ -379,10 +379,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 > 因此它能防「下载损坏」，但防不了「上游被替换」。真正的签名 + 公证需要 Developer ID 证书。
 
 **XrayTun 的许可证是什么？**
-> 源码在 GitHub 上公开。需要如实说明：仓库的 `Cargo.toml` 里写的是 `license = "MIT"`，
-> 但**截至 v0.8.26 仓库还没有附带 LICENSE 文件**，所以请不要把它当作已声明 MIT 许可的软件使用；
-> 在补上 LICENSE 之前请按「许可证未声明」对待。随包分发的 Xray-core 采用 MPL-2.0 许可
-> （以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库。
+> 源码在 GitHub 上公开，并以 **MIT** 许可发布：仓库里有 `LICENSE` 文件，
+> `Cargo.toml` 也声明 `license = "MIT"`（许可证文件见 `#links`）。
+> 随包分发的 Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），
+> 其许可证见 Xray-core 官方仓库；`geoip.dat` / `geosite.dat` 随其上游项目发布。
 
 ### 2.7 `#links` — 链接
 
@@ -397,9 +397,9 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | 给 AI 的站点摘要 | `https://harodggg.github.io/xrayTun/llms.txt`（task-21 产出） |
 
 **页脚许可证声明（中文）**
-> 本页内容与 XrayTun 源码公开在 GitHub。XrayTun 仓库的 `Cargo.toml` 声明 `license = "MIT"`，
-> 但截至 v0.8.26 尚未附带 LICENSE 文件，因此我们不把它表述为 MIT 许可软件。
-> 随包分发的 Xray-core 为 MPL-2.0，其许可证随 Xray-core 项目分发。
+> 本页内容与 XrayTun 源码公开在 GitHub。XrayTun 以 **MIT** 许可发布
+> （仓库有 `LICENSE`，`Cargo.toml` 亦声明 `license = "MIT"`）。随包分发的 Xray-core 为 MPL-2.0，
+> 其许可证随 Xray-core 项目分发；`geoip.dat` / `geosite.dat` 随其上游项目发布。
 
 ---
 
@@ -441,7 +441,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | CPU | Apple Silicon and Intel, one universal build (arm64 + x86_64) |
 | Download | dmg, 44.9 MiB (47,128,987 bytes) |
 | Xray core | **Included in the app** (Xray-core v26.9.9 in this build); you do not install Xray yourself |
-| License | Source is public on GitHub; see `#links` (**no LICENSE file in the repo yet**) |
+| License | Source is public on GitHub, released under **MIT** (a `LICENSE` file is in the repository; see `#links`) |
 
 ### 3.2 `#why`
 
@@ -698,11 +698,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 > compromised upstream. Real signing and notarization require a Developer ID certificate.
 
 **What licence does XrayTun use?**
-> The source is public on GitHub. To be explicit: the repository's `Cargo.toml` declares
-> `license = "MIT"`, but **as of v0.8.26 the repository contains no LICENSE file**, so please do not
-> treat XrayTun as MIT-licensed software; until a LICENSE file is added, treat the licence as
-> undeclared. The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate process, not a
-> derivative work); see the Xray-core repository for its licence.
+> The source is public on GitHub and released under the **MIT** licence: the repository contains a
+> `LICENSE` file and `Cargo.toml` declares `license = "MIT"` (see `#links`). The bundled Xray-core is
+> licensed under MPL-2.0 (invoked as a separate process, not a derivative work); see the Xray-core
+> repository for its licence, and `geoip.dat` / `geosite.dat` ship with their upstream project.
 
 ### 3.7 `#links` and footer
 
@@ -717,10 +716,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | AI summary for this site | `https://harodggg.github.io/xrayTun/llms.txt` (produced by task-21) |
 
 **Footer licence statement (English)**
-> The site content and the XrayTun source are public on GitHub. The XrayTun repository's `Cargo.toml`
-> declares `license = "MIT"`, but as of v0.8.26 no LICENSE file is included, so XrayTun is not
-> described here as MIT-licensed software. The bundled Xray-core is licensed under MPL-2.0, and its
-> licence ships with the Xray-core project.
+> The site content and the XrayTun source are public on GitHub. XrayTun is released under the
+> **MIT** licence (the repository contains a `LICENSE` file and `Cargo.toml` declares
+> `license = "MIT"`). The bundled Xray-core is licensed under MPL-2.0, and its licence ships with the
+> Xray-core project; `geoip.dat` and `geosite.dat` ship with their upstream project.
 
 ---
 
@@ -785,7 +784,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | G7 | 关键内容在原始 HTML 里 | `INTERACTION.md` §6.1 的 8 条在 §2/§3 中都以普通正文给出，无「JS 渲染后出现」的依赖 |
 | G8 | 下载区给真实资产 URL | §2.4 / §3.4 用具体 tag 的绝对资产 URL + 校验和 + `releases/latest` |
 | G9 | 安装说明不出现唯一解「右键 → 打开」 | §2.5 / §3.5 分版本给「系统设置 → 仍要打开」「右键打开」「`xattr -d`」三条，且明确 `-d` 不是 `-dr` |
-| G10 | 不许声称 MIT | §2.7 / §3.7 页脚、FAQ 许可证一条、`#what` 事实条三处都写「尚未附 LICENSE 文件」 |
+| G10 | 许可证表述必须与事实一致 | §2.6/§3.6（FAQ）、§2.7/§3.7（页脚）、`#what` 事实条、JSON-LD `license`：**XrayTun 是 MIT（仓库有 LICENSE，2026-09-20 起）**，随包 Xray-core 是 MPL-2.0（F37/F38） |
 
 ---
 
@@ -799,8 +798,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 2. **「系统代理」模式不写系统代理设置。** 很容易顺手写成「自动配置系统代理」——
    实测全仓库没有任何 `networksetup -setwebproxy` 调用（只有 DNS 相关），helper 协议里也没有代理请求。
    官网只能写「提供本机 SOCKS5/HTTP 入站，需要你自己指向」。
-3. **许可证不能写 MIT。** `Cargo.toml` 写的是 `license = "MIT"`，但仓库**没有 LICENSE 文件**，
-   所以 GitHub 的 license 识别为空。官网写「源码公开 / 许可证未声明」；Xray-core 是 MPL-2.0（F38）。
+3. **许可证要写对（2026-09-20 起已变）。** 仓库**已有 `LICENSE`（MIT，版权 harodggg 2026）**，
+   `Cargo.toml:15` 的 `license = "MIT"` 名实相符 —— 所以官网**应当**如实写「源码以 MIT 发布」；
+   不许再写「许可证未声明」。唯一仍要小心的是**随包分发的 Xray-core 是 MPL-2.0**（F38），
+   不要把它说成 MIT。
 
 **其余容易写错的点（同样会误导用户）**：
 
