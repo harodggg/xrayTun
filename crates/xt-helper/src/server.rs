@@ -379,8 +379,12 @@ impl Helper {
                 Err(_) => return Response::Error(internal("状态锁中毒")),
             };
             if let Some(existing) = &guard.session {
+                // **码要与「路径白名单失败」那类 InvalidRequest 分开**：
+                // 桌面端只对 `SessionConflict` 触发「自动清理 + 重试一次」，
+                // 其余错误必须原样暴露给用户（见 xt_proto::HelperError
+                // ::is_session_conflict 的注释）。文案保留中文，便于人读。
                 return Response::Error(HelperError::new(
-                    ErrorCode::InvalidRequest,
+                    ErrorCode::SessionConflict,
                     format!(
                         "已有活跃会话 {}（接口 {}），请先 tun_down",
                         existing.snapshot.session_id, existing.snapshot.interface
@@ -732,12 +736,6 @@ fn now_unix() -> u64 {
 #[allow(dead_code)]
 pub const SPAWN_GRACE: Duration = Duration::from_secs(2);
 
-/// 仅测试使用：判断某条错误是否表示「已经有一个会话」。
-#[cfg(test)]
-pub fn is_conflict(e: &HelperError) -> bool {
-    e.code == ErrorCode::InvalidRequest && e.message.contains("已有活跃会话")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,10 +767,25 @@ mod tests {
     }
 
     #[test]
-    fn conflict_detection_matches_its_message() {
-        let e = HelperError::new(ErrorCode::InvalidRequest, "已有活跃会话 s-1（接口 utun4），请先 tun_down");
-        assert!(is_conflict(&e));
-        assert!(!is_conflict(&invalid("别的问题")));
+    fn conflict_detection_uses_the_shared_predicate_and_has_a_boundary() {
+        // helper **现在真正发出**的那条：结构化错误码（task-31）。
+        let e = HelperError::new(
+            ErrorCode::SessionConflict,
+            "已有活跃会话 s-1（接口 utun4），请先 tun_down",
+        );
+        assert!(e.is_session_conflict());
+
+        // 旧版 helper 的形态（兼容分支，见 xt_proto::HelperError::is_session_conflict）。
+        let legacy = HelperError::new(
+            ErrorCode::InvalidRequest,
+            "已有活跃会话 s-1（接口 utun4），请先 tun_down",
+        );
+        assert!(legacy.is_session_conflict());
+
+        // **边界**：同样是 InvalidRequest，但不是会话冲突就不能判为冲突 ——
+        // 桌面端会据此去 Restore 拆会话，误判等于去拆一条不相干的会话。
+        assert!(!invalid("别的问题").is_session_conflict());
+        assert!(!HelperError::new(ErrorCode::Unauthorized, "已有活跃会话").is_session_conflict());
     }
 
     #[test]

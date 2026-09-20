@@ -177,6 +177,13 @@ pub enum ErrorCode {
     NotHandshaken,
     /// 找不到对应会话。
     NoSuchSession,
+    /// helper 上**已有活跃会话**，这次 `TunUp` 被拒绝。
+    ///
+    /// 调用方（桌面端）应当**自动清理后重试一次**，而不是让用户手工 `tun_down`。
+    /// 之所以要一个独立的码而不是复用 [`ErrorCode::InvalidRequest`]：调用方
+    /// 必须能**结构化**地判断「这条错误值得自愈」—— 靠匹配消息文本会漂移，
+    /// 也会把别的 `InvalidRequest`（例如路径白名单失败）一起吞掉。
+    SessionConflict,
     /// TUN 设备创建失败。
     TunCreateFailed,
     /// 路由 / DNS 配置失败（此时 helper 已尽力回滚）。
@@ -187,9 +194,39 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// 旧版 helper 在「已有活跃会话」时，消息里的固定片段。
+///
+/// ⚠️ 仅供 [`HelperError::is_session_conflict`] 的兼容分支使用；
+/// **不要在任何别处再写这个字符串匹配**（两份判据必然漂移，而漂移的表现是
+/// 「自愈在某些用户机器上静默失效」）。
+const LEGACY_CONFLICT_MARKER: &str = "已有活跃会话";
+
 impl HelperError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
+    }
+
+    /// 是否是「helper 上已有活跃会话」这类冲突。
+    ///
+    /// 调用方据此**自动拆掉泄漏会话并重试一次**（而不是让用户手工 `tun_down`）。
+    ///
+    /// # 为什么判据放在这里
+    ///
+    /// helper（`xt-helper` 只有 bin target）与桌面端**唯一共享的 crate 是
+    /// `xt-proto`**。判据放这里才能做到「一处实现、两边共用」——在 helper 或
+    /// 桌面端各写一份字符串匹配，改动文案时就会有一处静默失配。
+    ///
+    /// # 兼容分支是必须的，不是过渡态
+    ///
+    /// helper 是**单独安装的特权二进制**（安装要一次管理员密码），所以
+    /// 「新 App + 旧 helper」会长期共存：旧 helper 不认识
+    /// [`ErrorCode::SessionConflict`]，只会发 `InvalidRequest` +
+    /// 「已有活跃会话 …，请先 tun_down」。没有下面这个分支，自愈对
+    /// **已经装过 helper 的用户**直接失效。
+    pub fn is_session_conflict(&self) -> bool {
+        self.code == ErrorCode::SessionConflict
+            || (self.code == ErrorCode::InvalidRequest
+                && self.message.contains(LEGACY_CONFLICT_MARKER))
     }
 }
 
@@ -680,5 +717,40 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"status\":\"error\""));
         assert!(json.contains("\"code\":\"unauthorized\""));
+    }
+
+    /// 会话冲突判据：**新 helper 与旧 helper 都要认**，其它错误一律不认。
+    ///
+    /// 这条是 task-31 自愈的地基：桌面端据此决定「拆掉泄漏会话后重试一次」。
+    /// 判错方向的代价是双向的 ——
+    /// * 漏判 → 用户继续看到「请先 tun_down」（自愈失效）；
+    /// * 误判 → 对着一条根本不相干的错误去 Restore，甚至把白名单错误吞掉。
+    #[test]
+    fn session_conflict_detection_covers_new_and_old_helpers() {
+        // ① 新版 helper：结构化错误码，消息内容无关。
+        assert!(HelperError::new(ErrorCode::SessionConflict, "已有活跃会话 s-1").is_session_conflict());
+        assert!(HelperError::new(ErrorCode::SessionConflict, "whatever").is_session_conflict());
+
+        // ② 旧版 helper（兼容分支，必须保留）：只有 InvalidRequest + 那句中文。
+        assert!(HelperError::new(
+            ErrorCode::InvalidRequest,
+            "已有活跃会话 s-1（接口 utun6），请先 tun_down"
+        )
+        .is_session_conflict());
+
+        // ③ 关键边界：**其它 InvalidRequest 不得判为冲突**
+        //    （路径白名单失败就是 InvalidRequest 的一种）。
+        assert!(!HelperError::new(ErrorCode::InvalidRequest, "路径不在白名单内").is_session_conflict());
+
+        // ④ 码不对就不算冲突：即使消息里恰好带着那句话，
+        //    也不能把权限/内部错误当成「可自愈」。
+        assert!(!HelperError::new(ErrorCode::Unauthorized, "已有活跃会话").is_session_conflict());
+        assert!(!HelperError::new(ErrorCode::Internal, "已有活跃会话").is_session_conflict());
+
+        // ⑤ 线上名字是契约（App 与 helper 之间），钉住 snake_case。
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::SessionConflict).unwrap(),
+            "\"session_conflict\""
+        );
     }
 }
