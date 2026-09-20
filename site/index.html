@@ -41,7 +41,7 @@
   "downloadUrl": "https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg",
   "installUrl": "https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg",
   "releaseNotes": "https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md",
-  "license": "https://github.com/harodggg/xrayTun (no LICENSE file in the repository as of v0.8.26)",
+  "license": "https://github.com/harodggg/xrayTun/blob/main/LICENSE",
   "offers": {
     "@type": "Offer",
     "price": "0",
@@ -181,7 +181,7 @@
       "name": "XrayTun 的许可证是什么？",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "源码在 GitHub 上公开。需要如实说明：仓库的 Cargo.toml 里写的是 license = \"MIT\"，但截至 v0.8.26 仓库还没有附带 LICENSE 文件， 所以请不要把它当作已声明 MIT 许可的软件使用；在补上 LICENSE 之前请按「许可证未声明」对待。随包分发的 Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库。"
+        "text": "源码在 GitHub 上公开，并以 MIT 许可发布：仓库里有 LICENSE 文件， Cargo.toml 也声明 license = \"MIT\"。随包分发的 Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库；包内的 geoip.dat / geosite.dat 随其上游项目发布。"
       }
     }
   ]
@@ -692,10 +692,11 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg</code></pre>
 
         <h3>XrayTun 的许可证是什么？</h3>
         <p>
-          源码在 GitHub 上公开。需要如实说明：仓库的 <code>Cargo.toml</code> 里写的是
-          <code>license = "MIT"</code>，但<strong>截至 v0.8.26 仓库还没有附带 LICENSE 文件</strong>，
-          所以请不要把它当作已声明 MIT 许可的软件使用；在补上 LICENSE 之前请按「许可证未声明」对待。随包分发的
-          Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库。
+          源码在 GitHub 上公开，并以 <strong>MIT</strong> 许可发布：仓库里有
+          <a href="https://github.com/harodggg/xrayTun/blob/main/LICENSE">LICENSE 文件</a>，
+          <code>Cargo.toml</code> 也声明 <code>license = "MIT"</code>。随包分发的
+          Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core
+          官方仓库；包内的 <code>geoip.dat</code> / <code>geosite.dat</code> 随其上游项目发布。
         </p>
       </section>
 
@@ -727,9 +728,11 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg</code></pre>
     <footer class="site-footer">
       <div class="wrap prose">
         <p>
-          本页内容与 XrayTun 源码公开在 GitHub。XrayTun 仓库的 <code>Cargo.toml</code> 声明
-          <code>license = "MIT"</code>，但截至 v0.8.26 尚未附带 LICENSE 文件，因此我们不把它表述为 MIT
-          许可软件。随包分发的 Xray-core 为 MPL-2.0，其许可证随 Xray-core 项目分发。
+          本页内容与 XrayTun 源码公开在 GitHub。XrayTun 以 <strong>MIT</strong> 许可发布
+          （仓库有 <a href="https://github.com/harodggg/xrayTun/blob/main/LICENSE">LICENSE 文件</a>，
+          <code>Cargo.toml</code> 亦声明 <code>license = "MIT"</code>）。随包分发的 Xray-core 为
+          MPL-2.0，其许可证随 Xray-core 项目分发；包内的 <code>geoip.dat</code> /
+          <code>geosite.dat</code> 随其上游项目发布。
         </p>
         <p class="site-footer__meta">
           XrayTun v0.8.26 · 仅 macOS 13.0+ · 页面最后更新 2026-09-20 ·

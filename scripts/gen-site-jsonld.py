@@ -81,8 +81,8 @@ def build_ld(page: dict, faqs: list[tuple[str, str]]) -> list[dict]:
             "downloadUrl": DL,
             "installUrl": DL,
             "releaseNotes": "https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md",
-            # 仓库当前**没有** LICENSE 文件 → 不写 MIT（红线）
-            "license": "https://github.com/harodggg/xrayTun (no LICENSE file in the repository as of v0.8.26)",
+            # 仓库已有 LICENSE（MIT）→ 指向它（2026-09-20 用户决定补上，commit 12c523d）
+            "license": "https://github.com/harodggg/xrayTun/blob/main/LICENSE",
             "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
             "description": page["description"],
             "inLanguage": page["lang"],
@@ -164,8 +164,13 @@ def check() -> int:
         if app["operatingSystem"] != "macOS 13.0 or later":
             print(f"✗ {page['path']}: operatingSystem 不是「仅 macOS」")
             ok = False
-        if "MIT" in json.dumps(app, ensure_ascii=False) and "no LICENSE" not in json.dumps(app, ensure_ascii=False):
-            print(f"✗ {page['path']}: license 疑似声称 MIT")
+        # 许可证事实（2026-09-20 起）：源码 MIT 且仓库有 LICENSE；随包 Xray-core 是 MPL-2.0。
+        # 这里锁住「不能既不说 MIT 也不给出 LICENSE 链接」以及「必须提 MPL-2.0」，
+        # 而不是像以前那样禁止出现 MIT（那已经过期）。
+        lic = str(app.get("license", ""))
+        faq_text = json.dumps(faq, ensure_ascii=False)
+        if not lic.endswith("/LICENSE") or "MPL-2.0" not in faq_text:
+            print(f"✗ {page['path']}: license 字段应指向 /LICENSE，且 FAQ 必须写明随包 Xray-core 是 MPL-2.0")
             ok = False
         print(
             f"{'✓' if ok else '✗'} {page['path'].relative_to(SITE)}: JSON.parse ok · "

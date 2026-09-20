@@ -41,7 +41,7 @@
   "downloadUrl": "https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg",
   "installUrl": "https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg",
   "releaseNotes": "https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md",
-  "license": "https://github.com/harodggg/xrayTun (no LICENSE file in the repository as of v0.8.26)",
+  "license": "https://github.com/harodggg/xrayTun/blob/main/LICENSE",
   "offers": {
     "@type": "Offer",
     "price": "0",
@@ -181,7 +181,7 @@
       "name": "What licence does XrayTun use?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "The source is public on GitHub. To be explicit: the repository's Cargo.toml declares license = \"MIT\", but as of v0.8.26 the repository contains no LICENSE file, so please do not treat XrayTun as MIT-licensed software; until a LICENSE file is added, treat the licence as undeclared. The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate process, not a derivative work); see the Xray-core repository for its licence."
+        "text": "The source is public on GitHub and released under the MIT licence: the repository contains a LICENSE file and Cargo.toml declares license = \"MIT\". The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate process, not a derivative work); see the Xray-core repository for its licence, and geoip.dat / geosite.dat ship with their upstream project."
       }
     }
   ]
@@ -732,11 +732,11 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg</code></pre>
 
         <h3>What licence does XrayTun use?</h3>
         <p>
-          The source is public on GitHub. To be explicit: the repository's <code>Cargo.toml</code> declares
-          <code>license = "MIT"</code>, but <strong>as of v0.8.26 the repository contains no LICENSE file</strong>,
-          so please do not treat XrayTun as MIT-licensed software; until a LICENSE file is added, treat the
-          licence as undeclared. The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate
-          process, not a derivative work); see the Xray-core repository for its licence.
+          The source is public on GitHub and released under the <strong>MIT</strong> licence: the repository
+          contains a <a href="https://github.com/harodggg/xrayTun/blob/main/LICENSE">LICENSE file</a> and
+          <code>Cargo.toml</code> declares <code>license = "MIT"</code>. The bundled Xray-core is licensed
+          under MPL-2.0 (invoked as a separate process, not a derivative work); see the Xray-core repository
+          for its licence, and <code>geoip.dat</code> / <code>geosite.dat</code> ship with their upstream project.
         </p>
       </section>
 
@@ -768,10 +768,12 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg</code></pre>
     <footer class="site-footer">
       <div class="wrap prose">
         <p>
-          The site content and the XrayTun source are public on GitHub. The XrayTun repository's
-          <code>Cargo.toml</code> declares <code>license = "MIT"</code>, but as of v0.8.26 no LICENSE file is
-          included, so XrayTun is not described here as MIT-licensed software. The bundled Xray-core is
-          licensed under MPL-2.0, and its licence ships with the Xray-core project.
+          The site content and the XrayTun source are public on GitHub. XrayTun is released under the
+          <strong>MIT</strong> licence (the repository contains a
+          <a href="https://github.com/harodggg/xrayTun/blob/main/LICENSE">LICENSE file</a> and
+          <code>Cargo.toml</code> declares <code>license = "MIT"</code>). The bundled Xray-core is licensed
+          under MPL-2.0, and its licence ships with the Xray-core project; <code>geoip.dat</code> and
+          <code>geosite.dat</code> ship with their upstream project.
         </p>
         <p class="site-footer__meta">
           XrayTun v0.8.26 · macOS 13.0+ only · page last updated 2026-09-20 ·

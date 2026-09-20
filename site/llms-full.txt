@@ -269,7 +269,7 @@ xattr -d com.apple.quarantine /Applications/XrayTun.app
 
 ### XrayTun 的许可证是什么？
 
-源码在 GitHub 上公开。需要如实说明：仓库的 `Cargo.toml` 里写的是 `license = "MIT"`，但**截至 v0.8.26 仓库还没有附带 LICENSE 文件**， 所以请不要把它当作已声明 MIT 许可的软件使用；在补上 LICENSE 之前请按「许可证未声明」对待。随包分发的 Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库。
+源码在 GitHub 上公开，并以 **MIT** 许可发布：仓库里有 [LICENSE 文件](https://github.com/harodggg/xrayTun/blob/main/LICENSE)， `Cargo.toml` 也声明 `license = "MIT"`。随包分发的 Xray-core 采用 MPL-2.0 许可（以独立进程调用，不构成衍生作品），其许可证见 Xray-core 官方仓库；包内的 `geoip.dat` / `geosite.dat` 随其上游项目发布。
 
 ## 链接
 
@@ -542,7 +542,7 @@ The updater downloads the zip from the project's GitHub release and verifies it 
 
 ### What licence does XrayTun use?
 
-The source is public on GitHub. To be explicit: the repository's `Cargo.toml` declares `license = "MIT"`, but **as of v0.8.26 the repository contains no LICENSE file**, so please do not treat XrayTun as MIT-licensed software; until a LICENSE file is added, treat the licence as undeclared. The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate process, not a derivative work); see the Xray-core repository for its licence.
+The source is public on GitHub and released under the **MIT** licence: the repository contains a [LICENSE file](https://github.com/harodggg/xrayTun/blob/main/LICENSE) and `Cargo.toml` declares `license = "MIT"`. The bundled Xray-core is licensed under MPL-2.0 (invoked as a separate process, not a derivative work); see the Xray-core repository for its licence, and `geoip.dat` / `geosite.dat` ship with their upstream project.
 
 ## Links
 

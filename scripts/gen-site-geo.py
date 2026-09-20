@@ -180,7 +180,7 @@ TUN 模式还需要在应用内安装一次特权 helper（要求一次管理员
 - 自更新：比对 `SHA256SUMS.txt`，**只校验 SHA256、没有签名校验**。
 - **拿不到的（上游没有，不要替它推算）**：每条连接的字节数与持续时间；`dns-out`（UDP 出站）与 `api`（本机回环）的字节计数恒为 0，那是统计盲区。
 - 「最近连接」的域名是**时序配对**的近似值（可能配错，界面标 `*`）；约一半连接本来就没有域名。
-- 许可证：仓库 `Cargo.toml` 写 `license = "MIT"`，但**截至 v0.8.26 仓库没有 LICENSE 文件**，请按「许可证未声明」对待；随包分发的 Xray-core 是 MPL-2.0。
+- 许可证：XrayTun 以 **MIT** 发布（仓库有 `LICENSE`，`Cargo.toml` 亦声明 `license = "MIT"`）；随包分发的 Xray-core 是 MPL-2.0。
 - 仅 macOS；界面目前只有中文。
 """
     (SITE / "llms.txt").write_text(txt, encoding="utf-8")
