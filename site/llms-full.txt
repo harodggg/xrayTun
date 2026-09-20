@@ -2,20 +2,33 @@
 
 > 站点：https://harodggg.github.io/xrayTun/ ｜ 版本：v0.8.26（2026-09-20）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
-> 结构化数据见两个页面 `<head>`里的 JSON-LD（SoftwareApplication + FAQPage）。
+> 结构化数据见各页面 `<head>` 里的 JSON-LD（SoftwareApplication + FAQPage）。
 >
-> **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**两个语言页面的完整正文**
+> **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**官网所有页面的完整正文**
 > 与官网里的「事实与边界」清单。仓库 `docs/` 下的**完整设计文档（数千行规范）没有逐字复制**
 > 到这里 —— 那样既膨胀、又必然与仓库文档不同步，反而更糟。需要细节请看绝对链接：
 > <https://github.com/harodggg/xrayTun/tree/main/docs>
 > （安装与 TUN 权限：docs/02-tun-and-privileges.md；分流与 DNS：docs/04-routing-and-dns.md）
+>
+> **`xray-wasm` 的仓库是另一个**：<https://github.com/harodggg/xray-wasm>
+> 它是同一作者的**独立项目**（纯 Rust 实现 VLESS + XTLS-Vision + REALITY，编译到 wasm32-wasip2），
+> **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。
 
-来源：https://harodggg.github.io/xrayTun/（中文）与 https://harodggg.github.io/xrayTun/en/（英文）。
-这是同一份内容的两种语言，段落一一对应；任一处不一致以对应语言页面为准。
+收录页面（4 个，中英各 2）：
+
+- 中文：XrayTun 主页面 → https://harodggg.github.io/xrayTun/
+- 中文：xray-wasm（同一作者的另一个项目） → https://harodggg.github.io/xrayTun/wasm/
+- English: XrayTun home → https://harodggg.github.io/xrayTun/en/
+- English: xray-wasm (a separate project by the same author) → https://harodggg.github.io/xrayTun/en/wasm/
 
 ---
 
-# 中文页面全文
+
+---
+
+# 中文：XrayTun 主页面
+
+来源：https://harodggg.github.io/xrayTun/
 
 # XrayTun：macOS 上的 Xray 图形客户端，用原生 TUN 模式接管系统流量
 
@@ -289,7 +302,159 @@ xattr -d com.apple.quarantine /Applications/XrayTun.app
 
 ---
 
-# English page (full text)
+# 中文：xray-wasm（同一作者的另一个项目）
+
+来源：https://harodggg.github.io/xrayTun/wasm/
+
+# xray-wasm：把 Xray 的 VLESS + XTLS-Vision + REALITY 协议栈用纯 Rust 重写，编译成 WebAssembly 跑真实 TCP 代理
+
+xray-wasm 是一个**独立的协议栈实现**：它把 Xray 的 VLESS + XTLS-Vision + REALITY 用**纯 Rust** 重写，编译成 `wasm32-wasip2` 组件，在 **wasmtime**（或任何兼容的 WASI Preview 2 运行时 / 容器）里作为**真实的 TCP 代理**运行 —— 不是演示、不是模拟器。它有两个方向：**客户端**（本机 socket → REALITY 服务端）与**服务端**（REALITY 入站 → 目标站，为 k3s 这类容器场景而写）。
+
+[查看仓库 harodggg/xray-wasm](https://github.com/harodggg/xray-wasm) 容器镜像 v0.7.0 · amd64 + arm64
+
+v0.7.0（2026-09-20 发布）· 纯 Rust（二进制里没有 Go 的 Xray-core）· wasm32-wasip2 · wasmtime · 镜像 `ghcr.io/harodggg/xray-wasm:v0.7.0`
+
+跑在沙箱化的 WASI 运行时里，和 macOS 应用、和 XrayTun 的 TUN 模式都不是一回事 —— 先看[它和 XrayTun 的关系](#relation)。
+
+## 它和 XrayTun 是什么关系：同一个作者的两个独立项目
+
+这一节放在最前面，因为这是最容易被人（也最容易被 AI）搞混、也最容易被编错的地方。
+
+- **XrayTun 是 macOS 上的图形客户端**，随包附带的是**官方 Go 版 Xray-core**。XrayTun **不使用 xray-wasm**：它的实现里没有 wasm， 也没有把协议栈换成 Rust。
+
+- **xray-wasm 是另一条技术路线**：一个独立的、纯 Rust 的协议栈实现， 面向**容器、服务端与自动化**场景，运行在 WASI 运行时里，**没有图形界面**。
+
+- 两个项目只是**同一个作者、同一个 GitHub 账号**（ [harodggg](https://github.com/harodggg)）下的兄弟项目：代码仓库、版本号、许可证、 发行方式各自独立。
+
+- **两套版本号不要互相套用**：本页说的是 xray-wasm 的 **v0.7.0**； XrayTun 的当前版本是另一个序列（**v0.8.26**，见[首页](../)）。
+
+## 它解决什么问题
+
+**协议栈通常和「原生二进制」绑在一起。** Xray 生态的实现基本都是 Go（官方 Xray-core / V2Ray）。当你想把「VLESS + Vision + REALITY 客户端」放进一个**沙箱化的、不方便跑原生二进制**的环境里 —— WASI 运行时、 强隔离的容器、边缘节点 —— Go 的二进制就不是合适的形态。xray-wasm 把协议栈编译成 `wasm32-wasip2` 组件：**宿主只提供 TCP 等能力，协议栈跑在 guest 里**， 边界由运行时而不是进程权限来划。
+
+**服务侧同样可以反着来。** 除了客户端方向，它还有一个 `server` 子命令：REALITY 入站 → 把流量转发到目标站， 这是为 k3s 这类编排环境写的 —— 配置走环境变量，密钥走 Secret。
+
+**为「可断言」而设计。** 仓库 README 里专门有一节「给自动化 agent 的速查」，每一步都要求有可断言的输出； 两端都支持**只做配置自检**（环境变量 `XT_CHECK` 或命令行 `--check`）：打印生效的 fingerprint / no-flow / client-ver / server / listen （UUID 脱敏）后退出，不监听任何端口。
+
+**安全取向是明确写出来的，不是暗示的。** 客户端**默认只绑回环**，绑到非回环且没有认证时会打印醒目的「开放代理」警告； 服务端会把对端可控的字段（`sni` / `target`）转义后再写日志， 避免用 SNI 里的换行伪造日志行；fingerprint 名字拼错时**启动即失败**， 不静默回退到默认值。
+
+## 两个方向与用法
+
+下面两条命令是仓库 README 里的原文用法。镜像 `ghcr.io/harodggg/xray-wasm:v0.7.0` 提供 `linux/amd64` 与 `linux/arm64` 两个平台，**匿名即可拉取** （不需要 `docker login`）。
+
+### 方向一：客户端（socket → REALITY，默认方向）
+
+不写子命令时就是客户端：在本机提供 SOCKS5 入口，出站走 REALITY。 下面的例子里 `-p 127.0.0.1:1080:1080` 只把端口暴露在**本机回环**上 （与它默认只绑回环的取向一致），容器内监听 `0.0.0.0:1080` 由 `XT_LISTEN` 指定。
+
+```bash
+docker run --rm -p 127.0.0.1:1080:1080 \
+  -e XT_LISTEN=0.0.0.0:1080 \
+  -e XT_SERVER=<ip:port> -e XT_PBK=<公钥> -e XT_SID=<shortId> \
+  -e XT_SNI=<伪装域名> -e XT_UUID=<uuid> \
+  ghcr.io/harodggg/xray-wasm:v0.7.0
+```
+
+- `XT_SERVER`：REALITY 服务端的 `ip:port`。
+
+- `XT_PBK`：服务端 X25519 公钥；`XT_SID`：shortId。
+
+- `XT_SNI`：伪装域名（SNI）；`XT_UUID`：VLESS 用户 UUID。
+
+### 方向二：服务端（REALITY → 目标站，`server` 子命令）
+
+这是为 k3s 这类编排环境写的方向：在本机 `8443` 上做 REALITY 入站， 认证失败的流量**原样转发**到 `XT_DEST` 指向的真实站点。 四个 `XT_PRIVATE_KEY` / `XT_SHORT_IDS` / `XT_SERVER_NAMES` / `XT_DEST` / `XT_USERS` 都是必填，缺一个就拒绝启动并说明原因。
+
+```bash
+docker run --rm -p 8443:8443 \
+  -e XT_PRIVATE_KEY=<私钥> -e XT_SHORT_IDS=<shortId> \
+  -e XT_SERVER_NAMES=<伪装域名> -e XT_DEST=<同一个域名的 host:port> \
+  -e XT_USERS=<uuid> \
+  ghcr.io/harodggg/xray-wasm:v0.7.0 server
+```
+
+`XT_SERVER_NAMES` 必须与 `XT_DEST` 指向同一个站点，否则 REALITY 的伪装就不成立。服务端的环境变量里监听地址叫 `XT_SERVER_LISTEN`， 和客户端的 `XT_LISTEN` **不是同一个变量**。
+
+### 配置自检：先验证参数，再监听端口
+
+两端都支持只做配置自检：加上 `-e XT_CHECK=1`（或命令行 `--check`）， 它会打印生效配置后退出，**不监听任何端口**。这个模式在容器编排里当 `initContainer` 用很合适。
+
+### ⚠︎ 在 wasmtime 下不要断言退出码等于 2
+
+**wasmtime 会把 guest 的退出码塌缩成「0 / 非 0」**： `exit(0)` → 0，而 `exit(1)`、`exit(2)`、 `exit(42)` 都只能观察到 **1**。配置缺失在代码里走的是 `exit(2)`（在宿主二进制上实测就是 2），但在 wasmtime 下拿不回来。 所以 k8s `initContainer`、CI 或任何脚本里**不要写 `== 2`** —— 那种检查在宿主上过、在 wasm 上必红。
+
+## 验证状态
+
+一个「重写的协议栈」如果不和真实对端互通，就什么都不能说明。xray-wasm 的验证口径是：
+
+- **100 个单元测试**（仓库 README 与 `docs/verification-log.md` 的记载）。
+
+- **两个方向的真实端到端，对端是官方 Xray-core**，并且在 CI 里常态化跑： `.github/workflows/ci.yml` 里有两个 job —— `e2e` 用 **本项目的 wasm 客户端**连真实的 Xray REALITY 服务端； `e2e-server` 用**官方 Xray 客户端**连本项目的 wasm REALITY 服务端。
+
+- 每一次验证的**原始输出**都记在 docs/verification-log.md，包括没跑通、以及为什么推翻早先结论的记录。
+
+这些数字出自项目自己的仓库文档，不是本页替它推算的。要核对请点开上面两个链接。
+
+### 文档
+
+- verification-log.md：验证日志（每次验证做了什么、原始输出、结论）
+
+- [docs/](https://github.com/harodggg/xray-wasm/tree/main/docs)：设计文档与计划 —— `fingerprint-plan.md`、`fingerprint-security.md`、 `vision-server-plan.md`、`port-map.md`、`issue-board.md`
+
+## 已知边界（用它之前该知道的）
+
+- **它是 WASI 组件，不是原生程序，也不是应用。** 要跑起来需要 wasmtime 或兼容的 WASI Preview 2 运行时（容器镜像已经把运行时和组件打包好了）。 没有图形界面，也没有「双击安装」这回事。
+
+- **退出码只能看「0 / 非 0」**（见上面琥珀色块）。依赖具体退出码的编排逻辑要改。
+
+- **目标域名解析在 guest 里可能卡满 30 秒才失败。** 解析走的是宿主能力（wasmtime 的 `allow-ip-name-lookup`），失败时不是立刻返回。 仓库 README 把这一条列进「部署前必读」。
+
+- **客户端默认只绑回环**；一旦绑到非回环且无认证，那就是一个开放代理 —— 项目会打印警告，但不会替你拦住，这是你自己的部署责任。
+
+- **本页的事实对应 v0.7.0（2026-09-20）。** 之后的版本请以[仓库](https://github.com/harodggg/xray-wasm)为准； 本页不会替未发布的版本说话。
+
+## 常见问题
+
+### xray-wasm 和 XrayTun 是什么关系？
+
+同一个作者的两个**独立项目**。XrayTun 是 macOS 上的图形客户端，随包附带**官方 Go 版 Xray-core**，它**不使用 xray-wasm**；xray-wasm 是独立的纯 Rust 协议栈实现，跑在 WASI 运行时里，面向容器与服务端。代码、版本号、许可证、发行方式各自独立。
+
+### xray-wasm 需要 Go 或官方 Xray 二进制才能跑吗？
+
+不需要。协议栈是纯 Rust 实现，产物是 `wasm32-wasip2` 组件，在 wasmtime 里运行。 官方 Xray-core 只出现在**验证**环节：CI 用它当真实对端，双向验证互通性。
+
+### 许可证是什么？
+
+仓库里**有两个许可证文件**：`LICENSE` 与 `LICENSE.meow-rs`（后者 `Copyright (c) 2026 Max Lv`）， `Cargo.toml` 声明 `license = "MIT"`。因为多了一个第三方许可证文件， **GitHub 会把仓库识别为 `Other` 而不是 MIT**（接口返回 `NOASSERTION`）。所以引用时请写 「**MIT（另含 `LICENSE.meow-rs` 第三方许可，见仓库）**」， 不要简单写成「MIT」。
+
+### 容器镜像能直接拉吗？支持哪些平台？
+
+可以，**匿名即可拉取**，不需要登录容器仓库： `ghcr.io/harodggg/xray-wasm:v0.7.0` 提供 `linux/amd64` 与 `linux/arm64` 两个平台。
+
+### 它会取代 XrayTun 的 TUN 模式吗？
+
+不会，两者解决的不是同一个问题。XrayTun 的 TUN 模式用随包附带的官方 Xray-core 建 utun 网卡、改路由与 DNS，接管整台 Mac 的流量；xray-wasm 是把协议栈放进沙箱化运行时的另一条路线， 没有 TUN、没有系统网络配置、也没有界面。
+
+## 链接
+
+- 源码仓库：[github.com/harodggg/xray-wasm](https://github.com/harodggg/xray-wasm)
+
+- 全部 Release：[GitHub Releases](https://github.com/harodggg/xray-wasm/releases)
+
+- 容器镜像：ghcr.io/harodggg/xray-wasm
+
+- 验证日志：docs/verification-log.md
+
+- 设计文档：[docs/](https://github.com/harodggg/xray-wasm/tree/main/docs)
+
+- XrayTun（本站在讲的那个 macOS 客户端）：[首页](../)
+
+- 给 AI 的站点摘要：[llms.txt](../llms.txt)
+
+---
+
+# English: XrayTun home
+
+来源：https://harodggg.github.io/xrayTun/en/
 
 # XrayTun: an Xray GUI client for macOS that takes over system traffic with native TUN mode
 
@@ -559,3 +724,153 @@ The source is public on GitHub and released under the **MIT** licence: the repos
 - Routing and DNS: docs/04-routing-and-dns.md
 
 - AI summary for this site: [llms.txt](../llms.txt)
+
+---
+
+# English: xray-wasm (a separate project by the same author)
+
+来源：https://harodggg.github.io/xrayTun/en/wasm/
+
+# xray-wasm: Xray's VLESS + XTLS-Vision + REALITY protocol stack rewritten in pure Rust, compiled to WebAssembly, running a real TCP proxy
+
+xray-wasm is an **independent implementation of the protocol stack**: it rewrites Xray's VLESS + XTLS-Vision + REALITY in **pure Rust**, compiles it to a `wasm32-wasip2` component, and runs it under **wasmtime** (or any compatible WASI Preview 2 runtime / container) as a **real TCP proxy** — not a demo, not a simulator. It works in two directions: **client** (local socket → REALITY server) and **server** (REALITY inbound → destination, written for container environments such as k3s).
+
+[View the repo harodggg/xray-wasm](https://github.com/harodggg/xray-wasm) Container image v0.7.0 · amd64 + arm64
+
+v0.7.0 (released 2026-09-20) · pure Rust (no Go Xray-core inside the binary) · wasm32-wasip2 · wasmtime · image `ghcr.io/harodggg/xray-wasm:v0.7.0`
+
+It runs inside a sandboxed WASI runtime — which is neither a macOS app nor XrayTun's TUN mode. Start with [how it relates to XrayTun](#relation).
+
+## How it relates to XrayTun: two independent projects by the same author
+
+This section comes first because it is the thing most often mixed up — by people and by AI alike.
+
+- **XrayTun is a macOS GUI client** that ships the **official Go Xray-core** inside its bundle. XrayTun **does not use xray-wasm**: there is no WebAssembly in its implementation, and its protocol stack was not replaced with Rust.
+
+- **xray-wasm is a different technical route**: an independent, pure-Rust implementation of the protocol stack, aimed at **containers, servers and automation**, running inside a WASI runtime, with **no graphical interface**.
+
+- The two projects are simply sibling projects under **the same author and the same GitHub account** ([harodggg](https://github.com/harodggg)): separate repositories, separate version numbers, separate licenses, separate release processes.
+
+- **Do not mix up the version numbers.** This page describes xray-wasm **v0.7.0**; XrayTun's current version is a different sequence (**v0.8.26**, see the [home page](../../)).
+
+## What problem it solves
+
+**A protocol stack is usually tied to a native binary.** Implementations in the Xray ecosystem are almost all written in Go (official Xray-core / V2Ray). If you want to put a "VLESS + Vision + REALITY client" into an environment that is **sandboxed and awkward for native binaries** — a WASI runtime, a strongly isolated container, an edge node — then a Go binary is the wrong shape. xray-wasm compiles the stack into a `wasm32-wasip2` component: **the host provides capabilities such as TCP, and the protocol stack runs inside the guest**, with the boundary drawn by the runtime rather than by process privileges.
+
+**The server side works the other way round.** Besides the client direction there is a `server` subcommand: REALITY inbound → forward to a destination site. It was written for orchestrated environments such as k3s — configuration comes from environment variables and keys come from Secrets.
+
+**Designed to be assertable.** The repository README has a section aimed at automation agents ("quick reference for automation agents") where every step is expected to produce an assertable output. Both directions also support a **configuration self-check only** mode (environment variable `XT_CHECK` or the `--check` flag): it prints the effective fingerprint / no-flow / client-ver / server / listen values (UUID masked) and exits **without listening on any port**.
+
+**Its security posture is stated explicitly, not implied.** The client **binds to loopback only by default**, and prints a loud "open proxy" warning if it is bound to a non-loopback address without authentication. The server escapes peer-controlled fields (`sni` / `target`) before writing them to the log, so a newline smuggled into an SNI cannot forge a log line. A misspelled fingerprint name **fails at startup** instead of silently falling back to a default.
+
+## The two directions, and how to run them
+
+The two commands below are the exact usage from the repository README. The image `ghcr.io/harodggg/xray-wasm:v0.7.0` provides `linux/amd64` and `linux/arm64`, and can be pulled **anonymously** (no `docker login` needed).
+
+### Direction 1: client (socket → REALITY, the default)
+
+With no subcommand you get the client: a local SOCKS5 entry point whose outbound goes through REALITY. In the example below `-p 127.0.0.1:1080:1080` exposes the port on **loopback only** (consistent with its loopback-by-default posture), while the listen address inside the container is set to `0.0.0.0:1080` by `XT_LISTEN`.
+
+```bash
+docker run --rm -p 127.0.0.1:1080:1080 \
+  -e XT_LISTEN=0.0.0.0:1080 \
+  -e XT_SERVER=<ip:port> -e XT_PBK=<public key> -e XT_SID=<shortId> \
+  -e XT_SNI=<spoofed domain> -e XT_UUID=<uuid> \
+  ghcr.io/harodggg/xray-wasm:v0.7.0
+```
+
+- `XT_SERVER`: the REALITY server's `ip:port`.
+
+- `XT_PBK`: the server's X25519 public key; `XT_SID`: the shortId.
+
+- `XT_SNI`: the spoofed domain (SNI); `XT_UUID`: the VLESS user UUID.
+
+### Direction 2: server (REALITY → destination, the `server` subcommand)
+
+This is the direction written for orchestrated environments such as k3s: it takes REALITY inbound traffic on local port `8443` and **forwards traffic that fails authentication verbatim** to the real site named by `XT_DEST`. The four variables `XT_PRIVATE_KEY` / `XT_SHORT_IDS` / `XT_SERVER_NAMES` / `XT_DEST` / `XT_USERS` are all required; if any is missing it refuses to start and says why.
+
+```bash
+docker run --rm -p 8443:8443 \
+  -e XT_PRIVATE_KEY=<private key> -e XT_SHORT_IDS=<shortId> \
+  -e XT_SERVER_NAMES=<spoofed domain> -e XT_DEST=<host:port of that same domain> \
+  -e XT_USERS=<uuid> \
+  ghcr.io/harodggg/xray-wasm:v0.7.0 server
+```
+
+`XT_SERVER_NAMES` must point at the same site as `XT_DEST`, otherwise the REALITY disguise does not hold. Note that the server's listen address variable is `XT_SERVER_LISTEN`, which is **not the same variable** as the client's `XT_LISTEN`.
+
+### Configuration self-check: validate the flags before listening
+
+Both directions support a self-check that prints the effective configuration and exits **without listening on any port**: add `-e XT_CHECK=1` (or `--check` on the command line). That mode is a good fit for an `initContainer` in an orchestrator.
+
+### ⚠︎ Under wasmtime, never assert an exit code of 2
+
+**wasmtime collapses a guest's exit code to "0 / non-zero"**: `exit(0)` → 0, while `exit(1)`, `exit(2)` and `exit(42)` are all observable only as **1**. A missing required value goes through `exit(2)` in the code (measured as 2 on a host binary), but under wasmtime that value is gone. So in a k8s `initContainer`, in CI, or in any script, **do not write `== 2`** — that check passes on a host and is guaranteed to fail on wasm.
+
+## Verification status
+
+A rewritten protocol stack that never talks to a real peer proves nothing. xray-wasm's verification is:
+
+- **100 unit tests** (as recorded in the repository README and `docs/verification-log.md`).
+
+- **Real end-to-end runs in both directions, with official Xray-core as the peer**, run continuously in CI: `.github/workflows/ci.yml` has two jobs — `e2e` connects **this project's wasm client** to a real Xray REALITY server, and `e2e-server` connects **the official Xray client** to this project's wasm REALITY server.
+
+- **Raw output** for each verification is recorded in docs/verification-log.md, including what did not pass and why an earlier conclusion was overturned.
+
+Those numbers come from the project's own repository documents; this page does not recompute them. Follow the links above to check.
+
+### Documents
+
+- verification-log.md: the verification log (what each run did, raw output, conclusions)
+
+- [docs/](https://github.com/harodggg/xray-wasm/tree/main/docs): design documents and plans — `fingerprint-plan.md`, `fingerprint-security.md`, `vision-server-plan.md`, `port-map.md`, `issue-board.md`
+
+## Known boundaries (what to know before you use it)
+
+- **It is a WASI component, not a native program and not an application.** Running it requires wasmtime or a compatible WASI Preview 2 runtime (the container image packages the runtime and the component together). There is no GUI, and there is no "double-click to install".
+
+- **The exit code is only observable as "0 / non-zero"** (see the amber block above). Orchestration logic that depends on a specific exit code has to change.
+
+- **Destination hostname resolution inside the guest can take up to 30 seconds to fail.** Resolution uses a host capability (wasmtime's `allow-ip-name-lookup`), and failure is not immediate. The repository README lists this under "read before deploying".
+
+- **The client binds to loopback only by default**; bind it to a non-loopback address without authentication and you have an open proxy. The project prints a warning, but it will not stop you — that deployment decision is yours.
+
+- **The facts on this page describe v0.7.0 (2026-09-20).** For later versions, go to the [repository](https://github.com/harodggg/xray-wasm); this page does not speak for unreleased versions.
+
+## Frequently asked questions
+
+### How does xray-wasm relate to XrayTun?
+
+They are two **independent projects** by the same author. XrayTun is a macOS GUI client that ships the **official Go Xray-core** in its bundle, and it **does not use xray-wasm**; xray-wasm is an independent pure-Rust implementation of the protocol stack that runs inside a WASI runtime, aimed at containers and servers. The repositories, version numbers, licenses and release processes are all separate.
+
+### Does xray-wasm need Go or the official Xray binary to run?
+
+No. The protocol stack is implemented in pure Rust and the artifact is a `wasm32-wasip2` component that runs under wasmtime. Official Xray-core appears only during **verification**: CI uses it as the real peer to check interoperability in both directions.
+
+### What is the license?
+
+The repository contains **two license files**: `LICENSE` and `LICENSE.meow-rs` (the latter is `Copyright (c) 2026 Max Lv`), and `Cargo.toml` declares `license = "MIT"`. Because of the extra third-party license file, **GitHub identifies the repository as `Other` rather than MIT** (the API returns `NOASSERTION`). So when citing it, write "**MIT (plus a third-party `LICENSE.meow-rs`, see the repository)**" rather than plain "MIT".
+
+### Can the container image be pulled directly, and which platforms does it support?
+
+Yes — it can be pulled **anonymously**, with no login to a container registry: `ghcr.io/harodggg/xray-wasm:v0.7.0` provides `linux/amd64` and `linux/arm64`.
+
+### Does it replace XrayTun's TUN mode?
+
+No, they solve different problems. XrayTun's TUN mode uses the official Xray-core in its bundle to create a utun interface and change routes and DNS, taking over the whole Mac's traffic; xray-wasm is a different route that puts the protocol stack into a sandboxed runtime, with no TUN, no system network configuration and no UI.
+
+## Links
+
+- Source repository: [github.com/harodggg/xray-wasm](https://github.com/harodggg/xray-wasm)
+
+- All releases: [GitHub Releases](https://github.com/harodggg/xray-wasm/releases)
+
+- Container image: ghcr.io/harodggg/xray-wasm
+
+- Verification log: docs/verification-log.md
+
+- Design documents: [docs/](https://github.com/harodggg/xray-wasm/tree/main/docs)
+
+- XrayTun (the macOS client this site is about): [home page](../../)
+
+- Site summary for AI: [llms.txt](../../llms.txt)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""从页面 HTML 生成 / 校验 JSON-LD（task-19 第 3 步）。
+"""从页面 HTML 生成 / 校验 JSON-LD（task-19 第 3 步；task-29 扩展为多页面 + 两种软件类型）。
 
 为什么用脚本而不是手抄：
 「FAQPage 与页面 FAQ 逐字对应」如果靠人抄，下一次改文案就会静默不一致
@@ -8,8 +8,16 @@
 JSON-LD 里每一条 Q/A 必须能在页面可见文本里找到。
 
 用法：
-  python3 gen_jsonld.py gen      # 生成并写入两个页面的 <head>
-  python3 gen_jsonld.py check    # 只校验（不改文件）
+  python3 scripts/gen-site-jsonld.py gen      # 生成并写入各页面的 <head>
+  python3 scripts/gen-site-jsonld.py check    # 只校验（不改文件）
+
+校验口径（每页都必须过）：
+  · JSON-LD 恰好 2 块：软件块 + FAQPage；
+  · FAQPage 与页面 #faq 区块逐条逐字一致，且每条 Q/A 都出现在可见文本里；
+  · 软件块的 @type 与页面登记的 type 一致，version 与登记值一致；
+  · **canonical / 三向 hreflang** 与登记值逐字一致（域名迁移时这里会挡住半途而废）；
+  · meta description 与登记值一致（结构化数据不能描述一个页面里没有的说法）；
+  · 各类型的专属红线，见 check() 里的注释。
 """
 import html
 import json
@@ -21,26 +29,83 @@ from pathlib import Path
 # （早先它在仓库外的 .scratch/ 里，那时是 parents[1]/"xray-tun"/"site" ——
 #  那样脚本不可持续：.scratch/ 是 gitignore 的，别人拿不到它。）
 SITE = Path(__file__).resolve().parents[1] / "site"
+
+# 站点绝对基址：**与 gen-site-geo.py 的 BASE 必须一致**。
+# 域名迁移时两处一起改（生成器里各只有一处，产物由脚本重写，别手改产物）。
+BASE = "https://harodggg.github.io/xrayTun"
+
+XRAYTUN_VERSION = "0.8.26"
+XRAYTUN_DL = f"https://github.com/harodggg/xrayTun/releases/download/v{XRAYTUN_VERSION}/XrayTun_{XRAYTUN_VERSION}_x86_64_arm64.dmg"
+
+WASM_REPO = "https://github.com/harodggg/xray-wasm"
+
 PAGES = [
     {
         "path": SITE / "index.html",
+        "pair": "home",  # 同一 pair 的两种语言页面互为 hreflang alternate
         "lang": "zh-Hans",
-        "url": "https://harodggg.github.io/xrayTun/",
+        "url": f"{BASE}/",
+        "type": "SoftwareApplication",
         "name": "XrayTun",
-        "description": "XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量。当前版本 v0.8.26，通用包（Apple Silicon + Intel），包内自带 Xray 核心。",
+        "version": XRAYTUN_VERSION,
+        # 必须与页面 <meta name="description"> 逐字一致 —— 由 check() 强制。
+        # （2026-09-20 发现：这里的旧文案比页面 meta 少了关键词那半句，
+        #  也就是结构化数据在描述一个页面上没有的旧说法；以页面为准改齐。）
+        "description": "XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.26，通用包（Apple Silicon + Intel），包内自带 Xray 核心。",
         "os": "macOS 13.0 or later",
+        # 许可证事实（2026-09-20 起）：源码 MIT 且仓库有 LICENSE；随包 Xray-core 是 MPL-2.0。
+        "faq_must_contain": ["MPL-2.0"],
     },
     {
         "path": SITE / "en" / "index.html",
+        "pair": "home",
         "lang": "en",
-        "url": "https://harodggg.github.io/xrayTun/en/",
+        "url": f"{BASE}/en/",
+        "type": "SoftwareApplication",
         "name": "XrayTun",
-        "description": "XrayTun is an Xray GUI client for macOS 13 and later, using Xray-core's native TUN inbound to take over system traffic. Current version v0.8.26, universal build (Apple Silicon + Intel), Xray core included.",
+        "version": XRAYTUN_VERSION,
+        "description": "XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.26, universal build (Apple Silicon + Intel), Xray core included.",
         "os": "macOS 13.0 or later",
+        "faq_must_contain": ["MPL-2.0"],
+    },
+    {
+        # task-29：xray-wasm 独立页。它是**另一个项目**，不是 XrayTun 的功能页。
+        "path": SITE / "wasm" / "index.html",
+        "pair": "wasm",
+        "lang": "zh-Hans",
+        "url": f"{BASE}/wasm/",
+        # 用 SoftwareSourceCode：它是「源代码 + 运行时」而不是桌面应用。
+        # 关键：**不写 operatingSystem** —— 它跑在 wasmtime / 容器里，不是某个桌面系统。
+        "type": "SoftwareSourceCode",
+        "name": "xray-wasm",
+        "version": "0.7.0",
+        "description": "xray-wasm 把 Xray 的 VLESS + XTLS-Vision + REALITY 协议栈用纯 Rust 重写，编译成 wasm32-wasip2，在 wasmtime 下跑真实 TCP 代理。客户端与服务端两个方向，当前 v0.7.0，镜像 ghcr.io/harodggg/xray-wasm:v0.7.0（amd64 + arm64）。它与 XrayTun 是同一个作者的两个独立项目。",
+        "repo": WASM_REPO,
+        "runtime": "wasmtime (WASI Preview 2)",
+        # 页面必须**逐字**出现的两句话 —— 这是红线，用机制钉住，不靠自觉：
+        #  ① 与 XrayTun 是非集成关系（不许暗示 XrayTun 用了它）；
+        #  ② 许可证必须带上 LICENSE.meow-rs，不能只写 MIT（GitHub 因此识别为 Other）。
+        "must_contain": ["不使用 xray-wasm", "LICENSE.meow-rs"],
+    },
+    {
+        "path": SITE / "en" / "wasm" / "index.html",
+        "pair": "wasm",
+        "lang": "en",
+        "url": f"{BASE}/en/wasm/",
+        "type": "SoftwareSourceCode",
+        "name": "xray-wasm",
+        "version": "0.7.0",
+        "description": "xray-wasm rewrites Xray's VLESS + XTLS-Vision + REALITY protocol stack in pure Rust and compiles it to wasm32-wasip2, where it runs a real TCP proxy under wasmtime. Two directions (client and server), current version v0.7.0, image ghcr.io/harodggg/xray-wasm:v0.7.0 (amd64 + arm64). It is a separate project by the same author as XrayTun.",
+        "repo": WASM_REPO,
+        "runtime": "wasmtime (WASI Preview 2)",
+        "must_contain": ["does not use xray-wasm", "LICENSE.meow-rs"],
     },
 ]
-DL = "https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg"
-MARK_START = "<!-- JSON-LD: generated by .scratch/gen_jsonld.py — 改文案后重跑，别手改 -->"
+
+MARK_START = "<!-- JSON-LD: generated by scripts/gen-site-jsonld.py — 改文案后重跑，别手改 -->"
+# 早先脚本在仓库外，注释里写的是 .scratch/ 下的路径（那句是错的：别人拿不到那个目录）。
+# 重新生成时要连旧标记一起删掉，否则页面上会留下两份 JSON-LD。
+LEGACY_MARKS = ["<!-- JSON-LD: generated by .scratch/gen_jsonld.py — 改文案后重跑，别手改 -->"]
 
 
 def strip_tags(s: str) -> str:
@@ -68,25 +133,49 @@ def faq_pairs(src: str) -> list[tuple[str, str]]:
     return out
 
 
+def alternates(page: dict) -> list[tuple[str, str]]:
+    """本页所在 pair 的三向 hreflang（x-default 指向中文页）。"""
+    sibs = {p["lang"]: p["url"] for p in PAGES if p["pair"] == page["pair"]}
+    return [("zh-Hans", sibs["zh-Hans"]), ("en", sibs["en"]), ("x-default", sibs["zh-Hans"])]
+
+
 def build_ld(page: dict, faqs: list[tuple[str, str]]) -> list[dict]:
-    return [
-        {
+    if page["type"] == "SoftwareApplication":
+        software = {
             "@context": "https://schema.org",
             "@type": "SoftwareApplication",
             "name": page["name"],
             "operatingSystem": page["os"],
             "applicationCategory": "UtilitiesApplication",
-            "softwareVersion": "0.8.26",
-            "softwareHelp": "https://harodggg.github.io/xrayTun/",
-            "downloadUrl": DL,
-            "installUrl": DL,
+            "softwareVersion": page["version"],
+            "softwareHelp": f"{BASE}/",
+            "downloadUrl": XRAYTUN_DL,
+            "installUrl": XRAYTUN_DL,
             "releaseNotes": "https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md",
             # 仓库已有 LICENSE（MIT）→ 指向它（2026-09-20 用户决定补上，commit 12c523d）
             "license": "https://github.com/harodggg/xrayTun/blob/main/LICENSE",
             "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
             "description": page["description"],
             "inLanguage": page["lang"],
-        },
+        }
+    else:
+        # SoftwareSourceCode：**没有 operatingSystem 字段**（它跑在 WASI 运行时里）。
+        software = {
+            "@context": "https://schema.org",
+            "@type": "SoftwareSourceCode",
+            "name": page["name"],
+            "description": page["description"],
+            "codeRepository": page["repo"],
+            "programmingLanguage": "Rust",
+            "runtimePlatform": page["runtime"],
+            "version": page["version"],
+            # 指向仓库里的 LICENSE；**双许可的事实写在 FAQPage 的答案里**（同一份 JSON-LD 内），
+            # 页面上也逐字写了「MIT（另含 LICENSE.meow-rs 第三方许可，见仓库）」。
+            "license": f"{page['repo']}/blob/main/LICENSE",
+            "inLanguage": page["lang"],
+        }
+    return [
+        software,
         {
             "@context": "https://schema.org",
             "@type": "FAQPage",
@@ -113,12 +202,13 @@ def inject(path: Path, blocks: list[dict]) -> None:
         + "</script>"
         for b in blocks
     )
-    # 幂等：先删掉上次生成的块
-    src = re.sub(
-        re.escape(MARK_START) + r'\s*<script type="application/ld\+json">[\s\S]*?</script>\s*',
-        "",
-        src,
-    )
+    # 幂等：先删掉上次生成的块（含旧标记写的那些）
+    for mark in [MARK_START] + LEGACY_MARKS:
+        src = re.sub(
+            re.escape(mark) + r'\s*<script type="application/ld\+json">[\s\S]*?</script>\s*',
+            "",
+            src,
+        )
     assert "</head>" in src
     src = src.replace("</head>", payload + "\n  </head>", 1)
     path.write_text(src, encoding="utf-8")
@@ -128,9 +218,11 @@ def check() -> int:
     bad = 0
     for page in PAGES:
         src = page["path"].read_text(encoding="utf-8")
+        rel = page["path"].relative_to(SITE)
+        problems: list[str] = []
         blocks = re.findall(r'<script type="application/ld\+json">([\s\S]*?)</script>', src)
         if len(blocks) != 2:
-            print(f"✗ {page['path'].name}: JSON-LD 块数 {len(blocks)}（期望 2）")
+            print(f"✗ {rel}: JSON-LD 块数 {len(blocks)}（期望 2）")
             bad += 1
             continue
         parsed = []
@@ -138,45 +230,72 @@ def check() -> int:
             try:
                 parsed.append(json.loads(b))
             except json.JSONDecodeError as e:
-                print(f"✗ {page['path']}: JSON 解析失败 {e}")
-                bad += 1
-        app = next((p for p in parsed if p.get("@type") == "SoftwareApplication"), None)
+                problems.append(f"JSON 解析失败 {e}")
+        software = next((p for p in parsed if p.get("@type") == page["type"]), None)
         faq = next((p for p in parsed if p.get("@type") == "FAQPage"), None)
-        if not app or not faq:
-            print(f"✗ {page['path']}: 缺 SoftwareApplication 或 FAQPage")
+        if not software or not faq:
+            print(f"✗ {rel}: 缺 {page['type']} 或 FAQPage（实际 {[p.get('@type') for p in parsed]}）")
             bad += 1
             continue
-        # 页面可见文本（去标签）
+
         visible = strip_tags(src)
+
+        # ---- canonical / hreflang：与登记值逐字一致（域名迁移的护栏）------------
+        if f'<link rel="canonical" href="{page["url"]}" />' not in src:
+            problems.append(f'canonical 不等于登记的 {page["url"]}')
+        for h, u in alternates(page):
+            if f'<link rel="alternate" hreflang="{h}" href="{u}" />' not in src:
+                problems.append(f'hreflang {h} 不等于登记的 {u}')
+
+        # ---- meta description：结构化数据不能描述页面里没有的说法 ----------------
+        m = re.search(r'name="description"[^>]*content="([^"]*)"', src, re.S)
+        meta_desc = re.sub(r"\s+", " ", html.unescape(m.group(1))).strip() if m else ""
+        if meta_desc != page["description"]:
+            problems.append("meta description 与登记值不一致")
+
+        # ---- FAQPage 与页面 #faq 逐条逐字一致 ---------------------------------
         page_faqs = faq_pairs(src)
         ld_faqs = [(q["name"], q["acceptedAnswer"]["text"]) for q in faq["mainEntity"]]
-        ok = True
         if ld_faqs != page_faqs:
-            print(f"✗ {page['path']}: FAQPage 与页面 FAQ 不一致（{len(ld_faqs)} vs {len(page_faqs)}）")
-            ok = False
+            problems.append(f"FAQPage 与页面 FAQ 不一致（{len(ld_faqs)} vs {len(page_faqs)}）")
         for q, a in ld_faqs:
             if q not in visible:
-                print(f"✗ {page['path']}: 问题不在页面里：{q[:40]}")
-                ok = False
+                problems.append(f"问题不在页面里：{q[:40]}")
             if a[:60] not in visible:
-                print(f"✗ {page['path']}: 答案前 60 字不在页面里：{a[:60]}")
-                ok = False
-        if app["operatingSystem"] != "macOS 13.0 or later":
-            print(f"✗ {page['path']}: operatingSystem 不是「仅 macOS」")
-            ok = False
-        # 许可证事实（2026-09-20 起）：源码 MIT 且仓库有 LICENSE；随包 Xray-core 是 MPL-2.0。
-        # 这里锁住「不能既不说 MIT 也不给出 LICENSE 链接」以及「必须提 MPL-2.0」，
-        # 而不是像以前那样禁止出现 MIT（那已经过期）。
-        lic = str(app.get("license", ""))
+                problems.append(f"答案前 60 字不在页面里：{a[:60]}")
+
         faq_text = json.dumps(faq, ensure_ascii=False)
-        if not lic.endswith("/LICENSE") or "MPL-2.0" not in faq_text:
-            print(f"✗ {page['path']}: license 字段应指向 /LICENSE，且 FAQ 必须写明随包 Xray-core 是 MPL-2.0")
-            ok = False
+        # 版本键名两种类型不同：SoftwareApplication 用 softwareVersion，SoftwareSourceCode 用 version。
+        ld_version = software.get("softwareVersion" if page["type"] == "SoftwareApplication" else "version")
+        if str(ld_version or "") != page["version"]:
+            problems.append(f"version 不是 {page['version']}")
+        if not str(software.get("license", "")).endswith("/LICENSE"):
+            problems.append("license 字段应指向 /LICENSE")
+
+        if page["type"] == "SoftwareApplication":
+            if software.get("operatingSystem") != page["os"]:
+                problems.append(f"operatingSystem 应为「{page['os']}」")
+            for s in page.get("faq_must_contain", []):
+                if s not in faq_text:
+                    problems.append(f"FAQ 里必须写明 {s}")
+        else:
+            # 红线：不能声称某个操作系统 —— 它跑在 wasmtime / 容器里。
+            if "operatingSystem" in software:
+                problems.append("SoftwareSourceCode 不得写 operatingSystem")
+            if software.get("codeRepository") != page["repo"]:
+                problems.append(f"codeRepository 不是 {page['repo']}")
+            for s in page.get("must_contain", []):
+                if s not in visible:
+                    problems.append(f"页面里必须有这句话：{s}")
+
+        if problems:
+            for p in problems:
+                print(f"✗ {rel}: {p}")
+            bad += 1
         print(
-            f"{'✓' if ok else '✗'} {page['path'].relative_to(SITE)}: JSON.parse ok · "
-            f"SoftwareApplication ok · FAQPage {len(ld_faqs)} 条与页面逐条一致 · 可见文本 {len(visible)} 字"
+            f"{'✓' if not problems else '✗'} {rel}: JSON.parse ok · {page['type']} ok · "
+            f"FAQPage {len(ld_faqs)} 条与页面逐条一致 · canonical/hreflang ok · 可见文本 {len(visible)} 字"
         )
-        bad += 0 if ok else 1
     return bad
 
 
@@ -186,7 +305,7 @@ def main() -> int:
         for page in PAGES:
             faqs = faq_pairs(page["path"].read_text(encoding="utf-8"))
             inject(page["path"], build_ld(page, faqs))
-            print(f"  写入 JSON-LD：{page['path'].relative_to(SITE)}（FAQ {len(faqs)} 条）")
+            print(f"  写入 JSON-LD：{page['path'].relative_to(SITE)}（{page['type']} + FAQ {len(faqs)} 条）")
         mode = "check"
     if mode == "check":
         bad = check()

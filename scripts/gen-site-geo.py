@@ -104,27 +104,45 @@ def write_robots() -> None:
 
 
 def write_sitemap() -> None:
-    def url(loc: str, self_lang: str) -> str:
-        alts = "".join(
-            f'\n    <xhtml:link rel="alternate" hreflang="{h}" href="{u}"/>'
-            for h, u in (("zh-Hans", f"{BASE}/"), ("en", f"{BASE}/en/"), ("x-default", f"{BASE}/"))
-        )
-        return f"""  <url>
-    <loc>{loc}</loc>
-    <lastmod>{LAST_PUB}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>{"1.0" if self_lang == "zh-Hans" else "0.9"}</priority>{alts}
-  </url>"""
+    # 每个「逻辑页面」一对中英路径 + 各自优先级。
+    #
+    # hreflang 必须指向**同一逻辑页面**的中英版本 —— 早先这里写死了
+    # `{BASE}/` 与 `{BASE}/en/`，加子页面时 `/wasm/` 的 alternate 会错误地
+    # 指向首页（那会让搜索引擎把子页面当成首页的副本）。
+    pages = [
+        ("/", "/en/", "1.0", "0.9"),
+        ("/wasm/", "/en/wasm/", "0.8", "0.7"),
+    ]
 
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
-        xmlns:xhtml="http://www.w3.org/1999/xhtml">
-{url(f"{BASE}/", "zh-Hans")}
-{url(f"{BASE}/en/", "en")}
-</urlset>
-"""
+    def url(zh_path: str, en_path: str, priority: str, self_lang: str) -> str:
+        alts = "".join(
+            f'\n    <xhtml:link rel="alternate" hreflang="{h}" href="{BASE}{u}"/>'
+            for h, u in (("zh-Hans", zh_path), ("en", en_path), ("x-default", zh_path))
+        )
+        loc = zh_path if self_lang == "zh-Hans" else en_path
+        return (
+            "  <url>\n"
+            f"    <loc>{BASE}{loc}</loc>\n"
+            f"    <lastmod>{LAST_PUB}</lastmod>\n"
+            "    <changefreq>weekly</changefreq>\n"
+            f"    <priority>{priority}</priority>{alts}\n"
+            "  </url>"
+        )
+
+    entries = []
+    for zh_path, en_path, zh_pri, en_pri in pages:
+        entries.append(url(zh_path, en_path, zh_pri, "zh-Hans"))
+        entries.append(url(zh_path, en_path, en_pri, "en"))
+
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"\n'
+        '        xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
+        + "\n".join(entries)
+        + "\n</urlset>\n"
+    )
     (SITE / "sitemap.xml").write_text(xml, encoding="utf-8")
-    print("  写出 sitemap.xml：2 个 URL + 三向 hreflang alternate")
+    print(f"  写出 sitemap.xml：{len(entries)} 个 URL（按逻辑页面成对、各自三向 hreflang）")
 
 
 def write_llms() -> None:
@@ -139,7 +157,14 @@ def write_llms() -> None:
 
 - [中文站（完整正文）]({BASE}/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
 - [English site (equivalent content)]({BASE}/en/)：与中文站逐段等价，不是半份翻译
-- [本站全文（供一次性摄取）]({BASE}/llms-full.txt)：中英两个页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
+- [本站全文（供一次性摄取）]({BASE}/llms-full.txt)：官网所有页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
+
+## 相关项目：xray-wasm（**独立项目，XrayTun 不使用它**）
+
+- [xray-wasm 页面（中文）]({BASE}/wasm/)：把 Xray 的 VLESS + XTLS-Vision + REALITY 协议栈用**纯 Rust** 重写，
+  编译成 **wasm32-wasip2**，在 **wasmtime** 下跑真实 TCP 代理；客户端与服务端两个方向都已实现
+- [xray-wasm page (English)]({BASE}/en/wasm/)：与中文页逐段等价
+- [xray-wasm 仓库](https://github.com/harodggg/xray-wasm)（**另一个仓库**，不是本仓库的子目录）
 
 ## 下载
 
@@ -188,37 +213,49 @@ TUN 模式还需要在应用内安装一次特权 helper（要求一次管理员
 
 
 def write_llms_full() -> None:
-    zh = html_to_md((SITE / "index.html").read_text(encoding="utf-8"), "zh")
-    en = html_to_md((SITE / "en" / "index.html").read_text(encoding="utf-8"), "en")
+    """把所有官网页面转成 Markdown 拼起来 —— 等价性由「直接转换」保证，不手抄。"""
+    pages = [
+        ("中文：XrayTun 主页面", "/", SITE / "index.html", "zh"),
+        ("中文：xray-wasm（同一作者的另一个项目）", "/wasm/", SITE / "wasm" / "index.html", "zh"),
+        ("English: XrayTun home", "/en/", SITE / "en" / "index.html", "en"),
+        ("English: xray-wasm (a separate project by the same author)", "/en/wasm/",
+         SITE / "en" / "wasm" / "index.html", "en"),
+    ]
+
+    bodies = []
+    for title, path, file, lang in pages:
+        text = html_to_md(file.read_text(encoding="utf-8"), lang)
+        bodies.append(f"# {title}\n\n来源：{BASE}{path}\n\n{text}")
+
+    total_zh = sum(len(b) for (t, _, _, lg), b in zip(pages, bodies) if lg == "zh")
+    total_en = sum(len(b) for (t, _, _, lg), b in zip(pages, bodies) if lg == "en")
+
     header = f"""# XrayTun — 全文（llms-full.txt）
 
 > 站点：{BASE}/ ｜ 版本：v{VERSION}（{LAST_PUB}）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
-> 结构化数据见两个页面 `<head>`里的 JSON-LD（SoftwareApplication + FAQPage）。
+> 结构化数据见各页面 `<head>` 里的 JSON-LD（SoftwareApplication + FAQPage）。
 >
-> **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**两个语言页面的完整正文**
+> **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**官网所有页面的完整正文**
 > 与官网里的「事实与边界」清单。仓库 `docs/` 下的**完整设计文档（数千行规范）没有逐字复制**
 > 到这里 —— 那样既膨胀、又必然与仓库文档不同步，反而更糟。需要细节请看绝对链接：
 > <https://github.com/harodggg/xrayTun/tree/main/docs>
 > （安装与 TUN 权限：docs/02-tun-and-privileges.md；分流与 DNS：docs/04-routing-and-dns.md）
+>
+> **`xray-wasm` 的仓库是另一个**：<https://github.com/harodggg/xray-wasm>
+> 它是同一作者的**独立项目**（纯 Rust 实现 VLESS + XTLS-Vision + REALITY，编译到 wasm32-wasip2），
+> **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。
 
-来源：{BASE}/（中文）与 {BASE}/en/（英文）。
-这是同一份内容的两种语言，段落一一对应；任一处不一致以对应语言页面为准。
+收录页面（{len(pages)} 个，中英各 2）：
+
+{chr(10).join(f"- {t} → {BASE}{p}" for t, p, _, _ in pages)}
 
 ---
 
-# 中文页面全文
-
-{zh}
-
----
-
-# English page (full text)
-
-{en}
+{chr(10).join("\n---\n\n" + b for b in bodies)}
 """
     (SITE / "llms-full.txt").write_text(header, encoding="utf-8")
-    print(f"  写出 llms-full.txt：中文 {len(zh)} 字 + 英文 {len(en)} 字（由页面直接转换）")
+    print(f"  写出 llms-full.txt：{len(pages)} 个页面（中文 {total_zh} 字 + 英文 {total_en} 字，由 HTML 直接转换）")
 
 
 def main() -> int:

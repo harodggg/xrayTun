@@ -65,7 +65,11 @@
   }
 
   // ---- 2. 有新版提示（可选，失败静默） ------------------------------------
+  // 只在本页讲的软件**就是 XrayTun** 时才提示新版本。子项目页（例如 /wasm/，讲的是
+  // xray-wasm v0.7.0）如果显示「有新版本 vX」——那是拿 XrayTun 的 Release 去说另一个项目，
+  // 属于不实陈述。所以那些页面用 <html data-no-update-check> 明确关掉这一段。
   try {
+    if (document.documentElement.hasAttribute("data-no-update-check")) return;
     if (!("fetch" in window)) return;
     fetch(REPO_API, { headers: { Accept: "application/vnd.github+json" } })
       .then(function (r) {
