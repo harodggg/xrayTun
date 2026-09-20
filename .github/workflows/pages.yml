@@ -1,0 +1,105 @@
+name: Pages
+
+# 把 `site/` 发布成 GitHub Pages 站点。
+#
+# 为什么用 Actions 而不是「分支部署」（Settings → Pages → Deploy from branch）：
+# 分支部署会把整个仓库当成站点根目录（或要单独开一个 orphan 分支），
+# 而这里站点只是仓库里的一个子目录，且需要**构建前的静态检查**（见下）。
+# 官方 Actions 路线（upload-pages-artifact + deploy-pages）可以直接发布任意目录。
+#
+# ⚠️ 这是**普通 project 站点**，地址形如
+#     https://harodggg.github.io/xrayTun/
+# 即站点挂在**子路径** `/xrayTun/` 下。所以 `site/` 里**不能有根绝对路径**
+# （`href="/assets/..."`、`src="/xrayTun/..."` 之类）：在子路径部署下它们会 404。
+# 下面的静态检查会把这类写法直接判为失败 —— 实测过：本地起一个挂在
+# `/xrayTun/` 下的静态服务器逐条拉资源，这是唯一能在部署前发现它的办法。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# 只读仓库；写 Pages 与拿 OIDC token 由 deploy-pages 用
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一个 Pages 部署；**不要** cancel-in-progress：
+# 中途取消一次部署会留下半发布的站点。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 站点静态检查（子路径安全 + 必需文件）
+        run: |
+          set -eu
+          fail=0
+
+          # 1) 必需文件
+          for f in index.html en/index.html llms.txt llms-full.txt robots.txt sitemap.xml \
+                   assets/site.css assets/site.js; do
+            if [ -e "site/$f" ]; then
+              echo "  ✓ site/$f"
+            else
+              echo "  ✗ 缺 site/$f" >&2
+              fail=1
+            fi
+          done
+
+          # 2) 根绝对路径：在 /xrayTun/ 子路径部署下必定 404
+          #    （`#anchor` 与 `https://` 外链不算）
+          if grep -rInE '(href|src)="/([^/]|$)' site --include='*.html' >/tmp/abs.txt; then
+            echo "  ✗ 发现根绝对路径（子路径部署下会 404）：" >&2
+            cat /tmp/abs.txt >&2
+            fail=1
+          else
+            echo "  ✓ 没有根绝对路径（href|src=\"/…\"）"
+          fi
+          if grep -rInE 'url\(/([^/]|$)' site --include='*.css' >/tmp/abscss.txt; then
+            echo "  ✗ CSS 里有根绝对 url(/)：" >&2
+            cat /tmp/abscss.txt >&2
+            fail=1
+          else
+            echo "  ✓ CSS 里没有根绝对 url(/)"
+          fi
+
+          # 3) 英文页在 /en/ 下，资源必须是 ../ 开头（写成本地相对会被解析到 /en/assets/…）
+          if grep -qE '(href|src)="assets/' site/en/index.html; then
+            echo "  ✗ en/index.html 用了 'assets/…'（应为 '../assets/…'）" >&2
+            fail=1
+          else
+            echo "  ✓ en/index.html 的资源路径带 ../"
+          fi
+
+          [ "$fail" = 0 ] || exit 1
+
+      - uses: actions/configure-pages@v5
+        with:
+          # 仓库里 Pages 还没开过（实测 `gh api repos/…/pages` → 404）。
+          # 让这一步在需要时自动开启（build type = workflow），
+          # 否则第一次部署会因为「站点不存在」失败，还要人工去 Settings 里点一下。
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
