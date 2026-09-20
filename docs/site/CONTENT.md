@@ -5,7 +5,7 @@
 > **上游**：`docs/site/INTERACTION.md`（task-18，锚点 id 与安装路径口径以它为准）、
 > `docs/site/VISUAL.md`（task-17，长什么样归 art-designer）。
 > **本文件只交付「写什么」**：可直接抄进 HTML 的中英文文案 + 信息架构决策 + 结构化数据内容。
-> **基线**：`HEAD = e7ed509`；版本事实取自 `gh release view v0.8.26`（2026-09-20T07:29:52Z，`isDraft: false`）。
+> **基线**：`HEAD = e7ed509`；版本事实取自 `gh release view v0.8.28`（2026-09-20T16:03:44Z，`isDraft: false`）。
 
 ---
 
@@ -16,9 +16,9 @@
 
 | # | 断言（写进官网的样子） | 来源（可复核） |
 |---|---|---|
-| F1 | 当前版本 **v0.8.26**，发布日期 **2026-09-20** | `gh release view v0.8.26` → `tagName` / `publishedAt` |
-| F2 | dmg **47,128,987 字节（44.9 MiB）**，文件名 `XrayTun_0.8.26_x86_64_arm64.dmg` | `gh release view v0.8.26` assets[].size/name |
-| F3 | zip **42,636,964 字节（40.7 MiB）**，文件名 `XrayTun_0.8.26_x86_64_arm64.zip` | 同上 |
+| F1 | 当前版本 **v0.8.28**，发布日期 **2026-09-20** | `gh release view v0.8.28` → `tagName` / `publishedAt` |
+| F2 | dmg **47,145,126 字节（45.0 MiB）**，文件名 `XrayTun_0.8.28_x86_64_arm64.dmg` | `gh release view v0.8.28` assets[].size/name |
+| F3 | zip **42,647,148 字节（40.7 MiB）**，文件名 `XrayTun_0.8.28_x86_64_arm64.zip` | 同上 |
 | F4 | 另有 `SHA256SUMS.txt`（200 字节） | 同上 |
 | F5 | 仅 **macOS 13.0 或更高** | `apps/desktop/tauri.conf.json` → `bundle.macOS.minimumSystemVersion: "13.0"` |
 | F6 | 通用包，**arm64 与 x86_64 原生支持**；App / helper / 核心三者都是 universal | `.github/workflows/release.yml:118-125`（`lipo -archs` 断言三种可执行文件） |
@@ -31,7 +31,7 @@
 | F13 | TUN 使用的是 **Xray-core 原生 `tun` 入站（内置 gVisor 协议栈）**，不是 tun2socks 之类旁路进程 | `docs/03-xray-integration.md` §1（上游源码核实） |
 | F14 | 路由用 `0.0.0.0/1` + `128.0.0.0/1` 拆分，而不是替换默认路由 | `README.md` §核心问题；`docs/02` §路由策略 |
 | F15 | 三种模式：**直连 / 系统代理 / TUN** | `crates/xt-core/src/model.rs` `ProxyMode` |
-| F16 | 「系统代理」模式**只提供本机 SOCKS5(10808)/HTTP(10809) 入站，不修改 macOS 系统代理设置**（截至 v0.8.26） | 全仓库无 `networksetup -setwebproxy` 调用（`grep -rn "setwebproxy"` 只命中一处注释）；helper 协议无代理请求（`xt-proto` `Request` 枚举只有 TUN 相关）；`docs/07 §2.2` 未完成项第 6 条 |
+| F16 | 「系统代理」模式**只提供本机 SOCKS5(10808)/HTTP(10809) 入站，不修改 macOS 系统代理设置**（截至 v0.8.28） | 全仓库无 `networksetup -setwebproxy` 调用（`grep -rn "setwebproxy"` 只命中一处注释）；helper 协议无代理请求（`xt-proto` `Request` 枚举只有 TUN 相关）；`docs/07 §2.2` 未完成项第 6 条 |
 | F17 | 分流：4 个预设 + 自定义规则；自定义规则**追加在预设之后** | `model.rs` `RoutingPreset`；`Routing.tsx:74-79` |
 | F18 | 支持 **geoip / geosite 匹配**（`geoip:cn` / `geosite:cn` 等） | `docs/07 §2.1`、`docs/04` |
 | F19 | 规则**顺序敏感**（自上而下取第一条命中） | `Routing.tsx:45-49`；`docs/04` |
@@ -45,7 +45,7 @@
 | F27 | 自更新：从 GitHub Release 下载 zip → 比对 `SHA256SUMS.txt` → 替换应用并重启；**只校验 SHA256、没有签名校验** | `apps/desktop/src/commands/snapshot.rs:502/535`；`docs/07 §5.1(c)` |
 | F28 | 流量计数**跨核心重启续接**（重启不会把累计值归零），并如实显示「重启过 N 次」 | `crates/xt-core/src/xray/stats.rs` `MonotonicCounter`（`:357-390`）；`types.ts` `counter_resets` |
 | F29 | `dns-out`（UDP 出站）与 `api`（本机回环）的**字节计数器恒为 0，是上游统计盲区**；界面用**连接数**表示活跃度 | `docs/ui/topology/README.md` §v0.8.24；实测 4769 / 5374 条连接 |
-| F30 | 「最近连接」的域名是**时序配对**结果（可能不准，约一半连接配得到），界面标注 `*` 与配对时延 | `docs/ui/topology/CONNECTIONS.md` §2/§3；`CHANGELOG.md` 0.8.26 |
+| F30 | 「最近连接」的域名是**时序配对**结果（可能不准，约一半连接配得到），界面标注 `*` 与配对时延 | `docs/ui/topology/CONNECTIONS.md` §2/§3；`CHANGELOG.md` 0.8.28 |
 | F31 | 官网必须写清的两条诚实边界：**没有分连接字节数与持续时间**（上游没有） | `CONNECTIONS.md` §2「拿不到」 |
 | F32 | 命令进程以**普通用户**运行；只有建 utun / 装路由 / 改 DNS 在一个 root helper 里，且 helper 只接受来自本应用的、通过代码签名校验的连接 | `README.md` 三条设计决定；`docs/06` 对端授权 |
 | F33 | 首次使用需在设置里**安装特权 helper**（要一次管理员密码） | `.github/workflows/release.yml:167`；`Settings.tsx:426` |
@@ -103,7 +103,7 @@
 **决策 3 · 版本数字写死在 HTML 里，JS 只提示「有新版」。**
 理由与 `INTERACTION.md` INT-4-1/4-2 一致：AI 爬虫与禁用 JS 的用户只能看到原始 HTML，
 而资产文件名带版本号、链接会随版本失效。所以静态写死 + JS 增强 + 失败静默。
-**本文件 §2/§3 里的所有版本数字都是 v0.8.26 的值，发新版时必须整体更新**
+**本文件 §2/§3 里的所有版本数字都是 v0.8.28 的值，发新版时必须整体更新**
 （可见文本 / JSON-LD `softwareVersion` / `llms.txt` 三处保持一致，见 INT-4-4）。
 
 ---
@@ -115,7 +115,7 @@
 ```html
 <html lang="zh-Hans">
 <title>XrayTun — macOS 上的 Xray 图形客户端（原生 TUN 模式）</title>
-<meta name="description" content="XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.26，通用包（Apple Silicon + Intel），包内自带 Xray 核心。">
+<meta name="description" content="XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.28，通用包（Apple Silicon + Intel），包内自带 Xray 核心。">
 <link rel="canonical" href="https://xraytun.top/">
 <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/">
 <link rel="alternate" hreflang="en" href="https://xraytun.top/en/">
@@ -141,10 +141,10 @@
 
 | 项 | 值 |
 |---|---|
-| 当前版本 | v0.8.26（2026-09-20 发布） |
+| 当前版本 | v0.8.28（2026-09-20 发布） |
 | 系统要求 | macOS 13.0 或更高 |
 | 处理器 | Apple Silicon 与 Intel，通用包（arm64 + x86_64） |
-| 安装包 | dmg 44.9 MiB（47,128,987 字节） |
+| 安装包 | dmg 45.0 MiB（47,145,126 字节） |
 | Xray 核心 | **包内自带**（构建使用 Xray-core v26.9.9），不需要另外安装 |
 | 价格/授权 | 源码公开在 GitHub，以 **MIT** 许可发布（仓库有 `LICENSE`，见 `#links`） |
 
@@ -195,7 +195,7 @@
 * 三种模式：**直连 / 系统代理 / TUN**。
 * TUN 模式使用 **Xray-core 原生 `tun` 入站**（内置 gVisor 协议栈），不依赖 tun2socks 等旁路进程，UDP 与 QUIC 由同一协议栈处理。
 * 路由用 `0.0.0.0/1` 与 `128.0.0.0/1` 拆分而不是替换默认路由：最坏情况是「一部分流量走错路」，而不是「完全没有默认路由」。
-* **系统代理模式不会修改 macOS 的系统代理设置**（截至 v0.8.26）。它只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你自己把应用指向这两个端口；要自动接管请用 TUN 模式。
+* **系统代理模式不会修改 macOS 的系统代理设置**（截至 v0.8.28）。它只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你自己把应用指向这两个端口；要自动接管请用 TUN 模式。
 * 权限最小化：建 utun、装路由、改 DNS 由特权 helper 完成，**Xray 核心以普通用户身份运行**；helper 只接受来自本应用、通过代码签名校验的连接。
 * 首次使用需要在设置里安装特权 helper（会要求一次管理员密码）。
 
@@ -228,15 +228,15 @@
 ### 2.4 `#download` — 下载
 
 **主按钮**
-> 下载 macOS 版 v0.8.26 · dmg · 44.9 MiB
+> 下载 macOS 版 v0.8.28 · dmg · 45.0 MiB
 
 **真实资产 URL（必须写死在 HTML 的 `href` 里）**
 
 | 文件 | 链接 | 大小 |
 |---|---|---|
-| dmg（主） | `https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg` | 47,128,987 字节（44.9 MiB） |
-| zip（备用） | `https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip` | 42,636,964 字节（40.7 MiB） |
-| 校验和 | `https://github.com/harodggg/xrayTun/releases/download/v0.8.26/SHA256SUMS.txt` | 200 字节 |
+| dmg（主） | `https://github.com/harodggg/xrayTun/releases/download/v0.8.28/XrayTun_0.8.28_x86_64_arm64.dmg` | 47,145,126 字节（45.0 MiB） |
+| zip（备用） | `https://github.com/harodggg/xrayTun/releases/download/v0.8.28/XrayTun_0.8.28_x86_64_arm64.zip` | 42,647,148 字节（40.7 MiB） |
+| 校验和 | `https://github.com/harodggg/xrayTun/releases/download/v0.8.28/SHA256SUMS.txt` | 200 字节 |
 | 所有版本 | `https://github.com/harodggg/xrayTun/releases/latest` | — |
 
 **运行要求**
@@ -251,8 +251,8 @@
 
 ```bash
 # 与 release 里的 SHA256SUMS.txt 对比
-grep XrayTun_0.8.26_x86_64_arm64.dmg SHA256SUMS.txt
-shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
+grep XrayTun_0.8.28_x86_64_arm64.dmg SHA256SUMS.txt
+shasum -a 256 XrayTun_0.8.28_x86_64_arm64.dmg
 ```
 
 > 两行的哈希应当一致。注意 `SHA256SUMS.txt` 由 `shasum -a 256 ./*` 生成，行里带 `./` 前缀，
@@ -309,7 +309,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 
 **XrayTun 需要我另外安装 Xray 核心吗？**
 > 不需要。安装包内已包含 Xray-core 以及 `geoip.dat`、`geosite.dat`，位于应用的
-> `Contents/Resources/` 目录。XrayTun 从 v0.8.26 起随包分发核心，你只需要准备节点或订阅链接。
+> `Contents/Resources/` 目录，**不需要你另外安装**；你只需要准备节点或订阅链接。
 
 **XrayTun 支持哪些 macOS 版本和处理器？**
 > 支持 macOS 13.0 或更高版本，Apple Silicon（arm64）与 Intel（x86_64）都原生支持，
@@ -335,7 +335,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 > Xray 核心本身仍然以你的普通用户身份运行。
 
 **「系统代理」模式会自动设置 macOS 的系统代理吗？**
-> 不会（截至 v0.8.26）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）
+> 不会（截至 v0.8.28）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）
 > 入站，需要你手动把应用或系统代理指向这两个端口。要让整机流量自动按规则走，请使用 TUN 模式。
 
 **支持哪些节点协议和订阅格式？**
@@ -367,13 +367,14 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 **换 Wi-Fi、合盖唤醒之后需要手动点「连接」吗？**
 > 不需要。看门狗每 10 秒经隧道发一次真实请求，连续 2 次失败就自动重建隧道；开机时若上次是连接状态，
 > 会在后台最多重试约 2 分钟，因此开机时 Wi-Fi 还没就绪也能自动连上。重建失败时会退回直连以保证你能上网。
-> 需要如实说明的是：**v0.8.26 及更早版本**的界面只显示「已连接／未连接」，不会显示
-> 「正在自动恢复」的进度，这段时间你会看到状态短暂变成「未连接」——功能是自动的，
-> 只是界面还没把过程画出来。
+> 从 v0.8.27 起，界面会显示「正在自动恢复（第 N 次）」，你能看到自愈在进行；**v0.8.27 之前**的版本
+> 只显示「已连接／未连接」，所以那段时间状态会短暂变成「未连接」——功能一直是自动的，
+> 只是更早的界面没把过程画出来。
 >
-> （按版本锚定而不是「当前版本」：task-22 已让界面显示「正在自动恢复（第 N 次）」，写成
-> 「当前版本」会在下一个版本发布后变成假话；限定 v0.8.26 及更早则**永远准确**，
-> 不依赖任何人记得改官网。）
+> （按版本锚定而不是「当前版本」：写成「当前版本」会在下一个版本发布后变成假话；
+> **锚在「v0.8.27 起 / v0.8.27 之前」这种边界上则永远准确**，不依赖任何人记得改官网。
+> v0.8.28 同步：原文只写了旧版的限制（「v0.8.28 及更早不显示进度」），会让读者以为现在也不显示 ——
+> 现在把**当前行为**（自 v0.8.27 起显示自愈进度）与历史边界一起写出来。）
 
 **自动更新安全吗？**
 > 自动更新会从项目的 GitHub Release 下载压缩包，并用 release 里的 `SHA256SUMS.txt` 校验完整性，
@@ -415,7 +416,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 ```html
 <html lang="en">
 <title>XrayTun — A macOS GUI client for Xray with native TUN mode</title>
-<meta name="description" content="XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.26, universal build (Apple Silicon + Intel), Xray core included.">
+<meta name="description" content="XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.28, universal build (Apple Silicon + Intel), Xray core included.">
 <link rel="canonical" href="https://xraytun.top/en/">
 <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/">
 <link rel="alternate" hreflang="en" href="https://xraytun.top/en/">
@@ -438,10 +439,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 
 | Item | Value |
 |---|---|
-| Current version | v0.8.26 (released 2026-09-20) |
+| Current version | v0.8.28 (released 2026-09-20) |
 | Requirements | macOS 13.0 or later |
 | CPU | Apple Silicon and Intel, one universal build (arm64 + x86_64) |
-| Download | dmg, 44.9 MiB (47,128,987 bytes) |
+| Download | dmg, 45.0 MiB (47,145,126 bytes) |
 | Xray core | **Included in the app** (Xray-core v26.9.9 in this build); you do not install Xray yourself |
 | License | Source is public on GitHub, released under **MIT** (a `LICENSE` file is in the repository; see `#links`) |
 
@@ -499,7 +500,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 * Three modes: **direct, system proxy and TUN**.
 * TUN mode uses **Xray-core's native `tun` inbound** (built-in gVisor stack). There is no tun2socks sidecar process, and UDP/QUIC are handled by the same stack.
 * Routes use a `0.0.0.0/1` + `128.0.0.0/1` split instead of replacing the default route: the worst case is some traffic taking the wrong path, not losing the default route entirely.
-* **System proxy mode does not modify macOS system proxy settings** (as of v0.8.26). It only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps at those ports yourself. Use TUN mode to capture traffic automatically.
+* **System proxy mode does not modify macOS system proxy settings** (as of v0.8.28). It only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps at those ports yourself. Use TUN mode to capture traffic automatically.
 * Least privilege: creating the utun interface, installing routes and changing DNS are done by a privileged helper, while the **Xray core runs as your normal user**. The helper only accepts connections from the app that pass code-signature validation.
 * The privileged helper must be installed once from the app's settings, which asks for an administrator password.
 
@@ -532,13 +533,13 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 ### 3.4 `#download`
 
 **Primary button**
-> Download for macOS v0.8.26 · dmg · 44.9 MiB
+> Download for macOS v0.8.28 · dmg · 45.0 MiB
 
 | File | Link | Size |
 |---|---|---|
-| dmg (primary) | `https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg` | 47,128,987 bytes (44.9 MiB) |
-| zip (alternative) | `https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.zip` | 42,636,964 bytes (40.7 MiB) |
-| Checksums | `https://github.com/harodggg/xrayTun/releases/download/v0.8.26/SHA256SUMS.txt` | 200 bytes |
+| dmg (primary) | `https://github.com/harodggg/xrayTun/releases/download/v0.8.28/XrayTun_0.8.28_x86_64_arm64.dmg` | 47,145,126 bytes (45.0 MiB) |
+| zip (alternative) | `https://github.com/harodggg/xrayTun/releases/download/v0.8.28/XrayTun_0.8.28_x86_64_arm64.zip` | 42,647,148 bytes (40.7 MiB) |
+| Checksums | `https://github.com/harodggg/xrayTun/releases/download/v0.8.28/SHA256SUMS.txt` | 200 bytes |
 | All releases | `https://github.com/harodggg/xrayTun/releases/latest` | — |
 
 **Requirements**
@@ -552,8 +553,8 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 **Verify the download (optional)**
 
 ```bash
-grep XrayTun_0.8.26_x86_64_arm64.dmg SHA256SUMS.txt
-shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
+grep XrayTun_0.8.28_x86_64_arm64.dmg SHA256SUMS.txt
+shasum -a 256 XrayTun_0.8.28_x86_64_arm64.dmg
 ```
 
 > The two hashes should match. `SHA256SUMS.txt` is generated with `shasum -a 256 ./*`, so each line
@@ -644,7 +645,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 > normal user.
 
 **Does "system proxy" mode configure the macOS system proxy automatically?**
-> No (as of v0.8.26). System proxy mode only starts local SOCKS5 (127.0.0.1:10808) and HTTP
+> No (as of v0.8.28). System proxy mode only starts local SOCKS5 (127.0.0.1:10808) and HTTP
 > (127.0.0.1:10809) inbounds; you point your apps or system proxy settings at those ports yourself.
 > To capture all traffic automatically, use TUN mode.
 
@@ -685,13 +686,14 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 > consecutive failures; after login, if the app was connected when it last exited, it retries in the
 > background for about two minutes so it can come up before Wi-Fi is ready. If rebuilding fails it
 > falls back to direct connection.
-> To be straightforward about a version-specific limitation: **in v0.8.26 and earlier the UI only
-> shows "connected" or "disconnected" and does not display recovery progress**, so you may briefly
-> see "disconnected" while it recovers in the background.
+> Since v0.8.27 the UI shows **"recovering (attempt N)"**, so you can watch the recovery happen;
+> **before v0.8.27** it only showed "connected" or "disconnected", so you may briefly see
+> "disconnected" while it recovers in the background.
 >
-> (Anchored to the version rather than "the current version": task-22 added a
-> "recovering (attempt N)" indicator, so "the current version" would become false at the next
-> release. Limiting the claim to v0.8.26 and earlier stays accurate forever.)
+> (Anchored to the version rather than "the current version": "the current version" would become
+> false at the next release, whereas anchoring on the v0.8.27 boundary stays accurate forever.
+> v0.8.28 sync: the original text only stated the old limitation, which made it read as if the
+> progress indicator did not exist today — it now states the current behaviour plus the boundary.)
 
 **Is the auto-updater secure?**
 > The updater downloads the zip from the project's GitHub release and verifies it against
@@ -737,10 +739,10 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
   "name": "XrayTun",
   "applicationCategory": "UtilitiesApplication",
   "operatingSystem": "macOS 13.0 or later",
-  "softwareVersion": "0.8.26",
+  "softwareVersion": "0.8.28",
   "datePublished": "2026-09-20",
-  "downloadUrl": "https://github.com/harodggg/xrayTun/releases/download/v0.8.26/XrayTun_0.8.26_x86_64_arm64.dmg",
-  "fileSize": "47128987",
+  "downloadUrl": "https://github.com/harodggg/xrayTun/releases/download/v0.8.28/XrayTun_0.8.28_x86_64_arm64.dmg",
+  "fileSize": "47145126",
   "softwareRequirements": "macOS 13.0 or later; Apple Silicon or Intel; Xray node or subscription required",
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "CNY" },
   "url": "https://xraytun.top/",
@@ -758,7 +760,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
     { "@type": "Question", "name": "打开时提示「无法验证开发者」，怎么办？",
       "acceptedAnswer": { "@type": "Answer", "text": "这是未公证应用的预期提示，不是安装出错。macOS 15 及以后请走「系统设置 → 隐私与安全性 → 仍要打开」；macOS 14 及更低版本可以右键（Control 点按）应用选「打开」；也可以执行 xattr -d com.apple.quarantine /Applications/XrayTun.app 后正常打开。" } },
     { "@type": "Question", "name": "「系统代理」模式会自动设置 macOS 的系统代理吗？",
-      "acceptedAnswer": { "@type": "Answer", "text": "不会（截至 v0.8.26）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你手动指向这两个端口；要让整机流量自动按规则走，请使用 TUN 模式。" } },
+      "acceptedAnswer": { "@type": "Answer", "text": "不会（截至 v0.8.28）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你手动指向这两个端口；要让整机流量自动按规则走，请使用 TUN 模式。" } },
     { "@type": "Question", "name": "为什么有的出口流量显示 0 B？",
       "acceptedAnswer": { "@type": "Answer", "text": "因为那是 Xray 统计接口的盲区：Xray 不统计 UDP 出站流量（dns-out）与本机回环流量（api），这两个出口的字节计数器恒为 0，XrayTun 改用连接数表示活跃度；block 出口的 0 是真的 0。" } },
     { "@type": "Question", "name": "一条连接用了多少流量、持续了多久？",
@@ -780,7 +782,7 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
 | G1 | 事实密度高（不用形容词替代事实） | `#what` 事实条、`#features` 全部条目都带具体名词/数字；全站未使用「强大 / 高效 / 稳定」这类词 |
 | G2 | 每段独立成义（无「如上所述」「它」） | 中英各段均以完整主谓句开头；`#features` 每条形如「XrayTun 支持…」；`#why` 每段自足 |
 | G3 | FAQ 是完整问答句 | §2.6 / §3.6 每条问题即小标题、答案首句即结论 |
-| G4 | 给数字 | 版本 v0.8.26、发布日期、dmg 47,128,987 B、zip 42,636,964 B、macOS 13.0+、重连 24×5s、看门狗 10s/2 次、核心 v26.9.9 |
+| G4 | 给数字 | 版本 v0.8.28、发布日期、dmg 47,145,126 B、zip 42,647,148 B、macOS 13.0+、重连 24×5s、看门狗 10s/2 次、核心 v26.9.9 |
 | G5 | 依赖说清（是否需自备核心） | `#what` 事实条 + `#download` 运行要求 + FAQ 第 1 条：**包内自带，不需要自备** |
 | G6 | 中英双语且等价 | §2 与 §3 段落一一对应（7 段 + 17 条 FAQ）；`/` 与 `/en/` 各为完整单页 |
 | G7 | 关键内容在原始 HTML 里 | `INTERACTION.md` §6.1 的 8 条在 §2/§3 中都以普通正文给出，无「JS 渲染后出现」的依赖 |
@@ -831,5 +833,5 @@ shasum -a 256 XrayTun_0.8.26_x86_64_arm64.dmg
    若以后 CI 用别的版本构建，官网这一条要跟着改（建议由构建时注入，而不是手抄）。
 5. **未确认**：我没有在真机图形会话里走完 Gatekeeper 的 GUI 弹窗（`INTERACTION.md` §10 已声明同一限制），
    所以 §2.5 里对弹窗**措辞**的描述是「类似这样的提示」，不是逐字引用。
-6. **`fileSize` 单位**：JSON-LD 的 `fileSize` 用字节数（47,128,987）而不是 "44.9 MiB"，
+6. **`fileSize` 单位**：JSON-LD 的 `fileSize` 用字节数（47,145,126）而不是 "45.0 MiB"，
    因为 schema.org 的 `fileSize` 是文本字段且解析器对单位处理不一致；可见文本两处都写。

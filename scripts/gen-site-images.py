@@ -155,7 +155,7 @@ CARDS = [
         "brand": "XrayTun",
         "title": "macOS 上的 Xray 图形客户端",
         "subtitle": "原生 TUN 模式接管系统流量",
-        "chips": ["macOS 13.0+", "通用包 arm64 + x86_64", "包内自带 Xray 核心", "v0.8.26"],
+        "chips": ["macOS 13.0+", "通用包 arm64 + x86_64", "包内自带 Xray 核心", "v0.8.28"],
         "note": None,
     },
     {
@@ -164,7 +164,7 @@ CARDS = [
         "brand": "XrayTun",
         "title": "An Xray GUI client for macOS",
         "subtitle": "Native TUN mode takes over system traffic",
-        "chips": ["macOS 13.0+", "Universal arm64 + x86_64", "Xray core included", "v0.8.26"],
+        "chips": ["macOS 13.0+", "Universal arm64 + x86_64", "Xray core included", "v0.8.28"],
         "note": None,
     },
     {

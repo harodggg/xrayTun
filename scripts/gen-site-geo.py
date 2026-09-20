@@ -19,8 +19,17 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 # 域名迁移时两处一起改（生成器里各只有一处；产物由脚本重写，别手改产物）。
 BASE = "https://xraytun.top"
 LAST_PUB = "2026-09-20"
-VERSION = "0.8.26"
+VERSION = "0.8.28"
 DL = f"https://github.com/harodggg/xrayTun/releases/download/v{VERSION}"
+
+# 发行资产：**文件名由 VERSION 派生**，字节数取自 `gh release view v{VERSION}` 的**真实值**
+# （不许沿用上一版、不许估算 —— 本项目红线）。
+# ⚠️ 取整陷阱：dmg 47,145,126 B = 44.9611 MiB，站点写的是一位小数 → **45.0**，不是 44.9。
+DMG = f"XrayTun_{VERSION}_x86_64_arm64.dmg"
+ZIP = f"XrayTun_{VERSION}_x86_64_arm64.zip"
+DMG_BYTES, DMG_MIB = "47,145,126", "45.0"
+ZIP_BYTES, ZIP_MIB = "42,647,148", "40.7"
+SHA_BYTES = "200"
 
 # robots.txt 的两组 UA —— **与 Cloudflare 托管段逐条对齐**（原因见 write_robots 的注释）。
 #
@@ -273,7 +282,7 @@ def write_llms() -> None:
     txt = f"""# XrayTun
 
 > XrayTun 是 macOS 13.0+ 的 Xray 图形客户端，用 Xray-core 原生 TUN 入站接管系统流量（整机按规则走代理）。
-> 当前版本 v0.8.26（{LAST_PUB}），通用包（Apple Silicon + Intel），**包内自带 Xray 核心**。
+> 当前版本 v{VERSION}（{LAST_PUB}），通用包（Apple Silicon + Intel），**包内自带 Xray 核心**。
 > 安装包是 ad-hoc 签名、**未公证**的，首次打开会被 Gatekeeper 拦截，需按系统版本手动放行。
 > 仅支持 macOS；没有 Windows / Linux / 移动端版本。本页所有断言都可在仓库文档里逐条核对。
 
@@ -292,9 +301,9 @@ def write_llms() -> None:
 
 ## 下载
 
-- [XrayTun_0.8.26_x86_64_arm64.dmg]({DL}/XrayTun_0.8.26_x86_64_arm64.dmg)：47,128,987 字节（44.9 MiB），主下载
-- [XrayTun_0.8.26_x86_64_arm64.zip]({DL}/XrayTun_0.8.26_x86_64_arm64.zip)：42,636,964 字节（40.7 MiB），备用
-- [SHA256SUMS.txt]({DL}/SHA256SUMS.txt)：校验和（200 字节）
+- [{DMG}]({DL}/{DMG})：{DMG_BYTES} 字节（{DMG_MIB} MiB），主下载
+- [{ZIP}]({DL}/{ZIP})：{ZIP_BYTES} 字节（{ZIP_MIB} MiB），备用
+- [SHA256SUMS.txt]({DL}/SHA256SUMS.txt)：校验和（{SHA_BYTES} 字节）
 - [所有版本](https://github.com/harodggg/xrayTun/releases/latest)
 
 ## 安装（要点）
