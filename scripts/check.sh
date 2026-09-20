@@ -94,6 +94,54 @@ step "前端构建"
 # 因此能找到 tsconfig.json。上一行那个 `npm exec` 不会。
 npm --prefix apps/ui run build
 
+# ---------------------------------------------------------------- 站点版本
+
+# 为什么要有这一步（这是**发版流程真的漏过的地方**）：
+# v0.8.27 发版时没人同步官网 —— 站点一直写着上一版的版本号，下载按钮指向两个版本前的
+# 资产，而当时**没有任何检查会发现**：发版只改 Cargo.toml / tauri.conf.json /
+# apps/ui/package.json / CHANGELOG.md，从不碰 site/**。
+# 这里把「站点声明的版本 == Cargo.toml 的 workspace 版本」钉死，漂移在 CI 与发版前都红，
+# 而不是等用户下载到旧包。
+#
+# 只断言**真源**（两个生成器常量 + site.js）并对手写页面抽样一条下载文件名；
+# 全量扫 site/** 会因为历史锚定（例如「v0.8.27 之前」这类故意的版本边界）而变脆。
+step "站点版本一致性（site/** ↔ Cargo.toml）"
+
+want="$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version *= *"\([^"]*\)".*/\1/p' | head -1)"
+if [ -z "$want" ]; then
+  echo "  ✗ 无法从 Cargo.toml 的 [workspace.package] 读出 version" >&2
+  exit 1
+fi
+
+site_ver_problems=""
+check_site_ver() { # $1=文件  $2=sed 提取表达式  $3=可读标签
+  local got
+  got="$(sed -n "$2" "$1" | head -1)"
+  if [ "$got" = "$want" ]; then
+    printf '  ✓ %-30s %s\n' "$3" "$got"
+  else
+    printf '  ✗ %-30s 实际 %s / 期望 %s （期望来自 Cargo.toml [workspace.package] version）\n' \
+      "$3" "${got:-（未找到）}" "$want" >&2
+    site_ver_problems="${site_ver_problems}  ${1}"
+  fi
+}
+
+check_site_ver scripts/gen-site-jsonld.py 's/^XRAYTUN_VERSION *= *"\([^"]*\)".*/\1/p' "gen-site-jsonld.py XRAYTUN_VERSION"
+check_site_ver scripts/gen-site-geo.py 's/^VERSION *= *"\([^"]*\)".*/\1/p' "gen-site-geo.py VERSION"
+check_site_ver site/assets/site.js 's/.*PAGE_VERSION *= *"\([^"]*\)".*/\1/p' "site.js PAGE_VERSION"
+check_site_ver site/index.html 's/.*XrayTun_\([0-9.]*\)_x86_64_arm64\.dmg.*/\1/p' "site/index.html 下载文件名"
+check_site_ver site/en/index.html 's/.*XrayTun_\([0-9.]*\)_x86_64_arm64\.dmg.*/\1/p' "site/en/index.html 下载文件名"
+
+if [ -n "$site_ver_problems" ]; then
+  echo >&2
+  echo "  ✗ 站点声明的版本与 workspace 版本（$want）不一致 —— 访客会下载到旧的安装包。" >&2
+  echo "    不一致的文件：${site_ver_problems}" >&2
+  echo "    修法：先改两个生成器常量（真源），再改手写页面（含下载文件名、字节数、MiB 取整），" >&2
+  echo "    最后重跑：python3 scripts/gen-site-jsonld.py gen && python3 scripts/gen-site-geo.py" >&2
+  exit 1
+fi
+echo "  ✓ 站点声明的版本与 Cargo.toml 一致：$want"
+
 # ---------------------------------------------------------------- Rust
 
 step "clippy（warning 视为错误）"
