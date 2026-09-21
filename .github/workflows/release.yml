@@ -186,9 +186,16 @@ jobs:
              ```bash
              find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
              ```
-             两个实测过的坑：这台 macOS 的 `xattr` **没有 `-r`**，`xattr -dr` /
-             `xattr -cr` 都会以 `option -r not recognized`（exit 64）失败；
-             而只给 bundle 根路径的
+             注意 `xattr` 有**两个不同实现**，`-r` 的支持**随实现与版本而异**
+             （实测 macOS 26.6.2 / build 25G83）：
+             `which -a xattr` 在 PATH 上先命中 Python 的 `xattr` 包，
+             `xattr -dr …` → **exit 64**（`option -r not recognized`）；
+             而 Apple 的 `/usr/bin/xattr -dr …` → **exit 0**，标记真的被删掉
+             （它的 usage 是 `xattr [-l] [-r] [-s] [-v] [-x] file …`，**有 `-r`**）。
+             所以：**一律写绝对路径 `/usr/bin/xattr`**；**不要依赖 `-r`**
+             （需要递归就用上面那条 `find … -exec … +`）；
+             命令**不要 `2>/dev/null`** —— 失败要留痕。
+             另一个独立事实：只给 bundle 根路径的
              `xattr -d com.apple.quarantine /Applications/XrayTun.app`
              只清掉根上那一个（实测 13 个里还剩 12 个），所以要逐文件清。
 

@@ -106,10 +106,26 @@ cargo run -p xraytun-desktop
   find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
   ```
 
-  ⚠️ 两个坑都是本机 macOS 26.6.2 实测的，照旧写法做会失败：
+  ⚠️ 实测（macOS 26.6.2 / build 25G83）：**`xattr` 有两个不同实现，行为不一样** ——
+  Apple 的 `/usr/bin/xattr`（Mach-O）与 PATH 上可能先命中的 Python `xattr` 包（脚本）：
 
-  * 这台 macOS 的 `xattr` **没有 `-r`**：`xattr -dr` 与 `xattr -cr` 都以
-    `option -r not recognized`（exit 64）失败 —— 看起来像清掉了，其实没有；
+  ```text
+  $ which -a xattr
+  /Library/Frameworks/Python.framework/Versions/3.12/bin/xattr   ← Python 的 xattr 包
+  /usr/local/bin/xattr                                            ← 同一个包
+  /usr/bin/xattr                                                  ← Apple 的
+  $ xattr -dr com.apple.quarantine /tmp/xtest          → exit 64「option -r not recognized」
+  $ /usr/bin/xattr -dr com.apple.quarantine /tmp/xtest → exit 0，标记真的被删掉
+  ```
+
+  `/usr/bin/xattr` 的 usage 是 `xattr [-l] [-r] [-s] [-v] [-x] file …`（**支持 `-r`**）。
+  也就是说，**`-r` 的支持随实现与版本而异**：PATH 上先命中的那个没有；本机 Apple 的有；
+  更早的 macOS 里 Apple 的也没有。所以：
+
+  * **一律写绝对路径 `/usr/bin/xattr`** —— 否则可能命中 Python 的包；
+  * **不要依赖递归开关 `-r`** —— 需要递归就用上面那条 `find … -exec … +`；
+  * 命令**不要 `2>/dev/null`** —— 它会把「本来就没有该属性」和**真正的失败**一起吞掉，
+    失败要留痕（上面示例里保留它只是为了少刷屏，自己执行时建议去掉）。
   * `xattr -d com.apple.quarantine /Applications/XrayTun.app`（只给 bundle 根路径）
     **只会清掉根上那一个**：实测 13 个带 quarantine 的文件里还剩 **12 个**，
     所以要像上面那样逐文件清。`xattr -c` 同理（对目录不递归）。
