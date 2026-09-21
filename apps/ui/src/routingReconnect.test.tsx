@@ -90,7 +90,13 @@ const notice = () => screen.queryByRole("status");
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.stop.mockResolvedValue(snap(false, null));
-  mocks.start.mockResolvedValue(snap(true, Math.floor(Date.now() / 1000), "global_proxy"));
+  /**
+   * 重连成功后的快照：启动时间**必须明显晚于**保存时刻，否则这条会**偶发**失败 ——
+   * 原来这里是在 `beforeEach` 里用 `Date.now()`，「保存」发生在几十毫秒之后，
+   * 一旦中间跨过整秒，`started_at < savedAt` 仍成立 ⇒ 提示不会消失 ⇒ 随机红。
+   * 现在直接给一个「远在未来」的启动时间，语义仍是「核心在这次保存之后启动过」。
+   */
+  mocks.start.mockImplementation(async () => snap(true, Math.floor(Date.now() / 1000) + 60, "global_proxy"));
 });
 
 describe("已连接时改分流预设：不许静默不生效（task-70）", () => {
@@ -150,8 +156,11 @@ describe("已连接时改分流预设：不许静默不生效（task-70）", () 
   });
 
   it("边界：核心的启动时间**不早于**保存时刻 → 不提示（不许编造不需要做的事）", async () => {
-    // 保存时后端返回的核心启动时间 == 现在（相当于刚重启过），不是「保存之前起来的」
-    mocks.saveSettings.mockResolvedValue(snap(true, Math.floor(Date.now() / 1000), "global_proxy"));
+    // 保存时后端返回的核心启动时间**晚于**保存（相当于刚重启过）⇒ 不是「保存之前起来的」。
+    // 用「远在未来」而不是 `Date.now()`：后者会在跨秒时偶发变成「早于保存」而随机红。
+    mocks.saveSettings.mockResolvedValue(
+      snap(true, Math.floor(Date.now() / 1000) + 60, "global_proxy"),
+    );
     await renderRouting(snap(true, Math.floor(Date.now() / 1000)));
 
     pickPreset(/全局代理/);
