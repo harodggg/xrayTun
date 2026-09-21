@@ -64,10 +64,6 @@ function Highway({ topo, match }: { topo: Topology; match: ConnectionMatch | nul
           <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.block }} />
           已拦截
         </span>
-        <span className="highway__legend-item">
-          <span className="highway__legend-dot" style={{ background: NEUTRAL }} />
-          内部通道
-        </span>
         <span className="highway__legend-note">货车沿连线从入口开到出口</span>
       </div>
 
@@ -129,7 +125,18 @@ function Highway({ topo, match }: { topo: Topology; match: ConnectionMatch | nul
 
         {internal.length > 0 && (
           <div className="highway__internal">
-            <div className="highway__side-title">内部通道（不计入合计）</div>
+            {/* 「灰色 = 内部通道」原来挂在**上面的图例**里，但那一行里的其余 3 项都在讲**连线**
+                的颜色，而灰色在画面上**从来不是线**（`Flow.tsx` 跳过内部出口，它们不画线）——
+                它只出现在下面这些标签的**右缘色条**上。用「线」的形状描述一个不是线的东西，
+                就是图例在讲一个画面上不存在的对象。
+                所以把它移到它真正出现的那一组标题旁，并改用与色条一致的**竖条**形状（task-73）。
+                实测（CDP）：`rgb(100,116,139)` 只出现在
+                `.highway__lane-label--internal` 的 `box-shadow: inset -2px 0 0` 上，
+                24 条线的 stroke 里没有任何一条是它。 */}
+            <div className="highway__side-title">
+              <span className="highway__legend-bar" style={{ background: NEUTRAL }} />
+              内部通道（不计入合计）
+            </div>
             {internal.map((o) => (
               <div
                 className={`highway__lane-label highway__lane-label--internal${match?.outlet === o.tag ? " highway__lane-label--match" : ""}`}

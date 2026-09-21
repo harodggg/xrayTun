@@ -1738,6 +1738,26 @@ input[type="checkbox"] {
   letter-spacing: 0.06em;
 }
 
+/* 内部通道标题旁的色样（task-73）。
+ *
+ * 它原来是上面图例里的第 4 个条目 —— 但那一行其余 3 项讲的是**连线**的颜色，
+ * 而灰色在画面上**从来不是线**：内部出口（dns / api）不画线（`Flow.tsx` 跳过它们，
+ * `Highway.tsx` 也不给它们的标签注册 ref）。CDP 实测：`rgb(100, 116, 139)`
+ * 只出现在 `.highway__lane-label--internal` 的 `box-shadow: inset -2px 0 0` 上，
+ * 24 条线的 stroke 里一条都不是它。
+ *
+ * 所以把它移到它**真正出现**的那一组标题旁，并让形状与实际一致：
+ * 那些卡片的标记是一条 **2px 竖色条**，不是图例里那种 9×5 实心块。
+ * （只改「图例描述什么」，没有给内部通道新画线 —— 那是行为变更。） */
+.highway__legend-bar {
+  display: inline-block;
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  margin-right: 6px;
+  vertical-align: -2px;
+}
+
 .highway__lane-label {
   display: flex;
   flex-direction: column;
