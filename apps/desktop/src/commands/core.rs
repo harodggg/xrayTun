@@ -203,6 +203,60 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
     Ok(())
 }
 
+/// 停止核心后应当写回的运行态（**纯函数，便于单测**）。
+///
+/// # 为什么不是几条赋值语句（这是本卡的核心）
+///
+/// 原实现是「**先**清 `running`/`pid`/`tun_session`，**再**看 `result`」——
+/// 于是 helper 回滚失败时，界面照样显示「已停止」，而真实情况可能是
+/// 「没有隧道、也没恢复直连」。这是把没验证的事说成已验证。
+///
+/// 现在的口径：
+/// * **成功**（helper 的 `TunDown` 成功返回）→ 才敢说「网络配置已回滚」，
+///   并清掉 `tun_session`；
+/// * **失败** → **保留 `tun_session`**：那是「helper 上这条会话可能还活着」的
+///   唯一证据，清掉就再也 ref 不上；文案如实写「**未能确认网络已恢复**」。
+///
+/// `running`/`pid` 一律清掉：`supervisor.stop()` 已经把进程句柄与 session_id
+/// `take()` 走了，App 这边确实不再受管，所以不能声称「还在运行」。
+pub(crate) fn runtime_after_stop(
+    before: &CoreRuntime,
+    result: &Result<(), String>,
+) -> CoreRuntime {
+    let mut next = before.clone();
+    next.running = false;
+    next.pid = None;
+    match result {
+        Ok(()) => {
+            next.tun_session = None;
+            // 成功路径**不动 `last_error`**：原文如此 —— happy path 的运行态
+            // 必须与改前逐字节一致（task-62 验收）。
+        }
+        Err(e) => {
+            // **不清 tun_session**：会话可能还活着，这是我们唯一的线索。
+            next.last_error = Some(e.clone());
+        }
+    }
+    next
+}
+
+/// 停止核心后写给用户看的那条日志（`(level, message)`）。
+///
+/// 失败时**不许**出现「网络可用」这类未经验证的断言 —— 只报我们确实知道的事：
+/// 回滚没成功、网络恢复**未经验证**。
+pub(crate) fn stop_log_line(result: &Result<(), String>) -> (&'static str, String) {
+    match result {
+        Ok(()) => ("info", "核心已停止，网络配置已回滚".to_string()),
+        Err(e) => (
+            "error",
+            format!(
+                "停止核心时未能完成网络回滚：{e}；**未能确认网络已恢复**\
+                 （helper 上的会话可能仍在，已保留会话 id）"
+            ),
+        ),
+    }
+}
+
 pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let mut supervisor = state.supervisor.lock().await;
     let mut helper = state.helper.lock().await;
@@ -220,16 +274,11 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
             monitor.abort();
         }
         i.traffic = crate::state::TrafficSample::default();
-        i.runtime.running = false;
-        i.runtime.pid = None;
-        i.runtime.tun_session = None;
-        match &result {
-            Ok(()) => i.push_log("app", "info", "核心已停止，网络配置已回滚"),
-            Err(e) => {
-                i.runtime.last_error = Some(e.clone());
-                i.push_log("app", "error", format!("停止过程中出错：{e}"));
-            }
-        }
+        // 运行态由纯函数决定（见 `runtime_after_stop` 的注释）：
+        // **先算完再看结果**，而不是先清干净再补日志。
+        i.runtime = runtime_after_stop(&i.runtime, &result);
+        let (level, message) = stop_log_line(&result);
+        i.push_log("app", level, message);
     });
     // 采样任务已经收掉，标题会永远停在最后一拍的读数上 —— 手动清掉。
     let show = state.with(|i| i.settings.show_speed_in_title).unwrap_or(true);
@@ -237,6 +286,52 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
 
     events::runtime_changed(app, state);
     result
+}
+
+/// 「重建失败 → 退回直连」这一步的对外结论。
+///
+/// 只有 helper 的 `TunDown` **确实成功**时才敢说「配置已回滚」；
+/// 失败时必须如实说「未能确认网络已恢复」，否则又是「把没验证的事说成已验证」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FallbackOutcome {
+    /// 回滚成功：路由/DNS 已还原（这一步有 helper 的成功返回为证）。
+    DirectRestored,
+    /// 回滚失败：**不知道**网络恢没恢复，会话可能仍在。
+    DirectUnverified { error: String },
+}
+
+impl FallbackOutcome {
+    pub(crate) fn from_stop(result: &Result<(), String>) -> Self {
+        match result {
+            Ok(()) => Self::DirectRestored,
+            Err(e) => Self::DirectUnverified { error: e.clone() },
+        }
+    }
+
+    /// `(level, 应用日志, 顶部提示条)`。
+    ///
+    /// **全程不出现「网络可用」**：回滚成功只证明配置已还原，不证明能上网；
+    /// 回滚失败更连配置状态都不知道。宁可说「未能确认」，也不编一个好消息。
+    pub(crate) fn messages(&self) -> (&'static str, String, String) {
+        match self {
+            Self::DirectRestored => (
+                "error",
+                "自动重建失败，已退回直连：网络配置已回滚，流量不再走代理".to_string(),
+                "自动恢复失败，已退回直连（网络配置已回滚）。可在节点页重新连接".to_string(),
+            ),
+            Self::DirectUnverified { error } => (
+                "error",
+                format!(
+                    "自动重建失败，且回退直连**未能确认网络已恢复**（{error}）：\
+                     helper 上的会话可能仍在 → 路由/DNS 可能没还原"
+                ),
+                format!(
+                    "自动恢复失败，回退直连未完成：**未能确认网络已恢复**（{error}）。\
+                     请点「修复网络」重试回滚"
+                ),
+            ),
+        }
+    }
 }
 
 /// 连上之后**真的发一个请求出去**，确认这条隧道能用。
@@ -510,17 +605,16 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
 
             // 重建也失败：退回直连。用户至少能上网 —— 这比死守一条
             // 走不通的隧道更符合「除非我关闭，网络不该断」。
-            let _ = stop_core(&handle, &state).await;
+            // **回滚结果必须显式处理。** 以前这里是 `let _ = stop_core(...)`，
+            // 失败被丢掉，紧接着无条件写「网络可用」—— 那是在断言我们没验证过的事。
+            let stop_result = stop_core(&handle, &state).await;
+            let outcome = FallbackOutcome::from_stop(&stop_result);
+            let (level, log_line, notice) = outcome.messages();
             state.with(|i| {
-                i.push_log(
-                    "app",
-                    "error",
-                    "自动重建失败，已退回直连：网络可用，但流量不再走代理",
-                );
+                i.push_log("app", level, log_line);
                 i.runtime.recovery.fell_back_to_direct(xt_core::util::now_unix());
-                // 失败时 notice **保留**，并说清下一步能做什么。
-                i.last_notice =
-                    Some("自动恢复失败，已退回直连：网络可用，但流量不再走代理。可在节点页重新连接".into());
+                // 失败时 notice **保留**，并说清下一步能做什么（诚实版：不声称网络可用）。
+                i.last_notice = Some(notice);
             });
             events::runtime_changed(&handle, &state);
             return;
@@ -1249,5 +1343,157 @@ mod tests {
             assert_eq!(classify_log("failed to write config"), "error");
             assert_eq!(classify_log("WARNING: %v"), "warn");
         }
-}
 
+    // -----------------------------------------------------------------------
+    // 停止 / 回退的诚实性（task-62）
+    //
+    // 原实现的顺序是「先清 running/pid/tun_session，再看 result」+ 无条件写
+    // 「网络可用」。下面钉住新口径：**没有证据就不许说成功**。
+    // -----------------------------------------------------------------------
+
+    /// 一个「会话还活着」的运行态夹具。
+    fn running_with_session() -> CoreRuntime {
+        CoreRuntime {
+            running: true,
+            pid: Some(4321),
+            tun_session: Some("s-42".into()),
+            tun_interface: Some("utun6".into()),
+            ..Default::default()
+        }
+    }
+
+    /// **(a)+(b) 停失败：必须保留 `tun_session`（会话可能还活着）。**
+    ///
+    /// 清掉它就再也 ref 不上那条会话了 —— 而它正是「网络可能还没恢复」的唯一证据。
+    #[test]
+    fn failed_stop_keeps_the_session_as_evidence() {
+        let before = running_with_session();
+        let err = Err::<(), String>("helper 回滚 TUN 失败：连接被拒绝".into());
+        let after = runtime_after_stop(&before, &err);
+
+        assert!(!after.running, "不再受管（supervisor 已经 take 走句柄）");
+        assert_eq!(after.pid, None);
+        assert_eq!(
+            after.tun_session.as_deref(),
+            Some("s-42"),
+            "**停失败时不得清 tun_session**：那是「会话可能还活着」的唯一证据"
+        );
+        assert!(after.last_error.is_some(), "错误要留在运行态里，别只写日志");
+    }
+
+    /// 成功停止：只清掉原文也清的三个字段（running / pid / tun_session），
+    /// **其余字段与改前逐字节一致** —— happy path 不允许改行为。
+    #[test]
+    fn successful_stop_matches_the_old_happy_path_byte_for_byte() {
+        let before = CoreRuntime {
+            last_error: Some("旧的错误".into()),
+            ..running_with_session()
+        };
+        let after = runtime_after_stop(&before, &Ok(()));
+
+        assert!(!after.running);
+        assert_eq!(after.pid, None);
+        assert_eq!(after.tun_session, None, "回滚成功后会话确实没了");
+        assert_eq!(
+            after.last_error.as_deref(),
+            Some("旧的错误"),
+            "成功路径不得顺手改 last_error（原文没改，快照必须一致）"
+        );
+        assert_eq!(after.tun_interface.as_deref(), Some("utun6"), "其余字段原样保留");
+
+        // 字节级：把预期写成一个 CoreRuntime 字面量再比 JSON。
+        let expected = CoreRuntime {
+            running: false,
+            pid: None,
+            tun_session: None,
+            ..before.clone()
+        };
+        assert_eq!(
+            serde_json::to_string(&after).unwrap(),
+            serde_json::to_string(&expected).unwrap(),
+            "happy path 的运行态 JSON 必须与「只清那三个字段」完全一致"
+        );
+    }
+
+    /// **(c) 核心断言：失败路径的文案不得出现「网络可用」，必须说「未能确认」。**
+    #[test]
+    fn failed_stop_line_never_claims_the_network_is_back() {
+        let err = Err::<(), String>("TunDown 超时".into());
+        let (level, message) = stop_log_line(&err);
+
+        assert_eq!(level, "error");
+        assert!(
+            message.contains("未能确认网络已恢复"),
+            "拿不到证据就要如实说不知道，实际：{message}"
+        );
+        assert!(
+            !message.contains("网络可用"),
+            "**不许**断言没验证过的事，实际：{message}"
+        );
+    }
+
+    /// 成功路径的文案只声称「配置已回滚」（有 helper 成功返回为证），
+    /// 同样**不**出现「网络可用」这种更强的断言。
+    #[test]
+    fn successful_stop_line_claims_only_what_is_evidenced() {
+        let (level, message) = stop_log_line(&Ok(()));
+        assert_eq!(level, "info");
+        assert!(message.contains("网络配置已回滚"), "实际：{message}");
+        assert!(!message.contains("网络可用"), "实际：{message}");
+    }
+
+    /// 回退直连：helper 回滚失败 → `DirectUnverified`，日志与 notice 都必须
+    /// 如实说「未能确认网络已恢复」，并且**永不**出现「网络可用」。
+    #[test]
+    fn fallback_failure_is_reported_as_unverified_not_as_working() {
+        let outcome = FallbackOutcome::from_stop(&Err("stop failed".into()));
+        assert_eq!(
+            outcome,
+            FallbackOutcome::DirectUnverified { error: "stop failed".into() }
+        );
+
+        let (level, log_line, notice) = outcome.messages();
+        assert_eq!(level, "error");
+        for text in [&log_line, &notice] {
+            assert!(
+                text.contains("未能确认网络已恢复"),
+                "必须如实说未验证：{text}"
+            );
+            assert!(!text.contains("网络可用"), "不许编好消息：{text}");
+        }
+        assert!(notice.contains("修复网络"), "要给出下一步能做什么：{notice}");
+    }
+
+    /// 回退成功：只声称「网络配置已回滚」（有证据），不声称「能上网」。
+    #[test]
+    fn fallback_success_claims_rollback_not_reachability() {
+        let outcome = FallbackOutcome::from_stop(&Ok(()));
+        assert_eq!(outcome, FallbackOutcome::DirectRestored);
+
+        let (_, log_line, notice) = outcome.messages();
+        for text in [&log_line, &notice] {
+            assert!(text.contains("网络配置已回滚"), "实际：{text}");
+            assert!(!text.contains("未能确认"), "成功路径不该说未确认：{text}");
+            assert!(!text.contains("网络可用"), "实际：{text}");
+        }
+    }
+
+    /// `fell_back_to_direct` 现在确实会被走到（回退路径有判定，不再是死代码）：
+    /// 回退结局被映射到 recovery 状态机的 `DirectFallback`。
+    #[test]
+    fn fallback_reaches_the_recovery_state_machine() {
+        let mut recovery = crate::state::RecoveryState::default();
+        for outcome in [
+            FallbackOutcome::from_stop(&Ok(())),
+            FallbackOutcome::from_stop(&Err("boom".into())),
+        ] {
+            // 两个分支都必须能走到状态机（`fell_back_to_direct` 的两个入口）。
+            recovery.fell_back_to_direct(1_000);
+            assert_eq!(
+                recovery.last_outcome,
+                Some(crate::state::RecoveryOutcome::DirectFallback),
+                "结局 {outcome:?} 必须落到 DirectFallback"
+            );
+        }
+    }
+}

@@ -31,7 +31,9 @@ pub(crate) async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<
     // 不该握着状态锁去做。
     let core = core_availability(app, state);
     let login_item = login_item_state();
-    let update = update_status(app, state);
+    // **把已经算好的 `core` 传进去**：原文这里会再算一次 `core_availability`，
+    // 而那次会再 spawn 一次 `xray version`。一次快照一次 spawn 是纯浪费。
+    let update = update_status(app, state, &core);
     let dns = state.with(|i| i.dns.clone()).unwrap_or_default();
     let app_version = app.package_info().version.to_string();
 
@@ -559,31 +561,48 @@ pub(crate) fn stage_app_update(
     Ok(app)
 }
 
+/// 更新状态里**不需要 `AppHandle`/`AppState`** 的那部分（纯函数，可单测）。
+///
+/// `core` 必须由调用方传入**已经算好的**那份 —— 这就是本卡要消掉的那次重复
+/// `xray version` 进程 spawn（`build_snapshot` 原来算两遍）。
+pub(crate) fn update_status_with(
+    cached: &crate::state::UpdateStatus,
+    current_app_version: &str,
+    core: &CoreAvailability,
+    core_managed: bool,
+    meta: &xt_core::update::InstalledMeta,
+) -> crate::state::UpdateStatus {
+    let mut u = cached.clone();
+    // 是否**确实**有新版：`latest_app` 有值只说明「查到了 GitHub 上的最新版」，
+    // 你装的就是它时也有值。必须比较版本，否则界面永远显示「更新」按钮。
+    u.app_update_available = u
+        .latest_app
+        .as_ref()
+        .is_some_and(|a| xt_core::update::compare_versions(&a.version, current_app_version).is_gt());
+    u.core_version = core.version.clone();
+    u.core_managed = core_managed;
+    u.core_managed_version = meta.core_version.clone();
+    u.geo_tag = meta.geo_tag.clone();
+    u.geo_installed_at = meta.geo_installed_at;
+    u
+}
+
 /// 组装更新状态：当前生效的版本 + 上次检查的缓存。
-pub(crate) fn update_status(app: &AppHandle, state: &AppState) -> crate::state::UpdateStatus {
+///
+/// `core` 由调用方传入（见 [`update_status_with`]）：这里**不再自己 spawn 核心**。
+pub(crate) fn update_status(
+    app: &AppHandle,
+    state: &AppState,
+    core: &CoreAvailability,
+) -> crate::state::UpdateStatus {
     let root = state.store.root();
     let managed_dir = xt_core::update::managed_core_dir(root);
     let meta = xt_core::update::InstalledMeta::load(&managed_dir);
-    let core_version = core_availability(app, state).version;
     let core_managed = managed_dir.join("xray").is_file();
+    let current = app.package_info().version.to_string();
 
     state
-        .with(|i| {
-            let mut u = i.update.clone();
-            // 是否**确实**有新版：`latest_app` 有值只说明「查到了 GitHub 上的最新版」，
-            // 你装的就是它时也有值。必须比较版本，否则界面永远显示「更新」按钮。
-            let current = app.package_info().version.to_string();
-            u.app_update_available = u
-                .latest_app
-                .as_ref()
-                .is_some_and(|a| xt_core::update::compare_versions(&a.version, &current).is_gt());
-            u.core_version = core_version;
-            u.core_managed = core_managed;
-            u.core_managed_version = meta.core_version;
-            u.geo_tag = meta.geo_tag;
-            u.geo_installed_at = meta.geo_installed_at;
-            u
-        })
+        .with(|i| update_status_with(&i.update, &current, core, core_managed, &meta))
         .unwrap_or_default()
 }
 
@@ -689,4 +708,87 @@ mod tests {
             let out = merge_ranked(&current, &[], xt_core::dns_probe::DnsKind::Domestic, pool);
             assert_eq!(out, current);
         }
+
+    // -----------------------------------------------------------------------
+    // task-62 第 2 条：`build_snapshot` 每次调用 spawn 核心两次 → 一次
+    //
+    // 消重的结构性保证：`update_status_with` 的签名里没有 `AppHandle`、
+    // 没有路径、没有 `Command` —— 它**没有能力**起进程，只能消费传进来的
+    // `CoreAvailability`。
+    // -----------------------------------------------------------------------
+
+    fn an_available(version: &str) -> xt_core::update::Available {
+        xt_core::update::Available {
+            version: version.to_string(),
+            published_at: "2026-09-21T00:00:00Z".into(),
+            prerelease: false,
+            download_url: "https://example.invalid/x.zip".into(),
+            digest_url: None,
+            size: Some(1),
+        }
+    }
+
+    /// 用的是**传进来的** core 版本（证明这里不会再自己 spawn 一次）。
+    #[test]
+    fn update_status_uses_the_passed_in_core_version_without_spawning() {
+        let cached = crate::state::UpdateStatus::default();
+        let core = CoreAvailability {
+            path: Some(std::path::PathBuf::from("/Applications/XrayTun.app/Contents/Resources/xray")),
+            version: Some("Xray 26.9.9 (passed-in)".into()),
+            ..Default::default()
+        };
+        let meta = xt_core::update::InstalledMeta {
+            core_version: Some("26.1.0".into()),
+            geo_tag: Some("geo-v1".into()),
+            geo_installed_at: Some(123),
+            ..Default::default()
+        };
+
+        let u = update_status_with(&cached, "0.8.30", &core, true, &meta);
+
+        assert_eq!(u.core_version.as_deref(), Some("Xray 26.9.9 (passed-in)"));
+        assert!(u.core_managed);
+        assert_eq!(u.core_managed_version.as_deref(), Some("26.1.0"));
+        assert_eq!(u.geo_tag.as_deref(), Some("geo-v1"));
+        assert_eq!(u.geo_installed_at, Some(123));
+    }
+
+    /// 「有没有新版」是**逐段比较版本**算出来的，不是「查到最新版就有」。
+    #[test]
+    fn update_status_recomputes_app_update_availability_by_version() {
+        let cached = crate::state::UpdateStatus {
+            latest_app: Some(an_available("0.9.0")),
+            app_update_available: true, // 缓存里是旧结论，必须被重算
+            ..Default::default()
+        };
+        let core = CoreAvailability::default();
+        let meta = xt_core::update::InstalledMeta::default();
+
+        let same = update_status_with(&cached, "0.9.0", &core, false, &meta);
+        assert!(
+            !same.app_update_available,
+            "已经是最新版时不得显示「更新」按钮"
+        );
+
+        let older = update_status_with(&cached, "0.8.30", &core, false, &meta);
+        assert!(older.app_update_available, "落后时应当显示「更新」");
+    }
+
+    /// 没有查到最新版 → 一定没有「可更新」（不能因为缓存而复活）。
+    #[test]
+    fn update_status_without_latest_app_is_never_available() {
+        let cached = crate::state::UpdateStatus {
+            latest_app: None,
+            app_update_available: true,
+            ..Default::default()
+        };
+        let u = update_status_with(
+            &cached,
+            "0.8.30",
+            &CoreAvailability::default(),
+            false,
+            &xt_core::update::InstalledMeta::default(),
+        );
+        assert!(!u.app_update_available);
+    }
 }
