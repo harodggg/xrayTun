@@ -18,18 +18,32 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 # 站点绝对基址：**与 gen-site-jsonld.py 的 BASE 必须一致**。
 # 域名迁移时两处一起改（生成器里各只有一处；产物由脚本重写，别手改产物）。
 BASE = "https://xraytun.top"
-LAST_PUB = "2026-09-20"
-VERSION = "0.8.28"
+LAST_PUB = "2026-09-21"
+VERSION = "0.8.29"
 DL = f"https://github.com/harodggg/xrayTun/releases/download/v{VERSION}"
+RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
+
+# **发布两阶段开关**（发版时按顺序做，避免站点说谎）：
+#
+#   · 提交 1（版本号 bump 同一次）：把 VERSION 改成新版本，PUBLISHED 仍为 False。
+#     此刻新版本的资产**还不存在**，所以：**不给 pinned 直链**（会 404）、
+#     **不沿用上一版的字节数**（那是错的），如实写「正在发布，见 Releases 页面」。
+#   · 提交 2（`gh release view` 已经能读到 3 个资产之后）：取**真实**字节数，
+#     填进下面的 *_BYTES/*_MIB，把 PUBLISHED 置 True，再重跑本脚本。
+#
+# 为什么要有这个开关：`release.yml` 在打包前跑 `check.sh`，而 check.sh 断言
+# 「站点声明的版本 == Cargo.toml 的版本」——先 bump 会让断言失败；而站点要写新版本
+# 又需要真实资产。两阶段是唯一「每个瞬间都不说谎」的解法。
+PUBLISHED = False
 
 # 发行资产：**文件名由 VERSION 派生**，字节数取自 `gh release view v{VERSION}` 的**真实值**
 # （不许沿用上一版、不许估算 —— 本项目红线）。
 # ⚠️ 取整陷阱：dmg 47,145,126 B = 44.9611 MiB，站点写的是一位小数 → **45.0**，不是 44.9。
 DMG = f"XrayTun_{VERSION}_x86_64_arm64.dmg"
 ZIP = f"XrayTun_{VERSION}_x86_64_arm64.zip"
-DMG_BYTES, DMG_MIB = "47,145,126", "45.0"
-ZIP_BYTES, ZIP_MIB = "42,647,148", "40.7"
-SHA_BYTES = "200"
+DMG_BYTES, DMG_MIB = "", ""
+ZIP_BYTES, ZIP_MIB = "", ""
+SHA_BYTES = ""
 
 # robots.txt 的两组 UA —— **与 Cloudflare 托管段逐条对齐**（原因见 write_robots 的注释）。
 #
@@ -279,6 +293,21 @@ def write_sitemap() -> None:
 
 
 def write_llms() -> None:
+    # 下载段：已发布给 pinned 直链 + 真实字节数；未发布如实写「正在发布，见 Releases 页面」。
+    if PUBLISHED:
+        dl_section = (
+            f"- [{DMG}]({DL}/{DMG})：{DMG_BYTES} 字节（{DMG_MIB} MiB），主下载\n"
+            f"- [{ZIP}]({DL}/{ZIP})：{ZIP_BYTES} 字节（{ZIP_MIB} MiB），备用\n"
+            f"- [SHA256SUMS.txt]({DL}/SHA256SUMS.txt)：校验和（{SHA_BYTES} 字节）\n"
+            f"- [所有版本]({RELEASES_PAGE})\n"
+        )
+    else:
+        dl_section = (
+            f"- **v{VERSION} 正在发布**：资产发布后在本页给出直链与**真实字节数**；\n"
+            f"  在此之前请到 [GitHub Releases]({RELEASES_PAGE}) 查看（文件名将是\n"
+            f"  `{DMG}` 与 `{ZIP}`）。\n"
+            f"- 不在这里预先写死字节数或直链 —— 发布前它们还不存在。\n"
+        )
     txt = f"""# XrayTun
 
 > XrayTun 是 macOS 13.0+ 的 Xray 图形客户端，用 Xray-core 原生 TUN 入站接管系统流量（整机按规则走代理）。
@@ -301,11 +330,7 @@ def write_llms() -> None:
 
 ## 下载
 
-- [{DMG}]({DL}/{DMG})：{DMG_BYTES} 字节（{DMG_MIB} MiB），主下载
-- [{ZIP}]({DL}/{ZIP})：{ZIP_BYTES} 字节（{ZIP_MIB} MiB），备用
-- [SHA256SUMS.txt]({DL}/SHA256SUMS.txt)：校验和（{SHA_BYTES} 字节）
-- [所有版本](https://github.com/harodggg/xrayTun/releases/latest)
-
+{dl_section}
 ## 安装（要点）
 
 安装包 **ad-hoc 签名、未公证**，首次打开会被 macOS 拦截 —— 这是预期行为，不是文件损坏。
