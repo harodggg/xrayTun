@@ -499,76 +499,100 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           由特权 helper 负责建网卡、装路由与改 DNS。
         </p>
 
-        <div className="grid-2">
-          <div className="field">
-            <label>隧道网段</label>
-            <input
-              type="text"
-              value={settings.tun.network}
-              onChange={(e) => patchTun({ network: e.target.value })}
-            />
-            <div className="field__hint">
-              默认 <span className="mono">198.18.0.1/15</span>（RFC 2544 保留段，公网不可路由）。
-              <strong>主机位会被保留</strong> —— 这里的 .1 是接口自己的地址，不是网络地址。
-            </div>
-          </div>
-          <div className="field">
-            <label>MTU</label>
-            <input
-              type="number"
-              min={576}
-              max={9000}
-              value={settings.tun.mtu}
-              onChange={(e) => patchTun({ mtu: Number(e.target.value) })}
-            />
-            <div className="field__hint">
-              默认 1500。出现「大文件下载卡住但网页能开」时可以试 1400。
-            </div>
-          </div>
-          <div className="field">
-            <label>哨兵 DNS</label>
-            <input
-              type="text"
-              value={settings.tun.sentinel_dns}
-              onChange={(e) => patchTun({ sentinel_dns: e.target.value })}
-            />
-            <div className="field__hint">
-              写入系统的「假」解析器，位于隧道网段内且不会被真实路由 —— 唯一目的是让所有
-              53 端口流量必然进入隧道，从而被内核的 <span className="mono">dns-out</span> 接管。
-            </div>
-          </div>
-          <div className="field">
-            <label>IPv6 处理</label>
-            <select
-              value={settings.tun.ipv6}
-              onChange={(e) => patchTun({ ipv6: e.target.value as Ipv6Mode })}
-            >
-              {(Object.keys(IPV6_LABEL) as Ipv6Mode[]).map((k) => (
-                <option key={k} value={k}>
-                  {IPV6_LABEL[k]}
-                </option>
-              ))}
-            </select>
-            <div className="field__hint">
-              选「不接管」时，IPv6 流量会绕过隧道走物理网卡 —— 可能泄漏真实出口，
-              但不会因为内核 IPv6 配置问题导致断网。这是一个刻意的取舍。
-            </div>
-          </div>
-        </div>
+        {/* ── 高级参数收进折叠（task-78）────────────────────────────────
+            为什么：这些旋钮**默认值几乎总是对的、改了才需要懂**，而「连接」是用户最常打开的分类
+            —— 摊开时实测要 1158px（视口 813px），用户为了改「代理入口」得先滚过一屏多。
 
+            复用**本项目已有的折叠范式**：`Routing.tsx` 的 `<details className="page__details">`
+            （原生 details/summary + 现有样式类，含 ▸ 指示与悬停态）。
+            **没有新造机制、没有新 CSS**；原生 details 不卸载子节点，所以受控输入的值得以保留。
+
+            ⚠️ **留在明面的三项是刻意选的**：
+            · **哨兵 DNS**：它的说明是「隧道没了而 DNS 还指着它 ⇒ 用户表现为全网断」这条风险的
+              **唯一解释**，默认看不见就把已知风险变成暗知识；
+            · `bypass_private`：用户可感知、决定「家里 NAS / 局域网设备还能不能直连」，
+              且是网络出问题时最先要确认的东西 —— 这类「自救」项不许进折叠；
+            · 本节标题与「当前模式」说明：它是这一节的上下文，不该被藏。
+            被收起的**说明文字一句没删**；summary 里把四项名字都列出来，
+            收起时用户仍然知道里面有什么，点开即见完整解释。 */}
+        <details className="page__details">
+          <summary>高级：隧道网段 / MTU / IPv6 / 出站绑定接口</summary>
+
+          <div className="grid-2">
+            <div className="field">
+              <label>隧道网段</label>
+              <input
+                type="text"
+                value={settings.tun.network}
+                onChange={(e) => patchTun({ network: e.target.value })}
+              />
+              <div className="field__hint">
+                默认 <span className="mono">198.18.0.1/15</span>（RFC 2544 保留段，公网不可路由）。
+                <strong>主机位会被保留</strong> —— 这里的 .1 是接口自己的地址，不是网络地址。
+              </div>
+            </div>
+            <div className="field">
+              <label>MTU</label>
+              <input
+                type="number"
+                min={576}
+                max={9000}
+                value={settings.tun.mtu}
+                onChange={(e) => patchTun({ mtu: Number(e.target.value) })}
+              />
+              <div className="field__hint">
+                默认 1500。出现「大文件下载卡住但网页能开」时可以试 1400。
+              </div>
+            </div>
+            <div className="field">
+              <label>IPv6 处理</label>
+              <select
+                value={settings.tun.ipv6}
+                onChange={(e) => patchTun({ ipv6: e.target.value as Ipv6Mode })}
+              >
+                {(Object.keys(IPV6_LABEL) as Ipv6Mode[]).map((k) => (
+                  <option key={k} value={k}>
+                    {IPV6_LABEL[k]}
+                  </option>
+                ))}
+              </select>
+              <div className="field__hint">
+                选「不接管」时，IPv6 流量会绕过隧道走物理网卡 —— 可能泄漏真实出口，
+                但不会因为内核 IPv6 配置问题导致断网。这是一个刻意的取舍。
+              </div>
+            </div>
+          </div>
+
+          <div className="field">
+            <label>出站绑定接口（防路由环）</label>
+            <input
+              type="text"
+              placeholder="留空 = 自动使用物理出口（推荐）"
+              value={settings.tun.bind_outbound_to ?? ""}
+              onChange={(e) => patchTun({ bind_outbound_to: e.target.value.trim() || null })}
+            />
+            <div className="field__hint">
+              填入 <span className="mono">en0</span> 这类物理接口名后，核心会用
+              <span className="mono"> IP_BOUND_IF </span>
+              把「连代理服务器」的 socket 绑到该接口，从根上杜绝
+              「代理流量又被送进隧道」的路由环。留空时由核心自动探测。
+            </div>
+          </div>
+        </details>
+
+        {/* ⚠️ 哨兵 DNS **刻意留在明面**（不随上面几项一起收进「高级」）：它的说明是
+            「隧道没了而 DNS 还指着它 ⇒ 用户表现为全网断」这条风险的**唯一解释**。
+            这类解释一旦默认看不见，风险就从「已知」变成「暗知识」。 */}
         <div className="field">
-          <label>出站绑定接口（防路由环）</label>
+          <label>哨兵 DNS</label>
           <input
             type="text"
-            placeholder="留空 = 自动使用物理出口（推荐）"
-            value={settings.tun.bind_outbound_to ?? ""}
-            onChange={(e) => patchTun({ bind_outbound_to: e.target.value.trim() || null })}
+            value={settings.tun.sentinel_dns}
+            onChange={(e) => patchTun({ sentinel_dns: e.target.value })}
           />
           <div className="field__hint">
-            填入 <span className="mono">en0</span> 这类物理接口名后，核心会用
-            <span className="mono"> IP_BOUND_IF </span>
-            把「连代理服务器」的 socket 绑到该接口，从根上杜绝
-            「代理流量又被送进隧道」的路由环。留空时由核心自动探测。
+            写入系统的「假」解析器，位于隧道网段内且不会被真实路由 —— 唯一目的是让所有
+            53 端口流量必然进入隧道，从而被内核的 <span className="mono">dns-out</span> 接管。
           </div>
         </div>
 
