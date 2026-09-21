@@ -8,6 +8,13 @@
 #   ./scripts/diagnose-network-drop.sh --minutes 30     # 日志回看窗口（默认 10 分钟）
 #   ./scripts/diagnose-network-drop.sh --socks-port 10808 --node 1.2.3.4:443
 #   ./scripts/diagnose-network-drop.sh --redact-ip --redact-node
+#   ./scripts/diagnose-network-drop.sh --self-test          # **离线自检**：只跑判读逻辑（不联网、不写报告）
+#
+# **为什么必须「在故障当下」跑这份取证**：用户的症状是**间歇性**的 ——
+#   有时连不上 deepseek、有时连不上本机 127.0.0.1:3080、国内不通而国外良好；
+#   维护者**事后复现不到**（事后跑，国内国外全通）。故障当下那一刻的路由表、活动 DNS 解析器、
+#   utun 数量与代理旁路表才是证据；晚一步，现场可能已被自动重连/回滚抹掉。
+#   ⇒ **感觉不对就立刻跑一次**并留下整份报告，而不是等「确定坏了」再跑。
 #
 # 用户症状（本脚本围绕它取证）：连接状态下整机断网，**一断开/退出就恢复**，
 # 且**国外可以、国内直接断掉**。脚本必须能区分下面三态：
@@ -32,6 +39,83 @@
 #
 set -u
 
+# ---------------------------------------------------------------------------
+# 判读逻辑（**纯函数，可离线自检**）：回环路由形态
+# ---------------------------------------------------------------------------
+# 输入：`netstat -rn -f inet` 的文本（来自本机，或 --self-test 里的现场样例）。
+# 判据是**确定性的**：BSD 路由表里 127.0.0.0/8 的入口必须落在 lo0。
+# 若 127/8 指向某个网关（现场出现的是局域网路由器）而 netif 又不是 lo0，
+# 则**除 127.0.0.1 自带 /32 → lo0 之外**，其它 127.x.x.x 都会被送到那个网关 —— 回环局部失效。
+judge_loopback_routes() {
+  awk '
+    /^Destination/ { next }
+    NF < 4 { next }
+    {
+      dest=$1; gw=$2; flags=$3; netif=$4
+      if (dest=="127" || dest=="127/8" || dest=="127.0.0.0/8") {
+        if (netif=="lo0" && gw ~ /^127\./) {
+          printf "  [正常] 127/8 的回环路由：dest=%s gateway=%s flags=%s netif=%s\n", dest, gw, flags, netif
+        } else {
+          printf "  [异常] 127/8 的回环路由指向**非 lo0** 的出口：dest=%s gateway=%s flags=%s netif=%s\n", dest, gw, flags, netif
+          printf "         ⇒ 除 127.0.0.1（自带 /32 → lo0）以外，其它 127.x.x.x 会被送到 %s。\n", gw
+          bad++
+        }
+      }
+      if (dest=="127.0.0.1" || dest=="127.0.0.1/32") {
+        if (netif=="lo0") { onlo++ }
+        else { printf "  [异常] 127.0.0.1 的 /32 主机路由不在 lo0：netif=%s flags=%s\n", netif, flags; bad++ }
+      }
+    }
+    END {
+      if (onlo==0) { printf "  [异常] 路由表里没有「127.0.0.1 → lo0」的主机路由：回环本身可能不可用\n"; bad++ }
+      if (bad==0) print "  [正常] 回环路由形态健康（127.0.0.1/32 → lo0，且没有 127/8 via 网关）"
+      exit (bad>0 ? 1 : 0)
+    }
+  '
+}
+
+# 异常收集（§10 会汇总；让读者一眼分出「现在正常」与「发现异常」）
+ANOMALIES=""
+note_anomaly() { ANOMALIES="${ANOMALIES}  · $1
+"; }
+anomaly_count() { [ -n "$ANOMALIES" ] && printf '%s' "$ANOMALIES" | grep -c '  · ' || echo 0; }
+
+# ---------------------------------------------------------------------------
+# --self-test：用**现场样例**验证判据真的能抓到那条异常（离线、不联网、不写报告）
+# ---------------------------------------------------------------------------
+run_self_test() {
+  local rc=0
+  local fixture_bad fixture_good
+  # ↓↓ 逐字来自 lead 在用户机器上抓到的现场（task-81 卡面）。
+  #    这两行是 `netstat -rn -f inet` 的输出行本身；
+  #    卡面里跟在后面的「← ⚠️ 127.0.0.0/8 被静态路由指到局域网路由器」是**注解**，不是命令输出，故不录入。
+  fixture_bad='127        192.168.0.1   UGSc   en0
+127.0.0.1  127.0.0.1     UH     lo0'
+  # ↓↓ 健全形态（卡面要求：127.0.0.1 走 lo0，且**没有** 127/8 via 网关）
+  fixture_good='127.0.0.1  127.0.0.1  UH  lo0'
+
+  echo "=== --self-test 1/2：lead 现场样例（**必须**报「异常」）==="
+  printf '%s\n' "$fixture_bad"
+  echo "---- 判读 ----"
+  printf '%s\n' "$fixture_bad" | judge_loopback_routes
+  local rc_bad=$?
+  echo "判读退出码=${rc_bad}（0=正常，1=发现异常）"
+  if [ "$rc_bad" = "1" ]; then echo "✓ 符合预期：抓到「127 路由指向非 lo0 网关 ⇒ 异常」"; else echo "✗ 不符合预期：竟然判成正常"; rc=1; fi
+
+  echo
+  echo "=== --self-test 2/2：健全形态（**必须**报「正常」）==="
+  printf '%s\n' "$fixture_good"
+  echo "---- 判读 ----"
+  printf '%s\n' "$fixture_good" | judge_loopback_routes
+  local rc_good=$?
+  echo "判读退出码=${rc_good}（0=正常，1=发现异常）"
+  if [ "$rc_good" = "0" ]; then echo "✓ 符合预期：健全形态判成正常"; else echo "✗ 不符合预期：把健全形态判成了异常"; rc=1; fi
+
+  echo
+  if [ "$rc" = "0" ]; then echo "self-test：双向敏感性**通过**（异常样例报异常 / 健全样例报正常）"; else echo "self-test：**失败**"; fi
+  return "$rc"
+}
+
 OUT=""
 MIN=10
 REDACT_IP=0
@@ -46,6 +130,7 @@ while [ $# -gt 0 ]; do
     --node) NODE_ARG="${2:-}"; shift 2 ;;
     --redact-ip) REDACT_IP=1; shift ;;
     --redact-node) REDACT_NODE=1; shift ;;
+    --self-test) run_self_test; exit $? ;;
     -h|--help) sed -n '3,30p' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
@@ -249,6 +334,49 @@ section "2b. 物理端口与 Wi-Fi 关联"
 } | redact >> "$OUT"
 
 # ---------------------------------------------------------------------------
+# 2c) 回环本身（不只是「SOCKS 端口在不在监听」）
+# ---------------------------------------------------------------------------
+section "2c. 回环可用性（127.0.0.1 **以及其它 127.x.x.x**）"
+{
+  echo "为什么要测「其它 127.x.x.x」：现场出现过一条 127 → 192.168.0.1 UGSc en0 的静态路由，"
+  echo "只有 127.0.0.1 自带 /32 → lo0 才侥幸可用 ⇒ **只测 127.0.0.1 会漏掉这个故障**。"
+  echo "**归属（有代码证据，不是按进程名猜的）**：这条路由是 **XrayTun 自己装的** ——"
+  echo "  修复前 crates/xt-proto/src/lib.rs 的 default_bypass_networks() 里含 \"127.0.0.0/8\"（与连接态实读的旁路集合逐条吻合），"
+  echo "  而 crates/xt-tun/src/plan.rs 把**所有 IPv4 旁路网段一律指向物理网关**；"
+  echo "  修复 63b84dc（task-83）已把 127/8 移出该列表，并在规划层加防御。"
+  echo "  ⇒ 机器上仍看到它，最可能是**已安装的 App 还是旧版本**（新代码尚未上机）。"
+  echo
+  for A in 127.0.0.1 127.0.0.2; do
+    echo "-- ${A}"
+    run_cap 4 ping -c 1 -t 1 "$A"
+    printf '%s\n' "$RUN_OUT" | head -2 | sed 's/^/    ping: /'
+    if [ -n "$SOCKS_PORT" ]; then
+      run_cap 4 nc -z -G 2 -w 2 "$A" "$SOCKS_PORT"
+      printf '    nc -z %s:%s → rc=%s\n' "$A" "$SOCKS_PORT" "$RUN_RC"
+      run_cap 6 curl -s -o /dev/null --max-time 4 -w 'http=%{http_code} connect=%{time_connect}s total=%{time_total}s' "http://${A}:${SOCKS_PORT}/"
+      printf '    curl http://%s:%s/ → %s\n' "$A" "$SOCKS_PORT" "$(printf '%s' "$RUN_OUT" | tr '\n' ' ' | cut -c1-120)"
+    else
+      echo "    （未检测到 SOCKS 端口，跳过 nc/curl 那两行；可用 --socks-port 指定）"
+    fi
+  done
+  # 判读：127.0.0.1 通而 127.0.0.2 不通 ⇒ 回环是**局部**坏的
+  run_cap 4 nc -z -G 2 -w 2 127.0.0.1 "${SOCKS_PORT:-1}"
+  RC_LO1=$RUN_RC
+  run_cap 4 nc -z -G 2 -w 2 127.0.0.2 "${SOCKS_PORT:-1}"
+  RC_LO2=$RUN_RC
+  echo
+  echo "-- 判读"
+  if [ "$RC_LO1" = "0" ] && [ "$RC_LO2" != "0" ]; then
+    echo "    [异常] 127.0.0.1 可达但 127.0.0.2 不可达 ⇒ **回环局部失效**（与 §3c 的路由形态一起看）"
+    note_anomaly "回环局部失效：127.0.0.1 通、127.0.0.2 不通（§2c）"
+  elif [ "$RC_LO1" = "0" ] && [ "$RC_LO2" = "0" ]; then
+    echo "    [正常] 127.0.0.1 与 127.0.0.2 都可连"
+  else
+    echo "    （没有可比对的监听端口，或两个都不通 —— 结合 §3c 的路由判读看）"
+  fi
+} >> "$OUT"
+
+# ---------------------------------------------------------------------------
 # 3) 路由
 # ---------------------------------------------------------------------------
 section "3. 路由表（netstat -rn）"
@@ -264,6 +392,27 @@ section "3b. 关键前缀（TUN 是否接管默认路由）"
   echo; echo "-- 0.0.0.0/1"; run_cap 10 netstat -rn -f inet; printf '%s\n' "$RUN_OUT" | awk '$1=="0.0.0.0/1"||$1=="0/1"{print}' | redact
   echo; echo "-- 128.0.0.0/1"; run_cap 10 netstat -rn -f inet; printf '%s\n' "$RUN_OUT" | awk '$1=="128.0.0.0/1"||$1=="128/1"{print}' | redact
   echo; echo "-- 198.18.0.0/15（fake-dns 哨兵网段）"; run_cap 10 netstat -rn -f inet; printf '%s\n' "$RUN_OUT" | grep -E '198\.18\.' | redact
+} >> "$OUT"
+
+# ---------------------------------------------------------------------------
+# 3c) 回环路由形态的判读（**确定性判据**，含异常判定）
+# ---------------------------------------------------------------------------
+section "3c. 回环路由形态的判读（127/8 必须落在 lo0）"
+{
+  echo "-- netstat -rn -f inet 的相关原始行（^127 / ^0/1 / ^128/1 / ^198.18 / ^default）"
+  run_cap 15 netstat -rn -f inet
+  printf '%s\n' "$RUN_OUT" | awk '$1 ~ /^127/ || $1=="0/1" || $1=="0.0.0.0/1" || $1=="128/1" || $1=="128.0.0.0/1" || $1 ~ /^198\.18/ || $1=="default" {print}' | redact | sed 's/^/    /'
+  echo
+  echo "-- 判读（输入是上面同一份 netstat 文本；判据：127/8 必须 lo0）"
+  JUDGE_OUT="$(printf '%s\n' "$RUN_OUT" | judge_loopback_routes)"
+  JUDGE_RC=$?
+  printf '%s\n' "$JUDGE_OUT"
+  if [ "$JUDGE_RC" != "0" ]; then
+    echo "  归属：这条 127/8 → 物理网关的路由由 **XrayTun 的连接态规划**安装（修复前 127/8 在 bypass 列表里，"
+    echo "        且所有 IPv4 旁路网段一律指向物理网关）；修复 63b84dc（task-83）已移出该网段并加规划层防御。"
+    echo "        ⇒ 若机器上仍见它，多为「已安装 App 仍是旧版本」，不是第三方 VPN 的锅。"
+    note_anomaly "回环路由形态异常：127/8 未落在 lo0（§3c）"
+  fi
 } >> "$OUT"
 
 # ---------------------------------------------------------------------------
@@ -317,6 +466,45 @@ section "6. 应用与核心进程 / 数据清单"
   echo; echo "-- 遗留会话快照（helper 的回滚快照目录，如存在只列清单）"
   ls -l /var/run/com.xraytun.helper.sock 2>/dev/null
   ls -l /Library/Application\ Support/com.xraytun.helper 2>/dev/null || true
+} >> "$OUT"
+
+# ---------------------------------------------------------------------------
+# 6b) 多个 VPN / 代理栈的共存证据（**只报名字，不 dump 配置**）
+# ---------------------------------------------------------------------------
+section "6b. 多 VPN / 代理栈共存证据"
+{
+  echo "-- 所有 utun* 接口与 MTU（现场曾有 utun0..utun6 共 7 个）"
+  UTUN_ALL="$(ifconfig -a 2>/dev/null | awk -F: '/^utun[0-9]+:/{print $1}')"
+  if [ -z "$UTUN_ALL" ]; then
+    echo "    （没有 utun 接口）"
+  else
+    for u in $UTUN_ALL; do
+      M="$(ifconfig "$u" 2>/dev/null | awk '/mtu/{for(i=1;i<=NF;i++) if($i=="mtu") print $(i+1)}')"
+      H="$(ifconfig "$u" 2>/dev/null | awk '/inet /{print $2; exit}')"
+      printf '    %-8s mtu=%-6s inet=%s\n' "$u" "${M:-?}" "${H:-（无地址）}"
+    done
+    printf '    合计：%s 个 utun 接口\n' "$(printf '%s\n' $UTUN_ALL | grep -c .)"
+  fi
+  echo; echo "-- 第三方代理/VPN/隧道进程（**只列进程名**，不看命令行参数）"
+  pgrep -l -f 'Karing|Tailscale|tailscaled|clash|ClashX|mihomo|sing-box|Surge|Quantumult|Stash|v2ray|V2Ray|WireGuard|wg-quick|OpenVPN|tun2socks' 2>/dev/null | awk '{print "    "$2}' | sort -u
+  echo "    （空 = 没发现这些进程名；不代表没有别的栈）"
+  echo; echo "-- scutil --proxy（系统代理设置）"
+  scutil --proxy 2>&1 | redact | sed 's/^/    /'
+  echo; echo "-- 每个网络服务的代理旁路表（networksetup -getproxybypassdomains）"
+  networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | while IFS= read -r svc; do
+    echo "  [${svc}]"
+    networksetup -getproxybypassdomains "$svc" 2>&1 | sed 's/^/    /'
+  done
+  echo
+  UTUN_N="$(printf '%s\n' $UTUN_ALL | grep -c .)"
+  echo "-- 判读"
+  if [ "$UTUN_N" -ge 3 ]; then
+    echo "    [可疑] utun 接口 ${UTUN_N} 个（≥3）⇒ **多栈共存**；只能提示可疑，不能据此断言是故障原因。"
+    note_anomaly "多栈共存：utun 接口 ${UTUN_N} 个（§6b，**仅提示可疑**）"
+  else
+    echo "    [正常] utun 接口 ${UTUN_N} 个，未见明显多栈痕迹。"
+  fi
+  echo "    注：这条是**提示可疑**级别（确定性判据只有 §3c 的路由形态与 §8.7 的国内外对照）。"
 } >> "$OUT"
 
 # ---------------------------------------------------------------------------
@@ -446,6 +634,119 @@ fi
   run_cap 20 traceroute -n -m 5 -w 1 1.1.1.1 2>&1 | head -8
 } >> "$OUT"
 
+# --- 8.7 国内 vs 国外：**同一时刻**对照（判「国内不通」的直接判据）---
+{
+  echo
+  echo "-- 8.7 国内 vs 国外**同一时刻**对照（直连 / 经 SOCKS 各一遍；给 http 状态码 + 耗时）"
+  echo "   为什么必须「同一时刻」：用户症状是间歇的，分两次测会把「时间差」当成「路径差」。"
+  while IFS='|' read -r where name url; do
+    [ -z "${url:-}" ] && continue
+    curl_probe "直连   ${where} ${name}" "$url"
+  done <<'EOF'
+国内|www.baidu.com|https://www.baidu.com/
+国内|api.deepseek.com|https://api.deepseek.com/
+国外|google generate_204|https://www.google.com/generate_204
+国外|github.com|https://github.com/
+EOF
+  if [ "$SOCKS_LISTEN" = "yes" ]; then
+    while IFS='|' read -r where name url; do
+      [ -z "${url:-}" ] && continue
+      curl_probe "SOCKS  ${where} ${name}" --socks5-hostname "127.0.0.1:${SOCKS_PORT}" "$url"
+    done <<'EOF'
+国内|www.baidu.com|https://www.baidu.com/
+国内|api.deepseek.com|https://api.deepseek.com/
+国外|google generate_204|https://www.google.com/generate_204
+国外|github.com|https://github.com/
+EOF
+  else
+    echo "  （本机 SOCKS 未监听/未检测到端口，跳过「经 SOCKS」那一遍）"
+  fi
+  # 判读用同一时刻抓到的四个状态码
+  run_cap 10 curl -s -o /dev/null --max-time 7 -w '%{http_code}' https://www.baidu.com/
+  CB="$RUN_OUT"
+  run_cap 10 curl -s -o /dev/null --max-time 7 -w '%{http_code}' https://api.deepseek.com/
+  CD="$RUN_OUT"
+  run_cap 10 curl -s -o /dev/null --max-time 7 -w '%{http_code}' https://www.google.com/generate_204
+  CG="$RUN_OUT"
+  echo
+  echo "-- 判读（直连状态码：baidu=${CB} deepseek=${CD} google=${CG}；000 = 连不上/超时）"
+  if [ "$CB" = "000" ] && [ "$CG" != "000" ]; then
+    echo "    [异常] **国内不通、国外通** —— 与用户症状一致（分流/规则或上游链路，而不是整机断网）"
+    note_anomaly "国内不通而国外通（§8.7：baidu=000, google=${CG}）"
+  elif [ "$CB" = "000" ] && [ "$CG" = "000" ]; then
+    echo "    [异常] 国内国外**都不通** ⇒ 更像整机断网/默认路由黑洞（见 §9 的 A 态）"
+    note_anomaly "国内国外都不通（§8.7）"
+  elif [ "$CB" != "000" ] && [ "$CG" != "000" ]; then
+    echo "    [正常] 直连国内国外都通（此刻不处于「国内不通」状态）"
+  else
+    echo "    [可疑] 只有国外不通 —— 与用户症状相反，可能是本机到国外的路径问题"
+  fi
+  # 再判「经代理」这一路：用户症状在这里最常见 —— 直连全通、经代理时国内站挂。
+  # ⚠️ **必须跑多轮再下结论**：实测到过一次 SOCKS → baidu rc=35 SSL_ERROR_SYSCALL，
+  #    但随后 4 轮复测全部 200 —— **单次采样不能当「活体形态」**（那是假红，
+  #    与「按 80 行就当重复够了」是同一类错误：单点采样 + 结论性措辞）。
+  #    所以这里跑 N 轮，只报「几轮中几轮失败」，并按**多数轮**才升格为异常。
+  PROXY_ROUNDS=3
+  if [ "$SOCKS_LISTEN" = "yes" ]; then
+    FAIL_D=0; FAIL_G=0; _i=1
+    while [ "$_i" -le "$PROXY_ROUNDS" ]; do
+      run_cap 10 curl -s -o /dev/null --max-time 7 -w '%{http_code}' --socks5-hostname "127.0.0.1:${SOCKS_PORT}" https://www.baidu.com/
+      _sb="$RUN_OUT"; [ "$_sb" = "000" ] && FAIL_D=$((FAIL_D+1))
+      run_cap 12 curl -s -o /dev/null --max-time 9 -w '%{http_code}' --socks5-hostname "127.0.0.1:${SOCKS_PORT}" https://www.google.com/generate_204
+      _sg="$RUN_OUT"; [ "$_sg" = "000" ] && FAIL_G=$((FAIL_G+1))
+      printf '    轮%s：SOCKS 国内 baidu=%s  国外 google=%s\n' "$_i" "$_sb" "$_sg"
+      _i=$((_i+1))
+    done
+    echo "   ${PROXY_ROUNDS} 轮中失败次数：国内 baidu ${FAIL_D}/${PROXY_ROUNDS}；国外 google ${FAIL_G}/${PROXY_ROUNDS}"
+    if [ "$FAIL_D" -ge 2 ] && [ "$FAIL_G" -eq 0 ]; then
+      echo "    [异常] 经代理：国内站**多数轮失败**、国外站全通 ⇒ 与用户症状（国内不通、国外良好）一致"
+      note_anomaly "经代理：国内站多数轮失败而国外站全通（§8.7：SOCKS baidu ${FAIL_D}/${PROXY_ROUNDS}）"
+    elif [ "$FAIL_D" -ge 1 ] && [ "$FAIL_G" -eq 0 ]; then
+      echo "    [可疑·瞬态，不下结论] 国内站只有 ${FAIL_D}/${PROXY_ROUNDS} 轮失败、国外站全通。"
+      echo "       单次采样**不足以**定性（本项目栽过「单点采样 + 结论性措辞」）；请在**故障当下**再多跑几次。"
+      note_anomaly "经代理：国内站偶发失败 ${FAIL_D}/${PROXY_ROUNDS} 轮（§8.7，**疑为瞬态，不据此定性**）"
+    elif [ "$FAIL_D" -ge 2 ] && [ "$FAIL_G" -ge 2 ]; then
+      echo "    [异常] 经代理国内国外**多数轮都失败** ⇒ 代理/隧道本身不通（不是分流问题）"
+      note_anomaly "经代理国内国外多数轮都失败（§8.7）"
+    else
+      echo "    [正常] 经代理国内外都通（国内失败 ${FAIL_D}/${PROXY_ROUNDS}、国外 ${FAIL_G}/${PROXY_ROUNDS}）"
+    fi
+  fi
+} >> "$OUT"
+
+# --- 8.8 哨兵 DNS 与隧道状态：显式判定「隧道死了但 DNS 还指着哨兵」---
+{
+  echo
+  echo "-- 8.8 哨兵 DNS 与隧道状态（两者**分开报**，再给一句结论）"
+  run_cap 10 scutil --dns
+  NS0="$(printf '%s\n' "$RUN_OUT" | awk '/nameserver\[0\]/{print $3; exit}')"
+  SENT_ACTIVE="no"
+  case "$NS0" in 198.18.*) SENT_ACTIVE="yes" ;; esac
+  UTUN_UP="$(ifconfig -a 2>/dev/null | awk -F: '/^utun[0-9]+:/{print $1}' | while read -r u; do ifconfig "$u" 2>/dev/null | grep -q 'inet ' && echo "$u"; done | tr '\n' ' ')"
+  TUNNEL_ALIVE="no"
+  [ -n "$UTUN_UP" ] && TUNNEL_ALIVE="yes"
+  CORE_ALIVE="不在"; pgrep -f '/xray( |$)' >/dev/null 2>&1 && CORE_ALIVE="在"
+  printf '  活动解析器 nameserver[0] = %s\n' "${NS0:-（无）}"
+  printf '  哨兵 198.18.x 仍是活动解析器 = %s（scutil --dns 里 198.18 行数=%s）\n' "$SENT_ACTIVE" "$SENTINEL_DNS"
+  printf '  隧道（有 inet 地址的 utun）= %s（%s）；核心进程 = %s\n' "$TUNNEL_ALIVE" "${UTUN_UP:-无}" "$CORE_ALIVE"
+  run_cap 8 dig +short +time=3 +tries=1 @198.18.0.2 www.baidu.com
+  printf '  dig www.baidu.com @198.18.0.2（哨兵）→ %s\n' "$(printf '%s' "$RUN_OUT" | tr '\n' ' ' | cut -c1-80)"
+  run_cap 8 dig +short +time=3 +tries=1 @223.5.5.5 www.baidu.com
+  printf '  dig www.baidu.com @223.5.5.5（直连）→ %s\n' "$(printf '%s' "$RUN_OUT" | tr '\n' ' ' | cut -c1-80)"
+  echo "  【结论】"
+  if [ "$SENT_ACTIVE" = "yes" ] && [ "$TUNNEL_ALIVE" = "no" ]; then
+    echo "    [异常] **隧道已经不在，但系统 DNS 仍指向哨兵 198.18.x** —— 此刻域名解析会失败/挂住，"
+    echo "           这正是「App 断开/退出前连域名都解析不了」的形态（H4）。"
+    note_anomaly "隧道已不在但 DNS 仍指向哨兵 198.18.x（§8.8）"
+  elif [ "$SENT_ACTIVE" = "yes" ] && [ "$TUNNEL_ALIVE" = "yes" ]; then
+    echo "    [正常] 隧道在跑、DNS 指向哨兵 —— 这是**设计内**形态（解析走隧道内 DNS）。"
+  elif [ "$SENT_ACTIVE" = "no" ] && [ "$TUNNEL_ALIVE" = "no" ]; then
+    echo "    [正常] 没有隧道、DNS 也没指着哨兵 —— 没有残留。"
+  else
+    echo "    [可疑] 隧道在跑但 DNS 不指向哨兵 —— 解析可能没走隧道（与预期分流不一致）。"
+  fi
+} >> "$OUT"
+
 # ---------------------------------------------------------------------------
 # 9) 自动判读
 # ---------------------------------------------------------------------------
@@ -493,6 +794,36 @@ section "9. 自动判读（基于上面事实的**推断**，不是结论）"
   echo "  H6 国内站不通、国外站通 → 分流/规则或上游链路问题（与「整机断」不同）"
 } >> "$OUT"
 
+# ---------------------------------------------------------------------------
+# 10) 异常清单（让读者一眼分出「现在正常」与「发现异常」）
+# ---------------------------------------------------------------------------
+section "10. 异常清单（一眼看）"
+{
+  ANOM_N="$(anomaly_count)"
+  if [ "$ANOM_N" = "0" ]; then
+    echo "  [正常] 本次取证**没有**判定出异常（§2c / §3c / §6b / §8.7 / §8.8 都没报异常）。"
+    echo
+    echo "  ⚠️ 但这**不等于**「问题不存在」：用户症状是**间歇性**的 —— 现在正常只说明"
+    echo "     「这一次没抓到」。**下一次感觉不对时立刻再跑一次**（见脚本头部的说明）。"
+  else
+    echo "  [发现异常] 共 ${ANOM_N} 条："
+    printf '%s' "$ANOMALIES"
+  fi
+  echo
+  echo "  确定性判据（可直接当异常）："
+  echo "    · §3c  回环路由形态：127/8 必须落在 lo0（否则 127.x.x.x 会被送去网关）"
+  echo "    · §2c  127.0.0.1 与 127.0.0.2 的可达性差异"
+  echo "    · §8.7 国内 vs 国外**同一时刻**对照（直连状态码）"
+  echo "    · §8.8 「隧道已不在但 DNS 仍指向哨兵 198.18.x」"
+  echo "  只能提示可疑（要人工判断）：§6b 的 utun 数量与第三方栈共存、代理旁路表内容。"
+} >> "$OUT"
+
 echo
 echo "✓ 取证完成：$OUT"
 echo "  把它发给维护者即可。报告默认含 IP 与节点地址；如需打码：--redact-ip --redact-node 重跑。"
+ANOM_FINAL="$(anomaly_count)"
+if [ "$ANOM_FINAL" != "0" ]; then
+  echo "  ⚠️ 本次判定出 ${ANOM_FINAL} 条异常（见报告第 10 节）。"
+else
+  echo "  （本次未判定出异常；症状是间歇性的，下一次发生时请立刻重跑一次。）"
+fi
