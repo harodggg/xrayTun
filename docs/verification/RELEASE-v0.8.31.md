@@ -7,13 +7,26 @@
 > **纪律**：本卡只写本文件（脚本与下载都放 `/tmp`）；**未改** `site/**`、`Cargo.toml`、`apps/**`、`scripts/**`、`CHANGELOG.md`；
 > **未跑** `check.sh`（改为用 `sed` 逐条复现它的 6 条断言 —— 验的是**同一条事实**，不是同一条命令）。
 
+## 结论（一句话版）
+
+**v0.8.31 发布通过我的独立验证**：三个资产我都**自己下载、自己算哈希与字节数**（dmg `22c640d1…`/47,179,066 B、
+zip `10b278f3…`/42,681,220 B，与 `SHA256SUMS.txt` 两行 **MATCH**）；包内 app `codesign --verify --strict` **EXIT=0**
+（adhoc，与页面声明一致）、Info.plist 版本 **0.8.31**、隔离属性 **0**；`app_update_check` 整条链路 **EXIT=0**（我这边 **0 次** exit 28）；
+线上 `/` 与 `/en/` 与提交 `400d15c` **逐字节相同**，页面印的精确字节数**等于我自己下载算出的值**，3 条 pinned 直链全 **200**。
+过程中我抓到并促成了 **1 处真缺陷**（提交 1 页面上仍展示 0.8.30 的 45.0/40.7 MiB）、纠正了 **3 处自述口径**，
+并点出 **2 个门禁盲区**（`check.sh` 不覆盖 wasm 两页、也不覆盖 `Cargo.lock`）+ **1 个平台陷阱**（CF 软 404 让状态码失效）。
+**明确没验的**：真机安装、自动更新最后一步（替换+重启）、公证/Gatekeeper 真实体验、用户浏览器下载路径 —— 见 §5。
+
 ## 0. 修订与口径（先说清「我量的是哪个对象、哪一瞬间」）
 
 | 对象 | 修订 | 状态 |
 |---|---|---|
 | v0.8.31 冻结修订 | `035e083` | lead 在此跑过完整门禁（我按纪律**未重跑** `check.sh`） |
 | **提交 1**（版本 bump + 官网「正在发布」） | **`0e5fcf881bcc01f2cd9dcbd35e0df20a4bd54475`**（短 `0e5fcf8`，**父 `e99da22`**） | ✅ 已落地；**工作区 clean（脏文件数 0）**，所以我下面量到的就是提交内容本身 |
-| 提交 2 / 资产 / 线上 | — | 尚未发生（`gh release view v0.8.31` → `release not found`），见 §3 |
+| **tag `v0.8.31`** | `1c108d39…`（annotated）→ **指向 `0e5fcf8`** | ✅ Release workflow **completed / success**（18m56s） |
+| **资产（3 个：dmg / zip / SHA256SUMS）** | 构建产物，非修订 | ✅ 已发布（`publishedAt 2026-09-21T10:28:33Z`），见 §3.1 |
+| **提交 2**（站点填真实字节数 + `PUBLISHED=True` + pinned 直链） | **`400d15c`**（**在 tag 之后**） | ✅ 已部署，见 §3.4 / §3.5 |
+| 线上站点 | — | ✅ 此刻 `/` 与 `/en/` 与提交 `400d15c` **逐字节相同** |
 
 **复现入口**：本节的每一条都由一个只读脚本一次跑出 —— `bash /tmp/verify-commit1.sh`（输出 `/tmp/verify-commit1.out`，104 行）。
 它**不写仓库任何文件**：两个生成器只在 `/tmp` 副本里跑。
@@ -288,38 +301,222 @@ site/en/index.html:57 "downloadUrl": "https://github.com/harodggg/xrayTun/releas
 
 ---
 
-## 3. 资产出现后的验证（**待做** —— `gh release view v0.8.31` 目前 `release not found`）
+## 3. 资产出现后的验证（**已完成** —— v0.8.31 已发布）
 
-清单（每条都要「我跑的命令 + 原始输出」）：
+### 3.0 被测对象（先说清量的是哪个）
 
-- [ ] `gh release view v0.8.31` 显示 **3 个资产**（dmg / zip / SHA256SUMS）
-- [ ] **自己下载** dmg 与 `SHA256SUMS.txt` 到 `/tmp`，**自己 `shasum -a 256`** 并比对；给出**我自己算出的字节数**，
-      并与 §1.3 的旧值（45.0/40.7 MiB）对比，确认站点已换成真实值
-- [ ] `codesign --verify --strict` 的**退出码**
-- [ ] `xattr -l`：历史基线 13 个文件带隔离属性 → 应为 **0**
-- [ ] `app_update_check`：包内版本号（应 0.8.31）与 SHA256；**如实记录我遇到几次 exit 28**
-      （上一版第一次超时过 —— 那是 `ops` 的对象，我遇到的次数是另一个对象，分开记）
-- [ ] 线上 `https://xraytun.top/`：`0.8.31` / `0.8.30` / 「正在发布」各自出现次数；canonical；`/en/` 是否等价
-- [ ] `www.xraytun.top`：原始状态码（**已知未生效，不修**）
-- [ ] 复核 §1.3 的 6 处 CTA：提交 2 应填回 **0.8.31 的真实字节数**（现在写「大小见 Releases」，本阶段正确）
-- [ ] 站点 `0.8.31` 计数会从 **68 回升**（pinned 直链填回）——
-      **报告里必须写明我量的是「哪个阶段 + 哪个修订」**，否则同一个数字会指向两个不同的对象
+| 项 | 值（我跑出来的） |
+|---|---|
+| tag `v0.8.31` | `1c108d39d5d1675ffba48abdd205d7f89af9563f`（annotated），**指向提交 `0e5fcf8`** |
+| 提交 2（站点填真实数据） | `400d15c`，**在 tag 之后**（tag 只钉代码提交） |
+| GitHub Release | `publishedAt=2026-09-21T10:28:33Z`、`isDraft=false`、`isPrerelease=false` |
+| Release workflow | `gh run list --workflow=release.yml` → **completed / success**（18m56s） |
+| 我下载到的 | `/tmp/xt-release-v0.8.31/`（`gh release download v0.8.31 --repo harodggg/xrayTun`） |
+| 我跑的命令 | `bash /tmp/verify-release.sh` → 原始输出 `/tmp/verify-release.out` |
 
-**已测的线上对照（提交 1 已部署；`/` 与 `/en/` 与提交**逐字节相同**）**
+### 3.1 三个资产：**我自己下载、我自己算**（页面上的数字一个都没抄）
 
-```
-curl -s https://xraytun.top/     → 43696 bytes
-   0.8.31 出现 20 次   0.8.30 出现 0 次   「正在发布」出现 2 次    canonical = https://xraytun.top/
-curl -s https://xraytun.top/en/  → 0.8.31 出现 20 次   0.8.30 出现 0 次   "publishing now" 1 次
+**命令**：
 
-git show 0e5fcf8:site/index.html    vs  线上 /      → **IDENTICAL（逐字节）**
-git show 0e5fcf8:site/en/index.html vs  线上 /en/   → **IDENTICAL（逐字节）**
+```bash
+gh release download v0.8.31 --repo harodggg/xrayTun -D /tmp/xt-release-v0.8.31
+shasum -a 256 *          # 我自己算
+for f in *; do stat -f "%z  %N" "$f"; done
+cat SHA256SUMS.txt
 ```
 
-⇒ 这比「版本号出现次数对得上」强得多：**线上部署的就是我验收过的那一份提交内容**（不是「计数碰巧相同」）。
-（早先未部署时的基线是 43987 bytes、`0.8.30`×35，已不适用，保留在上面 §1 的历史里。）
+**原始输出**：
 
-### 3.1 ⚠️ 线上站点的一个**会骗人的行为**：CF Pages 的 SPA 兜底（我独立复现）
+```
+--- 我下载到 /tmp 的（这也是我量到的字节数）---
+200        SHA256SUMS.txt
+47179066   XrayTun_0.8.31_x86_64_arm64.dmg
+42681220   XrayTun_0.8.31_x86_64_arm64.zip
+
+--- 我自己算的 sha256 ---
+7d5832dd716741abf6e7eecb01852e7cfb123f0d088713ca77e5df9f5b4bff19  SHA256SUMS.txt
+22c640d117ac39840fd8ef5955f250ca0b59d208101f7597560767c2bee77652  XrayTun_0.8.31_x86_64_arm64.dmg
+10b278f350e23de87b51601d2fd0fb9ee9f33f2b48f04a5690c5f85e5552edb3  XrayTun_0.8.31_x86_64_arm64.zip
+
+--- SHA256SUMS.txt 原文（注意 ./ 前缀，这正是历史上踩过的坑）---
+22c640d117ac39840fd8ef5955f250ca0b59d208101f7597560767c2bee77652  ./XrayTun_0.8.31_x86_64_arm64.dmg
+10b278f350e23de87b51601d2fd0fb9ee9f33f2b48f04a5690c5f85e5552edb3  ./XrayTun_0.8.31_x86_64_arm64.zip
+
+--- 逐行比对 ---
+  MATCH   XrayTun_0.8.31_x86_64_arm64.dmg
+  MATCH   XrayTun_0.8.31_x86_64_arm64.zip
+```
+
+| 检查项 | 我实测 | 结论 |
+|---|---|---|
+| 资产个数 | **3**（dmg / zip / SHA256SUMS） | ✅ |
+| dmg 字节数 | **47,179,066** | ✅ 我算的 |
+| zip 字节数 | **42,681,220** | ✅ 我算的 |
+| `SHA256SUMS.txt` 字节数 | **200** | ✅ 我算的 |
+| 我自己算的 sha256 vs 文件里写的 | dmg **MATCH**、zip **MATCH** | ✅ **不是抄 GitHub 页面** |
+| 我自己算的 sha256 vs `gh` API 的 `digest` | 三个都相同（`22c640d1…` / `10b278f3…` / `7d5832dd…`） | ✅ 两条独立取数一致 |
+
+### 3.2 dmg 完整性：`codesign` 退出码 / 挂载 / xattr
+
+**命令与原始输出**：
+
+```
+{ dmg 本体 }
+codesign --verify --strict --verbose=2 XrayTun_0.8.31_x86_64_arm64.dmg
+  → "code object is not signed at all"        DMG codesign EXIT = 1
+
+{ 挂载 }
+hdiutil attach -nobrowse -readonly -mountpoint /tmp/xt-mnt-v0.8.31 <dmg>   → EXIT = 0
+  /dev/disk6s2 Apple_HFS /private/tmp/xt-mnt-v0.8.31
+  内容：Applications -> /Applications（软链） + XrayTun.app
+
+{ 包内 app }
+codesign --verify --strict --verbose=2 /tmp/xt-mnt-v0.8.31/XrayTun.app
+  --prepared:…/xraytun-helper   --validated:…/xraytun-helper
+  "valid on disk" + "satisfies its Designated Requirement"
+  APP codesign --verify --strict EXIT = 0            ← 关键退出码
+
+{ 签名详情 }
+Identifier=com.xraytun.desktop   Format=app bundle with Mach-O universal (x86_64 arm64)
+CodeDirectory v=20400 flags=0x2(adhoc)   Signature=adhoc        ← 无 Developer ID / 无 TeamIdentifier
+
+{ 包内版本（我读的 Info.plist）}
+CFBundleShortVersionString = 0.8.31
+CFBundleVersion            = 0.8.31
+
+{ xattr }
+带 com.apple.quarantine 的文件数 = 0     ← 历史基线 13 → 应为 0，符合
+带任意 xattr 的文件数            = 0
+（挂载点内 find -type f 共 8 个文件）
+
+{ 下载到 /tmp 的三个文件自身的 xattr }
+SHA256SUMS.txt / .dmg / .zip → 都只有 com.apple.provenance（.dmg 另有 com.apple.diskimages.recentcksum）
+→ 没有任何 com.apple.quarantine
+```
+
+| 检查项 | 我实测 | 结论 |
+|---|---|---|
+| `.dmg` 本体 `codesign` | **EXIT=1**，`code object is not signed at all` | ⚠️ **dmg 未签名**（如实记录；见下方口径） |
+| 包内 `XrayTun.app` `codesign --verify --strict` | **EXIT=0**（valid on disk / satisfies its Designated Requirement） | ✅ |
+| 签名类型 | **adhoc**（`flags=0x2(adhoc)`、无 TeamIdentifier） | ✅ **与页面声明一致**（页面明写「没有签名校验」） |
+| 包内版本号（我读 Info.plist） | `0.8.31` / `0.8.31` | ✅ |
+| 隔离属性计数 | **0**（挂载点内 8 个文件里 0 个带 quarantine） | ✅ 符合「应为 0」 |
+| 挂载内容 | `Applications` 软链 + `XrayTun.app` | ✅ 可拖拽安装的结构 |
+
+> **口径（这里最容易含糊过去）**：`com.apple.quarantine` 是**下载器**加的，不是包做的。
+> 我是用 `gh release download`（curl 路线）取的，所以三个文件**本来就不会**带 quarantine ——
+> **我的 0 证明的是「包内没有烘焙进隔离/FinderInfo 属性」**（这是打包要保证的事）；
+> 它**不证明**「用户用浏览器下载后不带隔离属性」——浏览器下载**会**由 macOS 自己加上。
+> 用户路径要看到的是「首次打开需要一次 `xattr -d` 或右键打开」，这与页面 FAQ 的说法一致。
+
+### 3.3 `app_update_check`：整条链路（除最后替换）走通 —— **第一次就成功，exit 28 次数 = 0**
+
+**命令**：`CARGO_HOME=/tmp/xt-cargo-home CARGO_TARGET_DIR=/tmp/xt-target /tmp/xt-target/debug/examples/app_update_check`
+
+**原始输出（节选）**：
+
+```
+=== 1) 查最新版 …===
+=== 2) 下载（每 200ms 报进度）=== 10% … 100%  ✓ 下载完成
+=== 3) 校验（这一步以前一直失败）===
+  校验文件原文：
+    22c640d1…  ./XrayTun_0.8.31_x86_64_arm64.dmg
+    10b278f3…  ./XrayTun_0.8.31_x86_64_arm64.zip
+  期望 10b278f350e23de87b51601d2fd0fb9ee9f33f2b48f04a5690c5f85e5552edb3
+  实际 10b278f350e23de87b51601d2fd0fb9ee9f33f2b48f04a5690c5f85e5552edb3
+  ✓ 校验通过
+=== 4) 解压并核对包内版本 ===
+  包内版本 0.8.31，release 声称 0.8.31    ✓ 一致
+
+✓ 整条自更新链路（除最后的替换）全部走通
+app_update_check EXIT = 0
+尝试次数 = 1 ; exit 28（超时）次数 = 0
+```
+
+| 检查项 | 我实测 | 结论 |
+|---|---|---|
+| `app_update_check` 退出码 | **0** | ✅ |
+| **我遇到的 exit 28（超时）次数** | **0**（第 1 次尝试即成功；我的重试循环最多 3 次，只跑了 1 次） | ✅ 与上一版「第一次 exit 28」不同 —— 但那是**上一版**的对象，两次不矛盾 |
+| 包内版本 vs release 声称 | `0.8.31` vs `0.8.31` | ✅ |
+| SHA256 校验 | 期望 = 实际 = `10b278f3…` | ✅（与我在 §3.1 自己算的**同一个值**） |
+
+### 3.4 线上站点：提交 2 已部署，且**逐字节**等于提交
+
+**命令与原始输出**：
+
+```
+curl -s https://xraytun.top/     → 43980 bytes
+   0.8.31 出现 35 次   0.8.30 出现 0 次   「正在发布」出现 0 次
+   canonical = https://xraytun.top/
+   hreflang: zh-Hans → https://xraytun.top/ ; en → https://xraytun.top/en/ ; x-default → https://xraytun.top/
+curl -s https://xraytun.top/en/  → 45083 bytes
+   0.8.31 出现 35 次   0.8.30 出现 0 次   canonical = https://xraytun.top/en/
+
+git show 400d15c:site/index.html    vs 线上 /      → IDENTICAL（逐字节）
+git show 400d15c:site/en/index.html vs 线上 /en/   → IDENTICAL（逐字节）
+
+线上页面里的精确字节数：42,681,220 与 47,179,066     ← 与我在 §3.1 自己下载算出的**完全相同**
+旧的 0.8.30 精确字节数（47,154,951 / 42,659,730）：出现 0 次
+pinned 直链（3 条，全部指向 v0.8.31）：
+  releases/download/v0.8.31/XrayTun_0.8.31_x86_64_arm64.dmg
+  releases/download/v0.8.31/XrayTun_0.8.31_x86_64_arm64.zip
+  releases/download/v0.8.31/SHA256SUMS.txt
+这 3 条我逐个 curl：全部 **200**
+页面上 MiB 显示：45.0 MiB ×4、40.7 MiB ×2
+```
+
+| 检查项 | 我实测 | 结论 |
+|---|---|---|
+| 线上 `0.8.31` 次数 | `/` **35**、`/en/` **35** | ✅ |
+| 线上 `0.8.30` 次数 | `/` **0**、`/en/` **0** | ✅ |
+| 线上「正在发布」 | `/` **0**、`/en/` **0** | ✅ 已切换到「已发布」态 |
+| canonical | `/`→`https://xraytun.top/`；`/en/`→`https://xraytun.top/en/` | ✅ |
+| 三向 hreflang | `zh-Hans` / `en` / `x-default` 齐全且指向正确 | ✅ `/en/` 与 `/` 等价互换 |
+| **线上页面 vs 提交 `400d15c`** | **逐字节 IDENTICAL** | ✅ 线上就是我验收过的那一份 |
+| 页面上印的精确字节数 | `47,179,066` / `42,681,220` | ✅ **等于我自己下载算出的值**，不是上一版的 47,154,951 / 42,659,730 |
+| pinned 直链可达性 | 3 条全部 **200** | ✅（这正是历史上「pinned 直链 404」那类事故的反面） |
+
+> **一处必须点明的「同一个数字、不同对象」**：MiB 显示仍是 **45.0 / 40.7**，与 0.8.30 时**一模一样** ——
+> 但精确字节数**变了**（47,154,951→**47,179,066**、42,659,730→**42,681,220**）。
+> 若只看 MiB，会以为「没更新」；**判据必须是精确字节数或哈希**。这正是我在 §1.3 抓那个缺陷时用的同一条纪律。
+
+### 3.5 提交 2 自身的复核（站点侧，我独立交叉核对 `ops` 填的数）
+
+**命令与原始输出**：
+
+```
+git show 400d15c:scripts/gen-site-jsonld.py | grep '^PUBLISHED'   → PUBLISHED = True
+git show 400d15c:scripts/gen-site-geo.py    | grep '^PUBLISHED'   → PUBLISHED = True
+git show 400d15c:scripts/gen-site-geo.py | grep 'BYTES\|MIB':
+   DMG_BYTES, DMG_MIB = "47,179,066", "45.0"
+   ZIP_BYTES, ZIP_MIB = "42,681,220", "40.7"
+   SHA_BYTES = "200"
+6 条版本断言在 400d15c 上重跑 → 全部 0.8.31
+site/** 里 0.8.31 计数 = 122 ；0.8.30 = 0
+JSON-LD（400d15c）：softwareVersion "0.8.31"；downloadUrl/installUrl =
+   .../releases/download/v0.8.31/XrayTun_0.8.31_x86_64_arm64.dmg   ← 已 pinned（且该 URL curl = 200）
+```
+
+**决定性验证（在 `400d15c` 的干净 worktree 副本里重跑两个生成器）**：
+
+```
+IDENTICAL site/index.html      IDENTICAL site/en/index.html
+IDENTICAL site/wasm/index.html IDENTICAL site/en/wasm/index.html
+IDENTICAL site/llms.txt        IDENTICAL site/llms-full.txt
+IDENTICAL site/robots.txt      IDENTICAL site/sitemap.xml
+```
+
+| 检查项 | 我实测 | 结论 |
+|---|---|---|
+| `PUBLISHED` | `True` ×2 | ✅ |
+| `ops` 填的**精确字节数** | `47,179,066` / `42,681,220` / `200` | ✅ **与我自己下载算出的逐位相同**（§3.1） |
+| `ops` 填的 MiB | `45.0` / `40.7` | ✅ 是**新**字节数的正确取整（不是沿用旧值） |
+| 6 条断言 | 全部 `0.8.31` | ✅ |
+| `site/**` 计数 | `0.8.31` = **122**、`0.8.30` = **0** | ✅ 如 lead 预告：填回 pinned 直链后**从 68 回升到 122**（**注意：这是提交 2 的数字，「68」是提交 1 的数字**） |
+| JSON-LD `downloadUrl` | 已 pinned，且 `curl` = **200** | ✅ 没有「pinned 到 404 的资产」 |
+| 两个生成器产物 vs 仓库 | **8/8 IDENTICAL** | ✅ 提交 2 也**没有**漏跑 `gen` |
+
+### 3.6 ⚠️ 线上站点的一个**会骗人的行为**：CF Pages 的 SPA 兜底（我独立复现）
 
 `ops` 提示：`xraytun.top` 上**不存在的路径返回 200 + 首页 HTML**。我自己复现了三条 URL：
 
@@ -329,18 +526,18 @@ https://xraytun.top/og-image-0.8.30.png             bytes=43696  sha256(前16)=1
 https://xraytun.top/this-path-does-not-exist-xyz    bytes=43696  sha256(前16)=1e12653843e9f902  content-type=text/html
 ```
 
-⇒ **三条 URL 的 body 完全相同**（包括那个「图片」路径！），且 `content-type` 都是 `text/html`。
+⇒ **三条 URL 的 body 完全相同**（包括那个「图片」路径！），`content-type` 都是 `text/html`。
 **结论：在 `xraytun.top` 上不能用状态码判断资产是否存在** —— 连 `curl -sI` 的 200 也不能。
 本卡后续凡是「某个资源在不在线上」的判断，我一律用 **`content-type` + body sha256** 双证据，
 并标注它**是既有行为**（不是本次发布引入），任何打错的路径都是 **200 软 404**。
 
-**`www.xraytun.top`（已知未生效；只报状态码，不修）**：
+### 3.7 `www.xraytun.top`：**200，无跳转**（已知未生效，未修）
 
 ```
 HTTP/2 200          ← 不是 301，且**没有 Location 头**
+content-type: text/html; charset=utf-8
 server: cloudflare
-apex sha256(前16)=02958cc437382b91 bytes=43987
-www  sha256(前16)=02958cc437382b91 bytes=43987   → SAME content
+apex sha256(前16)=a02e24a38f9d5dc5     www sha256(前16)=a02e24a38f9d5dc5   → SAME content
 ```
 
 ⇒ `www` 直接 **200** 并服务与 apex **完全相同**的内容（sha256 相同），**没有发生 301** ——
@@ -364,25 +561,41 @@ www  sha256(前16)=02958cc437382b91 bytes=43987   → SAME content
 | 10 | 「`site/**` 内 `0.8.30` = 0」 | **0** | ✅ 一致 |
 | 11 | 「删了旧 og-image」 | 是 **rename** 换掉的（`git show --stat` 显示 `{og-image-0.8.30.png => og-image-0.8.31.png}`），仓库内对旧名的引用 = 0 | ✅ 一致（我上一版文档的措辞已更正） |
 | 12 | 「wasm 盲区 / `Cargo.lock` 盲区」 | 我独立确认：`grep wasm scripts/check.sh` = 0；6 条断言不含 `Cargo.lock` | ✅ 一致 |
+| 13 | 「3 个资产已发布」 | `gh release view` = 3 个资产、`state=uploaded`、`isDraft=false`；我**自己下载**了三个并自己算哈希 | ✅ 一致 |
+| 14 | 「dmg / zip 的字节数」（页面与 `gh` 元数据） | 我**自己 `stat`**：dmg **47,179,066**、zip **42,681,220**、SHA256SUMS **200** —— 与页面、与 `gh api` digest 三方一致 | ✅ 一致 |
+| 15 | 「`SHA256SUMS.txt` 可用」 | 我**自己 `shasum -a 256`**：dmg/zip 两行 **MATCH**（文件里带 `./` 前缀也没挡住） | ✅ 一致 |
+| 16 | 「`app_update_check` 通过」 | 我跑**真实链路**：下载 → 校验（期望=实际=`10b278f3…`）→ 解压 → 包内 0.8.31，**EXIT=0**；**我遇到的 exit 28 次数 = 0**（第 1 次尝试即成功） | ✅ 一致（且我额外记录了**我自己的**超时次数这个独立对象） |
+| 17 | 「站点已填真实字节数」 | 线上页面印的精确字节 = `47,179,066` / `42,681,220` —— **与我下载算出的逐位相同**；旧的 `47,154,951`/`42,659,730` = **0 次** | ✅ 一致 |
+| 18 | 「`PUBLISHED=True` + pinned 直链」 | `400d15c` 上两个开关都 `True`；3 条 pinned 直链 `curl` 全部 **200**；JSON-LD `downloadUrl` 已 pinned 且可达 | ✅ 一致 |
+| 19 | 「线上版本号计数回升」 | 我实测：`/` 与 `/en/` 各 **0.8.31 ×35、0.8.30 ×0**；`site/**` 内 `0.8.31` = **122**（提交 1 是 68） | ✅ 一致（**注明：122 是提交 2、68 是提交 1，两个对象**） |
+| 20 | 「线上已部署」 | `/` 与 `git show 400d15c:site/index.html` **逐字节 IDENTICAL**；`/en/` 同样 | ✅ 一致（比计数更强） |
 
-**我查过、且一致的其他项**：`releases`=200 / `releases/latest`=302→v0.8.30 / `gh release view`=not found；
-wasm 两页手工 v0.8.31；OG 图存在且被引用；`Cargo.lock` 5 个 crate 0.8.31、`--locked` EXIT=0。
+**我查过、且一致的其他项**：`releases`=200 / `releases/latest`=302→v0.8.30 / `gh release view`=not found（提交 1 时）；
+wasm 两页手工 v0.8.31；OG 图存在且被引用；`Cargo.lock` 5 个 crate 0.8.31、`--locked` EXIT=0；
+提交 2 的两个生成器产物 **8/8 逐字节 IDENTICAL**；`www` 200 无跳转。
 
 ---
 
 ## 5. 我**无法**验证的（如实列出，不含糊）
 
-1. **真机安装**：把 dmg 拖进 `/Applications`、走一遍 Gatekeeper / `xattr -d com.apple.quarantine` 的真实体验。
-   我只有命令行，**没有**在真机上双击安装过。
-2. **真机自动更新全流程**：旧版 → 检查更新 → 下载 zip → SHA256 校验 → 替换 → 重启。
-   `app_update_check` 只能验「包内版本号/哈希」这类静态事实，**验不了** UI 里的升级闭环。
-3. **公证 / Developer ID**：本项目是 ad-hoc 签名（页面自己写明「没有签名校验」）。
-   `codesign --verify --strict` 只能说明**包内签名自洽**，**推不出**「用户不会看到 Gatekeeper 警告」。
-4. **dmg 挂载后的目录内容 / 能否拖拽安装** —— 需要 `hdiutil attach` + 人工看。
-5. **workflow 的真实执行与 CI 结果**：我按纪律**没跑** `check.sh`、也没触发 CI。「CI 会绿」是**引用**，不是我的实测。
-6. **`www` 的 301 最终生效**：需用户在 CF 控制台建 Redirect Rule，**我无法在仓库侧验证**。
-7. **Cloudflare Pages 的部署时机**：我看不到部署事件，只能靠 `curl` 反复取事实。
-8. **`check.sh` 与 CI 在冻结修订上真的会通过**：我**没有重跑**（纪律要求），这里只有 lead 的引用。
+1. **真机安装**：把 dmg 拖进 `/Applications`、走一遍 Gatekeeper / 右键打开的**真实**用户路径。
+   我做了 `hdiutil attach` + 读了包内结构（`Applications` 软链 + `XrayTun.app`）与 Info.plist，
+   但**没有**在真机上双击安装、也没有以普通用户身份打开过它。
+2. **自动更新的最后一步（替换 + 重启）**：`app_update_check` 把「查版 → 下载 zip → 校验 SHA256SUMS →
+   解压 → 核对包内版本」整条链路跑通了（EXIT=0），但**故意不做替换**；
+   「替换 `/Applications` 里的 app 并重启」这一段**我没有验**。
+3. **公证 / Developer ID**：本项目是 **adhoc** 签名。我实测包内 app 的 `codesign --verify --strict` **EXIT=0**，
+   但那只能说明**包内签名自洽**，**推不出**「用户不会看到 Gatekeeper 警告」。
+4. **`.dmg` 本体未签名**（我实测 `codesign` EXIT=1、`code object is not signed at all`）：
+   这**符合**页面「没有签名校验」的声明，但我**不能**据此判断「用户双击时会不会被拦」。
+5. **用户浏览器下载后的隔离属性**：我实测包内 quarantine = **0**，但我的取件路径是 `gh release download`（curl 路线），
+   **浏览器下载会由 macOS 自己加 quarantine** —— 这条用户路径我**验不了**（见 §3.2 的口径说明）。
+6. **CI 在冻结修订上是真的通过**：`Release` workflow 我实测 **completed/success**，但 `CI` 那条我当时读到的是
+   `completed success`（同一 push），而 `check.sh` 我按纪律**没重跑**；「本机 `check.sh` 绿」只有 lead 的引用。
+7. **`www` 的 301 最终生效**：需用户在 CF 控制台建 Redirect Rule，**我无法在仓库侧验证**（此刻仍是 200 直出）。
+8. **Cloudflare Pages 的部署事件**：我看不到部署动作，只能靠 `curl` 取到「部署后的内容」这一事实
+   （我用「线上 ⇄ 提交逐字节相同」来替代部署事件本身）。
+9. **StoreKit / 更新 UI 的交互闭环**：只验了后端链路，界面上的「检查更新」按钮点击流转**没验**。
 
 ## 6. 诚实清单：哪些是我实测、哪些是引用
 
@@ -390,19 +603,28 @@ wasm 两页手工 v0.8.31；OG 图存在且被引用；`Cargo.lock` 5 个 crate 
 §1.2 的 `grep` + `curl -sI` 状态码 + `gh release view`；§1.3 的 10 处陈旧字节数、GitHub API 的 0.8.30 真实字节数、本地无产物、修复后复验；
 §1.4 的 wasm 手工读数与 `check.sh` 零覆盖；§1.5 的 122 复算与 68 逐文件计数 + 对 `ops` 解释的算术核验；
 §1.6 CHANGELOG 复验；§1.7 的 og-image rename 认定；§2 两个生成器的逐字节比对与 JSON-LD 直读；
-§0 对 `ops` 18 文件/+681 的口径核验；§3 的线上基线与 `www` 状态码/内容哈希。
+§0 对 `ops` 18 文件/+681 的口径核验；
+**§3 全部由我自己下载/自己算**：三个资产的 sha256 与字节数（并与 `gh api` digest 交叉核对）、`SHA256SUMS.txt` 逐行 MATCH、
+dmg/app 的 `codesign` 退出码与 adhoc 签名详情、Info.plist 版本、挂载点内与下载文件自身的 xattr 计数、
+`app_update_check` 整条链路与我自己的 exit 28 次数、线上 `/` 与 `/en/` 的计数/canonical/hreflang、与提交 `400d15c` 的**逐字节**比对、
+线上精确字节数与我下载值的一致性、3 条 pinned 直链的状态码、提交 2 的两个生成器 8/8 逐字节比对、
+CF SPA 软 404 三条 URL 的 body 哈希、`www` 状态码与内容哈希。
 
 **我只能引用的（标注来源与不可验证性）**：
 * lead 在 `035e083` 上跑过「完整门禁 → `✓ 与 CI 相同的全部检查通过`，exit 0」——**引用 lead 的话，我未重跑**。
 * `ops` 的「提交 1 / 提交 2」流程与根因归因（0.8.30 phase-2 脚本只换文案）——**引用**；我用实测核它的**后果**。
-* 「历史基线：13 个文件带隔离属性」——**引用**卡内描述，资产出现后我会用 `xattr -l` 自己数。
-* 「上一版 `app_update_check` 第一次 exit 28」——**引用**卡内描述；我遇到的次数会**单独**记录。
+* 「历史基线：13 个文件带隔离属性」——**引用**卡内描述；我实测的是 **0**（§3.2），但**取件路径不同**（见 §3.2 口径）。
+* 「上一版 `app_update_check` 第一次 exit 28」——**引用**卡内描述；**我遇到的次数是 0**（§3.3），两者是不同对象。
+* `Release` / `CI` workflow 的结论来自 `gh run list`（**平台读数，不是我的实测**），我只把它当「引用」。
 
 ---
 
 ## 附：本次用到的产物
 
-* 一次性复现脚本（只读）：`/tmp/verify-commit1.sh` → 输出 `/tmp/verify-commit1.out`（104 行）
+* 一次性复现脚本（只读）：`/tmp/verify-commit1.sh` → 输出 `/tmp/verify-commit1.out`（提交 1，104 行）
+* 第二阶段复现脚本（只写 /tmp）：`/tmp/verify-release.sh` → 输出 `/tmp/verify-release.out`
+* 我自己下载的资产：`/tmp/xt-release-v0.8.31/`（dmg / zip / SHA256SUMS.txt，**我算的哈希见 §3.1**）
+* 提交 2 的干净 worktree：`/tmp/xt-c2`（`400d15c`）；生成器副本重跑：`/tmp/c2-gen/`
 * 副本 JSON-LD 验证：`/tmp/jsonld-test/`；副本 GEO 验证：`/tmp/geo-test/`
-* 线上首页原文：`/tmp/live.html`
+* 线上页面原文：`/tmp/live2-https___xraytun_top__.html`、`/tmp/live2-https___xraytun_top_en__.html`
 * 本文件是**唯一**被本卡写入的仓库文件（`docs/verification/RELEASE-v0.8.31.md`）
