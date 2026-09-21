@@ -125,6 +125,11 @@ pub fn build_plan(req: &TunUpRequest, physical: PhysicalUplink) -> Result<TunPla
     for host in &req.routes.bypass_hosts {
         let cidr = Cidr::host(*host);
         validate_cidr_text(&cidr.to_string())?;
+        // **回环不走物理网关。** 回环地址本来就只在 `lo0` 上，装一条经由网关的
+        // `127.0.0.1/32` 反而会把它送出去（与下面 2b 是同一类错误）。
+        if host.is_loopback() {
+            continue;
+        }
         // 服务器 host 路由是防路由环的核心，装不上就必须失败。
         routes.push(PlannedRoute::bypass(cidr, bypass_via(&physical, *host)?, true));
     }
@@ -134,6 +139,19 @@ pub fn build_plan(req: &TunUpRequest, physical: PhysicalUplink) -> Result<TunPla
         // 这些是「网段」而不是「接口地址」，所以先归一化（`Cidr` 刻意保留主机位）。
         let net = raw.network();
         validate_cidr_text(&net.to_string())?;
+        // **回环网段不装路由。**
+        //
+        // 内核已经把 `127.0.0.0/8` 指向 `lo0`，而它比捕获用的 `0.0.0.0/1`
+        // 更具体（`/8` > `/1`）⇒ TUN 本来就卷不走回环，这条旁路**没有必要**；
+        // 装上反而有害：`127.0.0.2` 及以上会被送去局域网路由器，换网后还指向旧网关。
+        // （实测：用户机器上出现过 `127 → 192.168.0.1 UGSc en0`。）
+        // `::1/128` 同理：即便走 `::/1` 捕获也安全（`/128` 比 `/1` 更具体）。
+        //
+        // 防御放在这里、而不是只从 `default_bypass_networks()` 里删掉：列表可能被
+        // 别的调用方带进来（IPC 请求是**数据**，不是常量），这一层对任何回环都成立。
+        if net.addr.is_loopback() {
+            continue;
+        }
         // IPv6 网段不能用 IPv4 网关，退化为按接口走。
         let via = match (net.addr, physical.gateway) {
             (IpAddr::V4(_), Some(gw)) => RouteVia::Gateway { addr: gw },
@@ -329,5 +347,173 @@ mod tests {
         // 直接构造一个非法串是不可能的（类型是 IpAddr），这里验证正常路径不报错。
         req.dns.servers = vec!["1.1.1.1".parse().unwrap()];
         assert!(build_plan(&req, physical()).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // task-83：回环绝不经由物理网关
+    //
+    // 实测现场：连接状态下用户机器上出现过 `127 → 192.168.0.1 UGSc en0`
+    // （整个回环网段指向局域网路由器），来源就是原来的 bypass 循环
+    // 「所有 IPv4 旁路网段一律指向物理网关」。回环本来不需要旁路：
+    // 内核已把 `127.0.0.0/8` 指向 `lo0`，且比捕获用的 `0.0.0.0/1` 更具体。
+    // -----------------------------------------------------------------------
+
+    fn request_with_bypass(
+        default_route: DefaultRouteMode,
+        ipv6: Ipv6Mode,
+        bypass_hosts: Vec<IpAddr>,
+        bypass_networks: Vec<Cidr>,
+    ) -> TunUpRequest {
+        let mut req = request(default_route, ipv6);
+        req.routes.bypass_hosts = bypass_hosts;
+        req.routes.bypass_networks = bypass_networks;
+        req
+    }
+
+    fn route_for<'a>(plan: &'a TunPlan, dest: &str) -> Option<&'a PlannedRoute> {
+        plan.routes.iter().find(|r| r.destination.to_string() == dest)
+    }
+
+    /// **核心断言**：规划结果里**没有**回环目的地会被装成路由。
+    ///
+    /// 两个方向都断言：
+    /// ① 默认旁路列表（现在已不含回环）不产生任何回环路由；
+    /// ② **防御**：请求里就算带了回环（网段 + 主机，v4 + v6），也不许装上。
+    #[test]
+    fn loopback_never_gets_a_route_even_if_the_request_asks_for_it() {
+        // ① 默认列表
+        let plan = build_plan(
+            &request_with_bypass(
+                DefaultRouteMode::SplitDefault,
+                Ipv6Mode::Passthrough,
+                vec!["203.0.113.7".parse().unwrap()],
+                xt_proto::default_bypass_networks(),
+            ),
+            physical(),
+        )
+        .unwrap();
+        let loopbacks: Vec<String> = plan
+            .routes
+            .iter()
+            .filter(|r| r.destination.addr.is_loopback())
+            .map(|r| r.destination.to_string())
+            .collect();
+        assert!(
+            loopbacks.is_empty(),
+            "默认旁路列表不该产生回环路由（内核自己就走 lo0）：{loopbacks:?}",
+        );
+
+        // ② 防御：请求里硬带回环
+        let plan = build_plan(
+            &request_with_bypass(
+                DefaultRouteMode::SplitDefault,
+                Ipv6Mode::Passthrough,
+                vec![
+                    "127.0.0.1".parse().unwrap(),
+                    "203.0.113.7".parse().unwrap(),
+                ],
+                vec![
+                    "127.0.0.0/8".parse().unwrap(),
+                    "::1/128".parse().unwrap(),
+                    "192.168.0.0/16".parse().unwrap(),
+                ],
+            ),
+            physical(),
+        )
+        .unwrap();
+        let loopbacks: Vec<String> = plan
+            .routes
+            .iter()
+            .filter(|r| r.destination.addr.is_loopback())
+            .map(|r| r.destination.to_string())
+            .collect();
+        assert!(
+            loopbacks.is_empty(),
+            "回环绝不该被装上路由（连 lo0 版本都不必装：内核已处理）：{loopbacks:?}",
+        );
+        // 同一次请求里，非回环的那条**必须**还在 —— 证明跳过是精准的、不是整段跳过。
+        assert!(
+            route_for(&plan, "192.168.0.0/16").is_some(),
+            "只跳过回环，其它网段必须照常安装",
+        );
+        assert!(
+            route_for(&plan, "203.0.113.7/32").is_some(),
+            "公网服务器 host 路由必须照常安装（它是防路由环的核心）",
+        );
+    }
+
+    /// **不变量（独立测试）**：其它旁路网段**必须仍然**经由物理网关
+    /// —— 别为了修回环一条把整张表弄没。
+    #[test]
+    fn other_bypass_networks_still_go_via_the_physical_gateway() {
+        let plan = build_plan(
+            &request_with_bypass(
+                DefaultRouteMode::SplitDefault,
+                Ipv6Mode::Passthrough,
+                vec!["203.0.113.7".parse().unwrap()],
+                xt_proto::default_bypass_networks(),
+            ),
+            physical(),
+        )
+        .unwrap();
+        let gw = RouteVia::Gateway {
+            addr: "192.168.1.1".parse().unwrap(),
+        };
+        for dest in [
+            "10.0.0.0/8",
+            "100.64.0.0/10",
+            "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "224.0.0.0/4",
+        ] {
+            let route = route_for(&plan, dest).unwrap_or_else(|| panic!("{dest} 必须仍在计划里"));
+            assert_eq!(route.via, gw, "{dest} 必须仍然经由物理网关");
+            assert_eq!(route.kind, RouteKind::Bypass);
+            assert!(
+                !route.critical,
+                "{dest} 是便利旁路：装不上不该毁掉整条隧道",
+            );
+        }
+        // v6 链路本地照旧按接口走（没有 v6 网关）—— 既有行为，不许被这次修复改掉。
+        let v6 = route_for(&plan, "fe80::/10").expect("fe80::/10 必须在");
+        assert_eq!(v6.via, RouteVia::Interface { name: "en0".into() });
+    }
+
+    /// **不变量**：捕获路由不受回环跳过逻辑影响。
+    #[test]
+    fn default_capture_routes_are_unaffected_by_the_loopback_skip() {
+        let plan = build_plan(
+            &request_with_bypass(
+                DefaultRouteMode::SplitDefault,
+                Ipv6Mode::Override,
+                vec!["203.0.113.7".parse().unwrap()],
+                vec![
+                    "127.0.0.0/8".parse().unwrap(),
+                    "10.0.0.0/8".parse().unwrap(),
+                ],
+            ),
+            physical(),
+        )
+        .unwrap();
+        for dest in ["0.0.0.0/1", "128.0.0.0/1", "::/1", "8000::/1"] {
+            let route = route_for(&plan, dest).unwrap_or_else(|| panic!("捕获路由 {dest} 必须仍在"));
+            assert_eq!(route.kind, RouteKind::DefaultCapture);
+            assert!(route.critical, "捕获路由装不上就意味着流量没被接管，必须 critical");
+        }
+        // 旁路里那条非回环的仍在，且仍经由物理网关
+        let b = route_for(&plan, "10.0.0.0/8").expect("10.0.0.0/8 必须仍在");
+        assert_eq!(b.kind, RouteKind::Bypass);
+        assert_eq!(
+            b.via,
+            RouteVia::Gateway {
+                addr: "192.168.1.1".parse().unwrap()
+            },
+        );
+        // 顺序不变量：bypass 必须先于默认接管（否则会形成路由环）
+        let dests: Vec<String> = plan.routes.iter().map(|r| r.destination.to_string()).collect();
+        let host_idx = dests.iter().position(|d| d == "203.0.113.7/32").unwrap();
+        let split_idx = dests.iter().position(|d| d == "0.0.0.0/1").unwrap();
+        assert!(host_idx < split_idx);
     }
 }
