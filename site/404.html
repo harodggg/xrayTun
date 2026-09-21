@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>页面不存在（404）— XrayTun</title>
+    <!--
+      这个文件为什么存在（task-77）：
+      Cloudflare Pages **没有顶层 404.html 时**会对任何未匹配路径返回 `200 + index.html`
+      （实测：`/this-path-does-not-exist-xyz`、`/foo/bar/baz`、`/old.html`、已删除的
+      `/og-image-0.8.30.png` 都是 200 + `content-type: text/html` + 与首页逐字节相同的 body）。
+      那是 SEO 上的**软 404**（打错的路径变成一份可索引的重复内容），也会骗过任何
+      「用状态码判断资产是否存在」的脚本。加了本文件后 CF Pages 会对未匹配路径返回**真 404**。
+
+      # 三条约束（改这个文件时请遵守）
+
+      1. **必须 `noindex`**：否则搜索引擎会把「随便一个打错的路径」当成可索引页面。
+      2. **本页会被任意深度的路径命中**（`/a/b/c` 也会走到这里），所以**不能引用任何相对路径的
+         资源**：`assets/site.css` 在 `/a/b/` 下会解析成 `/a/assets/site.css`。因此样式**内联**、
+         图标用 **data URI**，站点链接的根路径由页面末尾那段脚本探测（见那里的注释）。
+      3. **不写任何版本号**：404 页不该随每次发版变旧。下载指向 Releases 页面，不指向 pin 死的资产。
+    -->
+    <meta name="robots" content="noindex, follow" />
+    <meta name="theme-color" content="#0f1420" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230f1420'/%3E%3Cpath d='M18 18 46 46M46 18 18 46' stroke='%234f8ef7' stroke-width='8' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <style>
+      /* 配色**逐字取自** site/assets/site.css 的 :root（2026-09-21 快照）。
+         本页不能外链那个文件（见上方约束 2），所以这里内联必要的那几个值，
+         不引入任何新颜色、也不新增第三方依赖。 */
+      :root {
+        --bg: #0f1420;
+        --border: #263148;
+        --text: #e6ecf5;
+        --site-text: #ccd6e4;
+        --text-faint: #7b8da6;
+        --accent: #4f8ef7;
+        --accent-hover: #6ba0ff;
+        --on-accent: #06101f;
+        --border-interactive: #5c7290;
+        --radius: 10px;
+        --font-site: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+          "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--site-text);
+        font-family: var(--font-site);
+        font-size: 17px;
+        line-height: 1.65;
+        -webkit-text-size-adjust: 100%;
+      }
+      .wrap {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 56px 20px 72px;
+      }
+      .brand {
+        margin: 0 0 28px;
+        color: var(--text);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 32px;
+        line-height: 1.25;
+        color: var(--text);
+      }
+      h2 {
+        margin: 40px 0 10px;
+        font-size: 18px;
+        color: var(--text);
+      }
+      p {
+        margin: 0 0 14px;
+      }
+      .cta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 24px 0 8px;
+      }
+      .btn {
+        display: inline-block;
+        padding: 10px 16px;
+        border-radius: var(--radius);
+        font-weight: 600;
+        text-decoration: none;
+      }
+      .btn--primary {
+        background: var(--accent);
+        color: var(--on-accent);
+      }
+      .btn--primary:hover {
+        background: var(--accent-hover);
+      }
+      .btn--secondary {
+        border: 1px solid var(--border-interactive);
+        color: var(--text);
+      }
+      .btn--secondary:hover {
+        border-color: var(--accent);
+        color: var(--accent-hover);
+      }
+      ul.links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 18px;
+        margin: 0 0 6px;
+        padding: 0;
+        list-style: none;
+      }
+      a {
+        color: var(--accent);
+      }
+      a:hover {
+        color: var(--accent-hover);
+      }
+      .meta {
+        color: var(--text-faint);
+        font-size: 14px;
+      }
+      .split {
+        margin-top: 40px;
+        padding-top: 28px;
+        border-top: 1px solid var(--border);
+      }
+      @media (min-width: 900px) {
+        h1 {
+          font-size: 40px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <p class="brand">XrayTun</p>
+      <h1>页面不存在</h1>
+      <p>这个地址下没有内容 —— 可能是链接打错了，也可能是页面已经搬走或改名。</p>
+      <p class="cta">
+        <a class="btn btn--primary" data-site-link="" href="/">回到首页</a>
+        <a class="btn btn--secondary" data-site-link="en/" href="/en/" hreflang="en" lang="en"
+          >English home</a
+        >
+      </p>
+      <ul class="links">
+        <li><a data-site-link="wasm/" href="/wasm/">xray-wasm（同作者的另一个项目）</a></li>
+        <li>
+          <a href="https://github.com/harodggg/xrayTun/releases">下载与所有版本（GitHub）</a>
+        </li>
+        <li>
+          <a href="https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md">更新记录</a>
+        </li>
+      </ul>
+      <p class="meta">
+        本页状态码是 404。站内的下载、安装与常见问题都在首页上 ——
+        若你确定链接没写错，欢迎在 GitHub 上开 issue 告诉我们。
+      </p>
+
+      <div class="split" lang="en">
+        <h2>Page not found</h2>
+        <p>
+          There is nothing at this address. The link may be mistyped, or the page may have moved or
+          been renamed.
+        </p>
+        <p class="meta">This page is served with HTTP 404.</p>
+      </div>
+    </main>
+
+    <script>
+      /* 站点根路径探测（没有它，镜像站的链接会指到站点外面）。
+         - canonical 站（Cloudflare Pages）在**根**：站点根 = `/`
+         - GitHub Pages 镜像是**项目站**，跑在 `/xrayTun/` 子路径下：站点根 = `/xrayTun/`
+         而 404 页会被任意深度的路径命中，相对路径因而不可能可靠。所以这里**不硬编码任何
+         站点路径**：从当前路径往上逐级试 `manifest.webmanifest` 是不是那份真身
+         （存在 + content-type 是 manifest/json + 能解析出 name），命中即取该前缀为根。
+         全部失败时保守回退到 `/`（canonical 站上的正确值）。
+         禁用 JS 时上面的 `href` 就是 `/…`：对 canonical 站仍然正确。 */
+      (function () {
+        "use strict";
+        var segs = location.pathname.split("/").filter(Boolean);
+        var i = segs.length;
+        function candidate(n) {
+          return "/" + segs.slice(0, n).join("/") + (n > 0 ? "/" : "");
+        }
+        function apply(base) {
+          var links = document.querySelectorAll("a[data-site-link]");
+          for (var k = 0; k < links.length; k++) {
+            links[k].setAttribute("href", base + links[k].getAttribute("data-site-link"));
+          }
+        }
+        function next() {
+          if (i < 0) {
+            apply("/");
+            return;
+          }
+          var base = candidate(i);
+          i -= 1;
+          fetch(base + "manifest.webmanifest", { cache: "no-store" })
+            .then(function (r) {
+              var ct = (r.headers && r.headers.get("content-type")) || "";
+              if (!r.ok || !/manifest\+json|application\/json/.test(ct)) return null;
+              return r.json();
+            })
+            .then(function (m) {
+              if (m && m.name) apply(base);
+              else next();
+            })
+            .catch(next);
+        }
+        try {
+          next();
+        } catch (e) {
+          /* 可选增强：失败就不改 href，静态的 `/…` 仍然可用 */
+        }
+      })();
+    </script>
+  </body>
+</html>
