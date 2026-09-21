@@ -12,7 +12,7 @@
  * 注意：这些是**特征化**断言 —— 我把今天的行为（含缺口）钉住，而不是假定它是对的。
  */
 
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { cleanup, renderHook } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
