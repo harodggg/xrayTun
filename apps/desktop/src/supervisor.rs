@@ -149,11 +149,15 @@ pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u3
 /// 只探境外会让「国内断、国外正常」这种症状**恒通过**，门禁形同虚设
 /// （见 `docs/09-network-drop/SELF-HEAL-GAPS.md` 的读法 B）。
 ///
+/// **看门狗共用这一份**（`commands/core.rs::watchdog_probe_all`）：同一个盲区在
+/// 门禁那边修过（task-42/54），在看门狗那边却漏了 —— 结果是「国内全断、
+/// 国外正常」时看门狗永远认为一切正常（task-82）。**别再分叉出第二份清单。**
+///
 /// **境内为什么用域名而不是硬编码 IP**：一个写死的 IP 一旦失效，会把**所有**
 /// 用户误拦在门外（失败方向错了）。`www.baidu.com` 是必活的境内 HTTP 服务；
 /// 经 SOCKS 时由节点侧解析，**不依赖本机 DNS**，所以没有引入本机解析的干扰。
 /// 若将来要改成 IP 字面量，必须先在境内验证该 IP 确实提供 HTTP 响应。
-const REQUIRED_PROBE_TARGETS: &[&str] = &[
+pub(crate) const REQUIRED_PROBE_TARGETS: &[&str] = &[
     // 境外：项目现有的探测目标（`http://cp.cloudflare.com/generate_204`）。
     xt_core::xray::DEFAULT_PROBE_URL,
     // 境内：命中 CN 分流、走 direct 出站的真实 HTTP 服务。
@@ -1822,5 +1826,57 @@ mod tests {
         assert!(msg.contains("本机网络"), "实际：{msg}");
         assert!(msg.contains("断开"), "实际：{msg}");
         assert!(!msg.contains("请换一个节点后重试"), "别把因果唯一归到节点：{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-82 (a)/(c)：`direct` 出站的网卡绑定必须是**这次**探测到的那张
+    // -----------------------------------------------------------------------
+
+    /// **核心断言**：配置里的 `sockopt.interface` 就是传进来的那张网卡。
+    ///
+    /// 为什么这一条就够说明「换网后能恢复」：`Supervisor::start` **每次启动都会
+    /// 重新探测默认路由**（本文件 `start()` 里那段 `default_route()` +
+    /// `self.physical_interface = ...`），而 (a) 让换网后走一次 stop + start。
+    /// ⇒ 新配置里的 direct 出站会绑到**新**网卡（旧实现换网后只写日志、不重建，
+    /// 所以一直绑在旧网卡上 ⇒ 国内分流全断，task-82 根因）。
+    #[test]
+    fn config_binds_direct_outbound_to_the_freshly_detected_interface() {
+        let settings = AppSettings {
+            mode: ProxyMode::Tun,
+            ..Default::default()
+        };
+        let build = |iface: Option<&str>| {
+            xt_core::xray::build_pretty(&xt_core::xray::CoreConfigInput {
+                settings: &settings,
+                nodes: &[],
+                selected: None,
+                rules: &[],
+                profile: crate::state::profile_for(&settings, iface, true),
+                physical_interface: iface,
+            })
+        };
+        let interface_of = |config: &str| -> String {
+            let v: serde_json::Value =
+                serde_json::from_str(config).expect("生成的配置必须是合法 JSON");
+            v["outbounds"]
+                .as_array()
+                .expect("要有 outbounds")
+                .iter()
+                .find(|o| o["tag"] == "direct")
+                .and_then(|o| o["streamSettings"]["sockopt"]["interface"].as_str())
+                .unwrap_or("<缺失>")
+                .to_string()
+        };
+
+        let baseline = build(Some("en0"));
+        let after_move = build(Some("en5"));
+        assert_eq!(interface_of(&baseline), "en0");
+        assert_eq!(
+            interface_of(&after_move),
+            "en5",
+            "换网重建后 direct 出站必须绑**新**网卡 —— 否则国内分流仍旧走 en0（task-82）",
+        );
+        // 非 TUN 模式没有物理出口时不写这个字段（别凭空造一个网卡名）。
+        assert_eq!(interface_of(&build(None)), "<缺失>");
     }
 }

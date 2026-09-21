@@ -537,6 +537,32 @@ pub(crate) fn should_rebuild_tunnel(still_mine: bool, user_wants_it: bool, conse
     still_mine && user_wants_it && consecutive_failures >= FAILURES_BEFORE_REBUILD
 }
 
+/// 自动重建隧道的**固定顺序**：先停、再起。
+///
+/// 抽成带 seam 的泛型函数（而不是把两个 `await` 直接写在一起）是为了让
+/// 「顺序」与「停不下来就别起」**可测** —— 不需要 Tauri harness：传两个
+/// 记录调用顺序的闭包进来就能断言调用序列（与 task-54 的
+/// `verify_paths_then_commit` 同一手法）。
+///
+/// **为什么必须是这个顺序**：`start_core` 会**重新探测物理出口**并据此重算路由、
+/// 重写配置（`sockopt.interface` 因此变成新网卡）；但旧隧道没停干净就会撞上
+/// 「核心已经在运行」/「已有活跃会话」。
+pub(crate) async fn rebuild_tunnel_in_order<Stop, Start, SF, TF>(
+    mut stop: Stop,
+    mut start: Start,
+) -> Result<(), String>
+where
+    Stop: FnMut() -> SF,
+    SF: std::future::Future<Output = Result<(), String>>,
+    Start: FnMut() -> TF,
+    TF: std::future::Future<Output = Result<(), String>>,
+{
+    // 停不下来就直接失败：不要在坏状态上再叠一层。
+    stop().await?;
+    start().await
+}
+
+
 /// 经本地 SOCKS 入站发一个**真实请求**，返回 HTTP 状态码（失败时空串）。
 ///
 /// 用 `--socks5-hostname` 让节点去解析域名，所以这一个检查同时覆盖
@@ -548,6 +574,64 @@ pub(crate) fn should_rebuild_tunnel(still_mine: bool, user_wants_it: bool, conse
 pub(crate) async fn tunnel_probe(port: u16, timeout_secs: u32) -> String {
     crate::supervisor::socks_http_probe(port, xt_core::xray::DEFAULT_PROBE_URL.to_string(), timeout_secs)
         .await
+}
+
+/// 看门狗一次探测：**门禁那份必需目标全部探一遍**（境外 + 境内）。
+///
+/// 为什么两个都要探：只探境外时，「国内全断、国外正常」会让看门狗
+/// **永远认为一切正常** —— 而那正是用户报的形状（task-82）。
+///
+/// 两个目标**并行**：串行会让每 10 秒一次的探测最坏变成 12 秒（比探测间隔还长），
+/// 而看门狗的全部价值就是「及时发现」。
+pub(crate) async fn watchdog_probe_all(port: u16, timeout_secs: u32) -> Vec<(String, String)> {
+    let mut set = tokio::task::JoinSet::new();
+    for target in crate::supervisor::REQUIRED_PROBE_TARGETS {
+        let target = target.to_string();
+        set.spawn(async move {
+            let code =
+                crate::supervisor::socks_http_probe(port, target.clone(), timeout_secs).await;
+            (target, code)
+        });
+    }
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(pair) = joined {
+            out.push(pair);
+        }
+    }
+    // 并行完成的顺序不确定：排一下，日志与断言才稳定。
+    out.sort();
+    out
+}
+
+/// 看门狗的健康判据：**所有必需目标都通**才算通 —— 与门禁同一口径
+/// （门禁也是「每个目标都要答」才允许提交路由）。
+///
+/// `results` 为空 = **没有证据** ⇒ 不算通（本项目一贯口径：没有证据不许说好）。
+pub(crate) fn probe_results_all_alive(results: &[(String, String)]) -> bool {
+    !results.is_empty() && results.iter().all(|(_, code)| !tunnel_is_dead(code))
+}
+
+/// 把「哪个必需目标不通」写成一行给日志用。
+///
+/// 只写「隧道不通」是查不动的：**国内不通与国外不通是两件事** ——
+/// 前者指向 `direct` 出站/网卡绑定，后者指向节点或隧道本身（task-82）。
+pub(crate) fn describe_dead_targets(results: &[(String, String)]) -> String {
+    let dead: Vec<String> = results
+        .iter()
+        .filter(|(_, code)| tunnel_is_dead(code))
+        .map(|(target, code)| {
+            format!(
+                "{target} → {}",
+                if code.is_empty() { "无响应" } else { code.as_str() }
+            )
+        })
+        .collect();
+    if dead.is_empty() {
+        "无目标失败".to_string()
+    } else {
+        dead.join("、")
+    }
 }
 
 /// 隧道看门狗：**只要用户没主动断开，网络就不该是坏的。**
@@ -645,8 +729,11 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                 return;
             }
 
-            let code = tunnel_probe(port, 6).await;
-            if !tunnel_is_dead(&code) {
+            // **国内 + 境外都要探**（与门禁同一份目标清单，见 `watchdog_probe_all`）。
+            // 只探境外时，「国内全断、国外正常」会让看门狗**永远认为一切正常** ——
+            // 这正是用户报的形状，而旧实现永远发现不了（task-82）。
+            let results = watchdog_probe_all(port, 6).await;
+            if probe_results_all_alive(&results) {
                 failures = 0;
                 sync_probe_failures(&handle, &state, 0);
                 continue;
@@ -681,7 +768,8 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                         "app",
                         "warn",
                         format!(
-                            "隧道连续 {failures} 次不通（熄屏/换网/节点抖动，当前节点「{node_name}」），正在自动重建…"
+                            "隧道连续 {failures} 次不通（{}；熄屏/换网/节点抖动，当前节点「{node_name}」），正在自动重建…",
+                            describe_dead_targets(&results)
                         ),
                     );
                     i.last_notice = Some(crate::state::RECOVERING_NOTICE.into());
@@ -851,6 +939,42 @@ pub(crate) fn network_moved(before: &Egress, after: &Egress) -> bool {
     before != after
 }
 
+/// 换网检测该做什么。抽成枚举是为了让「必须重建」**可断言**（task-82）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EgressAction {
+    /// 没变（或这一刻查不到默认路由）→ 什么都不做，下一轮 5 秒后再看。
+    Ignore,
+    /// 物理出口变了 → **重建隧道**：重新探测网卡、重装路由、重建 DoH。
+    Rebuild,
+}
+
+/// 物理出口变化之后该做什么。
+///
+/// `now == None`（查不到默认路由）**不算变化**：网络正在切换时查不到是常态，
+/// 若把它当成变化，拔一下网线就会立刻拆一次隧道 —— 那时候重建没有任何意义
+/// （新出口还不知道）。下一轮再看。
+pub(crate) fn egress_action(before: &Egress, now: Option<&Egress>) -> EgressAction {
+    match now {
+        Some(now) if network_moved(before, now) => EgressAction::Rebuild,
+        _ => EgressAction::Ignore,
+    }
+}
+
+/// 换网重建的三道闸门 —— 与 `should_rebuild_tunnel` 同源，只是触发原因不同
+/// （那边是探测失败，这边是**物理出口变了**）。
+///
+/// * `still_mine`：这条隧道还是我负责的那次（用户重连会换 pid）；
+/// * `user_wants_it`：用户**现在还**想连着（否则就是「点了断开，几秒后它自己又连上」）；
+/// * `!already_recovering`：已经有一次自动恢复在跑 —— 那次重建**同样**会重新探测
+///   网卡并重装路由，这里再拆一次只会多断一次网。
+pub(crate) fn should_rebuild_after_egress_change(
+    still_mine: bool,
+    user_wants_it: bool,
+    already_recovering: bool,
+) -> bool {
+    still_mine && user_wants_it && !already_recovering
+}
+
 /// 连上之后盯着物理出口有没有变。
 ///
 /// 隧道是**按连接那一刻的物理出口**建的：helper 装的路由指向当时的网关，
@@ -901,17 +1025,106 @@ pub(crate) fn spawn_network_watch(
             let Some(now) = Egress::now() else {
                 continue; // 查不到默认路由是暂时的，下一轮再看
             };
-            if !network_moved(&before, &now) {
+            if egress_action(&before, Some(&now)) != EgressAction::Rebuild {
                 continue;
             }
-            let msg = format!(
-                "物理出口已变化（{} → {}），隧道不再有效，请断开后重新连接",
-                before.describe(),
-                now.describe()
+
+            // **换网了 —— 必须重建，不能只报一句。**
+            //
+            // 旧实现只写一条日志就 `return`：用户看不到那条日志，而隧道已经失效
+            // （helper 的路由指向旧网关、`direct` 出站仍绑在旧网卡、DoH 建在旧路径），
+            // 于是卡在「国内全断、国外正常」的坏状态里直到手动重连（task-82 根因）。
+            // 现在走**与看门狗同一套** stop + start ⇒ 重新探测网卡、重装路由、重建 DoH。
+            let (from, to) = (before.describe(), now.describe());
+
+            // 三道闸门：还是我这条隧道、用户现在还想要、且没有别的恢复正在跑。
+            let (still_mine_now, user_wants_it, recovering) = state
+                .with(|i| {
+                    (
+                        i.runtime.running && i.runtime.pid == pid,
+                        i.settings.was_connected,
+                        i.runtime.recovery.recovering,
+                    )
+                })
+                .unwrap_or((false, false, false));
+            if !should_rebuild_after_egress_change(still_mine_now, user_wants_it, recovering) {
+                // 不重建也要**可查**：别把「什么都没做」变成静默。
+                state.log(
+                    "app",
+                    "info",
+                    format!(
+                        "检测到换网（{from} → {to}），但不重建：{}",
+                        if recovering {
+                            "已有一次自动恢复在进行（它会重新探测网卡）"
+                        } else if !user_wants_it {
+                            "用户已断开"
+                        } else {
+                            "这条隧道已不归我管"
+                        }
+                    ),
+                );
+                return;
+            }
+
+            // **可读的过程**：复用已有的恢复态（界面据此显示「正在恢复」并改写
+            // 连接按钮），提示条**写明是因为换网**，而不是笼统一句「正在恢复」。
+            state.with(|i| {
+                i.last_notice = Some(format!("检测到换网（{from} → {to}），正在重建隧道…"));
+                i.runtime.recovery.begin(xt_core::util::now_unix());
+            });
+            state.log(
+                "app",
+                "warn",
+                format!(
+                    "检测到换网（{from} → {to}）：隧道是按旧出口建的（路由指向旧网关、direct 出站绑在旧网卡），正在重建…"
+                ),
             );
-            state.log("app", "error", msg);
             events::runtime_changed(&handle, &state);
-            return; // 只报一次，别刷屏
+
+            match rebuild_tunnel_in_order(
+                || stop_core(&handle, &state),
+                || start_core(&handle, &state),
+            )
+            .await
+            {
+                Ok(()) => {
+                    state.with(|i| {
+                        i.runtime.recovery.succeeded(xt_core::util::now_unix());
+                        crate::state::clear_recovering_notice(&mut i.last_notice);
+                    });
+                    // **结果也可读**：用户应该知道「刚才是因为换网，我重建了一次」。
+                    state.log(
+                        "app",
+                        "info",
+                        format!("已因换网重建隧道（{from} → {to}）：路由与 DNS 已按新出口重装"),
+                    );
+                    events::runtime_changed(&handle, &state);
+                }
+                Err(e) => {
+                    // 重建失败：退回直连（与看门狗同一处置），并如实说清失败在哪一步。
+                    let stop_result = stop_core(&handle, &state).await;
+                    let outcome = FallbackOutcome::from_stop(&stop_result);
+                    let (level, log_line, notice) = outcome.messages();
+                    state.with(|i| {
+                        i.push_log("app", level, format!("换网后重建失败：{e}；{log_line}"));
+                        i.runtime
+                            .recovery
+                            .fell_back_to_direct(xt_core::util::now_unix());
+                        i.last_notice = Some(notice);
+                    });
+                    // 已知失败 ⇒ 作废「自动重连」意图（task-64 的机制）：否则下次启动
+                    // 会拿这个新出口再试一次同样的失败。
+                    invalidate_connect_intent(
+                        &state,
+                        IntentDrop::KnownFailure,
+                        "换网后重建隧道失败",
+                    );
+                    events::runtime_changed(&handle, &state);
+                }
+            }
+            // 这条隧道的一生到此结束：重建成功时 `start_core` 会 spawn 新的 watcher
+            // （基线是**新**出口）。旧的留在这里只会把同一次换网重复报一遍。
+            return;
         }
     });
 }
@@ -1815,5 +2028,199 @@ mod tests {
             FallbackOutcome::from_stop(&Err("x".into())),
             FallbackOutcome::DirectUnverified { .. }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // task-82：换网必须重建 + 看门狗必须探国内
+    //
+    // 根因（用户机器上实测 + 读码）：`direct` 出站的 `sockopt.interface` 是
+    // **连接那一刻**的网卡；换网后国内分流仍走 direct ⇒ **国内全断、国外正常**；
+    // 而看门狗只探境外 ⇒ 一直认为正常 ⇒ **永不重建**，卡在坏状态里。
+    //
+    // 下面把「换网 ⇒ 重建（stop→start）」与「只坏国内 ⇒ 判为异常」变成断言。
+    // **不碰真机网络**：全部是纯函数 + seam，没有 route/DNS 操作。
+    // -----------------------------------------------------------------------
+
+    fn egress(interface: &str, gateway: &str) -> Egress {
+        Egress {
+            interface: interface.into(),
+            gateway: Some(gateway.parse().unwrap()),
+        }
+    }
+
+    /// **核心断言**：基线 en0、现在 en5 ⇒ 必须重建；没变 ⇒ 不许重建。
+    #[test]
+    fn egress_change_triggers_rebuild_and_unchanged_never_does() {
+        let baseline = egress("en0", "192.168.0.1");
+        assert_eq!(
+            egress_action(&baseline, Some(&egress("en5", "192.168.5.1"))),
+            EgressAction::Rebuild,
+            "网卡换了（en0 → en5）必须重建：旧隧道的 direct 出站还绑在 en0 上",
+        );
+        assert_eq!(
+            egress_action(&baseline, Some(&egress("en0", "192.168.9.1"))),
+            EgressAction::Rebuild,
+            "同一张网卡换了网关（换 WiFi / 路由器重发 DHCP）也必须重建：路由是按旧网关装的",
+        );
+        // **反例**：出口没变 ⇒ 不许重建（否则每 5 秒拆一次隧道）。
+        assert_eq!(
+            egress_action(&baseline, Some(&egress("en0", "192.168.0.1"))),
+            EgressAction::Ignore,
+            "出口没变还重建 = 每 5 秒自断一次网",
+        );
+        // **反例**：这一刻查不到默认路由（网络正在切换）⇒ 不动，下一轮再看。
+        assert_eq!(
+            egress_action(&baseline, None),
+            EgressAction::Ignore,
+            "查不到默认路由只是「还在切」，不是「换好了」——那时重建没有意义",
+        );
+    }
+
+    /// 重建的三道闸门：不是我的隧道 / 用户已断开 / 已有恢复在跑 ⇒ 都不重建。
+    #[test]
+    fn egress_rebuild_needs_mine_intent_and_no_concurrent_recovery() {
+        assert!(should_rebuild_after_egress_change(true, true, false));
+        assert!(
+            !should_rebuild_after_egress_change(false, true, false),
+            "不是我这代隧道 —— 旧的 watcher 该退出，别去动新的那条",
+        );
+        assert!(
+            !should_rebuild_after_egress_change(true, false, false),
+            "用户点了断开 —— 再重建就是「关不掉」",
+        );
+        assert!(
+            !should_rebuild_after_egress_change(true, true, true),
+            "已经有一次自动恢复在跑：它同样会重新探测网卡，这里再拆一次只会多断一次网",
+        );
+    }
+
+    /// **重建的调用序列**：先 stop、再 start。
+    ///
+    /// 「调用序列」正是 task-82 要的证据：用 seam 记录顺序，不需要 Tauri harness。
+    #[tokio::test]
+    async fn egress_rebuild_calls_stop_then_start() {
+        use std::sync::Mutex;
+        let calls = Mutex::new(Vec::<&str>::new());
+        let out = rebuild_tunnel_in_order(
+            || async {
+                calls.lock().unwrap().push("stop");
+                Ok::<(), String>(())
+            },
+            || async {
+                calls.lock().unwrap().push("start");
+                Ok::<(), String>(())
+            },
+        )
+        .await;
+        assert_eq!(out, Ok(()));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["stop", "start"],
+            "必须先停再起：旧隧道没拆干净，start 会撞「已有活跃会话」",
+        );
+    }
+
+    /// stop 失败 ⇒ **不许**继续 start（不要在坏状态上再叠一层）。
+    #[tokio::test]
+    async fn rebuild_stops_short_when_teardown_fails() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let started = AtomicBool::new(false);
+        let out = rebuild_tunnel_in_order(
+            || async { Err::<(), String>("helper 不可用".to_string()) },
+            || async {
+                started.store(true, Ordering::SeqCst);
+                Ok::<(), String>(())
+            },
+        )
+        .await;
+        assert!(out.is_err(), "停不下来就该如实失败");
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "停不下来还去起 = 在坏状态上再叠一层",
+        );
+    }
+
+    /// **(b)** 看门狗要探的目标必须**包含国内** —— 只探境外时「国内全断」永远发现不了。
+    #[test]
+    fn watchdog_probes_cover_domestic_and_overseas() {
+        let targets = crate::supervisor::REQUIRED_PROBE_TARGETS;
+        assert!(targets.len() >= 2, "至少国内 + 境外两个目标");
+        assert!(
+            targets.iter().any(|t| t.contains("baidu.com")),
+            "必须有一个**境内**目标：只探境外时「国内全断、国外正常」会让看门狗永远认为正常（task-82）",
+        );
+        assert!(
+            targets.iter().any(|t| t.contains("cloudflare.com")),
+            "也要保留境外目标（代理链路是否真能转发）",
+        );
+    }
+
+    /// **(b)** 只坏国内 ⇒ 看门狗必须判为异常；两个都通才算通。
+    #[test]
+    fn only_the_domestic_target_dead_is_an_anomaly() {
+        let pair = |t: &str, c: &str| (t.to_string(), c.to_string());
+        let overseas = "http://cp.cloudflare.com/generate_204";
+        let domestic = "http://www.baidu.com/";
+        assert!(
+            !probe_results_all_alive(&[pair(overseas, "204"), pair(domestic, "000")]),
+            "境外 204、国内 000 —— 这正是用户报的形状，必须算异常",
+        );
+        assert!(
+            !probe_results_all_alive(&[pair(overseas, ""), pair(domestic, "200")]),
+            "境外无响应同样算异常",
+        );
+        assert!(
+            probe_results_all_alive(&[pair(overseas, "204"), pair(domestic, "200")]),
+            "两个都通才算通",
+        );
+        assert!(!probe_results_all_alive(&[]), "没有证据不算好");
+    }
+
+    /// 日志必须说出**是哪个目标**不通（否则又回到「只报一句」查不动）。
+    #[test]
+    fn dead_target_description_names_the_target() {
+        let results = vec![
+            (
+                "http://cp.cloudflare.com/generate_204".to_string(),
+                "204".to_string(),
+            ),
+            ("http://www.baidu.com/".to_string(), String::new()),
+        ];
+        let text = describe_dead_targets(&results);
+        assert!(text.contains("baidu.com"), "要点名国内目标：{text}");
+        assert!(
+            text.contains("无响应"),
+            "空码要说「无响应」，不要假装它是一个状态码：{text}",
+        );
+        assert!(
+            !text.contains("cloudflare"),
+            "通的目标不该出现在失败描述里：{text}",
+        );
+    }
+
+    /// **防「换网又变回只写日志」与「看门狗又只探境外」**（task-82 双向敏感性靠它成立）。
+    ///
+    /// 这两个调用点都埋在 async 任务里（要 Tauri `AppHandle` 才执行得到），
+    /// 纯函数测试证明不了「任务里真的调了它」。所以这里做**源码级断言**：
+    /// 删掉任意一处调用 → 本测试变红（它只保证「调用还在」，不保证运行时行为）。
+    #[test]
+    fn network_watch_rebuilds_and_watchdog_probes_both_paths_in_production_source() {
+        let prod = include_str!("core.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        assert!(
+            prod.contains("rebuild_tunnel_in_order("),
+            "换网检测必须**继续调用重建**（而不是「只写一条日志就 return」）——\
+             删掉这个调用就是回到 task-82 的坏状态",
+        );
+        assert!(
+            prod.contains("watchdog_probe_all(port, 6)"),
+            "看门狗必须用**多目标探测**（国内 + 境外）—— 回到只探境外就又会漏掉「国内全断」",
+        );
+        assert!(
+            !prod.contains("请断开后重新连接"),
+            "旧文案「隧道不再有效，请断开后重新连接」= 只报不修，不许回来",
+        );
     }
 }
