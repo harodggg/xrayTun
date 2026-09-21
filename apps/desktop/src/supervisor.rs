@@ -229,6 +229,15 @@ impl GateFailure {
 /// `commit` 作为参数注入，是为了让测试能**断言调用序列** —— 探测不过时
 /// 它一次都不能被调用。「接管了默认路由但真实路径不通」正是当前零覆盖的
 /// 致命组合，只断言返回值是抓不住的。
+///
+/// # 两个目标**并行**探测（task-54）
+///
+/// 每个目标各有一次超时，串行等待 ⇒ 最坏是两个超时**相加**（2 × 6s = 12s），
+/// 而这段等待挂在每一次连接的启动路径上。改成同时发、一起等之后，最坏
+/// ≤ 一个超时，正常网络下也更快返回。
+///
+/// **语义一个字没改**：仍然要求**每个**目标都拿到真实响应才允许 `commit`；
+/// 只是把「依次等」换成「同时等」。任一目标失败 → 同样不得 commit。
 pub(crate) async fn verify_paths_then_commit<Pr, Pf, Cm, Cf>(
     targets: &[&str],
     mut probe: Pr,
@@ -236,16 +245,45 @@ pub(crate) async fn verify_paths_then_commit<Pr, Pf, Cm, Cf>(
 ) -> Result<(), GateFailure>
 where
     Pr: FnMut(String) -> Pf,
-    Pf: std::future::Future<Output = String>,
+    Pf: std::future::Future<Output = String> + Send + 'static,
     Cm: FnOnce() -> Cf,
     Cf: std::future::Future<Output = Result<(), xt_proto::HelperError>>,
 {
     if targets.is_empty() {
         return Err(GateFailure::NoTargets);
     }
+
+    // 先把所有探测**同时**发出去（闭包在这里同步调用，顺序仍是 targets 顺序，
+    // 所以测试里的调用序列断言依然确定）。
+    let mut set: tokio::task::JoinSet<(String, String)> = tokio::task::JoinSet::new();
+    for target in targets {
+        let target = (*target).to_string();
+        let probe_fut = probe(target.clone());
+        set.spawn(async move { (target, probe_fut.await) });
+    }
+
+    let mut codes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((target, http_code)) => {
+                codes.insert(target, http_code);
+            }
+            Err(e) => {
+                // 探测任务 panic 不该让整次启动 panic：当作「没拿到响应」处理。
+                return Err(GateFailure::Probe {
+                    failed: vec![ProbeOutcome {
+                        target: "<探测任务异常结束>".into(),
+                        http_code: format!("join error: {e}"),
+                    }],
+                });
+            }
+        }
+    }
+
+    // 判定按 `targets` 原顺序做 —— 报错文案与测试断言都不受完成先后影响。
     let mut failed = Vec::new();
     for target in targets {
-        let http_code = probe((*target).to_string()).await;
+        let http_code = codes.remove(*target).unwrap_or_default();
         let outcome = ProbeOutcome { target: (*target).to_string(), http_code };
         if !outcome.responded() {
             failed.push(outcome);
@@ -427,6 +465,7 @@ impl Supervisor {
             // 「已有活跃会话」。走自愈：拆掉泄漏会话后**重试一次**，而不是把
             // 「请先 tun_down」丢给用户 —— 那与本项目「开机后自动连上、
             // 不需要点击」的目标直接冲突。
+            let tun_started = std::time::Instant::now();
             tun_up_with_self_heal(helper, request)?;
             self.session_id = Some(session_id.clone());
 
@@ -434,6 +473,11 @@ impl Supervisor {
                 .take_tun_fd(&session_id)
                 .map_err(|e| format!("helper 交付 utun fd 失败：{}", e.message))?;
             tracing::info!(interface = %info.interface, fd, "已取得 utun fd");
+            tracing::info!(
+                stage = "tun_up_and_fd",
+                ms = tun_started.elapsed().as_millis() as u64,
+                "启动阶段耗时"
+            );
             self.tun_fd = Some(fd);
             deferred_commit = true;
         }
@@ -453,11 +497,17 @@ impl Supervisor {
             spawn_core(&core_path, &config_path, self.tun_fd, events, &geo_fallback).await?;
 
         // ---- 5) 等待就绪 ----
+        let port_started = std::time::Instant::now();
         if let Err(e) = xray::wait_for_port(settings.socks_port, CORE_READY_TIMEOUT).await {
             let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
             self.rollback_tun(helper);
             return Err(format!("核心未在预期时间内就绪：{e}"));
         }
+        tracing::info!(
+            stage = "wait_for_port",
+            ms = port_started.elapsed().as_millis() as u64,
+            "启动阶段耗时"
+        );
 
         // ---- 6) 接管默认路由 + 切换 DNS ----
         //
@@ -495,16 +545,29 @@ impl Supervisor {
             // 此时默认路由还没动，回滚只需拆掉 bypass 路由与 utun，系统网络干净。
             let socks_port = settings.socks_port;
             let session_id = self.session_id.clone().unwrap_or_default();
+            let gate_started = std::time::Instant::now();
             let gate = verify_paths_then_commit(
                 REQUIRED_PROBE_TARGETS,
                 |target| socks_http_probe(socks_port, target, PRE_COMMIT_PROBE_TIMEOUT_SECS),
                 || async {
-                    helper
+                    let commit_started = std::time::Instant::now();
+                    let result = helper
                         .call(&Request::CommitRoutes { session_id: session_id.clone() })
-                        .map(|_| ())
+                        .map(|_| ());
+                    tracing::info!(
+                        stage = "commit_routes",
+                        ms = commit_started.elapsed().as_millis() as u64,
+                        "启动阶段耗时"
+                    );
+                    result
                 },
             )
             .await;
+            tracing::info!(
+                stage = "pre_commit_gate",
+                ms = gate_started.elapsed().as_millis() as u64,
+                "启动阶段耗时（含两次探测，已并行）"
+            );
             match gate {
                 Ok(()) => {}
                 Err(GateFailure::Commit(msg)) => {
@@ -558,6 +621,7 @@ impl Supervisor {
 
     /// 停止核心并回滚隧道。
     pub async fn stop(&mut self, helper: &mut HelperClient) -> Result<(), String> {
+        let stopped_at = std::time::Instant::now();
         let mut errors: Vec<String> = Vec::new();
 
         // 先停数据面：它还持有 utun fd，不停掉接口不会消失。
@@ -571,6 +635,13 @@ impl Supervisor {
             errors.push(e);
         }
 
+        // 逐阶段计时（task-54 (d)）：`XRAYTUN_LOG=info` 时可见。
+        tracing::info!(
+            stage = "stop_core",
+            ms = stopped_at.elapsed().as_millis() as u64,
+            failures = errors.len(),
+            "停止阶段耗时"
+        );
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1538,6 +1609,32 @@ mod tests {
 
         assert!(res.is_ok(), "两个目标都通时必须通过：{res:?}");
         assert_eq!(log.seq(), ["probe:overseas", "probe:domestic", "commit"]);
+    }
+
+    /// **(d) 实测：两个探测真的并行**（不是只看代码形状）。
+    ///
+    /// 每个目标各睡 150ms：串行 ≥300ms（这正是门禁给每次连接加的最坏 12s 的来源），
+    /// 并行 ≈150ms。阈值 260ms 留足余量，但足以在「退化成串行」时变红。
+    #[tokio::test]
+    async fn gate_probes_run_in_parallel_not_sequentially() {
+        let started = std::time::Instant::now();
+        let res = verify_paths_then_commit(
+            &["slow-a", "slow-b"],
+            |_t| async {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                "204".to_string()
+            },
+            || async { Ok::<(), xt_proto::HelperError>(()) },
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert!(res.is_ok(), "两个目标都通时必须通过：{res:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(260),
+            "两次 150ms 探测并行时应当 ≈150ms；实际 {}ms（≥300ms 说明又变回串行了）",
+            elapsed.as_millis()
+        );
     }
 
     /// **本卡的核心反例（读法 B）**：境外通、境内黑洞 —— 不得接管默认路由。
