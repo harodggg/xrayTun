@@ -20,10 +20,10 @@
 
 ## 下载
 
-- **v0.8.29 正在发布**：资产发布后在本页给出直链与**真实字节数**；
-  在此之前请到 [GitHub Releases](https://github.com/harodggg/xrayTun/releases) 查看（文件名将是
-  `XrayTun_0.8.29_x86_64_arm64.dmg` 与 `XrayTun_0.8.29_x86_64_arm64.zip`）。
-- 不在这里预先写死字节数或直链 —— 发布前它们还不存在。
+- [XrayTun_0.8.29_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases/download/v0.8.29/XrayTun_0.8.29_x86_64_arm64.dmg)：47,148,505 字节（45.0 MiB），主下载
+- [XrayTun_0.8.29_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases/download/v0.8.29/XrayTun_0.8.29_x86_64_arm64.zip)：42,652,830 字节（40.7 MiB），备用
+- [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases/download/v0.8.29/SHA256SUMS.txt)：校验和（200 字节）
+- [所有版本](https://github.com/harodggg/xrayTun/releases)
 
 ## 安装（要点）
 
