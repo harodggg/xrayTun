@@ -84,17 +84,48 @@ apex https://xraytun.top        首页 / body sha256 = a02e24a38f9d5dc5 （43980
 * `site/robots.txt` 的 CF 托管段字节数注释改为**不再陈述成当前事实**（改的是生成器
   `scripts/gen-site-geo.py` 那一行，再重跑生成器 —— 只改产物会被下次生成静默覆盖）。
 
+### 3.1 第一版被**两个部署 workflow 拒绝**（真实事件，留档）
+
+第一版 `404.html` 的站内链接写成了**根绝对路径**（`href="/"`、`href="/en/"`、`href="/wasm/"`），
+想让「禁 JS 时在 canonical 站上也是对的」。结果 `0dccb3d` 推上去后
+**Cloudflare Pages 与 GitHub Pages 两个部署都失败**（run `35595485637` / `35595485638`），
+失败原因是仓库自己的静态检查 —— 它比我的设计更权威：
+
+```
+$ grep -rInE '(href|src)="/([^/]|$)' site --include='*.html'      # pages.yml / cloudflare-pages.yml 同一条
+site/404.html:152:  <a class="btn btn--primary" data-site-link="" href="/">回到首页</a>
+site/404.html:153:  <a class="btn btn--secondary" data-site-link="en/" href="/en/" …>English home</a>
+site/404.html:158:  <li><a data-site-link="wasm/" href="/wasm/">xray-wasm…</a></li>
+```
+
+那条检查存在的理由正是**镜像站跑在 `/xrayTun/` 子路径下，根绝对路径会指到站点外面**
+（`pages.yml` 的注释里写着）。所以**不是绕过检查，而是我的写法违反了一条真实约束**。
+修正：`href` 改为**相对值**（`./`、`en/`、`wasm/`），仍由脚本按探测到的根改写；
+无 JS 时的降级如实写进了文件头注释（单段未知路径正确；多段路径落回上一级）。
+
+事故记录（不放任它变成空白）：这次红是**我的新文件引入的**，两次部署都失败，
+窗口内 `xraytun.top` 仍是上一版内容（软 404 依然存在）；修正后重推才真正生效。
+
 ## 4. 部署后实测
 
 （待 `site/404.html` 部署完成后填入：未知路径 / 已删除资源 / 旧缓存 URL / 全部真实页面 200 / 深链锚点。）
 
 ## 5. 验证与诚实清单
 
+* **勘误**：上一个提交（`c1d74f9`）的提交信息标题写了「18 条路径读数」，实际是 **23 条**
+  （apex **17** 条 + 镜像 **6** 条，见 `/tmp/ops-404-probe-before.txt`）。提交信息已推送，
+  **不改写历史**，在此更正 —— 本文件里的表格本身就是准确的那一份。
+* **两个部署 workflow 的静态检查**（必需文件 / `href|src="/…"` / CSS `url(/…)` /
+  `en/index.html` 不用 `assets/`）已**逐字复刻**在本地跑过一遍 → 全部 ✓，
+  再推的（见 §3.1：第一版就是被它拦下的）。
 * `check.sh` 的 6 条站点版本断言：在**隔离 worktree**（HEAD + 本卡改动，不含他人在途改动）里跑
   完整 `./scripts/check.sh --no-release-build` → **exit 0**，其中「站点版本一致性」步骤全绿
   （前端 197 passed + 1 todo；Rust 全部通过；CSS token 检查绿）。
   为什么用 worktree：共享工作区里 `apps/ui/src/pages/Settings.tsx` 有他人未提交的在途改动，
   在共享工作区跑会把那份 WIP 一起编译/测试 —— 那是别人的提交面，不该由我引入变量。
+* `404.html` 的根路径探测脚本：用 `node` + `vm` 把页面里**那段真实脚本**抽出来跑了 5 个场景
+  （CF 根 `/unknown`、CF 深层 `/foo/bar/baz`、镜像 `/xrayTun/unknown`、镜像深层 `/xrayTun/a/b/c`、
+  探不到 manifest → 回退 `/`），全部得到期望的链接前缀。
 * `scripts/gen-site-geo.py` 改完**重跑生成器两次**，`site/robots.txt` 的 sha256 前后相同（幂等），
   且 `git status` 里**只多出这一处产物差异**（没有第二处）。
 * §1 的资料来自 `xraytun.top` 与 GitHub Pages 镜像的**实测**；§2.1 是**读码**；§2.2 是**实测**；

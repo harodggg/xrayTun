@@ -15,10 +15,18 @@
       # 三条约束（改这个文件时请遵守）
 
       1. **必须 `noindex`**：否则搜索引擎会把「随便一个打错的路径」当成可索引页面。
-      2. **本页会被任意深度的路径命中**（`/a/b/c` 也会走到这里），所以**不能引用任何相对路径的
-         资源**：`assets/site.css` 在 `/a/b/` 下会解析成 `/a/assets/site.css`。因此样式**内联**、
-         图标用 **data URI**，站点链接的根路径由页面末尾那段脚本探测（见那里的注释）。
+      2. **不能引用任何相对路径的「资源」**：本页会被任意深度的路径命中（`/a/b/c` 也会走到这里），
+         `assets/site.css` 在 `/a/b/` 下会解析成 `/a/assets/site.css`。因此样式**内联**、
+         图标用 **data URI**。
+         站内**链接**同理不能写成根绝对路径 `/…`：GitHub Pages 镜像跑在 `/xrayTun/` 子路径下，
+         根绝对路径会指到站点外面 —— 两个部署 workflow 的「站点静态检查」
+         （`grep -rInE '(href|src)="/([^/]|$)' site --include='*.html'`）也会直接判失败。
+         所以 `href` 用**相对**值（`./`、`en/`、`wasm/`），再由页面末尾那段脚本按
+         **探测到的站点根**改写（CF 得 `/`，镜像得 `/xrayTun/`，任意深度都正确）。
+         禁用 JS 时：未知路径若是**单段**（`/typo` 这种最常见的情形），相对值在 apex 与镜像上
+         都指向正确位置；多段路径（`/a/b/c`）下无 JS 会落回上一级 —— 这是本页已知的可接受降级。
       3. **不写任何版本号**：404 页不该随每次发版变旧。下载指向 Releases 页面，不指向 pin 死的资产。
+
     -->
     <meta name="robots" content="noindex, follow" />
     <meta name="theme-color" content="#0f1420" />
@@ -149,13 +157,13 @@
       <h1>页面不存在</h1>
       <p>这个地址下没有内容 —— 可能是链接打错了，也可能是页面已经搬走或改名。</p>
       <p class="cta">
-        <a class="btn btn--primary" data-site-link="" href="/">回到首页</a>
-        <a class="btn btn--secondary" data-site-link="en/" href="/en/" hreflang="en" lang="en"
+        <a class="btn btn--primary" data-site-link="" href="./">回到首页</a>
+        <a class="btn btn--secondary" data-site-link="en/" href="en/" hreflang="en" lang="en"
           >English home</a
         >
       </p>
       <ul class="links">
-        <li><a data-site-link="wasm/" href="/wasm/">xray-wasm（同作者的另一个项目）</a></li>
+        <li><a data-site-link="wasm/" href="wasm/">xray-wasm（同作者的另一个项目）</a></li>
         <li>
           <a href="https://github.com/harodggg/xrayTun/releases">下载与所有版本（GitHub）</a>
         </li>
@@ -182,11 +190,12 @@
       /* 站点根路径探测（没有它，镜像站的链接会指到站点外面）。
          - canonical 站（Cloudflare Pages）在**根**：站点根 = `/`
          - GitHub Pages 镜像是**项目站**，跑在 `/xrayTun/` 子路径下：站点根 = `/xrayTun/`
-         而 404 页会被任意深度的路径命中，相对路径因而不可能可靠。所以这里**不硬编码任何
-         站点路径**：从当前路径往上逐级试 `manifest.webmanifest` 是不是那份真身
+         而 404 页会被任意深度的路径命中，**链接**的相对值在多段路径上会落回上一级。所以这里
+         **不硬编码任何站点路径**：从当前路径往上逐级试 `manifest.webmanifest` 是不是真身
          （存在 + content-type 是 manifest/json + 能解析出 name），命中即取该前缀为根。
          全部失败时保守回退到 `/`（canonical 站上的正确值）。
-         禁用 JS 时上面的 `href` 就是 `/…`：对 canonical 站仍然正确。 */
+         禁用 JS 时上面的相对 `href` 仍能工作：单段未知路径（`/typo`）在 apex 与镜像上都指对，
+         多段路径（`/a/b/c`）会落回上一级 —— 见文件头注释里的那条已知降级。 */
       (function () {
         "use strict";
         var segs = location.pathname.split("/").filter(Boolean);
