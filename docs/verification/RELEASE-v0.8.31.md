@@ -211,6 +211,42 @@ HEAD:site/wasm/index.html:1
 | `site/en/wasm/index.html` | 1 | **1** | 0 | 全清 |
 | **合计** | **122** | **122 ✅ 完全吻合** | **0** | 「任何一处变 0」在此**是预期**，逐项列出 |
 
+### 1.6 ⚠️ 待跟进的第二处：`CHANGELOG.md` 仍停在 0.8.30
+
+**我跑的命令**：
+
+```bash
+head -3 CHANGELOG.md
+git status --porcelain CHANGELOG.md
+git log --oneline -3 -- CHANGELOG.md
+grep -rc "0\.8\.31" CHANGELOG.md
+grep -rn "CHANGELOG" site/*.html site/en/*.html site/llms*.txt
+```
+
+**原始输出**：
+
+```
+# 更新记录
+## 0.8.30            ← 最新条目，没有 0.8.31
+git status CHANGELOG.md → 空（提交 1 未改它）
+72b21fb v0.8.30：拓扑回流/蓝车漂移 + …（历史上每次发版都改它）
+73351a9 v0.8.29：接管默认路由前的端到端门禁…
+29cb6f8 v0.8.28：会话泄漏自动清理并重试一次…
+CHANGELOG.md 里 "0.8.31" 出现 0 次
+
+站点指向它（用户在页面上看得到）：
+site/index.html:58   "releaseNotes": ".../blob/main/CHANGELOG.md"
+site/index.html:746  更新记录：<a href=".../CHANGELOG.md">CHANGELOG.md</a>
+site/en/index.html:59,793 同上（英文）
+site/llms.txt:46 / llms-full.txt:303,736 同上
+```
+
+**为什么值得盯**：站点 **JSON-LD 的 `releaseNotes` 与页面上「更新记录」链接都指向 `CHANGELOG.md`**。
+提交 1 之后站点已写「v0.8.31」，但点进去的最新条目还是 **0.8.30**。
+**若提交 2 也不补**，这次发版就会「官网说 0.8.31、更新记录说 0.8.30」。
+（`ops` 可能本来就打算放在提交 2 —— 我**不断言**它漏了，只把它列为**待复核项**：
+提交 2 落地后我会重新 `grep -c '0\.8\.31' CHANGELOG.md`，仍为 0 就是缺陷。）
+
 ---
 
 ## 2. JSON-LD 的决定性验证（本卡最容易悄悄漏掉的一处）
@@ -277,6 +313,8 @@ site/en/index.html:57: "downloadUrl": "https://github.com/harodggg/xrayTun/relea
 - [ ] `app_update_check`：包内版本号（应 0.8.31）与 SHA256；**如实记录遇到几次 exit 28 超时**（上一版第一次超时过）
 - [ ] 线上站点 `https://xraytun.top/`：`0.8.31` / `0.8.30` / 「正在发布」各自出现次数；canonical；`/en/` 是否等价
 - [ ] `www.xraytun.top`：原始状态码（**已知未生效**，不修）
+- [ ] **复核 §1.6**：提交 2 后 `grep -c "0\.8\.31" CHANGELOG.md` 是否已非 0（若仍为 0 = 官网说 0.8.31、更新记录说 0.8.30）
+- [ ] 复核 §1.3 的 10 处 MiB：提交 2 时应变成 **0.8.31 的真实字节数**（而不是继续沿用 45.0 / 40.7）
 
 **已提前测的对照基线（此刻线上还是旧版本，因为提交 1 还没部署）**：
 
