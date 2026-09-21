@@ -1440,7 +1440,10 @@ be1fd34274975e55ef96cf804459b952be06e3dc159011c688616f2211b106cc  ./XrayTun_0.6.
             "-dr com.apple.quarantine",
             "-cr com.apple.quarantine",
         ] {
-            assert!(!s.contains(bad), "不得再出现 `{bad}`（这台 macOS 的 xattr 没有 -r）：{s}");
+            assert!(
+                !s.contains(bad),
+                "不得再出现 `{bad}`（xattr 有两个实现，`-r` 的支持随实现与版本而异）：{s}"
+            );
         }
         // 必须用与 README / release.yml 一致的那一种写法
         assert!(
