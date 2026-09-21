@@ -331,6 +331,21 @@ export function Flow({
     });
     const sigs = geo.routes.map((r) => r.d);
 
+    // 每辆车 `<g>` 里那个 `<rect>` 的**按 key 缓存**（与上面的 `spansByKey` 同一手法）。
+    //
+    // 为什么：动画每帧对每辆车做一次 `g.querySelector("rect")` —— 实测 11.03 次/帧
+    // （11 辆车时 ≈662/s，task-56/63）。它每帧的结果**永远不变**，纯属热路径上的重复查询。
+    //
+    // 为什么还要 `isConnected` 兜底：车辆数量变化时，同名 key 可能对应**新**元素
+    // （旧 `<g>` 已随 React 卸载）。往缓存里那个脱挂的元素写属性等于没写 ——
+    // 表现就是那辆车的颜色/淡入停在初始值。所以缓存命中也要确认它还挂在文档上。
+    const rectByKey = new Map<string, SVGRectElement>();
+    for (const g of container.querySelectorAll<SVGGElement>("g.flow__truck")) {
+      const key = g.dataset.truckKey;
+      const r = g.querySelector("rect");
+      if (key && r) rectByKey.set(key, r);
+    }
+
     // 每条路线「主干 + 各分支去程段」在 guide 上的**真实弧长区间**。
     //
     // 必须用引擎量的弧长（`getTotalLength`），不能用弦长：车的落点由
@@ -500,7 +515,13 @@ export function Flow({
         if (g.style.visibility === "hidden") g.style.visibility = "";
 
         // 颜色跟着**这一圈要送的分支**走（一趟一个颜色），不再按「整圈比例」猜。
-        const rect = g.querySelector("rect");
+        // `<rect>` 从表里取（见上面的 `rectByKey`）：miss 或已脱挂时才查一次 DOM，
+        // 所以稳态下这条路径**没有** `g.querySelector("rect")`。
+        let rect = rectByKey.get(key);
+        if (!rect || !rect.isConnected) {
+          rect = g.querySelector("rect") ?? undefined;
+          if (rect) rectByKey.set(key, rect);
+        }
         if (rect) {
           const fill = route.branches[st.branch]?.color || NEUTRAL;
           if (fill !== st.color) {

@@ -1702,3 +1702,129 @@ describe("动画不变量护栏（行为级）", () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// 渲染后颜色（task-63）：车的 fill 必须与「它当前所在分支对应的出口类别」一致
+//
+// 为什么单列：现有 25 条拓扑测试里**没有任何一条读 `fill`**（grep 0 命中）。
+// 也就是说「按状态取色」这套今天没有护栏 —— 改错取色/取错元素，测试会全绿。
+//
+// 为什么不 import `OUTBOUND_COLOR`：那样只是把「意图」抄第二遍，实现里的取色错了
+// 测试会跟着一起错（本项目已发生过：B1 回退后全绿、`span=total` 回退后全绿）。
+// 这里用**期望色字面量**（独立于实现），类别从 **DOM 的出口标签 class** 读、
+// 分支区间从 **DOM 的可见线长度** 读、车的颜色从 **DOM 的 `fill`** 读。
+// ---------------------------------------------------------------------------
+
+/** 期望色（写死在测试里 = 独立于实现的金标）。 */
+const GOLDEN_FILL: Record<string, string> = {
+  node: "#4f8ef7",
+  direct: "#34d399",
+  block: "#f87171",
+  dns: "#64748b",
+  internal: "#64748b",
+};
+
+const KINDS = ["node", "direct", "block", "dns", "internal"] as const;
+
+/** 出口标签（右列，非合计行）的类别，按 DOM 顺序 = 分支顺序。 */
+function outletKindsFromDom(): string[] {
+  return [...document.querySelectorAll(".highway__side--right .highway__lane-label")]
+    .filter((el) => !el.classList.contains("highway__lane-label--total"))
+    .map((el) => KINDS.find((k) => el.classList.contains(`highway__lane-label--${k}`)) ?? "");
+}
+
+interface BranchSpan {
+  start: number;
+  end: number;
+  stroke: string;
+}
+
+/** 每条路线的「分支弧长区间」：从 DOM 的可见线（`path.flow__route`）长度累计，
+ *  上色的那些就是去程分支（主干/回程是中性色）。顺序即出口顺序。 */
+function routeBranchSpans(): { trunkEnd: number; branches: BranchSpan[] }[] {
+  const out: { trunkEnd: number; branches: BranchSpan[] }[] = [];
+  for (const grp of document.querySelectorAll("svg.flow g[data-route-paths]")) {
+    const paths = [...grp.querySelectorAll("path.flow__route")] as SVGPathElement[];
+    const trunkStroke = paths[0]?.getAttribute("stroke") ?? "";
+    let acc = 0;
+    let trunkEnd = 0;
+    const branches: BranchSpan[] = [];
+    paths.forEach((p, i) => {
+      const len = pathLengthOf(p);
+      const stroke = p.getAttribute("stroke") ?? "";
+      if (i === 0) trunkEnd = acc + len;
+      else if (stroke !== trunkStroke) branches.push({ start: acc, end: acc + len, stroke });
+      acc += len;
+    });
+    out.push({ trunkEnd, branches });
+  }
+  return out;
+}
+
+interface TruckPaint {
+  key: string;
+  routeIdx: number;
+  arc: number;
+  fill: string;
+}
+
+/** 渲染后的颜色：读 `<rect>` 的真实 `fill` 属性（不是 `fill` 变量、不是常量）。 */
+function truckPaints(): TruckPaint[] {
+  const out: TruckPaint[] = [];
+  for (const g of document.querySelectorAll("svg.flow g.flow__truck") as NodeListOf<SVGGElement>) {
+    const key = truckKey(g);
+    const arc = Number(g.dataset.arc);
+    const rect = g.querySelector("rect");
+    if (!Number.isFinite(arc) || !rect) continue;
+    out.push({ key, routeIdx: Number(g.dataset.route ?? 0), arc, fill: rect.getAttribute("fill") ?? "" });
+  }
+  return out;
+}
+
+describe("渲染后颜色（读 DOM fill）", () => {
+  it("车当前所在分支的 fill 必须等于该出口类别的既定色（覆盖 ≥2 种通道）", async () => {
+    await mount(baseTopo());
+    const allKinds = outletKindsFromDom();
+    // 流程图只画「流向用户」的出口；dns/api 是内部通道，不在流程图上（另一条测试钉着这点）。
+    const kinds = allKinds.filter((k) => k !== "dns" && k !== "internal");
+    expect(kinds.length, "没有读到出口标签类别").toBeGreaterThanOrEqual(3);
+
+    const spans = routeBranchSpans();
+    expect(kinds.length, "流程图的分支数与出口类别数不一致").toBe(spans[0]!.branches.length);
+    const bad: string[] = [];
+    const byKind = new Map<string, number>();
+    let sampled = 0;
+
+    for (let f = 0; f < 900; f++) {
+      runFrame(1000 / 60);
+      for (const t of truckPaints()) {
+        const branches = spans[t.routeIdx]?.branches ?? [];
+        // 车在主干上时，fill 指向「这一趟要送的分支」——仅凭 arc 无法确定是哪条 → 跳过
+        // 只采「分支内部」：两端各留 0.5px，避开主干↔分支边界（在边界上 arc 属于主干，
+        // 而 fill 已经切到「这一趟要送的分支」，会误报）
+        const bi = branches.findIndex((b) => t.arc >= b.start + 0.5 && t.arc < b.end - 0.5);
+        if (bi < 0) continue;
+        const kind = kinds[bi];
+        const want = kind ? GOLDEN_FILL[kind] : undefined;
+        if (!kind || !want) {
+          bad.push(`分支 ${bi} 没有可判定的出口类别（kinds=${JSON.stringify(kinds)}）`);
+          continue;
+        }
+        sampled += 1;
+        byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+        // 同时校验「可见线本身的颜色」与金标一致：否则取色写错时两边一起错、仍然自洽
+        if (branches[bi]!.stroke !== want) {
+          bad.push(`第 ${bi} 条分支线 stroke=${branches[bi]!.stroke} 应为 ${want}（kind=${kind}）`);
+        }
+        if (t.fill !== want) {
+          bad.push(`key=${t.key} arc=${t.arc.toFixed(1)} 在分支 ${bi}(${kind}) 上 fill=${t.fill} 应为 ${want}`);
+        }
+      }
+    }
+
+    expect(sampled, "没有采样到「车在分支上」的帧，断言是空壳").toBeGreaterThan(200);
+    expect(byKind.size, `只观察到 ${byKind.size} 种通道，颜色切换没被覆盖`).toBeGreaterThanOrEqual(2);
+    // 先报前几条，避免一个断言刷屏
+    expect(bad.slice(0, 6), `颜色不符 ${bad.length} 处`).toEqual([]);
+  });
+});
