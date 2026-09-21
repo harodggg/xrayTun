@@ -578,7 +578,6 @@ pub fn unzip_tree(zip: &Path, dest: &Path) -> Result<()> {
 /// 抽成纯函数是为了能单测 —— 这段字符串会在用户机器上以他的权限跑，
 /// 里面每个 quoting 都值得钉住。
 pub fn self_update_script(pid: u32, src_app: &Path, target_app: &Path, tmp_root: &Path) -> String {
-    let q = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', r"'\''"));
     format!(
         r#"#!/bin/sh
 # 由 XrayTun 自动更新生成。等待旧进程退出 → 替换 .app → 重启。
@@ -599,16 +598,88 @@ sleep 1
 #    中途失败就只剩一个残缺的 bundle。
 rm -rf {target}
 /usr/bin/ditto {src} {target}
-# 3) 去掉隔离标记，否则新包第一次打开会被 Gatekeeper 拦
-/usr/bin/xattr -dr com.apple.quarantine {target} 2>/dev/null || true
+{quarantine}
 # 4) 清理暂存目录后重启
 rm -rf {tmp}
 /usr/bin/open {target}
 "#,
         pid = pid,
-        target = q(target_app),
-        src = q(src_app),
-        tmp = q(tmp_root),
+        target = sh_quote(target_app),
+        src = sh_quote(src_app),
+        tmp = sh_quote(tmp_root),
+        quarantine = quarantine_cleanup_block(target_app),
+    )
+}
+
+/// 把一个路径包成 shell 单引号字面量（单引号自身转义）。
+fn sh_quote(p: &Path) -> String {
+    format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
+}
+
+/// `self_update_script` 里「去掉隔离标记 + 读回验证」那一段（第 3 步）。
+///
+/// # 为什么是 `find … -exec xattr -d … +`
+///
+/// * **不能用递归开关**：`-r` 的支持**随 macOS 版本与解析到的 xattr 实现而异**。
+///   2026-09 在本机（macOS 26.6.2）实测：
+///   * `/usr/bin/xattr -dr …` → **exit 0，真的递归删掉了**（这个版本的 Apple
+///     xattr 已经支持 `-r`）；
+///   * 但 PATH 上先命中的 `/usr/local/bin/xattr` 与
+///     `/Library/Frameworks/Python.framework/.../xattr` 是 Python `xattr` 包，
+///     它们**没有** `-r` → `option -r not recognized`，**exit 64**；
+///   * 更早的 macOS 版本里 `/usr/bin/xattr` 也没有 `-r`（README 记的就是这一条）。
+///
+///   也就是说「`-dr` 到底行不行」取决于用户机器 —— 而原文是
+///   `… 2>/dev/null || true`，失败完全不可见，于是在不支持的环境里隔离标记
+///   **从来没被去掉**，用户更新后被 Gatekeeper 拦。`find` 逐文件 + `-d`
+///   在所有版本、两种实现上都成立，所以不再赌 `-r`。
+/// * **只对 bundle 根路径执行不够**：`com.apple.quarantine` 会落在 bundle 内
+///   多个文件上，而 `xattr -d` 是**非递归**的。`find` 本身递归，`-exec … +`
+///   把命中项批量传给 xattr（`\;` 会为每个文件起一个进程，上万个文件会极慢）。
+/// * 不用 `xattr -c`（清掉该文件**全部**扩展属性）：它同样非递归（还是得靠
+///   `find` 逐文件），而且会顺手抹掉 `com.apple.provenance` 这类无关属性 ——
+///   我们只想删这一个标记。
+///
+/// # 退出码语义（实测，决定了判据）
+///
+/// * 每个路径都带该属性 → 退出码 **0**；
+/// * 只要有**一个**路径没有该属性 → 报 `No such xattr`，整条命令退出码 **1**。
+///   这是**正常情况**（bundle 里不是每个文件都被打过标记），不是失败。
+///
+/// 因此**判据是读回的残留数，不是退出码**；退出码与 stderr 仍然原样写进
+/// `app-update.log`（此前是 `2>/dev/null || true`，失败完全不可见）。
+/// 这一段永远不中断替换：隔离标记清不掉只影响首次打开，包本身已经装好了。
+fn quarantine_cleanup_block(target: &Path) -> String {
+    let target = sh_quote(target);
+    format!(
+        r#"# 3) 去掉隔离标记，否则新包第一次打开会被 Gatekeeper 拦。
+#
+# ⚠️ 不要给 xattr 加「递归开关」：`-r` 的支持随 macOS 版本与 xattr 实现而异
+#    （老版本 /usr/bin/xattr 没有它；PATH 上先命中的 Python xattr 也没有），
+#    在那些机器上会以 `option -r not recognized`（exit 64）失败 —— 看起来像
+#    清掉了。`find` 逐文件 + `-d` 在所有版本上都成立，所以不赌递归开关。
+#    bundle 里多个文件都可能带标记，而 `-d` 非递归，所以必须用 find 遍历；
+#    用 `+` 批量传参（`\;` 会为每个文件起一个进程，上万个文件会非常慢）。
+# 注意：对**没有**该属性的文件，`xattr -d` 会报 `No such xattr` 并让整条命令
+#    返回非 0 —— 那是正常情况，不是失败。真正的判据是下面的**读回**。
+quarantine_rc=0
+quarantine_out=$(find {target} -exec /usr/bin/xattr -d com.apple.quarantine {{}} + 2>&1) || quarantine_rc=$?
+if [ "$quarantine_rc" -ne 0 ]; then
+  echo "去隔离标记：命令退出码 $quarantine_rc（含「No such xattr」这种正常情况）；输出如下："
+  echo "$quarantine_out"
+fi
+# 3b) 读回验证：数一数还有多少文件带着 com.apple.quarantine
+quarantine_read_rc=0
+quarantine_list=$(find {target} -exec /usr/bin/xattr -l {{}} + 2>&1) || quarantine_read_rc=$?
+quarantine_left=$(printf '%s\n' "$quarantine_list" | grep -c com.apple.quarantine || true)
+if [ "$quarantine_left" -eq 0 ] && [ "$quarantine_read_rc" -eq 0 ]; then
+  echo "去隔离标记：已确认全部清除（读回 0 个残留）"
+elif [ "$quarantine_left" -eq 0 ]; then
+  echo "去隔离标记：读回未发现残留，但读回命令退出码 $quarantine_read_rc（目标可能不存在或权限不足），请人工确认"
+else
+  echo "去隔离标记：**仍有 $quarantine_left 个文件带 com.apple.quarantine**，首次打开可能被 Gatekeeper 拦；不中断安装"
+fi
+"#
     )
 }
 
@@ -1335,6 +1406,184 @@ be1fd34274975e55ef96cf804459b952be06e3dc159011c688616f2211b106cc  ./XrayTun_0.6.
             Path::new("/tmp/a'b"),
         );
         assert!(s.contains(r"'/tmp/a'\''b/XrayTun.app'"), "单引号要转义：{s}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 去隔离标记（task-46）
+    //
+    // 线上真实发生过：脚本里写的是**带递归开关**的 xattr 调用（原文
+    // `/usr/bin/xattr -dr … 2>/dev/null || true`）。在不支持 `-r` 的环境里
+    // 它会以 `option -r not recognized`（exit 64）失败，而 `2>/dev/null || true`
+    // 把失败完全吞掉 —— 隔离标记从来没被去掉，用户更新后被 Gatekeeper 拦，
+    // app-update.log 里还没有任何线索。
+    //
+    // 2026-09 复测补充：`-r` 的支持**随版本/实现而异** —— macOS 26.6.2 的
+    // `/usr/bin/xattr -dr` 实测 exit 0 且真的删掉了；但 PATH 上先命中的
+    // Python xattr（`/usr/local/bin/xattr`）没有 `-r`（exit 64），更早的
+    // macOS 版本里 `/usr/bin/xattr` 也没有。所以修法是**不再赌 `-r`**。
+    //
+    // 下面四类断言分别钉：静态形态、真实行为、退出码语义、失败必须留痕。
+    // -----------------------------------------------------------------------
+
+    /// **静态防回归**：不得再出现 `xattr -dr` / `xattr -cr`，也不得再静默。
+    #[test]
+    fn self_update_script_never_uses_the_broken_recursive_xattr_flags() {
+        let s = self_update_script(
+            1,
+            Path::new("/tmp/stage/XrayTun.app"),
+            Path::new("/Applications/XrayTun.app"),
+            Path::new("/tmp/stage"),
+        );
+        for bad in [
+            "xattr -dr",
+            "xattr -cr",
+            "-dr com.apple.quarantine",
+            "-cr com.apple.quarantine",
+        ] {
+            assert!(!s.contains(bad), "不得再出现 `{bad}`（这台 macOS 的 xattr 没有 -r）：{s}");
+        }
+        // 必须用与 README / release.yml 一致的那一种写法
+        assert!(
+            s.contains("-exec /usr/bin/xattr -d com.apple.quarantine {} +"),
+            "要用 `find … -exec xattr -d … +`（逐文件、批量、只删这一个属性）：{s}"
+        );
+        // 失败必须留痕：退出码与 stderr 都要进日志（脚本的 stdout/stderr 已整体重定向到 app-update.log）
+        assert!(s.contains("命令退出码 $quarantine_rc"), "失败要记退出码：{s}");
+        assert!(s.contains(r#"echo "$quarantine_out""#), "失败要把 stderr 抄进日志：{s}");
+        assert!(
+            !s.contains("com.apple.quarantine {target} 2>/dev/null"),
+            "不能再把 xattr 的 stderr 丢进 /dev/null：{s}"
+        );
+        // 读回验证
+        assert!(s.contains("已确认全部清除"), "要有读回验证并写进日志：{s}");
+    }
+
+    /// 读回统计：目标树里还有多少个路径带着 `com.apple.quarantine`。
+    #[cfg(target_os = "macos")]
+    fn count_quarantine(dir: &Path) -> usize {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "find {} -exec /usr/bin/xattr -l {{}} + 2>/dev/null | grep -c com.apple.quarantine || true",
+                sh_quote(dir)
+            ))
+            .output()
+            .expect("跑读回命令");
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
+    }
+
+    /// 给一个路径打上隔离标记（测试夹具）。
+    #[cfg(target_os = "macos")]
+    fn mark_quarantined(p: &Path) {
+        let ok = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "com.apple.quarantine", "0083;xraytun-test"])
+            .arg(p)
+            .status()
+            .expect("写 quarantine");
+        assert!(ok.success(), "夹具：给 {p:?} 写隔离标记失败");
+    }
+
+    /// **行为断言**：所有路径都带标记时，脚本里那条命令真的成功（退出码 0），
+    /// 而且标记真的没了。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn quarantine_command_succeeds_when_all_paths_are_marked() {
+        let dir = std::env::temp_dir().join(format!("xt-quarantine-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sub = dir.join("Contents");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("Info.plist"), b"x").unwrap();
+        for p in [dir.as_path(), sub.as_path(), sub.join("Info.plist").as_path()] {
+            mark_quarantined(p);
+        }
+        assert_eq!(count_quarantine(&dir), 3, "夹具：应当有 3 个路径带标记");
+
+        // 就是脚本里那一条命令
+        let cmd = format!(
+            "find {} -exec /usr/bin/xattr -d com.apple.quarantine {{}} +",
+            sh_quote(&dir)
+        );
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).output().unwrap();
+        assert!(
+            out.status.success(),
+            "所有路径都带标记时必须退出 0，实际 {:?}；stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(count_quarantine(&dir), 0, "标记必须真的被删掉（不是「看起来删了」）");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **退出码语义（实测）**：真实 bundle 里只有部分文件带标记 →
+    /// `xattr -d` 报 `No such xattr` 并让整条命令返回 1，但标记**确实已删掉**。
+    ///
+    /// 所以判据必须是「读回残留数」，不是退出码；脚本那一段也必须照此报告。
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn quarantine_exit_code_one_is_benign_when_some_files_are_unmarked() {
+        let dir = std::env::temp_dir().join(format!("xt-quarantine-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marked = dir.join("marked");
+        let plain = dir.join("plain");
+        std::fs::write(&marked, b"x").unwrap();
+        std::fs::write(&plain, b"x").unwrap();
+        mark_quarantined(&marked);
+
+        let cmd = format!(
+            "find {} -exec /usr/bin/xattr -d com.apple.quarantine {{}} +",
+            sh_quote(&dir)
+        );
+        let out = std::process::Command::new("/bin/sh").arg("-c").arg(&cmd).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "有未标记文件时实测退出码是 1");
+        assert_eq!(count_quarantine(&dir), 0, "尽管退出码是 1，标记必须已经被删掉");
+
+        // 脚本那一段在同样的夹具上要给出「已确认全部清除」（判据=读回）
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("set -e\n{}", quarantine_cleanup_block(&dir)))
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&out.stdout);
+        assert!(log.contains("已确认全部清除"), "读回为 0 时要给出确认：{log}");
+        assert!(out.status.success(), "这一段不能在 set -e 下中断替换流程");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **失败必须留痕**：对不存在的目标，日志里要有退出码与真实 stderr，
+    /// 而且**不能**给出「已确认全部清除」这种假安慰；同时不中断替换流程。
+    #[test]
+    fn quarantine_block_logs_failure_instead_of_swallowing_it() {
+        let missing =
+            std::env::temp_dir().join(format!("xt-quarantine-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("set -e\n{}", quarantine_cleanup_block(&missing)))
+            .output()
+            .unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(log.contains("命令退出码"), "失败必须记退出码：{log}");
+        assert!(
+            log.contains("No such file or directory"),
+            "必须把 find 的 stderr 抄进日志（这才是排障线索）：{log}"
+        );
+        assert!(
+            !log.contains("已确认全部清除"),
+            "失败时不能给假安慰：{log}"
+        );
+        assert!(
+            out.status.success(),
+            "清理失败不该中断替换流程（记录后继续）：{:?}",
+            out.status
+        );
     }
 
     /// 403 和 404 必须给出**不同的**指引。
