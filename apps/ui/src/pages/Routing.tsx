@@ -13,6 +13,7 @@
  * 4. 复现命令做成可复制的代码块 —— 原样是一条会折行的长文本，实际没法直接用。
  */
 
+import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import {
@@ -32,11 +33,66 @@ const PRESETS: Array<{ id: RoutingPreset; desc: string }> = [
 
 export default function Routing() {
   const { snapshot, busy, run } = useStore();
+
+  /**
+   * 「保存了但还没生效」的那次改动。
+   *
+   * # 为什么需要这个状态（本页此前是**静默空操作**）
+   *
+   * Xray **没有配置热重载**：规则只在核心**启动时**读取（全仓 grep 无 reload/SIGHUP/
+   * 文件监视；`crates/xt-core/src/update.rs` 之外的启动路径见 `commands/core.rs` 的
+   * `start_core`）。而 `save_settings` **只持久化 + 对齐登录项，不重启核心**。
+   * 所以「已连接时改分流预设」以前是：界面没有任何变化、也没有任何提示，
+   * 而规则其实没生效 —— 正是用户抱怨过的「改了设置，什么都没发生」。
+   *
+   * 这里记下保存时刻，用它和**后端给的** `runtime.started_at_unix` 比：
+   * 只要核心是在这次保存**之前**启动的，它跑的就是当时生成的那份配置。
+   * 两个量都来自快照/后端，所以提示不会变成编造。
+   */
+  const [pendingSave, setPendingSave] = useState<{ preset: RoutingPreset; savedAt: number } | null>(
+    null,
+  );
+  const startedAt = snapshot?.runtime.started_at_unix ?? null;
+
+  // 核心**重新启动**过（新配置已生成）→ 提示自动消失。
+  // 这条同时覆盖「用户在顶栏自己重连」：那种情况下「需要重连」已经是假话了，
+  // 不能继续显示（红线：不许声称一件不需要做的事）。
+  useEffect(() => {
+    if (pendingSave && startedAt !== null && startedAt >= pendingSave.savedAt) setPendingSave(null);
+  }, [startedAt, pendingSave]);
+
   if (!snapshot) return <div className="empty">正在加载…</div>;
 
   const { settings } = snapshot;
+  const running = snapshot.runtime.running;
+
   const setPreset = (preset: RoutingPreset) =>
-    void run("preset", () => api.saveSettings({ ...settings, routing_preset: preset }));
+    void run("preset", async () => {
+      const savedAt = Math.floor(Date.now() / 1000);
+      const next = await api.saveSettings({ ...settings, routing_preset: preset });
+      // 只在**确实有隧道在跑**时才记「待重连」：没连接就没有可重连的东西，
+      // 那时候新预设会在下次连接时自然生效（task-54 踩过「未运行却隐式启核」的坑）。
+      setPendingSave(next.runtime.running ? { preset, savedAt } : null);
+      return next;
+    });
+
+  /**
+   * 立即重连 = **先停再起**。
+   *
+   * 不能只调 `api.start()`：`start_core` 对「已在运行」是**空操作**
+   * （源码注释原文：「已经在跑就当作成功，不要报错」），
+   * 光调它不会重新生成配置，等于按钮点了没用。
+   */
+  const reconnect = () =>
+    void run("reconnect", async () => {
+      await api.stop();
+      return api.start();
+    });
+
+  // 提示成立的**全部条件**（都可从快照核实）：
+  //   ① 用户刚刚在本页保存过预设；② 核心此刻在跑；③ 它的启动时间早于那次保存。
+  const needsReconnect =
+    pendingSave !== null && running && startedAt !== null && startedAt < pendingSave.savedAt;
 
   return (
     <div className="page">
@@ -69,6 +125,24 @@ export default function Routing() {
             );
           })}
         </div>
+
+        {needsReconnect && (
+          <div className="banner banner--warn" role="status" style={{ marginTop: 12 }}>
+            <span>⚠︎</span>
+            <div>
+              <strong>分流规则已保存，但还没有生效。</strong>
+              Xray <strong>不支持配置热重载</strong> —— 规则只在核心<strong>启动时</strong>读取，
+              而这个核心是在你保存<strong>之前</strong>启动的，跑的仍是当时生成的那份配置
+              （已保存为「{PRESET_LABEL[pendingSave!.preset]}」）。
+              要让新规则生效需要重新连接；重连会短暂中断流量。
+              <div style={{ marginTop: 8 }}>
+                <button className="btn btn--primary" disabled={busy !== null} onClick={reconnect}>
+                  {busy === "reconnect" ? "正在重连…" : "立即重连"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="page__sec">
