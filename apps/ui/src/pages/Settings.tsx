@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../ipc";
+import { InlineConfirm } from "../InlineConfirm";
 import { useStore } from "../store";
 import {
   DNS_MODE_LABEL,
@@ -702,20 +703,34 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               重启 helper
             </button>
           )}
-          <button
+          {/* 破坏性操作先确认（task-65）：用既有的 `InlineConfirm`，不引 window.confirm。
+              问句里的后果是**读码确认**的（`crates/xt-proto/src/lib.rs` 的 `Restore` 定义 +
+              `crates/xt-helper/src/server.rs` 的 `Request::Restore` 分支）：它会
+              `tear_down_live_session()`（杀数据面、回滚路由与 DNS、关掉 utun fd）
+              **再用磁盘快照 `force_cleanup()` 兜底** —— 也就是说它不只清「遗留会话」，
+              **正在生效的隧道也会被拆掉**，helper 的回复是「已回滚路由与 DNS」。
+              按钮文字里的「遗留配置」低估了这件事，所以确认问句必须说明白。 */}
+          <InlineConfirm
+            label="修复网络（回滚遗留配置）"
             className="btn"
             disabled={busy !== null}
-            onClick={() => void run("restore", () => api.restoreStale())}
-          >
-            修复网络（回滚遗留配置）
-          </button>
-          <button
+            question="修复网络会回滚 helper 装的路由与 DNS，并拆掉当前正在生效的那条隧道（utun 网卡也会移除）——网络会回到直连；如果你正连着，连接会断。"
+            confirmLabel="确认修复网络"
+            onConfirm={() => void run("restore", () => api.restoreStale())}
+          />
+          {/* 卸载 helper 的后果（读码确认）：`Request::Uninstall` 的定义是
+              「停止数据面、回滚会话、移除 launchd 注册与自身二进制」
+              （`crates/xt-proto/src/lib.rs`）。之后没有 root 守护进程就**建不了 utun**，
+              即 TUN 模式不可用；而重装要写 `/Library/LaunchDaemons` 与
+              `/Library/PrivilegedHelperTools` → 本页自己的 hint 里写了「需要一次管理员授权」。 */}
+          <InlineConfirm
+            label="卸载 helper"
             className="btn btn--danger"
             disabled={busy !== null}
-            onClick={() => void run("uninstall-helper", () => api.uninstallHelper())}
-          >
-            卸载 helper
-          </button>
+            question="卸载 helper 会停止数据面、回滚它装的路由与 DNS，并从 launchd 与磁盘上移除。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
+            confirmLabel="确认卸载"
+            onConfirm={() => void run("uninstall-helper", () => api.uninstallHelper())}
+          />
         </div>
         <div className="field__hint" style={{ marginTop: 10 }}>
           安装会写入 <span className="mono">/Library/LaunchDaemons</span> 与
@@ -852,11 +867,29 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               更新 geo 到 {snapshot.update.latest_geo.version}
             </button>
           )}
+          {/* 回退的后果（读码确认）：`revert_managed_update` 调
+              `xt_core::update::revert_managed(managed_core_dir)`，它就是
+              **删掉整个受管目录**（`crates/xt-core/src/update.rs:1273`：注释写明
+              「清空托管目录 —— 回到包内自带的版本」），并记一条日志
+              「已回退到随包版本（核心与 geo）」。
+              ⚠️ **不写具体会变成哪个版本号**：随包核心的版本没有暴露在快照里，
+              只有**当前受管的那个**版本可读（`core_managed_version`），所以问句只报
+              「将要删掉的那个版本」，目标版本如实写「包内自带的那一版」。
+              「需要重新连接才生效」也是可确认的：核心二进制在**启动时**才解析
+              （`xray::resolve_core_binary(core_path, managed_core_dir, resource_dir, …)`）。 */}
           {snapshot.update.core_managed && (
-            <button className="btn btn--ghost" disabled={busy !== null}
-                    onClick={() => void run("revert-update", () => api.revertManagedUpdate())}>
-              回退到随包版本
-            </button>
+            <InlineConfirm
+              label="回退到随包版本"
+              className="btn btn--ghost"
+              disabled={busy !== null}
+              question={`回退到随包版本会删掉受管更新里的核心${
+                snapshot.update.core_managed_version
+                  ? `（当前受管版本 ${snapshot.update.core_managed_version}）`
+                  : ""
+              }与 geo 文件，核心改回包内自带的那一版，需要重新连接才会生效。`}
+              confirmLabel="确认回退"
+              onConfirm={() => void run("revert-update", () => api.revertManagedUpdate())}
+            />
           )}
         </div>
 
@@ -953,14 +986,21 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           菜单栏因为要和系统图标抢地方，用更短的 <span className="mono">↓1.2M ↑34K</span>，
           且空闲时不显示。速率来自核心的流量计数器，系统代理与 TUN 两种模式都有效。
         </div>
-        <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
-          <input
-            type="checkbox"
-            checked={settings.restore_system_proxy_on_exit}
-            onChange={(e) => patch({ restore_system_proxy_on_exit: e.target.checked })}
-          />
-          退出时还原系统代理设置
-        </label>
+        {/* ⚠️ 「退出时还原系统代理设置」这个复选框**已从界面移除**（task-65）。
+            原因：它绑定的 `settings.restore_system_proxy_on_exit` 在**全仓没有任何逻辑读它**
+            —— 只有 `crates/xt-core/src/model.rs` 的字段定义与默认值、`types.ts` 的类型、
+            预览数据，以及这里原来的复选框本身。也就是说**用户勾与不勾，什么都不会发生**。
+            界面**不许承诺做不到的事**（本项目红线），比「少一个功能」严重。
+
+            它当前**没有对象**：`ProxyMode::SystemProxy` 只提供本机 SOCKS/HTTP 入站，
+            **从来没有改过 macOS 的系统代理设置**（`docs/07-roadmap-and-risks.md` 的
+            「已知未实现项」第 6 条），所以「退出时还原」没有被还原的东西。
+
+            实现它（写用户的网络服务设置 + 崩溃安全还原）是**独立的路线图功能项**，
+            不该由一张「加确认框」的卡顺手带出来。
+            字段与 `serde` 默认值**刻意保留**（删掉会破坏已持久化设置文件的兼容性），
+            只隐藏界面入口；将来真正实现后，再把开关放回来，并同时补一句如实的说明。 */}
+
         <div className="row row--wrap">
           <button className="btn" onClick={() => void runVoid("open-dir", () => api.openDataDir())}>
             打开数据目录
