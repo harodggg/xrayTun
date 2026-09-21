@@ -19,7 +19,7 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 # 域名迁移时两处一起改（生成器里各只有一处；产物由脚本重写，别手改产物）。
 BASE = "https://xraytun.top"
 LAST_PUB = "2026-09-21"
-VERSION = "0.8.30"
+VERSION = "0.8.31"
 DL = f"https://github.com/harodggg/xrayTun/releases/download/v{VERSION}"
 RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 
@@ -34,7 +34,7 @@ RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 # 为什么要有这个开关：`release.yml` 在打包前跑 `check.sh`，而 check.sh 断言
 # 「站点声明的版本 == Cargo.toml 的版本」——先 bump 会让断言失败；而站点要写新版本
 # 又需要真实资产。两阶段是唯一「每个瞬间都不说谎」的解法。
-PUBLISHED = True
+PUBLISHED = False
 
 # 发行资产：**文件名由 VERSION 派生**，字节数取自 `gh release view v{VERSION}` 的**真实值**
 # （不许沿用上一版、不许估算 —— 本项目红线）。
@@ -45,9 +45,9 @@ PUBLISHED = True
 # 下面的断言会把这种失误直接变成构建失败。
 DMG = f"XrayTun_{VERSION}_x86_64_arm64.dmg"
 ZIP = f"XrayTun_{VERSION}_x86_64_arm64.zip"
-DMG_BYTES, DMG_MIB = "47,154,951", "45.0"
-ZIP_BYTES, ZIP_MIB = "42,659,730", "40.7"
-SHA_BYTES = "200"
+DMG_BYTES, DMG_MIB = "", ""
+ZIP_BYTES, ZIP_MIB = "", ""
+SHA_BYTES = ""
 if PUBLISHED and not (DMG_BYTES and DMG_MIB and ZIP_BYTES and ZIP_MIB and SHA_BYTES):
     raise SystemExit(
         "PUBLISHED=True 但 *_BYTES/*_MIB 是空的："
