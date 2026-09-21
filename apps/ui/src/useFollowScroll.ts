@@ -18,7 +18,7 @@
  * 塞在组件里只能用浏览器手工验，而它恰恰是容易出回归的地方。
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 /** 距底部多少像素以内算「在底部」。用 8px 而不是 0：亚像素与圆整会差一两像素。 */
 export const BOTTOM_SLACK_PX = 8;
@@ -37,7 +37,15 @@ function scrollToBottom(el: HTMLElement): void {
   el.scrollTop = el.scrollHeight;
 }
 
-export function useFollowScroll(contentLength: number) {
+/**
+ * @param contentRevision **内容版本**：渲染内容每变一次就必须变一个值
+ *   （跟随开启时靠它决定「要不要再滚到底」）。
+ *
+ *   ⚠️ 这里**不能**传 `filtered.length`：缓冲满员（`MAX_UI_LOGS`）之后长度恒为 1500，
+ *   这个依赖就再也不变了 → 跟随**静默失效**（新行不再滚进视野）。这是 task-55 顺带
+ *   发现并修掉的第二个真 bug，调用方现在传 `${长度}:${最新一行的 seq}`。
+ */
+export function useFollowScroll(contentRevision: string | number) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [follow, setFollowState] = useState(true);
@@ -93,7 +101,90 @@ export function useFollowScroll(contentLength: number) {
     }
     // 兜底：容器还没量到（首帧）时用元素自身滚入视野。
     bottomRef.current?.scrollIntoView?.({ block: "end" });
-  }, [contentLength, follow]);
+  }, [contentRevision, follow]);
 
   return { boxRef, bottomRef, follow, setFollow, onScroll };
+}
+
+/**
+ * 缓冲从**前面**裁掉旧行时，把阅读位置钉在原处（跟随关闭、用户正在读中间时）。
+ *
+ * # 为什么浏览器不替我们做
+ *
+ * 这正是 CSS 的 scroll anchoring（`overflow-anchor`）要解决的问题，但 **WebKit 长期没有实现它**：
+ * <https://bugs.webkit.org/show_bug.cgi?id=171099>（2023 年维护者还明确写「currently not implemented」），
+ * 直到 2026-03 那条才被并入 <https://bugs.webkit.org/show_bug.cgi?id=307734>「Enable in stable」而关闭。
+ * 本应用要求 **macOS 13+**，跑在 WKWebView 上 —— 大量用户所在系统的 WebKit 没有这个能力，
+ * 所以不能把「位置不跳」寄托在引擎上。
+ *
+ * # 怎么钉（关键：量**残余**位移，而不是假定引擎什么都没做）
+ *
+ * 记住一个**幸存行**的屏幕位置；每次 DOM 更新后量它的新位置，把差值反向加到 `scrollTop`：
+ *
+ * * 引擎**没**做锚定 → 该行上移了 h → 我们补 h（这就是老 WebKit 上的修复）；
+ * * 引擎**做**了锚定 → 该行位置不变 → 差值为 0 → **我们什么都不做**（不会二次补偿）。
+ *
+ * 所以不需要给容器加 `overflow-anchor: none`，在新旧引擎上都正确。
+ *
+ * # 只在两件事同时成立时才补偿
+ *
+ * 1. `enabled`（调用方传「跟随已关闭」）—— 跟随开着时本来就要贴底，补偿会把它从底部拉开；
+ * 2. **头部序号变了**（真的发生了前面的裁剪）—— 过滤/切换等级导致的行增删不补偿，
+ *    那种情况下用户本来就期望视图变化。
+ *
+ * @param headKey 当前第一条日志的 `seq`（没有日志时传 null）
+ */
+export function usePreserveReadingPosition(
+  boxRef: RefObject<HTMLElement | null>,
+  enabled: boolean,
+  headKey: number | null,
+): void {
+  const anchorRef = useRef<{ el: Element; top: number } | null>(null);
+  const headRef = useRef<number | null>(null);
+
+  // 用户滚动时**必须**刷新基准，否则补偿会多算一个「用户自己滚走的距离」。
+  //
+  // 为什么不能只靠渲染时机刷新：显式关掉跟随后 `onScroll` 会提前返回（不许被位置翻案），
+  // 于是滚动**不引起任何 state 变化 → 不重渲染** → 留在 effect 里的旧基准就是滚之前的值。
+  // 真实浏览器里程序性/用户滚动都会发 `scroll` 事件，所以监听它最可靠。
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const refresh = () => {
+      const a = anchorRef.current;
+      if (a && a.el.isConnected) a.top = a.el.getBoundingClientRect().top;
+    };
+    box.addEventListener("scroll", refresh);
+    return () => box.removeEventListener("scroll", refresh);
+  }, [boxRef]);
+
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+
+    const trimmed = headRef.current !== null && headKey !== null && headRef.current !== headKey;
+    headRef.current = headKey;
+
+    const anchor = anchorRef.current;
+    if (anchor && anchor.el.isConnected) {
+      const top = anchor.el.getBoundingClientRect().top;
+      if (trimmed && enabled) {
+        // 把锚点**挪回**它原来的屏幕位置：补偿量就是它这一帧的位移。
+        box.scrollTop += top - anchor.top;
+        // 补偿之后它的真实位置已经回到 `anchor.top`，所以基准**保持不变**
+        // （写成 `anchor.top = top` 会让下一次的位移算成 0，补偿只生效一次）。
+      } else {
+        // 没补偿（跟随开着 / 不是裁剪引起的更新）→ 基准跟随实际位置。
+        anchor.top = top;
+      }
+      return;
+    }
+
+    // 锚点没了（首帧、或它终于被裁掉）：改用**最后一行**。
+    // 为什么是最后一行而不是第一行：裁剪只从**前面**发生，最后一行能活最久
+    // （第一行正是下一条要被裁掉的那一行，用它当锚点每次都会失效、丢掉一次补偿）。
+    const all = box.querySelectorAll("[data-log-seq]");
+    const el = all[all.length - 1];
+    anchorRef.current = el ? { el, top: el.getBoundingClientRect().top } : null;
+  });
 }

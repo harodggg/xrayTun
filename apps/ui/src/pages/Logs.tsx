@@ -22,7 +22,7 @@
 import { useMemo, useState } from "react";
 import { api } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
-import { useFollowScroll } from "../useFollowScroll";
+import { useFollowScroll, usePreserveReadingPosition } from "../useFollowScroll";
 import { useStore } from "../store";
 
 const LEVELS = ["all", "info", "warn", "error", "debug"] as const;
@@ -73,7 +73,18 @@ export default function Logs() {
   // 滚回底部自动恢复。原来的实现是「只要开关开着就每次滚到底」，
   // 于是用户往上翻时会被下一条日志立刻拽回底部（实测 scrollTop 50 → 2065），
   // 表现就是「根本滚不动」。
-  const { boxRef, bottomRef, follow, setFollow, onScroll } = useFollowScroll(filtered.length);
+  //
+  // 这里传的是**内容版本**（长度 + 最新一行的身份），**不是长度**：
+  // 缓冲满员后长度恒为 MAX_UI_LOGS，只传长度会让跟随在这之后静默失效
+  // （新行不再滚进视野）—— 见 `logsDomStability.test.tsx` 的反例测试。
+  const lastVisibleSeq = filtered.length ? filtered[filtered.length - 1]!.seq : 0;
+  const { boxRef, bottomRef, follow, setFollow, onScroll } = useFollowScroll(
+    `${filtered.length}:${lastVisibleSeq}`,
+  );
+
+  // 缓冲满员后从**前面**裁行：把阅读位置钉住（原理见 hook 文档）。
+  // `enabled` 只在跟随关闭时成立 —— 跟随开着时我们本来就要贴底。
+  usePreserveReadingPosition(boxRef, !follow, logs[0]?.seq ?? null);
 
   const exportLogs = async () => {
     const text = filtered
@@ -194,8 +205,17 @@ export default function Logs() {
             )}
           </div>
         ) : (
-          filtered.map((line, i) => (
-            <div key={`${line.ts_unix}-${i}`} className={`log-line log-line--${line.level}`}>
+          filtered.map((line) => (
+            <div
+              // **必须是稳定身份**：`seq` 在入库时分配一次、永不改变。
+              // 这里以前是 `${line.ts_unix}-${i}` —— 下标一旦进入 key，缓冲满员后
+              // 每来一行新日志都会让所有 key 前移一位，React 就卸载重建整列表
+              // （1500 个节点/行），用户看到的就是「关闭跟随后日志还一直跳动」。
+              key={line.seq}
+              // 供「裁剪时钉住阅读位置」量幸存行的位移（见 usePreserveReadingPosition）。
+              data-log-seq={line.seq}
+              className={`log-line log-line--${line.level}`}
+            >
               <span className="log-line__ts">{formatClock(line.ts_unix)}</span>
               <span className="log-line__src">{line.source}</span>
               <span className="log-line__msg">{line.message}</span>

@@ -24,10 +24,15 @@ import {
 import { api, errorText, parseRecovery, subscribe } from "./ipc";
 import type { RecoveryState } from "./types";
 import { isCount, isObject, isText, rejectPayload } from "./eventGuards";
-import type { AppSnapshot, LogEntry, ProbeResult } from "./types";
+import type { AppSnapshot, ProbeResult, UiLogEntry } from "./types";
 
-/** 日志在内存里保留的上限。后端也有自己的上限，这里再兜一层防止长跑占用内存。 */
-const MAX_UI_LOGS = 1500;
+/**
+ * 日志在内存里保留的上限。后端也有自己的上限，这里再兜一层防止长跑占用内存。
+ *
+ * ⚠️ 满员后从**前面**裁 → 渲染层必须用**稳定身份**（`seq`）当 key，否则每来一行
+ * 都会重建整个列表（见 `LogEntry.seq` 的注释与 `pages/Logs.tsx`）。
+ */
+export const MAX_UI_LOGS = 1500;
 
 /** 「已自动恢复」提示展示多久（可感知的结束，但不长期占位）。 */
 const RECOVERED_NOTICE_MS = 8000;
@@ -54,7 +59,7 @@ export interface LogsLoad {
 
 interface StoreValue {
   snapshot: AppSnapshot | null;
-  logs: LogEntry[];
+  logs: UiLogEntry[];
   /** 日志读取本身的状态 —— 「没读到」与「读到但是空的」是两件事。 */
   logsLoad: LogsLoad;
   /** 正在执行的操作名，用于按钮转圈与防重复点击。 */
@@ -88,7 +93,17 @@ const StoreContext = createContext<StoreValue | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logs, setLogs] = useState<UiLogEntry[]>([]);
+
+  /**
+   * 日志条目的单调序号（分配一次、永不改变）—— 渲染层拿它当 React key。
+   *
+   * 用 ref 而不是 state：它是**身份**，不是要渲染的数据；自增不该引起额外渲染。
+   * 刻意**不**在清空日志时归零：序号复用会让新旧两行拿到同一个 key，
+   * 那正是「同一身份被复用」的万恶之源。
+   */
+  const logSeqRef = useRef(0);
+  const nextLogSeq = useCallback(() => (logSeqRef.current += 1), []);
   /** 日志读取状态：最初是「正在读」，成败由 IPC 的真实结果决定。 */
   const [logsLoad, setLogsLoad] = useState<LogsLoad>({ phase: "loading", error: null });
   const [busy, setBusy] = useState<string | null>(null);
@@ -243,9 +258,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return rejectPayload("core://log", payload, "缺少 line/level 字符串");
         }
         setLogs((prev) => {
-          const next = [
+          const next: UiLogEntry[] = [
             ...prev,
             {
+              seq: nextLogSeq(),
               ts_unix: Math.floor(Date.now() / 1000),
               source: "core",
               level: payload.level,
@@ -301,7 +317,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try {
       const entries = await api.tailLogs(500);
       // 事件推送可能已经先到了：已有内容时不要用历史覆盖实时。
-      setLogs((prev) => (prev.length ? prev : entries));
+      //
+      // 历史条目来自 Rust（没有 `seq`），必须在这里补上 —— 否则它们会退化成
+      // 「没有身份」，渲染层只能退回下标 key，整条修复就白做了。
+      setLogs((prev) =>
+        prev.length ? prev : entries.map((e) => ({ ...e, seq: e.seq ?? nextLogSeq() })),
+      );
       setLogsLoad({ phase: "loaded", error: null });
     } catch (e) {
       setLogsLoad({ phase: "failed", error: errorText(e) });

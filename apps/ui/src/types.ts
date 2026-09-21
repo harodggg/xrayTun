@@ -355,7 +355,28 @@ export interface LogEntry {
   source: string;
   level: string;
   message: string;
+  /**
+   * **进入界面时分配一次的单调序号**（只存在于 UI 层，Rust 侧的契约不变）。
+   *
+   * # 为什么必须有它
+   *
+   * 日志列表有两个行为叠在一起：缓冲到 `MAX_UI_LOGS`(1500) 就从**前面**裁掉一行，
+   * 而渲染时若用数组下标参与 key（`${ts}-${i}`），裁掉一行会让**所有下标整体前移** →
+   * **全部 key 变化 → React 卸载并重建整个列表**。核心 stdout 是持续转发的，
+   * 于是每来一行都重建 1500 个节点：主线程持续卡顿 + 内容视觉位移 = 用户报的
+   * 「关闭跟随后日志还一直跳动」（与跟随开关无关，所以关掉也照样跳）。
+   *
+   * `ts_unix` 只到秒，同一秒内的多行会重复，**不能**单独当身份。
+   * 序号由 `store` 在**两条入口**（实时事件 `onLog` 与历史 `tailLogs`）统一分配，
+   * 保证：单调、唯一、且一行进入界面后永不改变 —— 这正是 React key 需要的性质。
+   *
+   * 类型上是可选的：`api.tailLogs` 返回的后端条目没有它。界面里请用 `UiLogEntry`。
+   */
+  seq?: number;
 }
+
+/** 界面里真正在用的日志条目：`seq` 一定已经由 store 分配好。 */
+export type UiLogEntry = LogEntry & { seq: number };
 
 export interface AppSnapshot {
   settings: AppSettings;
