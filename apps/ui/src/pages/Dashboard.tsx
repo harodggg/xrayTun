@@ -47,7 +47,12 @@ interface Notice {
   action?: { label: string; run: () => void };
 }
 
-export default function Dashboard({ onNavigate }: { onNavigate: (view: string) => void }) {
+export default function Dashboard({
+  onNavigate,
+}: {
+  /** `target` 是目标分节（如 `set-helper`）：设置页是两级结构，带目标才会落到正确的分类。 */
+  onNavigate: (view: string, target?: string) => void;
+}) {
   const { snapshot, busy, run, probing, recovery } = useStore();
   const [showAllNotices, setShowAllNotices] = useState(false);
   if (!snapshot) return <div className="empty">正在加载…</div>;
@@ -281,7 +286,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (view: string) =
 function collectNotices(
   snapshot: AppSnapshot,
   run: ReturnType<typeof useStore>["run"],
-  onNavigate: (view: string) => void,
+  onNavigate: (view: string, target?: string) => void,
 ): Notice[] {
   const { core, helper, notice, runtime } = snapshot;
   const out: Notice[] = [];
@@ -355,8 +360,16 @@ function collectNotices(
       text: <>{notice}</>,
       action: {
         label: "去处理",
-        // helper 未装是最常见的来源，直接带去设置页比让用户自己找路更省事
-        run: () => onNavigate(helper.socket_present ? "logs" : "settings"),
+        // helper 未装是最常见的来源，直接带去设置页比让用户自己找路更省事。
+        //
+        // **但必须带上目标分节**：设置页现在是两级结构（选中哪一类只显示那一类），
+        // 只跳到「设置」会落在默认分类上，而「特权助手」在「系统与助手」里 ——
+        // 那等于把用户带到一个看不到待处理项的地方，比不给入口更糟。
+        run: () =>
+          onNavigate(
+            helper.socket_present ? "logs" : "settings",
+            helper.socket_present ? undefined : "set-helper",
+          ),
       },
     });
   }
