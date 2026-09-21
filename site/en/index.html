@@ -624,9 +624,14 @@ shasum -a 256 XrayTun_0.8.29_x86_64_arm64.dmg</code></pre>
                 <pre class="code"><code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code></pre>
                 <p class="path__note">
                   This only removes the "downloaded from the internet" quarantine flag. Note it is
-                  <code>-d</code>, <strong>not</strong> <code>-dr</code>: current versions of
-                  <code>xattr</code> do not have a <code>-r</code> option, and <code>-dr</code> fails with
-                  <code>option -r not recognized</code>.
+                  <code>-d</code>, <strong>not</strong> <code>-dr</code>: macOS ships
+                  <strong>two <code>xattr</code> implementations</strong> (the system one at
+                  <code>/usr/bin/xattr</code> and the Python <code>xattr</code> package that may come
+                  first on <code>PATH</code>), and <code>-r</code> support <strong>varies by
+                  implementation and version</strong> — the old <code>-dr</code> form fails with
+                  <code>option -r not recognized</code> on machines where Python's comes first. For
+                  recursion use <code>find … -exec /usr/bin/xattr -d … {} +</code> and write the
+                  absolute path <code>/usr/bin/xattr</code>.
                 </p>
               </div>
             </div>

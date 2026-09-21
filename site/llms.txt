@@ -33,7 +33,10 @@
 - **macOS 15 及以后**：系统设置 → 隐私与安全性 → 「仍要打开」→ 再双击一次
 - **macOS 14 及更早**：Finder 里 Control 点按（右键）应用 → 「打开」→ 再点一次「打开」
 - **终端（全版本可用）**：`xattr -d com.apple.quarantine /Applications/XrayTun.app`
-  —— 注意是 `-d`，**不是** `-dr`（现代 macOS 的 `xattr` 没有 `-r`，会报 `option -r not recognized`）
+  —— 注意是 `-d`，**不是** `-dr`：`xattr` 在 macOS 上有**两个实现**（系统自带的 `/usr/bin/xattr`
+  与 PATH 上可能先命中的 Python `xattr` 包），`-r` 的支持**随实现与版本而异** —— 旧的 `-dr`
+  写法在 PATH 先命中 Python 那份的机器上会报 `option -r not recognized`。
+  要递归就用 `find … -exec /usr/bin/xattr -d … {} +`，并写绝对路径 `/usr/bin/xattr`。
 
 TUN 模式还需要在应用内安装一次特权 helper（要求一次管理员密码）。
 

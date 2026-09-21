@@ -214,7 +214,7 @@ macOS 14-
 xattr -d com.apple.quarantine /Applications/XrayTun.app
 ```
 
-这条命令只删除系统给下载文件打的「来自互联网」标记。**注意是 `-d`，不是 `-dr`**： 现代 macOS 的 `xattr` 没有 `-r` 选项，写成 `-dr` 会报 `option -r not recognized`。
+这条命令只删除系统给下载文件打的「来自互联网」标记。**注意是 `-d`，不是 `-dr`**： `xattr` 在 macOS 上有**两个实现**（系统自带的 `/usr/bin/xattr` 与 PATH 上可能先命中的 Python `xattr` 包），`-r` 的支持**随实现与版本而异** —— 旧的 `-dr` 写法在 PATH 先命中 Python 那份的机器上会报 `option -r not recognized`。 要递归清理就用 `find … -exec /usr/bin/xattr -d … {} +`，并写绝对路径 `/usr/bin/xattr`。
 
 ### 第 4 步：在应用里安装特权 helper（TUN 模式需要）
 
@@ -647,7 +647,7 @@ Prefer the terminal, or the steps above did not work: open Terminal and run the 
 xattr -d com.apple.quarantine /Applications/XrayTun.app
 ```
 
-This only removes the "downloaded from the internet" quarantine flag. Note it is `-d`, **not** `-dr`: current versions of `xattr` do not have a `-r` option, and `-dr` fails with `option -r not recognized`.
+This only removes the "downloaded from the internet" quarantine flag. Note it is `-d`, **not** `-dr`: macOS ships **two `xattr` implementations** (the system one at `/usr/bin/xattr` and the Python `xattr` package that may come first on `PATH`), and `-r` support **varies by implementation and version** — the old `-dr` form fails with `option -r not recognized` on machines where Python's comes first. For recursion use `find … -exec /usr/bin/xattr -d … {} +` and write the absolute path `/usr/bin/xattr`.
 
 ### Step 4 — Install the privileged helper inside the app (TUN mode needs it)
 

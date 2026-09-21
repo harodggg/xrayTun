@@ -597,8 +597,10 @@ shasum -a 256 XrayTun_0.8.29_x86_64_arm64.dmg</code></pre>
                 <pre class="code"><code>xattr -d com.apple.quarantine /Applications/XrayTun.app</code></pre>
                 <p class="path__note">
                   这条命令只删除系统给下载文件打的「来自互联网」标记。<strong>注意是 <code>-d</code>，不是 <code>-dr</code></strong>：
-                  现代 macOS 的 <code>xattr</code> 没有 <code>-r</code> 选项，写成 <code>-dr</code>
-                  会报 <code>option -r not recognized</code>。
+                  <code>xattr</code> 在 macOS 上有<strong>两个实现</strong>（系统自带的 <code>/usr/bin/xattr</code>
+                  与 PATH 上可能先命中的 Python <code>xattr</code> 包），<code>-r</code> 的支持<strong>随实现与版本而异</strong>
+                  —— 旧的 <code>-dr</code> 写法在 PATH 先命中 Python 那份的机器上会报 <code>option -r not recognized</code>。
+                  要递归清理就用 <code>find … -exec /usr/bin/xattr -d … {} +</code>，并写绝对路径 <code>/usr/bin/xattr</code>。
                 </p>
               </div>
             </div>
