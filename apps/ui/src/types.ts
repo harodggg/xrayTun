@@ -320,6 +320,16 @@ export interface UpdateStatus {
   latest_geo: AvailableUpdate | null;
   /** 客户端自己的最新版。仓库是私有的，所以这一步需要 token。 */
   latest_app: AvailableUpdate | null;
+  /**
+   * 是否**确实**有新版。
+   *
+   * `latest_app` 有值只说明「查到了 GitHub 上的最新版」—— 你装的就是它时也有值。
+   * 后端已经比过版本（`commands/snapshot.rs`：`compare_versions(...).is_gt()`），
+   * 界面**只该用这个字段**决定要不要显示「更新并重启」。
+   *
+   * 这是「**查到了 ≠ 有新版**」—— 本项目修过四次的「查不到 ≠ 没有」的镜像。
+   */
+  app_update_available: boolean;
   /** 正在进行的更新下载。null 表示没有在下载。 */
   progress: UpdateProgress | null;
   checked_at: number | null;

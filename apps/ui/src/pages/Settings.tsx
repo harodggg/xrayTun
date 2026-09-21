@@ -638,12 +638,27 @@ export default function Settings() {
                     onClick={() => void run("check-app", () => api.checkAppUpdate())}>
               检查客户端更新
             </button>
-            {snapshot.update.latest_app && (
+            {/* 只在**确实**有新版时给「更新并重启」。
+                `latest_app` 非空只说明「查到了 GitHub 上的最新版」—— 你装的就是它时
+                也非空，只按它判断会让按钮永远显示（用户报的「多余」就是这个）。
+                判据用后端算好的 `app_update_available`（它比过版本）。 */}
+            {snapshot.update.app_update_available && snapshot.update.latest_app && (
               <button className="btn btn--primary" disabled={busy !== null || downloading}
                       onClick={() => void run("install-app", () => api.installAppUpdate())}>
                 更新到 {snapshot.update.latest_app.version} 并重启
               </button>
             )}
+            {/* 查到了、但确实没有新版 → 给一句明确的反馈。
+                点了「检查客户端更新」总该有落点，否则用户会以为没生效（再去点第二次）。
+                **失败时绝不允许走到这里**：`check_error` 优先（上面的失败块），
+                因为「没查到」不等于「已是最新」。 */}
+            {!snapshot.update.app_update_available &&
+              snapshot.update.latest_app &&
+              !snapshot.update.check_error && (
+                <span className="field__hint" style={{ alignSelf: "center" }}>
+                  已是最新版本
+                </span>
+              )}
             {downloading && (
               <span className="field__hint" style={{ alignSelf: "center" }}>下载中，请勿关闭…</span>
             )}

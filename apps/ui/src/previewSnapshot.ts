@@ -95,6 +95,23 @@ function probe(nodeId: string, rtt: number | null, ok: boolean, err: string | nu
  * `?preview=1&state=connected|uncommitted|disconnected|no-core|stale|notice`
  * 默认 `uncommitted`（两阶段启动的中间态，最值得看的一种）。
  */
+/**
+ * 预览用的「GitHub 上的最新版」条目。
+ *
+ * `size` / `published_at` / `download_url` 用 v0.8.28 的真实形状（站点资产表里有同样的
+ * 数字），这样界面上的文案与真实数据同形。
+ */
+function fakeAppRelease(version: string): NonNullable<AppSnapshot["update"]["latest_app"]> {
+  return {
+    size: 47_145_126,
+    version,
+    published_at: "2026-09-20T16:03:44Z",
+    prerelease: false,
+    download_url: `https://github.com/harodggg/xrayTun/releases/download/v${version}/XrayTun_${version}_x86_64_arm64.dmg`,
+    digest_url: `https://github.com/harodggg/xrayTun/releases/download/v${version}/SHA256SUMS.txt`,
+  } as unknown as NonNullable<AppSnapshot["update"]["latest_app"]>;
+}
+
 export function scenarioSnapshot(): AppSnapshot {
   const base = structuredClone(BASE_SNAPSHOT);
   const state = new URLSearchParams(location.search).get("state") ?? "uncommitted";
@@ -124,6 +141,23 @@ export function scenarioSnapshot(): AppSnapshot {
       // 故意堆多条，检查「只显示最急一条 + 还有 N 条」
       base.core = { ...base.core, supports_native_tun: false } as AppSnapshot["core"];
       base.runtime.last_error = "上次启动失败：端口 10808 被占用";
+      break;
+    case "update-latest":
+      // 「已经是最新版」：**查得到** GitHub 上的版本，但当前装的就是它。
+      // 这正是用户报的「多余」场景 —— 应该没有更新按钮、但要有「已是最新版本」。
+      base.update = {
+        ...base.update,
+        latest_app: fakeAppRelease(base.app_version),
+        app_update_available: false,
+      } as unknown as AppSnapshot["update"];
+      break;
+    case "update-available":
+      // 确实有新版：必须出现「更新到 X 并重启」。
+      base.update = {
+        ...base.update,
+        latest_app: fakeAppRelease("0.8.30"),
+        app_update_available: true,
+      } as unknown as AppSnapshot["update"];
       break;
     case "uncommitted":
     default:
@@ -255,6 +289,8 @@ const BASE_SNAPSHOT: AppSnapshot = {
     latest_core: null,
     latest_geo: null,
     latest_app: null,
+    /** 后端比过版本才算出来的字段（见 types.ts 的说明）。 */
+    app_update_available: false,
     checked_at: now - 300,
     check_error: null,
     progress: null,
