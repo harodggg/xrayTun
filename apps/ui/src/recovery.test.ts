@@ -21,8 +21,8 @@
 import { describe, expect, it } from "vitest";
 
 import { parseRecovery, recoveryView } from "./ipc";
-// 仪表盘主按钮的呈现是纯函数（task-60 ② 让「恢复期间必须禁用」可单测）。
-import { connectControl } from "./pages/Dashboard";
+// 顶栏唯一主按钮的可点性（task-72：仪表盘那颗等价按钮已收敛掉，不变量搬到这里）。
+import { runButtonDisabled } from "./topbarStatus";
 import type { RecoveryState } from "./types";
 
 function rec(over: Partial<RecoveryState> = {}): RecoveryState {
@@ -259,41 +259,36 @@ describe("③ 粘滞：手动重连成功后不得再显示「自动恢复失败
  * 防的故障（实测）：`?recovery=recovering` 时顶栏按钮是「正在恢复…」且禁用，
  * 而仪表盘同一屏给了一个**可点的「连接」**，它自己的副文案还写着「点了会打断它」。
  */
-describe("仪表盘主按钮：恢复期间必须禁用", () => {
-  const opts = { busy: false, mode: "tun" as const, hasCore: true };
+/**
+ * task-60 ②（task-72 后搬到顶栏）：自动恢复期间，唯一的「连接/断开」按钮必须禁用。
+ *
+ * 防的故障（实测）：`?recovery=recovering` 时顶栏按钮是「正在恢复…」且禁用，
+ * 而仪表盘同一屏曾给了一个**可点的「连接」**，它自己的副文案还写着「点了会打断它」。
+ * task-72 把仪表盘那颗等价按钮收敛掉了（同一命令），所以这条不变量现在钉在
+ * `runButtonDisabled()` 上 —— 它驱动**顶栏那唯一的一颗**。
+ */
+describe("顶栏唯一的主按钮：恢复期间必须禁用", () => {
+  const opts = { runBusy: false, mode: "tun" as const };
 
-  it("recovering → disabled + 文案与顶栏同词", () => {
+  it("recovering → disabled（这条不变量不能随仪表盘那颗按钮一起消失）", () => {
     const rv = recoveryView(rec({ recovering: true, attempt: 2 }), false);
-    const c = connectControl(false, rv, opts);
-    expect(c.disabled).toBe(true);
-    expect(c.label).toBe("正在恢复…");
-    expect(c.title).toContain("打断");
+    expect(runButtonDisabled(rv, opts)).toBe(true);
   });
 
-  it("idle（未连接）→ 可点，标签是「连接」", () => {
-    const c = connectControl(false, recoveryView(rec(), false), opts);
-    expect(c.disabled).toBe(false);
-    expect(c.label).toBe("连接");
+  it("idle → 可点（未连接时是「连接」，已连接时是「断开」）", () => {
+    expect(runButtonDisabled(recoveryView(rec(), false), opts)).toBe(false);
+    expect(runButtonDisabled(recoveryView(rec(), true), opts)).toBe(false);
   });
 
-  it("idle（已连接）→ 可点，标签是「断开」", () => {
-    const c = connectControl(true, recoveryView(rec(), true), opts);
-    expect(c.disabled).toBe(false);
-    expect(c.label).toBe("断开");
-  });
-
-  it("failed → 可点（手动重连是出路），标题说明已退回直连", () => {
+  it("failed → 可点（手动重连是出路）", () => {
     const rv = recoveryView(rec({ last_outcome: "direct_fallback" }), false);
-    const c = connectControl(false, rv, opts);
-    expect(c.disabled).toBe(false);
-    expect(c.title).toContain("手动重连");
+    expect(runButtonDisabled(rv, opts)).toBe(false);
   });
 
-  it("忙碌 / 直连模式 / 缺核心 → 沿用原来的禁用条件（不要改坏）", () => {
+  it("忙碌 / 直连模式 → 沿用原来的禁用条件（不要改坏）", () => {
     const idle = recoveryView(rec(), false);
-    expect(connectControl(false, idle, { ...opts, busy: true }).disabled).toBe(true);
-    expect(connectControl(false, idle, { ...opts, hasCore: false }).disabled).toBe(true);
-    expect(connectControl(false, idle, { ...opts, mode: "direct" }).disabled).toBe(true);
-    expect(connectControl(true, idle, { ...opts, mode: "direct" }).disabled).toBe(true);
+    expect(runButtonDisabled(idle, { ...opts, runBusy: true })).toBe(true);
+    expect(runButtonDisabled(idle, { ...opts, mode: "direct" })).toBe(true);
+    expect(runButtonDisabled(recoveryView(rec(), true), { ...opts, mode: "direct" })).toBe(true);
   });
 });

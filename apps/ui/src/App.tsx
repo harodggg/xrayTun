@@ -2,7 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { api, recoveryView } from "./ipc";
 // 状态语义的**唯一真源**（task-45 建、task-47 合并）：顶栏的线/点与仪表盘的状态区
 // 都从 `appStatus` 取，任何地方再抄一份判断都是把同一族「假陈述」种回去。
-import { appStatus, DOT_TONE_CLASS, TOPBAR_TONE_CLASS } from "./topbarStatus";
+import {
+  appStatus,
+  DOT_TONE_CLASS,
+  runButtonDisabled,
+  systemProxyBadge,
+  TOPBAR_TONE_CLASS,
+} from "./topbarStatus";
 import { StoreProvider, useStore } from "./store";
 import { MODE_LABEL, formatBytes, formatRate, type ProxyMode } from "./types";
 import Dashboard from "./pages/Dashboard";
@@ -209,6 +215,8 @@ export function TopBar({ view }: { view: View }) {
     httpPort: snapshot?.settings.http_port ?? null,
   });
   const socksPort = snapshot?.settings.socks_port ?? null;
+  /** 只有在「核心运行中 + 系统代理模式」时才有内容（task-72，见 `systemProxyBadge`）。 */
+  const proxyBadge = systemProxyBadge(mode, running, socksPort);
   const traffic = snapshot?.traffic;
   // 窗口用的是 `hiddenTitle`（见 tauri.conf.json），macOS 的标题栏文字是
   // 隐藏的 —— 这条顶栏才是用户真正看到的「标题栏」。所以网速要显示在这里，
@@ -314,14 +322,15 @@ export function TopBar({ view }: { view: View }) {
 
       {/* 「系统代理」模式的真相（task-68）：**本应用从不修改系统代理设置** ——
           它只提供本地入站入口（`docs/07-roadmap-and-risks.md` 里「系统代理模式
-          真正生效」仍是未勾选项，全仓对系统代理的写入 0 命中）。而这是**默认模式**，
-          所以这条提示要跟着用户走到每一页，不能只在仪表盘说一次。
-          完整说明（含「需要手动指向」）在 `status.detail` 里，也是读屏的播报内容。 */}
-      {running && mode === "system_proxy" && (
+          真正生效」仍是未勾选项，全仓对系统代理的写入 0 命中）。
+
+          task-72：**只在核心运行中 + 系统代理模式**显示。`SystemProxy` 是 `#[default]`，
+          新用户一打开就是它，那时没有端口需要指向 —— 显示它只是噪音；连上之后
+          它才是真事实，也正是用户需要它的时刻。仪表盘 `sub` 与 live region 里的
+          同一句话**不受这个条件影响**（载体按条件出现，信息不消失）。 */}
+      {proxyBadge && (
         <span className="badge badge--unknown" title={status.detail}>
-          {socksPort !== null
-            ? `未设系统代理 · 需指向 127.0.0.1:${socksPort}`
-            : "未设系统代理 · 需手动指向本地端口"}
+          {proxyBadge}
         </span>
       )}
 
@@ -349,7 +358,7 @@ export function TopBar({ view }: { view: View }) {
       <span className={`dot ${DOT_TONE_CLASS[status.tone]}`} />
       <button
         className={`btn ${rv.button === "connect" ? "btn--primary" : ""}`}
-        disabled={runBusy || mode === "direct" || rv.button === "recovering"}
+        disabled={runButtonDisabled(rv, { runBusy, mode })}
         onClick={() => void toggleRun()}
         title={
           mode === "direct"

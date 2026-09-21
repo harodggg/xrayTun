@@ -22,12 +22,12 @@
 
 import { useState } from "react";
 
-import { api, recoveryView, type RecoveryView } from "../ipc";
+import { api, recoveryView } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
 import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
 import { useStore } from "../store";
-import type { AppSnapshot, ProxyMode } from "../types";
+import type { AppSnapshot } from "../types";
 import {
   formatBytes,
   formatRate,
@@ -104,12 +104,6 @@ export default function Dashboard({
    * 驱动，**不解析 notice 文案**。
    */
   const rv = recoveryView(recovery, connected);
-  /** 主按钮（连接/断开）的呈现：恢复期间必须禁用（task-60 ②）。 */
-  const connectBtn = connectControl(connected, rv, {
-    busy: busy !== null,
-    mode: settings.mode,
-    hasCore: core.path !== null,
-  });
 
   // ---- 状态词：**唯一真源**（task-47）----
   //
@@ -183,16 +177,14 @@ export default function Dashboard({
             这样顶栏 `title`、live region 与这里**同一份文本、同一个真源**。 */}
         {state.sub && <div className="dash__state-sub">{state.sub}</div>}
 
+        {/* 主操作（连接/断开）**只在顶栏渲染一个**（task-72）。
+            这里原来还有一颗等价的「连接/断开」，同一个屏上出现两个 —— 而两者
+            调的是同一个命令（顶栏 `toggleRun` → `run("stop"|"start", api.stop|api.start)`，
+            与这里删掉的那颗逐字相同），所以它不是「另一条路径」，只是重复。
+            保留顶栏那颗：它是全局控件，任何页面都在。
+            恢复期间「不得可点」这条不变量搬到了 `runButtonDisabled`（有单测），
+            没有随按钮一起消失。 */}
         <div className="dash__actions">
-          <button
-            className={`btn ${connected ? "btn--danger" : "btn--primary"}`}
-            disabled={connectBtn.disabled}
-            onClick={() => void run(connected ? "stop" : "start", connected ? api.stop : api.start)}
-            title={connectBtn.title}
-          >
-            {busy === "start" || busy === "stop" ? <span className="spin" /> : null}
-            {connectBtn.label}
-          </button>
           <button className="btn btn--ghost" onClick={() => onNavigate("nodes")}>
             {connected ? "切换节点" : "选择节点"}
           </button>
@@ -449,39 +441,12 @@ function elapsed(startedAtUnix: number): string {
   return `${Math.floor(hours / 24)} 天`;
 }
 
-/**
- * 仪表盘主按钮（连接/断开）的呈现。
+/*
+ * 这里原来有 `connectControl()`：仪表盘那颗「连接/断开」按钮的呈现（含
+ * 「恢复期间必须禁用」）。
  *
- * # 为什么抽成纯函数
- *
- * 原来 `disabled` 只看 `busy / mode / core`，**不看正在自动恢复** —— 于是
- * `?recovery=recovering` 时顶栏的按钮是「正在恢复…」且 `disabled=true`，
- * 而仪表盘在同一屏给出一个**可点的「连接」**，它自己的副文案还写着
- * 「点了会打断它」（task-60 实测：`dashBtns: [{"t":"连接","dis":false}]`）。
- * 抽出来是为了让「恢复期间必须禁用」这条能被单测钉住，而不是只靠渲染层自觉。
- *
- * 标签与顶栏保持**同一套词**（`App.tsx` 的 TopBar）：两处按钮说的是同一件事，
- * 一个写「正在恢复…」另一个写「连接」本身就是矛盾。
+ * task-72 把那颗按钮收敛掉了 —— 它与顶栏那颗是**同一个命令**的等价按钮
+ * （两处都是 `run("stop"|"start", api.stop|api.start)`），同屏出现两个「断开」
+ * 只是重复。该不变量没有随之消失，而是搬到了 `topbarStatus.runButtonDisabled()`
+ * （顶栏唯一的那个按钮），并保持有单测。
  */
-export function connectControl(
-  connected: boolean,
-  rv: RecoveryView,
-  opts: { busy: boolean; mode: ProxyMode; hasCore: boolean },
-): { label: string; disabled: boolean; title: string | undefined } {
-  const label = rv.button === "recovering" ? "正在恢复…" : connected ? "断开" : "连接";
-  if (rv.button === "recovering") {
-    return {
-      label,
-      disabled: true,
-      title: "正在自动恢复 —— 现在点「连接」会打断看门狗的重建，所以先禁用；恢复会自动完成",
-    };
-  }
-  if (opts.mode === "direct") {
-    return { label, disabled: true, title: "直连模式下无需启动核心" };
-  }
-  return {
-    label,
-    disabled: opts.busy || !opts.hasCore,
-    title: rv.phase === "failed" ? "自动恢复失败，已退回直连；点这里可手动重连" : undefined,
-  };
-}

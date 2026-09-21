@@ -262,3 +262,42 @@ function baseStatus(input: StatusInput): AppStatus {
     detail: `${entry} —— 系统代理未被本应用修改，需要手动${pointTo}`,
   };
 }
+
+/**
+ * 顶栏那条「未设系统代理」徽章的文字；`null` = **不显示**。
+ *
+ * # 为什么只在「核心运行中 + 系统代理模式」显示（task-72）
+ *
+ * `ProxyMode::SystemProxy` 是 `#[default]`，所以**新用户一打开就是它** ——
+ * 而那时并没有代理入口需要指向，徽章只是噪音。等真的连上、本地入站端口在监听了，
+ * 它才是一条**真事实**，而且正是那一刻用户需要它（要手动把浏览器/系统代理指过来）。
+ *
+ * 注意区分：**徽章是按条件出现的载体，信息本身不随条件消失** ——
+ * 仪表盘的 `sub` 与 live region 里的同一句话不受此函数影响（它们有自己的显示条件，
+ * 见 `appStatus` 的第 7 个分支）。
+ */
+export function systemProxyBadge(
+  mode: ProxyMode,
+  running: boolean,
+  socksPort: number | null,
+): string | null {
+  if (!running || mode !== "system_proxy") return null;
+  return socksPort !== null
+    ? `未设系统代理 · 需指向 127.0.0.1:${socksPort}`
+    : "未设系统代理 · 需手动指向本地端口";
+}
+
+/**
+ * 顶栏「连接/断开」是否禁用。
+ *
+ * 抽出来是为了让「**恢复期间不得可点**」这条不变量有单测。task-60 ② 把它钉在
+ * 仪表盘那颗按钮上；task-72 把仪表盘那颗按钮收敛掉了（它与顶栏是同一个命令的
+ * 等价按钮），**不变量必须跟着搬到顶栏，不能随按钮一起删掉** ——
+ * 否则用户又能在看门狗重建时点「连接」把它打断。
+ */
+export function runButtonDisabled(
+  rv: RecoveryView,
+  opts: { runBusy: boolean; mode: ProxyMode },
+): boolean {
+  return opts.runBusy || opts.mode === "direct" || rv.button === "recovering";
+}
