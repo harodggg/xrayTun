@@ -15,6 +15,7 @@
 
 import { useState } from "react";
 import { api } from "../ipc";
+import { InlineConfirm } from "../InlineConfirm";
 import { useStore } from "../store";
 import { formatBytes, formatTimestamp, type Subscription } from "../types";
 
@@ -199,9 +200,22 @@ function SubscriptionRow({
         <button className="btn btn--ghost" disabled={busy} onClick={onRefresh}>
           更新
         </button>
-        <button className="btn btn--ghost btn--danger" disabled={busy} onClick={onRemove}>
-          删除
-        </button>
+        {/* 删订阅**连带删掉它带来的节点**（后端 `remove_subscription` → `nodes.retain(...)`），
+            所以确认语里必须把「会删掉多少个节点」写出来 —— 只说「删除订阅」会让人以为
+            只是少了一个订阅源。 */}
+        <InlineConfirm
+          label="删除"
+          className="btn btn--ghost btn--danger"
+          disabled={busy}
+          title="删除该订阅"
+          question={
+            sub.node_count > 0
+              ? `删除订阅「${sub.name}」？会同时删除它带来的 ${sub.node_count} 个节点，无法撤销。`
+              : `删除订阅「${sub.name}」？此操作会写入配置文件，无法撤销。`
+          }
+          confirmLabel="确认删除"
+          onConfirm={onRemove}
+        />
       </div>
     </div>
   );

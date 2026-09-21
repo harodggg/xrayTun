@@ -57,6 +57,11 @@ export type {
   TopologyProbeVerdict,
 } from "./previewProbe";
 
+/** 预览参数。失败态场景靠它选（只读 URL，不改任何真实状态）。 */
+function previewParam(key: string): string | null {
+  return new URLSearchParams(location.search).get(key);
+}
+
 /** 安装桥接。返回 uninstall，便于热更新时清理。 */
 export function installPreviewBridge(): () => void {
   // 拓扑自检探针（`window.__topologyProbe()`）：只读 DOM，与假后端无关，
@@ -138,7 +143,23 @@ export function installPreviewBridge(): () => void {
           };
         }
         case "tail_logs":
+          // 日志**读取失败**的复现入口（task-23 缺陷 A）：
+          //   · `?preview=1&logs=fail`  → 真的 reject：验「读不到 ≠ 没有日志」
+          //   · `?preview=1&logs=empty` → 读取成功但没有日志：配合 `&state=disconnected`
+          //     得到「核心还没启动过」，配合默认 state 得到「核心在跑但还没输出」
+          if (previewParam("logs") === "fail") {
+            throw new Error(
+              "读取日志失败：~/Library/Application Support/XrayTun/logs/xraytun.log 打不开（Permission denied, os error 13）",
+            );
+          }
+          if (previewParam("logs") === "empty") return [];
           return MOCK_LOGS;
+        case "clear_logs":
+          // 清空**失败**态：验「后端没确认成功之前不能先把界面清空」（缺陷 B 的诚实性）。
+          if (previewParam("clear") === "fail") {
+            throw new Error("清空日志文件失败：Permission denied (os error 13)");
+          }
+          return null;
         case "recent_connections":
           return connectionsScenario();
         case "diagnostics":

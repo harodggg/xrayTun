@@ -19,6 +19,7 @@
 
 import { useMemo, useState } from "react";
 import { api, errorText } from "../ipc";
+import { InlineConfirm } from "../InlineConfirm";
 import { useStore } from "../store";
 import { latencyTier, nodeSummary, type Node, type NodeExport } from "../types";
 
@@ -308,17 +309,22 @@ function NodeRow({
         >
           二维码
         </button>
-        <button
+        {/* 删除会**落盘**（后端 `delete_node` → `save_nodes`）且无法撤销，所以要确认。
+            订阅带来的节点还要额外说清「它会回来」—— 刷新订阅时后端会先按订阅清空、
+            再重新导入（`nodes.rs:246-252`），所以手动删掉的那个下次更新又会出现。 */}
+        <InlineConfirm
+          label="删除"
           className="btn btn--ghost btn--danger"
           disabled={busy}
           title="删除该节点"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-        >
-          删除
-        </button>
+          question={
+            fromSubscription
+              ? `删除节点「${node.name}」？它来自订阅，下次更新订阅时会重新出现；此操作会写入配置文件，无法撤销。`
+              : `删除节点「${node.name}」？此操作会写入配置文件，无法撤销。`
+          }
+          confirmLabel="确认删除"
+          onConfirm={onDelete}
+        />
       </span>
     </div>
   );

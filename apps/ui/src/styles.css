@@ -226,6 +226,24 @@ textarea {
   border-color: var(--danger);
 }
 
+/* ---- 内联二次确认（破坏性操作，见 InlineConfirm.tsx） ----
+   确认态就地长在被操作对象旁边：先把**后果**说清楚（问句），再给两颗语义不同的按钮。
+   之所以不是「同一个按钮点两次」——那样两次点击语义相同，误触与连点都会通过。 */
+.confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  /* 确认态比按钮宽，允许它在行内换行，但不要撑破卡片 */
+  max-width: 100%;
+}
+
+.confirm__question {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .btn--ghost {
   background: transparent;
   border-color: transparent;
@@ -509,6 +527,13 @@ input[type="checkbox"] {
   border-color: #26456b;
   background: #131f30;
   color: #cfe1f8;
+}
+
+/* 日志页的读取失败横幅：原因文字可以换行，按钮留在最右。 */
+.logs__banner-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
 }
 
 /* ---------------------------------------------------------------- 日志 */
