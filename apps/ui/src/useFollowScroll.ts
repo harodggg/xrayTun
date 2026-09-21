@@ -40,7 +40,35 @@ function scrollToBottom(el: HTMLElement): void {
 export function useFollowScroll(contentLength: number) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
-  const [follow, setFollow] = useState(true);
+  const [follow, setFollowState] = useState(true);
+
+  /**
+   * 用户是否**显式关掉**过跟随。
+   *
+   * # 为什么必须有这个标记
+   *
+   * 位置驱动的自动暂停/恢复（见下面的 `onScroll`）与复选框共用同一个 state 时，
+   * 两者会互相翻案 —— 实测到的用户问题是：
+   *
+   *   1. 用户在底部取消勾选「跟随」（意图：别再自动滚了）；
+   *   2. 他随手一滚（`atBottom` 仍为真）→ `onScroll` 把 follow 设回 `true`；
+   *   3. 下一条日志又把他拽回底部。
+   *
+   * 也就是**「关了跟随，日志还在动」** —— 开关形同虚设。
+   *
+   * 语义上这两件事必须分开：
+   * * **位置**只说明「用户现在看的是哪里」，可以据此*自动暂停*（往上翻历史时别打断他）；
+   * * **复选框**是用户的*明确指令*，一旦说关就必须是关，位置不许翻案。
+   *
+   * 所以：显式关闭后锁住（位置驱动完全停用），直到用户再次显式打开。
+   */
+  const manualOffRef = useRef(false);
+
+  /** 复选框走这里：它是用户的明确指令，所以顺带记录意图。 */
+  const setFollow = useCallback((next: boolean) => {
+    manualOffRef.current = !next;
+    setFollowState(next);
+  }, []);
 
   // 用户往上滚就暂停跟随；滚回底部就恢复。
   //
@@ -49,8 +77,10 @@ export function useFollowScroll(contentLength: number) {
   const onScroll = useCallback(() => {
     const el = boxRef.current;
     if (!el) return;
+    // 显式关过：位置不许把它翻回来（否则开关等于没关）。
+    if (manualOffRef.current) return;
     const near = atBottom(el);
-    setFollow((prev) => (prev === near ? prev : near));
+    setFollowState((prev) => (prev === near ? prev : near));
   }, []);
 
   // 有新内容：只有仍处于跟随状态时才滚到底。

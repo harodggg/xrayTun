@@ -133,4 +133,58 @@ describe("useFollowScroll", () => {
     });
     expect(checkbox.checked).toBe(true);
   });
+
+  it("**显式关掉跟随之后，位置不许把它翻回来**（用户实测：关了跟随日志还在动）", () => {
+    const { getByTestId } = render(<Harness />);
+    const box = getByTestId("box");
+    sizeBox(box);
+    const checkbox = getByTestId("follow") as HTMLInputElement;
+
+    // 用户在底部取消勾选 —— 意图是「别再自动滚了」
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(false);
+
+    // 随手一滚，人还在底部。位置驱动**不得**因此把它重新打开。
+    act(() => {
+      box.scrollTop = box.scrollHeight - box.clientHeight;
+      fireEvent.scroll(box);
+    });
+    expect(checkbox.checked).toBe(false);
+
+    // 之后新日志到达，也不许把视图拽到底部。
+    box.scrollTop = 123;
+    fireEvent.click(getByTestId("more"));
+    expect(box.scrollTop).toBe(123);
+  });
+
+  it("显式关掉后，重新勾选仍然能恢复「滚回底部自动跟随」", () => {
+    const { getByTestId } = render(<Harness />);
+    const box = getByTestId("box");
+    sizeBox(box);
+    const checkbox = getByTestId("follow") as HTMLInputElement;
+
+    // 关 → 位置翻不了案
+    fireEvent.click(checkbox);
+    act(() => {
+      box.scrollTop = box.scrollHeight - box.clientHeight;
+      fireEvent.scroll(box);
+    });
+    expect(checkbox.checked).toBe(false);
+
+    // 用户再次勾上：显式打开，锁解除，位置驱动重新生效
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+
+    act(() => {
+      box.scrollTop = 50;
+      fireEvent.scroll(box);
+    });
+    expect(checkbox.checked).toBe(false);
+
+    act(() => {
+      box.scrollTop = box.scrollHeight - box.clientHeight;
+      fireEvent.scroll(box);
+    });
+    expect(checkbox.checked).toBe(true);
+  });
 });
