@@ -780,8 +780,18 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
 
             // 重建：用**当前**的物理出口重新算路由与 DNS。熄屏唤醒后网关
             // 变了也能对上，这正是"能自愈"的关键。
-            if stop_core(&handle, &state).await.is_ok()
-                && start_core(&handle, &state).await.is_ok()
+            //
+            // 与换网重建共用 `rebuild_tunnel_in_order`（先停后起、停不下来不起）。
+            // **等价性有测试**：`rebuild_seam_is_equivalent_to_the_inline_and_then_short_circuit`
+            // 逐个枚举 (stop, start) 的四种结果，断言「结果 == stop.is_ok() && start.is_ok()」
+            // 且「stop 失败时不调用 start」—— 与原写法完全一致；`.is_ok()` 保持
+            // 原来的「不看具体错误」。**不要**借这次统一改行为。
+            if rebuild_tunnel_in_order(
+                || stop_core(&handle, &state),
+                || start_core(&handle, &state),
+            )
+            .await
+            .is_ok()
             {
                 state.with(|i| {
                     i.runtime.recovery.succeeded(xt_core::util::now_unix());
@@ -975,6 +985,38 @@ pub(crate) fn should_rebuild_after_egress_change(
     still_mine && user_wants_it && !already_recovering
 }
 
+/// 两次自动重建之间的最小间隔。
+///
+/// 为什么要冷却：重建会**强制拆掉隧道**（用户可感知的中断）。Wi-Fi 连断/漫游时
+/// `Egress` 会在几秒内来回变，没有冷却就变成「每 5 秒拆一次网」——
+/// 那比「晚半分钟恢复」糟得多。
+///
+/// 为什么是 30 秒：换网检测每 5 秒一轮、看门狗每 10 秒一轮；30 秒 =
+/// 看门狗探测间隔的 3 倍、检测间隔的 6 倍。足以吸收一次「连断 → 重连」的抖动，
+/// 又不至于让一次**真**换网迟迟不恢复。
+///
+/// **只约束紧随其后的重复**：第一次变化立刻重建（见 `egress_rebuild_allowed`）。
+pub(crate) const EGRESS_REBUILD_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// 这一轮换网检测允许重建吗。
+///
+/// * `last_rebuild_started` = 上一次**任何**自动重建的开始时刻，取自
+///   `runtime.recovery.started_unix`（看门狗与换网重建共用它，**不新造状态**）；
+/// * `None`（这次运行里还没重建过）⇒ **允许**：第一次变化必须立刻重建；
+/// * 距上次不足冷却 ⇒ 挡下 —— 调用方**必须留日志**，不许变成静默不生效；
+/// * 墙上时钟被往回调（`now < last`）⇒ **允许**：无法判断间隔时宁可去恢复网络，
+///   也不要让一次时钟跳变把隧道永久卡在坏状态。
+pub(crate) fn egress_rebuild_allowed(
+    now_unix: u64,
+    last_rebuild_started: Option<u64>,
+    cooldown: Duration,
+) -> bool {
+    match last_rebuild_started {
+        None => true,
+        Some(last) => now_unix < last || now_unix - last >= cooldown.as_secs(),
+    }
+}
+
 /// 连上之后盯着物理出口有没有变。
 ///
 /// 隧道是**按连接那一刻的物理出口**建的：helper 装的路由指向当时的网关，
@@ -1066,11 +1108,35 @@ pub(crate) fn spawn_network_watch(
                 return;
             }
 
+            // **冷却窗口**：只挡「紧随其后的重复」，第一次变化不受影响。
+            //
+            // 判据用 `recovery.started_unix`（看门狗与换网重建共用的「上次重建
+            // 何时开始」），所以不需要新造状态。
+            let now_unix = xt_core::util::now_unix();
+            let last_started = state
+                .with(|i| i.runtime.recovery.started_unix)
+                .unwrap_or(None);
+            if !egress_rebuild_allowed(now_unix, last_started, EGRESS_REBUILD_COOLDOWN) {
+                // **绝不静默**：被冷却挡下也必须留下可见记录，并说清「还会再试」——
+                // 「检测到了但什么都不做且没人知道」正是本项目栽过三次的那一族。
+                let since = now_unix.saturating_sub(last_started.unwrap_or(now_unix));
+                state.log(
+                    "app",
+                    "warn",
+                    format!(
+                        "检测到再次换网（{from} → {to}），但距上次重建仅 {since}s（冷却 {}s），这一轮不重建：避免反复拆建隧道；出口仍不同的话冷却过后会自动重建",
+                        EGRESS_REBUILD_COOLDOWN.as_secs()
+                    ),
+                );
+                // **继续盯着，不能 return**：冷却过后还得有人把隧道建回来。
+                continue;
+            }
+
             // **可读的过程**：复用已有的恢复态（界面据此显示「正在恢复」并改写
             // 连接按钮），提示条**写明是因为换网**，而不是笼统一句「正在恢复」。
             state.with(|i| {
                 i.last_notice = Some(format!("检测到换网（{from} → {to}），正在重建隧道…"));
-                i.runtime.recovery.begin(xt_core::util::now_unix());
+                i.runtime.recovery.begin(now_unix);
             });
             state.log(
                 "app",
@@ -2140,6 +2206,96 @@ mod tests {
         );
     }
 
+    /// **决定②的前提：证明等价。**
+    ///
+    /// 看门狗原来写的是 `stop_core(...).is_ok() && start_core(...).is_ok()`。
+    /// 逐个枚举四种结果，断言 `rebuild_tunnel_in_order` 与它
+    /// **结果相同、调用序列相同**（`&&` 短路 ⇒ stop 失败时不调用 start）。
+    /// 只有这条绿，才允许把看门狗统一到 seam 上。
+    #[tokio::test]
+    async fn rebuild_seam_is_equivalent_to_the_inline_and_then_short_circuit() {
+        use std::sync::Mutex;
+        for stop_ok in [true, false] {
+            for start_ok in [true, false] {
+                let calls = Mutex::new(Vec::<&str>::new());
+                let out = rebuild_tunnel_in_order(
+                    || async {
+                        calls.lock().unwrap().push("stop");
+                        if stop_ok {
+                            Ok::<(), String>(())
+                        } else {
+                            Err("stop 失败".to_string())
+                        }
+                    },
+                    || async {
+                        calls.lock().unwrap().push("start");
+                        if start_ok {
+                            Ok::<(), String>(())
+                        } else {
+                            Err("start 失败".to_string())
+                        }
+                    },
+                )
+                .await;
+                // ① 结果 == 原来 `&&` 的真值
+                assert_eq!(
+                    out.is_ok(),
+                    stop_ok && start_ok,
+                    "stop_ok={stop_ok} start_ok={start_ok}：结果必须与 `&&` 一致",
+                );
+                // ② 调用序列 == 原来 `&&` 的短路行为
+                let expected: Vec<&str> = if stop_ok {
+                    vec!["stop", "start"]
+                } else {
+                    vec!["stop"]
+                };
+                assert_eq!(
+                    *calls.lock().unwrap(),
+                    expected,
+                    "stop_ok={stop_ok} start_ok={start_ok}：调用序列必须与 `&&` 一致",
+                );
+            }
+        }
+    }
+
+    /// **冷却窗口**：第一次变化立刻放行；紧随其后的重复被挡；冷却过后再放行。
+    #[test]
+    fn egress_rebuild_cooldown_gates_only_repeats_not_the_first() {
+        let now = 1_700_000_000u64;
+        assert!(
+            egress_rebuild_allowed(now, None, EGRESS_REBUILD_COOLDOWN),
+            "这次运行里还没重建过 —— 第一次变化必须立刻重建",
+        );
+        assert!(
+            !egress_rebuild_allowed(now + 1, Some(now), EGRESS_REBUILD_COOLDOWN),
+            "刚刚重建过又变了一次（Wi-Fi 抖动）—— 冷却期内不许再拆一次",
+        );
+        assert!(
+            !egress_rebuild_allowed(
+                now + EGRESS_REBUILD_COOLDOWN.as_secs() - 1,
+                Some(now),
+                EGRESS_REBUILD_COOLDOWN,
+            ),
+            "冷却还差 1 秒也不行",
+        );
+        assert!(
+            egress_rebuild_allowed(
+                now + EGRESS_REBUILD_COOLDOWN.as_secs(),
+                Some(now),
+                EGRESS_REBUILD_COOLDOWN,
+            ),
+            "冷却一到就必须允许重建（否则隧道一直坏着）",
+        );
+        assert!(
+            egress_rebuild_allowed(now + 3600, Some(now), EGRESS_REBUILD_COOLDOWN),
+            "过了很久当然允许",
+        );
+        assert!(
+            egress_rebuild_allowed(now - 100, Some(now), EGRESS_REBUILD_COOLDOWN),
+            "墙上时钟被往回调 ⇒ 无法判断间隔，宁可去恢复网络，不许永久卡死",
+        );
+    }
+
     /// **(b)** 看门狗要探的目标必须**包含国内** —— 只探境外时「国内全断」永远发现不了。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
@@ -2217,6 +2373,10 @@ mod tests {
         assert!(
             prod.contains("watchdog_probe_all(port, 6)"),
             "看门狗必须用**多目标探测**（国内 + 境外）—— 回到只探境外就又会漏掉「国内全断」",
+        );
+        assert!(
+            prod.contains("!egress_rebuild_allowed(now_unix, last_started"),
+            "换网重建必须**继续过冷却判据**（删掉它 = Wi-Fi 抖动时每 5 秒拆一次网）",
         );
         assert!(
             !prod.contains("请断开后重新连接"),
