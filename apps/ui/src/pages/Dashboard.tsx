@@ -23,6 +23,8 @@
 import { useState } from "react";
 
 import { api, recoveryView } from "../ipc";
+// 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
+import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
 import { useStore } from "../store";
 import type { AppSnapshot } from "../types";
 import {
@@ -62,30 +64,29 @@ export default function Dashboard({ onNavigate }: { onNavigate: (view: string) =
    */
   const rv = recoveryView(recovery, connected);
 
-  // ---- 状态词：把「进程在跑」与「流量真的走代理了吗」合成一个结论 ----
-  // 这是规范第 2 条要求的精确表达：中间态不能说成「已连接」。
-  // 自动恢复的两态排在「未连接」**之前**，否则又会被盖成「未连接」。
-  const state = !core.path
-    ? { tone: "bad", dot: "", label: "未找到核心", sub: "缺少 Xray 可执行文件" }
-    : rv.phase === "recovering"
-      ? {
-          tone: "warn",
-          dot: "dot--warn",
-          label: rv.text!,
-          sub: "看门狗正在重建隧道，不需要手动点「连接」（点了会打断它）",
-        }
-      : rv.phase === "failed"
-        ? {
-            tone: "warn",
-            dot: "dot--warn",
-            label: "自动恢复失败",
-            sub: "已退回直连：网络可用，但流量不再走代理 —— 可手动重连，或换一个节点",
-          }
-        : !connected
-          ? { tone: "off", dot: "", label: "未连接", sub: "核心没有在运行" }
-          : !runtime.routes_committed
-            ? { tone: "warn", dot: "dot--warn", label: "隧道已建立", sub: "默认路由尚未接管，流量还没有走代理" }
-            : { tone: "on", dot: "dot--on", label: "已连接", sub: null };
+  // ---- 状态词：**唯一真源**（task-47）----
+  //
+  // 这里以前自己抄了一份判断：不看 `mode`，只按 `routes_committed` 分流。
+  // 后果是系统代理模式下写出「**隧道已建立**」「默认路由尚未接管」——
+  // 而系统代理根本没有隧道、也不接管路由；同一屏的顶栏线却是蓝的（部分覆盖），
+  // 文字与线互相矛盾。根因就是「同一事实两处陈述」。
+  //
+  // 现在顶栏的线/点与这里的词/说明/圆点**全部来自 `appStatus`**。
+  // 要改判据请改 `apps/ui/src/topbarStatus.ts` —— **不要在这里再抄一份**。
+  const status = appStatus({
+    mode: settings.mode,
+    running: connected,
+    routesCommitted: runtime.routes_committed,
+    lastError: runtime.last_error,
+    corePath: core.path,
+    recovery: rv,
+  });
+  const state = {
+    label: status.label,
+    sub: status.sub,
+    toneClass: DASH_TONE_CLASS[status.tone],
+    dotClass: DOT_TONE_CLASS[status.tone],
+  };
 
   const notices = collectNotices(snapshot, run, onNavigate);
   const [primary, ...rest] = notices;
@@ -95,8 +96,8 @@ export default function Dashboard({ onNavigate }: { onNavigate: (view: string) =
     <div className="dash">
       {/* ---------------------------------------------------------- 状态区 */}
       <section className="dash__status">
-        <div className={`dash__state dash__state--${state.tone}`}>
-          <span className={`dot ${state.dot}`} />
+        <div className={`dash__state ${state.toneClass}`}>
+          <span className={`dot ${state.dotClass}`} />
           <span className="dash__state-label">{state.label}</span>
           {connected && selected && (
             <>

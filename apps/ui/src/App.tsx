@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { api, recoveryView, type RecoveryView } from "./ipc";
+import { api, recoveryView } from "./ipc";
+// 状态语义的**唯一真源**（task-45 建、task-47 合并）：顶栏的线/点与仪表盘的状态区
+// 都从 `appStatus` 取，任何地方再抄一份判断都是把同一族「假陈述」种回去。
+import { appStatus, DOT_TONE_CLASS, TOPBAR_TONE_CLASS } from "./topbarStatus";
 import { StoreProvider, useStore } from "./store";
 import { MODE_LABEL, formatBytes, formatRate, type ProxyMode } from "./types";
 import Dashboard from "./pages/Dashboard";
@@ -12,120 +15,6 @@ import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
 
 type View = "dashboard" | "nodes" | "subscriptions" | "routing" | "topology" | "globe" | "logs" | "settings";
-
-/* ======================================================================
- * 顶栏状态线的语义（task-45）
- *
- * 那条 2px 的线横跨整窗、常驻可见，是应用里最「环境化」的信号。它必须回答
- * **一个问题**：*此刻这台机器的流量被代理覆盖到什么程度？*
- *
- * 它以前是一句 **假陈述**：`styles.css` 把 `.topbar` 的底边写死成 `--ok`（绿），
- * 于是直连、系统代理、未连接、恢复中、已退回直连 **全都是绿的**。
- * 而在这套配色里绿色 = 已受保护 —— 直连模式下用户会以为受保护，实际毫无代理；
- * 自动兜底退回直连时更严重：**流量已经在裸奔，界面还在报平安**。
- *
- * 判据全部来自后端真实字段，**不允许前端按时间或次数猜**：
- *   `settings.mode` / `runtime.running` / `runtime.routes_committed` /
- *   `runtime.last_error` / `runtime.recovery`（经 `recoveryView` 翻译成三段）。
- *
- * 五种色调，与 `styles.css` 的 `--status-*` 一一对应：
- *
- * | tone      | 含义                             | 颜色                    |
- * |-----------|----------------------------------|-------------------------|
- * | `on`      | 整机受保护（TUN 在跑）           | `--ok` 绿               |
- * | `partial` | 部分覆盖（系统代理在跑）         | `--accent` 蓝           |
- * | `off`     | **没有代理覆盖**（直连/未运行）  | `--status-off` 中性灰   |
- * | `busy`    | 正在自愈 / 隧道建好但路由没接管  | `--warn` 琥珀           |
- * | `failed`  | **代理承诺已破**（退回直连/报错）| `--danger` 红           |
- *
- * 两条硬性约束：
- * 1. **直连与系统代理绝不能是绿色** —— 绿色专属于「整机受保护」（TUN）。
- * 2. **默认值是 `off`（中性灰），不是绿。** 漏配状态、快照还没到时不该
- *    「默认受保护」。
- *
- * 状态优先级刻意与 `pages/Dashboard.tsx:68-88` 的 `state` 派生**保持一致**
- * （那里是状态词的既有唯一真源）：恢复态排在「未连接」之前，
- * `routes_committed === false` 必须降级 —— 否则「隧道建好了但默认路由还没接管」
- * 会被画成绿色，又是同一族假陈述。
- */
-export type TopbarTone = "on" | "partial" | "off" | "busy" | "failed";
-
-/** tone → 顶栏修饰类名。组件与测试共用，避免两处各拼一遍字符串。 */
-export const TOPBAR_TONE_CLASS: Record<TopbarTone, string> = {
-  on: "topbar--on",
-  partial: "topbar--partial",
-  off: "topbar--off",
-  busy: "topbar--busy",
-  failed: "topbar--failed",
-};
-
-/**
- * tone → 小圆点的修饰类名。
- *
- * 底边那条线和这个点**必须同色**：它们相距几像素、说的是同一件事。
- * 改这一条之前请先看 `topbarStatus` 的说明 —— 两处不一致比一处错更难查。
- */
-export const DOT_TONE_CLASS: Record<TopbarTone, string> = {
-  on: "dot--on",
-  partial: "dot--partial",
-  off: "dot--off",
-  busy: "dot--warn",
-  failed: "dot--failed",
-};
-
-export interface TopbarStatus {
-  tone: TopbarTone;
-  /** 这个状态的一句话说明（`title` + 屏幕阅读器共用）。每个分支都有，不编造。 */
-  detail: string;
-}
-
-export function topbarStatus(input: {
-  mode: ProxyMode;
-  running: boolean;
-  routesCommitted: boolean;
-  lastError: string | null;
-  recoveryPhase: RecoveryView["phase"];
-}): TopbarStatus {
-  const { mode, running, routesCommitted, lastError, recoveryPhase } = input;
-
-  // 1) 故障最优先。`direct_fallback` 时 `mode` **仍然是 `"tun"`** ——
-  //    若按模式取色就会画成绿色，而那正是这条缺陷最严重的一种表现。
-  if (recoveryPhase === "failed") {
-    return { tone: "failed", detail: "自动恢复失败，已退回直连 —— 流量不再走代理" };
-  }
-  // 2) 自愈中：此刻既不是「受保护」也不是「未连接」。
-  if (recoveryPhase === "recovering") {
-    return { tone: "busy", detail: "正在自动恢复 —— 看门狗在重建隧道，不需要手动连接" };
-  }
-  // 3) 直连是用户**主动选的**模式，中性报告即可（不是警告，也不是正常）。
-  if (mode === "direct") {
-    return { tone: "off", detail: "直连模式 —— 不接管任何流量" };
-  }
-  // 4) 核心没在跑，且上次是失败的 → 如实说故障。
-  if (lastError !== null && !running) {
-    return { tone: "failed", detail: `核心未运行：${lastError}` };
-  }
-  // 5) 核心没在跑（用户还没点连接）→ 空闲，中性。
-  if (!running) {
-    return { tone: "off", detail: "未连接 —— 核心没有运行" };
-  }
-  // 6) 关键：**进程在跑 ≠ 流量走了代理**。TUN 的承诺是「接管全部流量」，
-  //    而两阶段启动里隧道会先建好、默认路由还没接管 —— `CoreRuntime` 的字段注释
-  //    （`state.rs`）明确要求 UI 表达这个中间态，此时画绿色就是假陈述。
-  //    **只对 TUN 生效**：`routes_committed` 是 TUN 的闸门
-  //    （`supervisor.rs` 里提交路由那段在 `if mode == Tun` 分支内），
-  //    系统代理模式不接管路由，这个字段对它没有意义 —— 拿它压系统代理会
-  //    把「部分覆盖正常工作中」误报成「流量还没走代理」。
-  if (mode === "tun") {
-    if (!routesCommitted) {
-      return { tone: "busy", detail: "隧道已建立，默认路由尚未接管 —— 流量还没有走代理" };
-    }
-    // 7) 只有这里才是名副其实的绿色。
-    return { tone: "on", detail: "TUN 模式运行中 —— 整机流量受保护" };
-  }
-  // 8) 系统代理：只有读系统代理的应用走代理 → 部分覆盖，用强调色而不是绿。
-  return { tone: "partial", detail: "系统代理运行中 —— 只有读取系统代理的应用走代理" };
-}
 
 const NAV: Array<{ id: View; label: string }> = [
   { id: "dashboard", label: "仪表盘" },
@@ -270,18 +159,20 @@ export function TopBar({ view }: { view: View }) {
    */
   const rv = recoveryView(recovery, running);
   /**
-   * 顶栏状态线的色调（task-45）。**两条线共用同一个 tone** —— 底边那条 2px 的线
-   * 和右边那个小圆点如果在同一块区域里给出两种结论，比一条错的更糟。
+   * 状态语义（task-45；task-47 起与仪表盘状态区**同一个真源**）。
+   * 顶栏底边那条 2px 的线和右边那个小圆点都用这个 tone —— 两处相距几像素、
+   * 说的是同一件事，给出两种结论比一处错更糟。
    *
-   * `routesCommitted` 在快照缺席时取 `false`（=「还没接管」）而不是 `true`：
-   * 未知状态应当降级成「不可信」，不能默认「已受保护」。
+   * 快照缺席时的降级值是刻意的：`running ?? false`、`routesCommitted ?? false`、
+   * `corePath ?? null` —— 未知状态一律落到「不可信」，**不能默认「已受保护」**。
    */
-  const status = topbarStatus({
+  const status = appStatus({
     mode,
     running,
     routesCommitted: snapshot?.runtime.routes_committed ?? false,
     lastError: snapshot?.runtime.last_error ?? null,
-    recoveryPhase: rv.phase,
+    corePath: snapshot?.core.path ?? null,
+    recovery: rv,
   });
   const traffic = snapshot?.traffic;
   // 窗口用的是 `hiddenTitle`（见 tauri.conf.json），macOS 的标题栏文字是
