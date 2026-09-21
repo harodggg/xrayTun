@@ -22,11 +22,12 @@
 
 import { useState } from "react";
 
-import { api, recoveryView } from "../ipc";
+import { api, recoveryView, type RecoveryView } from "../ipc";
+import { InlineConfirm } from "../InlineConfirm";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
 import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
 import { useStore } from "../store";
-import type { AppSnapshot } from "../types";
+import type { AppSnapshot, ProxyMode } from "../types";
 import {
   formatBytes,
   formatRate,
@@ -37,14 +38,49 @@ import {
 } from "../types";
 
 /** 一条横幅。`tone` 决定配色，`rank` 只用于排序（越小越急）。 */
-interface Notice {
+export interface Notice {
   key: string;
   tone: "error" | "warn" | "info";
   icon: string;
   text: React.ReactNode;
   rank: number;
-  /** 需要用户立刻动手修的情况，附一个按钮。 */
-  action?: { label: string; run: () => void };
+  /** 需要用户立刻动手修的情况，附一个动作。 */
+  action?: {
+    label: string;
+    run: () => void;
+    /**
+     * **破坏性动作**（改系统网络配置、删数据）的二次确认问句。
+     *
+     * 问句必须写清**真实的、能从代码确认的后果**（红线：编不出来的后果就不要写）；
+     * 只是导航（「去处理」）之类的动作**不加**确认 —— 那会变成纯摩擦。
+     */
+    confirm?: { question: string; confirmLabel: string };
+  };
+}
+
+/**
+ * 横幅右侧的动作按钮。带 `confirm` 的走既有 `InlineConfirm`，其余直接执行。
+ *
+ * 抽成独立组件是因为「未确认时后端 API 不得被调用」这条断言需要**渲染**它 ——
+ * 为此渲染整个仪表盘要拉一整套 store 与 Tauri 桥接，那会让人不愿意跑这条测试。
+ */
+export function NoticeAction({ action }: { action: NonNullable<Notice["action"]> }) {
+  if (!action.confirm) {
+    return (
+      <button className="btn" onClick={action.run}>
+        {action.label}
+      </button>
+    );
+  }
+  return (
+    <InlineConfirm
+      label={action.label}
+      className="btn"
+      question={action.confirm.question}
+      confirmLabel={action.confirm.confirmLabel}
+      onConfirm={action.run}
+    />
+  );
 }
 
 export default function Dashboard({
@@ -68,6 +104,12 @@ export default function Dashboard({
    * 驱动，**不解析 notice 文案**。
    */
   const rv = recoveryView(recovery, connected);
+  /** 主按钮（连接/断开）的呈现：恢复期间必须禁用（task-60 ②）。 */
+  const connectBtn = connectControl(connected, rv, {
+    busy: busy !== null,
+    mode: settings.mode,
+    hasCore: core.path !== null,
+  });
 
   // ---- 状态词：**唯一真源**（task-47）----
   //
@@ -85,6 +127,9 @@ export default function Dashboard({
     lastError: runtime.last_error,
     corePath: core.path,
     recovery: rv,
+    // 端口只用于「系统代理」模式的文案（那半句要说清指向哪个端口）。
+    socksPort: settings.socks_port,
+    httpPort: settings.http_port,
   });
   const state = {
     label: status.label,
@@ -133,17 +178,20 @@ export default function Dashboard({
           )}
         </div>
 
+        {/* `state.sub` 现在同时承载三件事：系统代理模式的「需要手动指向」、
+            以及（task-68）探测失败窗口的自救提示 —— 两者都由 `appStatus` 折进来，
+            这样顶栏 `title`、live region 与这里**同一份文本、同一个真源**。 */}
         {state.sub && <div className="dash__state-sub">{state.sub}</div>}
 
         <div className="dash__actions">
           <button
             className={`btn ${connected ? "btn--danger" : "btn--primary"}`}
-            disabled={busy !== null || settings.mode === "direct" || !core.path}
+            disabled={connectBtn.disabled}
             onClick={() => void run(connected ? "stop" : "start", connected ? api.stop : api.start)}
-            title={settings.mode === "direct" ? "直连模式下无需启动核心" : undefined}
+            title={connectBtn.title}
           >
             {busy === "start" || busy === "stop" ? <span className="spin" /> : null}
-            {connected ? "断开" : "连接"}
+            {connectBtn.label}
           </button>
           <button className="btn btn--ghost" onClick={() => onNavigate("nodes")}>
             {connected ? "切换节点" : "选择节点"}
@@ -185,11 +233,7 @@ export default function Dashboard({
         <div key={n.key} className={`banner banner--${n.tone} dash__banner`}>
           <span>{n.icon}</span>
           <div style={{ flex: 1 }}>{n.text}</div>
-          {n.action && (
-            <button className="btn" onClick={n.action.run}>
-              {n.action.label}
-            </button>
-          )}
+          {n.action && <NoticeAction action={n.action} />}
         </div>
       ))}
       {rest.length > 0 && !showAllNotices && (
@@ -282,8 +326,11 @@ export default function Dashboard({
  * 旧版把这些写成 5 个平铺的 `{cond && <Banner/>}`，顺序是代码顺序而不是
  * 紧急程度，于是「流量还没走代理」可能排在「helper 没装」下面。
  * 收集后由调用方只显示最急的一条 —— 需要看全时也仍然拿得到。
+ *
+ * 导出是为了让「哪条 notice 带二次确认、问句里有没有真实后果」能被单测直接断言
+ * （渲染整个仪表盘需要一整套 store，那条断言就会没人愿意跑）。
  */
-function collectNotices(
+export function collectNotices(
   snapshot: AppSnapshot,
   run: ReturnType<typeof useStore>["run"],
   onNavigate: (view: string, target?: string) => void,
@@ -331,6 +378,21 @@ function collectNotices(
       ),
       action: {
         label: "立即修复",
+        /**
+         * 二次确认（task-68）。后果全部来自代码，不是推测：
+         * * `Request::Restore` 在 helper 侧是**无条件**的强清理
+         *   （`crates/xt-helper/src/server.rs:301-332`：`tear_down_live_session()`
+         *   先拆内存里的活会话、关掉 utun fd，再 `force_cleanup()` 按磁盘快照还原
+         *   路由与 DNS）；
+         * * `restore_stale`（`apps/desktop/src/commands/helper.rs:56-74`）只发这一个
+         *   请求并重建快照，**不调用 `start_core`** —— 所以**不会自动重连**。
+         * 这两条是唯一可确认的后果；其余（耗时、是否需要重装 helper）不写。
+         */
+        confirm: {
+          question:
+            "回滚网络配置会还原 helper 装的路由与 DNS，并拆掉当前正在生效的那条隧道（utun 网卡也会移除）——网络会回到直连；如果你正连着，连接会断。",
+          confirmLabel: "确认回滚",
+        },
         run: () => void run("restore", () => api.restoreStale()),
       },
     });
@@ -385,4 +447,41 @@ function elapsed(startedAtUnix: number): string {
   const hours = Math.floor(secs / 3600);
   if (hours < 24) return `${hours} 小时 ${Math.floor((secs % 3600) / 60)} 分钟`;
   return `${Math.floor(hours / 24)} 天`;
+}
+
+/**
+ * 仪表盘主按钮（连接/断开）的呈现。
+ *
+ * # 为什么抽成纯函数
+ *
+ * 原来 `disabled` 只看 `busy / mode / core`，**不看正在自动恢复** —— 于是
+ * `?recovery=recovering` 时顶栏的按钮是「正在恢复…」且 `disabled=true`，
+ * 而仪表盘在同一屏给出一个**可点的「连接」**，它自己的副文案还写着
+ * 「点了会打断它」（task-60 实测：`dashBtns: [{"t":"连接","dis":false}]`）。
+ * 抽出来是为了让「恢复期间必须禁用」这条能被单测钉住，而不是只靠渲染层自觉。
+ *
+ * 标签与顶栏保持**同一套词**（`App.tsx` 的 TopBar）：两处按钮说的是同一件事，
+ * 一个写「正在恢复…」另一个写「连接」本身就是矛盾。
+ */
+export function connectControl(
+  connected: boolean,
+  rv: RecoveryView,
+  opts: { busy: boolean; mode: ProxyMode; hasCore: boolean },
+): { label: string; disabled: boolean; title: string | undefined } {
+  const label = rv.button === "recovering" ? "正在恢复…" : connected ? "断开" : "连接";
+  if (rv.button === "recovering") {
+    return {
+      label,
+      disabled: true,
+      title: "正在自动恢复 —— 现在点「连接」会打断看门狗的重建，所以先禁用；恢复会自动完成",
+    };
+  }
+  if (opts.mode === "direct") {
+    return { label, disabled: true, title: "直连模式下无需启动核心" };
+  }
+  return {
+    label,
+    disabled: opts.busy || !opts.hasCore,
+    title: rv.phase === "failed" ? "自动恢复失败，已退回直连；点这里可手动重连" : undefined,
+  };
 }

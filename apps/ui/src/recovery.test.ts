@@ -21,6 +21,8 @@
 import { describe, expect, it } from "vitest";
 
 import { parseRecovery, recoveryView } from "./ipc";
+// 仪表盘主按钮的呈现是纯函数（task-60 ② 让「恢复期间必须禁用」可单测）。
+import { connectControl } from "./pages/Dashboard";
 import type { RecoveryState } from "./types";
 
 function rec(over: Partial<RecoveryState> = {}): RecoveryState {
@@ -142,5 +144,156 @@ describe("载荷解析：畸形一律当「没有」", () => {
     expect(r!.attempt).toBe(0);
     expect(r!.probe_failures).toBe(0);
     expect(r!.started_unix).toBeNull();
+  });
+});
+
+/**
+ * task-60：**「可能正在变坏」必须看得见，但不能被说成「已经坏了」**。
+ *
+ * 防的故障（实测）：`probe_failures = 1` 时界面与健康时**逐字相同**
+ * （绿点 + `已连接 · 香港 · 53 ms` + 按钮「断开」，无任何提示）。而看门狗是
+ * 「连续 2 次失败才重建」，所以第 1 次失败之后的那 10 秒里用户正在断网，
+ * 界面却说一切正常 —— 他会去查路由器/运营商/节点，**不会想到「先断开」**。
+ *
+ * 同一条测试同时守住反面：**不许把它做成错误态**（那会把设计内的过程说成故障）。
+ */
+describe("探测失败窗口（degraded）：可见，但不是错误态", () => {
+  it("probe_failures=1 且核心在跑 → degraded，且**必须**带「断开」自救提示", () => {
+    const v = recoveryView(rec({ probe_failures: 1 }), true);
+    expect(v.phase).toBe("degraded");
+    // 核心断言：自救提示必须出现，且点名那个动作。
+    expect(v.hint).not.toBeNull();
+    expect(v.hint).toContain("断开");
+    expect(v.text).toContain("断开");
+    expect(v.text).toContain("1 次");
+    // 状态**没变**：连接仍在，按钮仍是「断开」而不是「连接」。
+    expect(v.button).toBe("disconnect");
+    expect(v.justRecovered).toBe(false);
+  });
+
+  it("probe_failures=0 → 什么都不说（不能因为加了这档就让健康态开始报警）", () => {
+    const v = recoveryView(rec({ probe_failures: 0 }), true);
+    expect(v.phase).toBe("idle");
+    expect(v.hint).toBeNull();
+    expect(v.text).toBeNull();
+    expect(v.button).toBe("disconnect");
+  });
+
+  it("probe_failures=2 → 仍然是 degraded，且把次数如实写出来（不猜「即将重建」）", () => {
+    // 后端在自增到阈值后**同一次迭代内**就 begin()，所以 `probe_failures=2`
+    // 且未 recovering 是毫秒级的瞬态；这里只断言渲染是**如实**的，不编倒计时。
+    const v = recoveryView(rec({ probe_failures: 2 }), true);
+    expect(v.phase).toBe("degraded");
+    expect(v.text).toContain("2 次");
+  });
+
+  it("核心没在跑时**不给**自救提示（次数是陈旧的，不能拿来吓用户）", () => {
+    // 用户主动断开后，后端不会把 probe_failures 清零（只有探测成功时才清）。
+    // 若这里仍然渲染，界面会在「用户自己关掉了」时显示「探测失败，先断开」——
+    // 一句既无用又自相矛盾的话。
+    const v = recoveryView(rec({ probe_failures: 1 }), false);
+    expect(v.phase).toBe("idle");
+    expect(v.hint).toBeNull();
+    expect(v.button).toBe("connect");
+  });
+
+  it("恢复中**不给**自救提示（此刻按钮是禁用的，让用户去点「断开」就是自相矛盾）", () => {
+    const v = recoveryView(rec({ recovering: true, attempt: 2, probe_failures: 2 }), false);
+    expect(v.phase).toBe("recovering");
+    expect(v.hint).toBeNull();
+  });
+
+  it("已退回直连时不给自救提示（那条路已由「自动恢复失败」说清）", () => {
+    const v = recoveryView(rec({ probe_failures: 3, last_outcome: "direct_fallback" }), false);
+    expect(v.phase).toBe("failed");
+    expect(v.hint).toBeNull();
+  });
+
+  it("`hint` 只在 degraded 出现 —— 四种状态逐一锁住", () => {
+    const cases: Array<[string, ReturnType<typeof recoveryView>]> = [
+      ["recovering", recoveryView(rec({ recovering: true }), false)],
+      ["failed", recoveryView(rec({ last_outcome: "direct_fallback" }), false)],
+      ["degraded", recoveryView(rec({ probe_failures: 1 }), true)],
+      ["idle", recoveryView(rec(), true)],
+    ];
+    for (const [name, v] of cases) {
+      if (name === "degraded") expect(v.hint).not.toBeNull();
+      else expect(v.hint, `${name} 不该有 hint`).toBeNull();
+    }
+  });
+});
+
+describe("③ 粘滞：手动重连成功后不得再显示「自动恢复失败」", () => {
+  it("last_outcome 仍是 direct_fallback，但核心已经在跑 → 回到 idle（不再报失败）", () => {
+    // 防的故障：后端不会在 `start_core` 成功时重置 last_outcome（core.rs 只写
+    // begin / succeeded / fell_back / set_probe_failures），若前端不看 `running`，
+    // 用户手动重连成功之后界面会显示红色「自动恢复失败 / 已退回直连」，
+    // 而实际上隧道已经好了、流量也在走代理 —— 陈述与事实相反。
+    const v = recoveryView(rec({ attempt: 2, last_outcome: "direct_fallback" }), true);
+    expect(v.phase).toBe("idle");
+    expect(v.text).toBeNull();
+    expect(v.text ?? "").not.toContain("自动恢复失败");
+    expect(v.button).toBe("disconnect");
+  });
+
+  it("同一份状态、核心没在跑 → 仍然如实报「已退回直连」（别把真失败也藏了）", () => {
+    const v = recoveryView(rec({ attempt: 2, last_outcome: "direct_fallback" }), false);
+    expect(v.phase).toBe("failed");
+    expect(v.text).toContain("已退回直连");
+    expect(v.button).toBe("connect");
+  });
+
+  it("重连成功后再失败一次探测 → 回到 degraded（不是 failed，也不是沉默）", () => {
+    const v = recoveryView(
+      rec({ attempt: 2, last_outcome: "direct_fallback", probe_failures: 1 }),
+      true,
+    );
+    expect(v.phase).toBe("degraded");
+    expect(v.hint).toContain("断开");
+  });
+});
+
+/**
+ * task-60 ②：仪表盘的「连接」按钮在恢复期间必须禁用。
+ *
+ * 防的故障（实测）：`?recovery=recovering` 时顶栏按钮是「正在恢复…」且禁用，
+ * 而仪表盘同一屏给了一个**可点的「连接」**，它自己的副文案还写着「点了会打断它」。
+ */
+describe("仪表盘主按钮：恢复期间必须禁用", () => {
+  const opts = { busy: false, mode: "tun" as const, hasCore: true };
+
+  it("recovering → disabled + 文案与顶栏同词", () => {
+    const rv = recoveryView(rec({ recovering: true, attempt: 2 }), false);
+    const c = connectControl(false, rv, opts);
+    expect(c.disabled).toBe(true);
+    expect(c.label).toBe("正在恢复…");
+    expect(c.title).toContain("打断");
+  });
+
+  it("idle（未连接）→ 可点，标签是「连接」", () => {
+    const c = connectControl(false, recoveryView(rec(), false), opts);
+    expect(c.disabled).toBe(false);
+    expect(c.label).toBe("连接");
+  });
+
+  it("idle（已连接）→ 可点，标签是「断开」", () => {
+    const c = connectControl(true, recoveryView(rec(), true), opts);
+    expect(c.disabled).toBe(false);
+    expect(c.label).toBe("断开");
+  });
+
+  it("failed → 可点（手动重连是出路），标题说明已退回直连", () => {
+    const rv = recoveryView(rec({ last_outcome: "direct_fallback" }), false);
+    const c = connectControl(false, rv, opts);
+    expect(c.disabled).toBe(false);
+    expect(c.title).toContain("手动重连");
+  });
+
+  it("忙碌 / 直连模式 / 缺核心 → 沿用原来的禁用条件（不要改坏）", () => {
+    const idle = recoveryView(rec(), false);
+    expect(connectControl(false, idle, { ...opts, busy: true }).disabled).toBe(true);
+    expect(connectControl(false, idle, { ...opts, hasCore: false }).disabled).toBe(true);
+    expect(connectControl(false, idle, { ...opts, mode: "direct" }).disabled).toBe(true);
+    expect(connectControl(true, idle, { ...opts, mode: "direct" }).disabled).toBe(true);
   });
 });

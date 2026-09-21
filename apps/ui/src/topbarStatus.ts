@@ -36,7 +36,7 @@ import type { ProxyMode } from "./types";
  * | tone      | 含义                             | 颜色           |
  * |-----------|----------------------------------|----------------|
  * | `on`      | 整机受保护（TUN 在跑）           | `--ok` 绿      |
- * | `partial` | 部分覆盖（系统代理在跑）         | `--accent` 蓝  |
+ * | `partial` | 本地入口就绪但**系统代理未设置** | `--accent` 蓝  |
  * | `off`     | 没有代理覆盖（直连 / 未运行）    | `--status-off` |
  * | `busy`    | 正在自愈 / 隧道建好但路由没接管  | `--warn` 琥珀  |
  * | `failed`  | 代理承诺已破（退回直连 / 报错）  | `--danger` 红  |
@@ -84,6 +84,17 @@ export interface StatusInput {
   corePath: string | null;
   /** 由 `recoveryView(recovery, running)` 得到，**不要**在这里重新解释原始字段。 */
   recovery: RecoveryView;
+  /**
+   * 本地 SOCKS 入站端口（`settings.socks_port`）。
+   *
+   * 用于「系统代理」模式的文案：**这个模式只提供本地入口，从不修改系统代理设置**
+   * （`docs/07-roadmap-and-risks.md` 里「系统代理模式真正生效」仍是未勾选项；
+   * 全仓对系统代理的写入 0 命中）。既然要说「指向哪个端口」，就得把真实端口写对。
+   * 快照缺席时为 `null` —— **那就一个数字都不写**（不编）。
+   */
+  socksPort: number | null;
+  /** 本地 HTTP 入站端口（`settings.http_port`）；缺席时同样不写数字。 */
+  httpPort: number | null;
 }
 
 export interface AppStatus {
@@ -117,7 +128,33 @@ export interface AppStatus {
  * 路由，拿它压系统代理会把「部分覆盖正常工作中」误报成「流量还没走代理」。
  */
 export function appStatus(input: StatusInput): AppStatus {
-  const { mode, running, routesCommitted, lastError, corePath, recovery } = input;
+  const base = baseStatus(input);
+  const { recovery } = input;
+  /**
+   * task-68：`degraded`（探测失败、但看门狗还没开始重建）**不改状态词、不改色调** ——
+   * 这就是 task-60 的 tone 决定：`running` 仍为真、隧道仍在，「1 次失败」不是状态变化，
+   * 把它渲染成 `busy`/`failed` 等于把**设计内**的过程说成故障（另一种假陈述）。
+   *
+   * 这里只做一件事：把 `recoveryView` 已经写好的自救句接进 `sub` 与 `detail`。
+   * **`detail` 是顶栏 `.sr-only` + `role="status"` 的文本** —— 不接进来，
+   * 读屏用户就收不到「整机断网时先点『断开』」这句话，而那正是这次修复的全部内容。
+   *
+   * 例外：基础状态是 `failed`（例如根本没找到核心）时**不覆盖** ——
+   * 自救提示不能把一个更严重的结论盖成轻的。
+   */
+  if (recovery.phase === "degraded" && recovery.hint && base.tone !== "failed") {
+    return {
+      ...base,
+      sub: base.sub ? `${base.sub}；${recovery.hint}` : recovery.hint,
+      detail: `${base.detail} —— ${recovery.hint}`,
+    };
+  }
+  return base;
+}
+
+function baseStatus(input: StatusInput): AppStatus {
+  const { mode, running, routesCommitted, lastError, corePath, recovery, socksPort, httpPort } =
+    input;
 
   // 1) 核心可执行文件都不在 —— 没有任何「受保护」的可能。
   if (corePath === null) {
@@ -201,12 +238,27 @@ export function appStatus(input: StatusInput): AppStatus {
     };
   }
 
-  // 7) 系统代理：只有读系统代理设置的应用走代理 → 部分覆盖。
-  //    **不要说「隧道已建立」** —— 系统代理模式根本没有隧道，也不接管路由。
+  // 7) 「系统代理」模式：**应用只提供本地入站入口，从不修改系统代理设置。**
+  //
+  //    这里原来写的是「系统代理已启用」+「只有读取系统代理设置的应用走代理」。
+  //    后一句是真的，**前一句比事实强**：`docs/07-roadmap-and-risks.md` 里
+  //    「系统代理模式真正生效」仍是未勾选项，明写「用户需要手动把浏览器/系统代理
+  //    指向 127.0.0.1:…」；全仓对系统代理的写入（`setwebproxy` / `scutil` /
+  //    `SCDynamicStore`）**0 命中**。用户看到「已启用」就会以为浏览器已经在走代理。
+  //
+  //    所以：label 只说**已经成立**的事（本地入口就绪），把「需要你手动指向」
+  //    第一次说给用户，并带上真实端口（读不到端口就一个数字都不写）。
+  //    **仍然不许出现「隧道」** —— 这个模式没有隧道，也不接管路由。
+  const socks = socksPort !== null ? `127.0.0.1:${socksPort}` : null;
+  const http = httpPort !== null ? `127.0.0.1:${httpPort}` : null;
+  const entry = socks
+    ? `本地 SOCKS 入口 ${socks}${http ? ` 与 HTTP 入口 ${http}` : ""} 已就绪`
+    : "本地代理入口已就绪";
+  const pointTo = socks ? `指向 ${socks}${http ? `（HTTP ${http}）` : ""}` : "指向它的本地端口";
   return {
     tone: "partial",
-    label: "系统代理已启用",
-    sub: "只有读取系统代理设置的应用走代理",
-    detail: "系统代理已启用 —— 只有读取系统代理设置的应用走代理",
+    label: "本地代理入口已就绪",
+    sub: `系统代理未被本应用修改：需要手动把浏览器或系统代理${pointTo}。`,
+    detail: `${entry} —— 系统代理未被本应用修改，需要手动${pointTo}`,
   };
 }

@@ -121,10 +121,18 @@ export interface RuntimePayload {
 
 /** 恢复状态怎么呈现（纯函数，便于单测「恢复中不得显示为未连接」）。 */
 export interface RecoveryView {
-  /** 三态：正在恢复 / 上次恢复失败（已退回直连）/ 不在恢复流程里。 */
-  phase: "recovering" | "failed" | "idle";
-  /** 状态文案；`idle` 时为 **null**（不编「未在恢复」）。 */
+  /**
+   * 四态：正在恢复 / 上次恢复失败（已退回直连）/
+   * **探测已经开始失败、但还没到重建那一步** / 不在恢复流程里。
+   */
+  phase: "recovering" | "failed" | "degraded" | "idle";
+  /** 状态文案（**短**，顶栏徽章用）；`idle` 时为 **null**（不编「未在恢复」）。 */
   text: string | null;
+  /**
+   * 自救提示（**长句**，仪表盘副文案用；顶栏把它放进 `title`）。
+   * **只有 `degraded` 有**，其余状态一律 `null` —— 测试锁着这条。
+   */
+  hint: string | null;
   /** 按钮语义：connect=可点的「连接」；disconnect=可点的「断开」；recovering=禁用。 */
   button: "connect" | "disconnect" | "recovering";
   /** 恢复刚刚成功（用于「可感知的结束」提示）。 */
@@ -134,7 +142,7 @@ export interface RecoveryView {
 /**
  * 把（后端给的）恢复状态翻译成界面语义。
  *
- * 五条不变量（测试锁着）：
+ * 六条不变量（测试锁着）：
  * 1. `recovering` 时**按钮绝不是 `connect`** —— 不允许出现「看起来未连接 + 可点的连接按钮」；
  * 2. 文案永远带「恢复」二字，不会退化成「未连接」；
  * 3. **成功之后不留残影**：`last_outcome === "recovered"` 且不在恢复时 phase 回到 `idle`
@@ -143,6 +151,18 @@ export interface RecoveryView {
  *    并且按钮保持可点（= 手动重连），不留一个无事可做的禁用按钮；
  * 5. 没有任何倒计时：后端没有「计划中的下次重试」（失败即退回直连并退出），
  *    所以**不渲染**倒计时 —— 编一个恒为空的时间字段本身就是编语义。
+ * 6. **「可能正在变坏」不等于「已经坏了」**：看门狗是「连续 2 次失败才重建」
+ *    （`core.rs` 的 `FAILURES_BEFORE_REBUILD`），所以第 1 次探测失败之后那 10 秒
+ *    是**设计内**的窗口。这期间 phase 是 `degraded`：**不改成黄/红**（那会把设计内
+ *    过程说成故障），只补一句**可见**的自救提示 `hint`。
+ *
+ * # 为什么要有 `degraded`（这是它防的故障）
+ *
+ * 以前这段窗口里界面上**与健康时逐字相同**：绿点、`已连接 · 香港 · 53 ms`、按钮
+ * 「断开」（实测于 task-60）。于是用户整机断网时看到的仍然是「一切正常」，他去查
+ * 路由器/运营商/节点，**不会想到「先断开」** —— 而 `断开` 会走
+ * `supervisor.stop` → helper 回滚系统网络配置（`core.rs:227` 日志「网络配置已回滚」）。
+ * 这条提示就是把那个已经存在、但从未被说出来的自救动作说出来。
  */
 export function recoveryView(
   recovery: RecoveryState | null | undefined,
@@ -153,21 +173,47 @@ export function recoveryView(
     return {
       phase: "recovering",
       text: `正在自动恢复（第 ${rec.attempt} 次）`,
+      hint: null,
       button: "recovering",
       justRecovered: false,
     };
   }
-  if (rec?.last_outcome === "direct_fallback") {
+  // `direct_fallback` **只有在没在跑的时候才成立**。
+  //
+  // 手动重连成功后 `running === true`，但后端不会重置 `last_outcome`（`core.rs` 对
+  // recovery 的写入只有 begin / succeeded / fell_back / set_probe_failures 四处）。
+  // 若这里仍然返回 `failed`，界面会在「已经连上、流量正在走代理」时显示红色
+  // 「自动恢复失败 / 已退回直连」—— 陈述与事实相反，比漏报更糟。
+  if (rec?.last_outcome === "direct_fallback" && !running) {
     return {
       phase: "failed",
       text: `自动恢复失败（第 ${rec.attempt} 次），已退回直连 —— 流量不再走代理`,
-      button: running ? "disconnect" : "connect",
+      hint: null,
+      button: "connect",
+      justRecovered: false,
+    };
+  }
+  // ①「探测失败、但看门狗还没开始重建」的那 10–20 秒。
+  //
+  // 只说事实（已经失败过 N 次），**不猜**下一次会不会重建 —— 阈值在后端。
+  // 也**不**把它渲染成失败态：见不变量 6。
+  const failures = rec?.probe_failures ?? 0;
+  if (running && failures >= 1) {
+    return {
+      phase: "degraded",
+      text: `隧道探测失败 ${failures} 次 · 整机断网时先点「断开」`,
+      hint:
+        `已连接，但最近一次连通性探测失败（连续 ${failures} 次）。` +
+        `如果整台 Mac 都上不了网，先点「断开」再试 —— 断开会还原系统网络配置。`,
+      // 连接仍在（按钮仍是「断开」）：状态没变，变的只是「可能正在变坏」。
+      button: "disconnect",
       justRecovered: false,
     };
   }
   return {
     phase: "idle",
     text: null,
+    hint: null,
     button: running ? "disconnect" : "connect",
     // 「可感知的结束」：后端明确说上次自动重建成功了，且现在确实在跑
     justRecovered: running && rec?.last_outcome === "recovered",

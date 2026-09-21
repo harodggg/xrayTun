@@ -204,7 +204,11 @@ export function TopBar({ view }: { view: View }) {
     lastError: snapshot?.runtime.last_error ?? null,
     corePath: snapshot?.core.path ?? null,
     recovery: rv,
+    // 端口只用于「系统代理」模式的文案；快照缺席时给 null（那就一个数字都不写）。
+    socksPort: snapshot?.settings.socks_port ?? null,
+    httpPort: snapshot?.settings.http_port ?? null,
   });
+  const socksPort = snapshot?.settings.socks_port ?? null;
   const traffic = snapshot?.traffic;
   // 窗口用的是 `hiddenTitle`（见 tauri.conf.json），macOS 的标题栏文字是
   // 隐藏的 —— 这条顶栏才是用户真正看到的「标题栏」。所以网速要显示在这里，
@@ -235,7 +239,13 @@ export function TopBar({ view }: { view: View }) {
      * `title` 与下面那个 `sr-only` 的 live region 让**不依赖颜色**也能读到状态：
      * 那条线本身没有文字，色盲用户/灰度截图里五种色调是读不出来的。
      */
-    <header className={`topbar ${TOPBAR_TONE_CLASS[status.tone]}`} title={status.detail}>
+    <header
+      className={`topbar ${TOPBAR_TONE_CLASS[status.tone]}`}
+      // task-68：自救提示（`rv.hint`）现在由 `appStatus` 折进 `detail` —— 同一份
+      // 文本既进 `title`（悬停可读），也进下面那个 `role="status"` 的 live region
+      // （**读屏用户必须听到它**，否则那句自救指令只有看得见的人才收得到）。
+      title={status.detail}
+    >
       <span className="sr-only" role="status">
         {status.detail}
       </span>
@@ -291,10 +301,27 @@ export function TopBar({ view }: { view: View }) {
 
       {/* 行为变更提示：**模式只是一个偏好**。未连接时点它不再隐式连接核心
           （以前会，代价是一次完整连接）。这条提示由状态直接推导，不是一次性
-          flag —— 所以不会留下过期的「点连接开始」。 */}
-      {!running && mode !== "direct" && !modeBusy && (
+          flag —— 所以不会留下过期的「点连接开始」。
+
+          `rv.phase === "idle"` 是必须的：自动恢复中与已退回直连时，界面刚刚
+          告诉用户「不要点连接 / 已退回直连」，这条「点右侧「连接」开始」会
+          当场把话反过来说（实测：恢复中曾与「正在自动恢复（第 2 次）」同屏）。 */}
+      {!running && mode !== "direct" && !modeBusy && rv.phase === "idle" && (
         <span className="badge badge--unknown" title="模式已保存；真正开始连接的是「连接」按钮">
           已选「{MODE_LABEL[mode]}」，点右侧「连接」开始
+        </span>
+      )}
+
+      {/* 「系统代理」模式的真相（task-68）：**本应用从不修改系统代理设置** ——
+          它只提供本地入站入口（`docs/07-roadmap-and-risks.md` 里「系统代理模式
+          真正生效」仍是未勾选项，全仓对系统代理的写入 0 命中）。而这是**默认模式**，
+          所以这条提示要跟着用户走到每一页，不能只在仪表盘说一次。
+          完整说明（含「需要手动指向」）在 `status.detail` 里，也是读屏的播报内容。 */}
+      {running && mode === "system_proxy" && (
+        <span className="badge badge--unknown" title={status.detail}>
+          {socksPort !== null
+            ? `未设系统代理 · 需指向 127.0.0.1:${socksPort}`
+            : "未设系统代理 · 需手动指向本地端口"}
         </span>
       )}
 
@@ -307,6 +334,15 @@ export function TopBar({ view }: { view: View }) {
       {rv.phase === "failed" && (
         <span className="badge badge--unknown" title={rv.text ?? undefined}>
           自动恢复失败
+        </span>
+      )}
+      {/* 「可能正在变坏」（task-60）：第 1 次探测失败之后、看门狗重建之前的窗口。
+          刻意用**中性**徽章而不是黄色/红色 —— 看门狗本来就是「连续 2 次才重建」，
+          这一段是**设计内**的过程，染成告警色等于把正常过程说成故障（那是另一种
+          假陈述）。真正要传达的是「你有一个已知有效的自救动作」，见 `hint`。 */}
+      {rv.phase === "degraded" && (
+        <span className="badge badge--unknown" title={rv.hint ?? undefined}>
+          {rv.text}
         </span>
       )}
 

@@ -71,18 +71,21 @@ const CSS = () => readSrc("styles.css");
 const IDLE_RECOVERY = {
   phase: "idle" as const,
   text: null,
+  hint: null,
   button: "connect" as const,
   justRecovered: false,
 };
 const RECOVERING = {
   phase: "recovering" as const,
   text: "正在自动恢复（第 2 次）",
+  hint: null,
   button: "recovering" as const,
   justRecovered: false,
 };
 const FAILED = {
   phase: "failed" as const,
   text: "自动恢复失败（第 2 次），已退回直连 —— 流量不再走代理",
+  hint: null,
   button: "connect" as const,
   justRecovered: false,
 };
@@ -95,6 +98,8 @@ const base = {
   lastError: null as string | null,
   corePath: "/Applications/XrayTun.app/Contents/Resources/xray",
   recovery: IDLE_RECOVERY,
+  socksPort: 10808,
+  httpPort: 10809,
 };
 
 const s = (over: Partial<Parameters<typeof appStatus>[0]> = {}) => appStatus({ ...base, ...over });
@@ -112,13 +117,29 @@ describe("appStatus：九种状态的 tone / label / sub / detail", () => {
   });
 
   it("系统代理在跑 → partial，且**不出现「隧道」字样**", () => {
+    // task-68 改了期望值：原来断言 `label === "系统代理已启用"`。
+    // **不改测试意图**（它防的是「系统代理谎报隧道已建立」—— 那条断言原样保留），
+    // 只改措辞：应用从不修改系统代理设置（docs/07 路线图里那一条仍未勾选），
+    // 所以「已启用」是**界面比事实强**的一句。
     const r = s({ mode: "system_proxy", running: true });
     expect(r.tone).toBe("partial");
-    expect(r.label).toBe("系统代理已启用");
-    expect(r.sub).toContain("只有读取系统代理设置的应用走代理");
+    expect(r.label).toBe("本地代理入口已就绪");
+    expect(r.label).not.toContain("已启用");
+    // 第一次把「需要你手动指向」说给用户，并给真实端口。
+    expect(r.sub).toContain("系统代理未被本应用修改");
+    expect(r.sub).toContain("127.0.0.1:10808");
+    expect(r.detail).toContain("需要手动");
     // 系统代理模式**根本没有隧道、也不接管路由** —— 这句话是 task-47 的核心缺陷。
     expect(`${r.label}${r.sub}${r.detail}`).not.toContain("隧道");
     expect(TOPBAR_TONE_CLASS[r.tone]).toBe("topbar--partial");
+  });
+
+  it("系统代理：端口读不到时**一个数字都不写**（不编）", () => {
+    const r = s({ mode: "system_proxy", running: true, socksPort: null, httpPort: null });
+    expect(r.label).toBe("本地代理入口已就绪");
+    expect(r.sub).toContain("系统代理未被本应用修改");
+    expect(`${r.label}${r.sub}${r.detail}`).not.toMatch(/127\.0\.0\.1:\d/);
+    expect(r.detail).toContain("本地端口");
   });
 
   it("直连模式 → off，**不能说成「未连接」**（那是有意为之，不是故障）", () => {
@@ -181,7 +202,7 @@ describe("task-47 的核心：系统代理与 TUN 的状态词必须不同", () 
     expect(sys.sub).not.toBe(tun.sub);
     expect(sys.detail).not.toBe(tun.detail);
     expect(tun.label).toBe("已连接");
-    expect(sys.label).toBe("系统代理已启用");
+    expect(sys.label).toBe("本地代理入口已就绪");
   });
 
   it("系统代理**不得**被说成「隧道已建立」，也不得是绿色那一类", () => {
@@ -198,7 +219,7 @@ describe("task-47 的核心：系统代理与 TUN 的状态词必须不同", () 
     // 这正是 task-47 报的那个缺陷所走的代码路径。
     const r = s({ mode: "system_proxy", running: true, routesCommitted: false });
     expect(r.tone).toBe("partial");
-    expect(r.label).toBe("系统代理已启用");
+    expect(r.label).toBe("本地代理入口已就绪");
     expect(r.tone).not.toBe("busy");
   });
 });
@@ -250,7 +271,8 @@ describe("优先级：故障必须压过模式", () => {
 // ---------------------------------------------------------------- 同源
 
 describe("同源：状态词只能有一个出处", () => {
-  const LABELS = ["已连接", "系统代理已启用", "直连模式", "未连接", "隧道已建立", "未找到核心"];
+  // task-68：「系统代理已启用」→「本地代理入口已就绪」（应用从不改系统代理设置）。
+  const LABELS = ["已连接", "本地代理入口已就绪", "直连模式", "未连接", "隧道已建立", "未找到核心"];
   /**
    * 只看**代码**，不看注释 —— 注释里引用状态词（「以前写的是『隧道已建立』」）
    * 是正常的文档行为，不是第二份判断。块注释与行注释都剥掉。
@@ -443,7 +465,7 @@ describe("真渲染：顶栏与仪表盘在同一份快照下必须一致", () =
     d.unmount();
   });
 
-  it("系统代理（state=uncommitted）→ 顶栏 topbar--partial，状态词「系统代理已启用」**且没有「隧道已建立」**", () => {
+  it("系统代理（state=uncommitted）→ 顶栏 topbar--partial，状态词「本地代理入口已就绪」**且没有「隧道已建立」**", () => {
     // 这正是 task-47 报的那条路径：mode=system_proxy 且 routes_committed=false，
     // 改前 Dashboard 会走 !routes_committed 分支写出「隧道已建立」。
     const snap = snapFor("uncommitted");
@@ -457,7 +479,9 @@ describe("真渲染：顶栏与仪表盘在同一份快照下必须一致", () =
     tb.unmount();
 
     const d = mountDashboard(snap);
-    expect(screen.getByText("系统代理已启用")).toBeTruthy();
+    // task-68：断言的是**状态词本身**（不是「系统代理已启用」那句比事实强的话）。
+    expect(screen.getByText("本地代理入口已就绪")).toBeTruthy();
+    expect(screen.queryByText("系统代理已启用")).toBeNull();
     expect(screen.queryByText("隧道已建立")).toBeNull();
     expect(d.container.querySelector(".dot--partial")).toBeTruthy();
     d.unmount();
@@ -471,7 +495,9 @@ describe("真渲染：顶栏与仪表盘在同一份快照下必须一致", () =
       routesCommitted: snap.runtime.routes_committed,
       lastError: snap.runtime.last_error,
       corePath: snap.core.path,
-      recovery: { phase: "idle", text: null, button: "connect", justRecovered: false },
+      recovery: { phase: "idle", text: null, hint: null, button: "connect", justRecovered: false },
+      socksPort: snap.settings.socks_port,
+      httpPort: snap.settings.http_port,
     });
     const tb = mountTopBar(snap);
     const d = mountDashboard(snap);
