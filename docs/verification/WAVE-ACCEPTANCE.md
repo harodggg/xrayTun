@@ -22,6 +22,14 @@
 > interaction-designer 的 task-68 落地后它才转绿。⇒ **一张卡写下的红基线，成了下一张卡的验收标准**；
 > 这也说明「验收数字必须与修订号绑定」，否则同一句话在两个提交上含义不同。
 
+> **最新读数（修订 `5223a01`，隔离 worktree `/tmp/xt-t2`，本文件写定时）**：
+> UI `vitest run` = **188 passed + 1 todo（16 files）、0 failed**；
+> Rust `cargo test -p xraytun-desktop --lib` = **121 passed / 0 failed / 1 ignored**。
+> 其中我 task-66 写下的那条**红**验收断言
+> `【要求】probe_failures ≥ 1 时界面必须有可见信号` **已转绿** ——
+> 即 task-68（`5223a01`）的修复在**提交修订**上被我独立复验通过：
+> **一张卡写下的红基线，被下一张卡关掉了**（这一步不是我采信作者结论，是我自己在那条修订上重跑出来的）。
+
 ---
 
 ## 1. 结果总表
@@ -29,10 +37,10 @@
 | # | 目标 | 我构造的攻击场景 | 结果 | 关键数字 |
 |---|---|---|---|---|
 | 1 | task-55 日志跳动 | ①头部序号不变（过滤/搜索）时故意改动可见内容位置；②真裁剪；③跟随开着时裁剪；④**锚点那一行自己也被裁掉** | **未能攻破**（①③④断言全绿；②补偿正确），④留下一个**残余缺口** | ①scrollTop 500→500；②500→**460**（补了 -40）；③500→500；④500→500（本帧无基准） |
-| 2 | task-54 模式切换卡顿 | 想实测三种模式 × 未运行/运行中的**真实耗时** | **没能测**（需要 cargo + 真核心/真节点；已向 lead 申请，见 §5） | — |
+| 2 | task-54 模式切换卡顿 | 只拿到**无节点/失败路径条件下的读数**：注入闭包的调用序列 + 门禁并行化实测（见 §3.3） | **部分**：逻辑与并行上界**已实测**；**「用户感知的耗时」仍未测**（需真核心 + 真节点） | 门禁两次 150ms 探测**实测 152ms**（串行需 ≥300ms）；未运行态 `steps=[]`、stop/start **零调用** |
 | 3 | task-61 192 行重复 | 删掉重复块 → 真浏览器**逐元素比较计算样式**（`.chain*` 8 行 × 1280/900 × 20 个属性） | **未能攻破**（差异 0）；重复结构我复测为 **两段 86+106=192 行、第二份 0 行独有**（与 lead 一致，**我上一版只覆盖了第一段**）；该重复在 `bdeee46`/`ac98a68` 存在，**已在 `1a1c8a3` 删除** | 元素数 `.chain`=1、`.chain__row`=8…；**diff=0**；`styles.css` 2577→2399 行（删重复提交 `1a1c8a3`） |
 | 4 | task-63 取色缓存 | 车辆数量 **13→10→13**，让同名 key `mixed#3..5` 以**新元素**回来（缓存里的旧元素已脱挂） | **攻破「去掉 `isConnected` 回退」的变体**（HEAD 实现防住） | 无回退：**6 辆车 20 秒 fill 恒为 `#64748b`**（红）；HEAD：绿 |
-| 5 | task-60 恢复期可见性 | 用后端会发的字段序列 `probe_failures 0→1→2→recovering→recovered/direct_fallback` 走一遍 | **在 HEAD `bdeee46` 上攻破**（16 秒窗口界面**完全沉默**）；工作区已有未提交的 `degraded` 修复，此刻实时状态已被覆盖 | HEAD：`failures=1/2 → text=null`（红）；工作区：`"隧道探测失败 N 次 · 整机断网时先点「断开」"`（绿） |
+| 5 | task-60 恢复期可见性 | 用后端会发的字段序列 `probe_failures 0→1→2→recovering→recovered/direct_fallback` 走一遍 | **在 HEAD `bdeee46` 上攻破**（16 秒窗口界面**完全沉默**）；该缺口的 `degraded` 修复**已随 `5223a01` 提交**，我在隔离 worktree 上复验「要求断言」**已转绿** | HEAD：`failures=1/2 → text=null`（红）；`5223a01`：`"隧道探测失败 N 次 · 整机断网时先点「断开」"`（绿） |
 
 ---
 
@@ -99,7 +107,7 @@
 
 ---
 
-## 3. 我试了但没能攻破的
+## 3. 我试了但没能攻破的（§3.3 = 目标 2 只拿到「无节点条件读数」，**不是**攻破）
 
 ### 3.1 目标 1：日志跳动（task-55）
 
@@ -176,6 +184,61 @@ art-designer 的 190 与我的 192 是**同一事实的两个等价边界**。
 
 ---
 
+### 3.3 目标 2：模式切换 —— **无节点 / 失败路径条件下的读数**（隔离 HEAD `5223a01`）
+
+> **先把标签立死**：下面每一条都是「**无节点 / 失败路径条件下**」的读数 ——
+> 探测、stop、start **全是测试注入的闭包**，没有真核心、没有真节点。
+> 它们能证明「**逻辑与调用序列**」以及「门禁并行化把串行上界压掉了」，
+> **不能**当「模式切换实测耗时」或「用户感知的卡顿」引用（后者见 §5.1，**仍未测**）。
+
+**为什么非要有真节点**：`apply_mode_switch` 的真实耗时 ≈ `core::start_core` 的真实耗时，
+而后者的绝大部分是「核心进程就绪」（上限 `CORE_READY_TIMEOUT = 10s`）
+加「探测目标可达」（`REGION_PROBE_TIMEOUT = 4s` / `PRE_COMMIT_PROBE_TIMEOUT_SECS = 6s`，
+两次探测并行后最坏 ≤6s）。没有真核心二进制 + 真节点，这些数只能是**常量上界**，不是测量值。
+
+#### 3.3.1 这次真正读到的
+
+| 读数 | 测试（`5223a01`） | 值 | 含义 |
+|---|---|---|---|
+| 门禁探测**确实并行** | `supervisor::tests::gate_probes_run_in_parallel_not_sequentially`（注入两次 150ms 探测） | **152 ms** | 串行必须 ≥300ms；实测 ≈150ms + 开销 ⇒ **并行成立** |
+| 未运行态切模式**完全不碰核心** | `mode_switch_when_idle_never_touches_the_core`、`..._when_idle_to_direct_is_also_inert` | `steps=[]`、stop/start **零调用** | 「没连接时点模式」这条路径**结构上不可能**卡在核心上 |
+| 运行中切模式**只有必要动作** | `..._while_running_restarts_the_core`（stop+start）、`..._while_running_to_direct_only_stops`（只 stop）、`..._does_not_start_when_stop_failed`（stop 失败**不得** start） | 调用序列断言全绿 | 不会出现「stop 失败还硬 start」的二连击 |
+| 门禁的**反例面**（不是只探一边） | 8 条 `gate_*`：境内黑洞、境外代理死、空码当超时、未配目标、探测全过但 commit 失败、失败文案不预判原因 | 全绿 | 门禁不是摆设；「境外通就接管」这种写法会被这几条打红 |
+| 同一修订的**整套**后端 | `cargo test -p xraytun-desktop --lib` | **121 passed / 0 failed / 1 ignored**（1.44s） | 唯一 ignored 的是 `commands::globe::tests::real_lookup_returns_a_plausible_location`，标注「需要网络」 |
+
+`152 ms` 的取法：在 `/tmp` **副本**的该测试里临时加一行
+`println!("GATE_PARALLEL_ELAPSED_MS={}", elapsed.as_millis())` 再 `--nocapture` 读出；
+**被测逻辑一行未改，仓库文件未动**。
+
+#### 3.3.2 有真机的人怎么读数（埋点地图；行号 = 修订 `5223a01`）
+
+1. `XRAYTUN_LOG=info` 启动。每次连接会打 5 条 `stage=... ms=...`「启动阶段耗时」：
+   `tun_up_and_fd`（`apps/desktop/src/supervisor.rs:478`）、`wait_for_port`（`:508`）、
+   `commit_routes`（`:559`）、`pre_commit_gate`（`:568`，文案已写明「含两次探测，已并行」）、
+   `stop_core`（`:641`，额外带 `failures=`）。
+2. 切模式再打一条**总账**：`apps/desktop/src/commands/settings.rs:202` 的
+   `tracing::info!(mode, was_running, steps = ?steps, elapsed_ms, "模式切换完成（逐阶段耗时见各阶段的 tracing 日志）")`；
+   并且**同一句会写进 app 日志**（`已切换为「X」模式（已重启核心/已停止核心）；耗时 N ms`），
+   用户排障直接看得到 —— 这也是 task-54 的交付面之一。
+3. 所以「切模式卡不卡」的判法 = 读 `elapsed_ms`，再用 `stage` 把时间拆到具体阶段；
+   `was_running=false` 时应为 `steps=[]` 且 `elapsed_ms`≈0（只改偏好 + 存快照）。
+
+#### 3.3.3 环境坑（给别人省时间）
+
+* 主工作区直接 `cargo test` 被沙箱拦：`~/.cargo` 只读
+  （`failed to open '.../bit-set-0.8.0.crate': Operation not permitted (os error 1)`）。
+  可复现的绕过：`CARGO_HOME=/tmp/xt-cargo-home CARGO_TARGET_DIR=/tmp/xt-target`；
+  **首次全量编译 8m07s**，之后复用同一 target 只重编本工作区 crate。
+* 隔离 worktree **缺未入库的资源**，tauri 构建脚本会直接 fail：
+  `resource path 'binaries/xray' doesn't exist`，修完又报 `binaries/geosite.dat`。
+  需要把主工作区的 `apps/desktop/binaries/{xray,geoip.dat,geosite.dat,LICENSE-xray}`、
+  `apps/ui/dist`、`apps/ui/node_modules` 链进来。
+  ⚠️ **坑**：`binaries/` 是**已入库目录**（有 `.gitkeep`/`README.md`），
+  `ln -s <真实binaries目录> binaries` 不会替换它，而是**在它里面再套一层同名软链**
+  （`binaries/binaries`），报错**依旧是**「resource path doesn't exist」——必须**逐文件**软链。
+
+---
+
 ## 4. 我发现但没在本卡修的
 
 1. **去重已在 `1a1c8a3` 落地**（`styles.css` 2577→2399 行）—— 我上一版写的「88 行重复仍在
@@ -187,17 +250,24 @@ art-designer 的 190 与我的 192 是**同一事实的两个等价边界**。
    「已退回直连」而实际在走代理）。这条**改变了 HEAD 行为**，我按真实状态
    （退回直连后 `running=false`）复测两者一致（都显示「已退回直连」）；但它属于别人
    在途的改动，我不改，仅报备。
+4. **共享工作区此刻 `tsc --noEmit` 是红的（11 条），但那全是别人在途的改动**：
+   同一修订 `5223a01` 的**隔离 worktree 里 `tsc --noEmit` 退出码 0（完全干净）**；
+   11 条全部落在工作区被改动的 `App.tsx` / `Dashboard.tsx`（以及被它连带的**已提交**文件
+   `recovery.test.ts`：`connectControl` / `runButtonDisabled` 正在被重命名）。
+   ⇒ 发布前必须**以提交的修订**再跑一次，别拿工作区的实时红去判断谁没收拾干净。
+   （我自己的那条 TS6133 噪音已在 `5fff566` 清掉，与这 11 条无关。）
 
 ---
 
 ## 5. 我测不到的（诚实清单）
 
-1. **目标 2（模式切换耗时）没测**：要拿到「用户感知的卡顿」需要 **cargo 编译 + 真核心 +
-   真节点**（未运行态还要能真正 start）。我按卡片要求**先问 lead**；在没有授权/没有可用节点前，
-   我只做了代码读数（`apply_mode_switch` 已把「未运行 → 不 stop/start」落在调用序列上；
-   运行中仍是「必要的一次 stop + start」）。
-   我还**没法**用现有测试替代它：现有断言只验调用序列，时序要靠 `start_core` 逐阶段计时
-   （task-54 加了埋点，但要在真机上跑）。
+1. **目标 2 的「用户感知耗时」没测**（§3.3 给的只是**无节点/失败路径条件下的读数**：
+   注入闭包的调用序列 + 门禁并行化实测 152ms，**不是**「模式切换实测耗时」）。
+   要拿真耗时需要 **cargo 编译 + 真核心二进制 + 真节点**，未运行态还要能真正 start。
+   **好消息**：读数的埋点已经齐了（§3.3.2 的 `elapsed_ms` + 5 个 `stage`），
+   有节点的人按 §3.3.2 跑一遍即可，不需要我再改代码。
+   ⚠️ 常量（`CORE_READY_TIMEOUT=10s` / `CORE_SHUTDOWN_GRACE=3s` / `REGION_PROBE_TIMEOUT=4s` /
+   `PRE_COMMIT_PROBE_TIMEOUT_SECS=6s`）是**上界**，不许当读数引用。
 2. 目标 1 的**端到端漂移**未测（预览无日志流，见 3.1）。
 3. 目标 3 只测了拓扑页的两个视口；**没测**路由页/设置页/暗色主题/其它缩放。
 4. 目标 4 的对比在 **jsdom** 里做的（无布局），但「fill 是否写进 DOM」不依赖布局，
@@ -212,3 +282,6 @@ art-designer 的 190 与我的 192 是**同一事实的两个等价边界**。
 * 取色缓存攻击（/tmp）：`/tmp/ac-guard`（HEAD）与 `/tmp/ac-noguard`（去掉 `isConnected`）
 * CSS 去重实验（/tmp）：`/tmp/css-orig`、`/tmp/css-dedup`、`/tmp/css-diff.mjs`、`/tmp/css-*.json`
 * 隔离 worktree：`/tmp/xt-tester`（detached `bdeee46`）
+* 目标 2 的隔离 worktree：`/tmp/xt-t2`（detached `5223a01`，只软链了资源/依赖，**源码未改**）
+* 目标 2 的后端测试输出：`/tmp/t2-tests.log`（121 passed / 0 failed / 1 ignored）
+* Rust 依赖缓存（绕沙箱只读 `~/.cargo`）：`CARGO_HOME=/tmp/xt-cargo-home`、`CARGO_TARGET_DIR=/tmp/xt-target`
