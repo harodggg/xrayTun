@@ -194,7 +194,9 @@ jobs:
              （它的 usage 是 `xattr [-l] [-r] [-s] [-v] [-x] file …`，**有 `-r`**）。
              所以：**一律写绝对路径 `/usr/bin/xattr`**；**不要依赖 `-r`**
              （需要递归就用上面那条 `find … -exec … +`）；
-             命令**不要 `2>/dev/null`** —— 失败要留痕。
+             `2>/dev/null` 按上下文用：**产品脚本里不许用**（失败要留痕，例如自动更新
+             会写 `app-update.log`）；这条**给用户手动执行的指引**可以保留它 ——
+             只为压掉 `No such xattr` 这类刷屏噪声，不影响判断成败。
              另一个独立事实：只给 bundle 根路径的
              `xattr -d com.apple.quarantine /Applications/XrayTun.app`
              只清掉根上那一个（实测 13 个里还剩 12 个），所以要逐文件清。

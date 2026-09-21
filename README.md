@@ -124,8 +124,9 @@ cargo run -p xraytun-desktop
 
   * **一律写绝对路径 `/usr/bin/xattr`** —— 否则可能命中 Python 的包；
   * **不要依赖递归开关 `-r`** —— 需要递归就用上面那条 `find … -exec … +`；
-  * 命令**不要 `2>/dev/null`** —— 它会把「本来就没有该属性」和**真正的失败**一起吞掉，
-    失败要留痕（上面示例里保留它只是为了少刷屏，自己执行时建议去掉）。
+  * `2>/dev/null` 要**按上下文**用：**产品脚本里不许用**（失败必须留痕，例如自动更新
+    会写 `app-update.log`）；而**上面这种给用户手动执行的安装指引**可以保留它 ——
+    它只是压掉 `No such xattr` 这类刷屏噪声，不影响你判断成败。
   * `xattr -d com.apple.quarantine /Applications/XrayTun.app`（只给 bundle 根路径）
     **只会清掉根上那一个**：实测 13 个带 quarantine 的文件里还剩 **12 个**，
     所以要像上面那样逐文件清。`xattr -c` 同理（对目录不递归）。

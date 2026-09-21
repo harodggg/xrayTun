@@ -32,14 +32,19 @@
 #   * macOS 15 及以上：右键「打开」**已被 Apple 移除**（2024-08-06 公告），
 #     只能去「系统设置 → 隐私与安全性」里对被拦的 App 点「仍要打开」；
 #   * macOS 14 及更早：右键（或 Control-点击）→「打开」；
-#   * 终端（两者皆可）：逐文件清 quarantine（macOS 的 xattr 没有 -r）：
+#   * 终端（两者皆可）：逐文件清 quarantine —— 用 `find … -exec … +`，因为 `xattr`
+#     有**两个实现**、`-r` 的支持**随实现与版本而异**：
 #       find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
 #
-# ⚠️ 这里**必须**逐文件清，两个坑都是本机（macOS 26.6.2）实测的：
-#   * `xattr -dr` / `xattr -cr` 会以 exit 64 失败并打印 `option -r not recognized`
-#     （这台 macOS 的 xattr 用法里根本没有 -r）；
+# ⚠️ 这里**必须**逐文件清，两点都是本机（macOS 26.6.2 / build 25G83）实测的：
+#   * `xattr` 有**两个实现**：Apple 的 `/usr/bin/xattr`（支持 `-r`）与 PATH 上先命中的
+#     Python `xattr` 包（**没有 `-r`**：`xattr -dr …` → exit 64，打印
+#     `option -r not recognized`）。所以**产品脚本一律写绝对路径 `/usr/bin/xattr`**，
+#     且**不要依赖 `-r`** —— 需要递归就用上面的 `find … -exec … +`；
 #   * 只给 bundle 根路径的 `xattr -d com.apple.quarantine /Applications/XrayTun.app`
 #     只清掉根上那一个 —— 实测 13 个带 quarantine 的文件里还剩 12 个。
+# 上面示例是**给用户手动执行**的，保留 `2>/dev/null` 只为压掉 `No such xattr` 刷屏；
+# **产品脚本里不许 `2>/dev/null`**（失败要留痕）。
 # README 与 Release Notes 里的说法必须与这里一致。
 #
 # 要真正免打扰分发，必须有付费开发者账号，然后：
@@ -222,8 +227,10 @@ fi
 #     "Disallowed xattr com.apple.FinderInfo found on .../xraytun-helper"
 #
 # 现在不阻塞启动，但**公证与 Developer ID 分发一定会被挡住**，而且是非严格
-# 校验看不见的静默失效。所以这里逐文件清掉（macOS 的 `xattr -c` 不递归，
-# 且没有 `-r`，不能用 `xattr -cr`）。
+# 校验看不见的静默失效。所以这里逐文件清掉，两个理由：
+#   * `xattr -c` 对**目录不递归**（只清目录自己那一个）；
+#   * `-r` 的支持**随实现与版本而异**（PATH 上先命中的 Python `xattr` 没有，
+#     `xattr -cr` 会 exit 64），所以不能依赖 `xattr -cr`。
 #
 # 清完 `com.apple.provenance` 可能仍在（系统加的、不可删），但 codesign
 # 容忍它 —— 实测上述 13 个 FinderInfo 清掉后 `--strict` 即通过。
@@ -296,8 +303,9 @@ if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$STAGE
   RMNT="$(mktemp -d)"
   if hdiutil convert -quiet "$RAW" -format UDRW -o "$RW" \
      && hdiutil attach -nobrowse -mountpoint "$RMNT" "$RW" >/dev/null 2>&1; then
-    # 逐文件：这台 macOS 的 `xattr` **没有 -r**，而且 `-c` 对目录不递归，
-    # 所以 `xattr -cr` / `xattr -c <目录>` 都不行（前者还会 exit 64）。
+    # 逐文件：`-c` 对目录**不递归**，而 `-r` 的支持**随实现与版本而异**
+    # （PATH 上先命中的 Python `xattr` 没有 `-r`，`xattr -cr` 会 exit 64），
+    # 所以两者都不能依赖 —— 直接用 `find … -exec … +` 逐个文件清。
     find "$RMNT" -exec xattr -c {} + 2>/dev/null || true
     hdiutil detach "$RMNT" >/dev/null 2>&1 || hdiutil detach "$RMNT" -force >/dev/null 2>&1 || true
     CLEANED=1
@@ -309,7 +317,8 @@ if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$STAGE
     # **CI 下宁可失败，也不放过。**
     #
     # 这不是「环境挑剔」，而是取舍：清不掉 = **无法验证交付物**；而「无法验证时放行」
-    # 正是本项目反复踩的那一类坑（`$arg（` 未定义、`xattr -dr` 不存在、探针看不见 B1、
+    # 正是本项目反复踩的那一类坑（`$arg（` 未定义、`xattr -dr` 是否可用随实现而异、
+    # 探针看不见 B1、
     # `codesign --verify` 不带 `--strict`）—— 全是「看起来做了、其实没做」。
     #
     # GitHub 的 macOS runner 有完整的 hdiutil 与挂载能力，所以正常 CI 不会误伤；
@@ -408,8 +417,8 @@ cat <<EOF
   * macOS 15+：右键「打开」已被 Apple 移除，去「系统设置 → 隐私与安全性」
     对被拦的 App 点「仍要打开」；
   * macOS 14-：右键（或 Control-点击）→「打开」；
-  * 终端（都适用）：xattr -d com.apple.quarantine /Applications/XrayTun.app
-    （**不是** `xattr -dr`：这台 macOS 的 xattr 没有 -r，会 exit 64）
+  * 终端（都适用）：逐文件清 quarantine（`xattr` 有两个实现，`-r` 支持随实现/版本而异）：
+      find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
 
 架构：App 是 ${APP_ARCH}，核心是 ${CORE_ARCH:-未知}。
 两者不一致时（本机就是：x86_64 的 App + arm64 的核心），
