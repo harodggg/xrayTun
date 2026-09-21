@@ -22,9 +22,14 @@ use xt_core::store::Store;
 pub enum RecoveryOutcome {
     /// 重建成功，隧道已恢复。
     Recovered,
-    /// 重建失败，已退回直连：网络可用，但流量不再走代理。
+    /// 重建失败，已**尝试**退回直连（不再走代理）。
     ///
-    /// 刻意不叫 `failed`：失败后**不是断网**，界面的文案要说清这个差别。
+    /// ⚠️ **不等于「网络可用」**：这一步的结局有两种 ——
+    /// 回滚成功（路由/DNS 已还原）或回滚失败（网络恢复**未经验证**，
+    /// 见 `commands::FallbackOutcome`）。界面必须按结局区分文案，
+    /// **不许**一律说「能上网」。
+    ///
+    /// 刻意不叫 `failed`：退回直连是一个**动作**，与「隧道失败」不是同一件事。
     DirectFallback,
 }
 
@@ -826,9 +831,15 @@ mod tests {
             "别的模块写的 notice 不能被顺手清掉"
         );
 
-        let mut succeeded = Some("自动恢复失败，已退回直连：网络可用，但流量不再走代理。可在节点页重新连接".to_string());
-        clear_recovering_notice(&mut succeeded);
-        assert!(succeeded.is_some(), "失败时 notice 要保留并说清下一步");
+        // 夹具用**现在的生产文案**（回滚失败那一种）：它与本测试的目的无关，
+        // 但别引用已经删掉的旧文案 —— 那会让后来人以为旧文案还在用。
+        let mut unverified = Some(
+            "自动恢复失败，回退直连未完成：**未能确认网络已恢复**（helper 回滚失败）。\
+             请点「修复网络」重试回滚"
+                .to_string(),
+        );
+        clear_recovering_notice(&mut unverified);
+        assert!(unverified.is_some(), "失败时 notice 要保留并说清下一步");
 
         let mut empty: Option<String> = None;
         clear_recovering_notice(&mut empty);

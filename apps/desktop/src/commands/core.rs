@@ -334,6 +334,26 @@ impl FallbackOutcome {
     }
 }
 
+/// 「节点连上了、但经它访问目标一直超时，且没有可回退的好节点」时给用户看的话。
+///
+/// # 为什么不预设原因（task-67）
+///
+/// 同一个现象至少有三种可能：节点不可用、**本机网络本身不通**、链路被干扰。
+/// 以前这里直接写「请换一个节点」——把因果**唯一地**归到节点上，用户于是陷入
+/// 「换节点 → 还不通 → 再换」的循环（用户原话：「不知道是应用、运营商还是节点」）。
+///
+/// 现在只陈述**观察到的因果**（经它访问一直超时）+ 可能性，并给出用户已知有效的
+/// 自救动作：**先点「断开」恢复直连**（那条路径会回滚路由与 DNS，见
+/// `Supervisor::stop` → `Request::TunDown` → `controller::rollback`；用户也实测过
+/// 「断开或退出应用后网络就恢复了」）。
+pub(crate) fn node_unusable_message(node_name: &str) -> String {
+    format!(
+        "节点「{node_name}」已连接，但经它访问目标一直超时。\
+         可能是这个节点不可用，也可能**本机网络本身不通**（或被链路干扰）。\
+         先试换一个节点；**如果整台 Mac 都上不了网，先点「断开」恢复直连**。"
+    )
+}
+
 /// 连上之后**真的发一个请求出去**，确认这条隧道能用。
 ///
 /// 为什么必须做：启动流程里那两次检查问的都是「**服务器** TCP 可达吗」，
@@ -689,9 +709,7 @@ pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard
                 Some(_) => format!(
                     "节点「{node_name}」连上了但流量出不去，正在自动退回上一个可用节点"
                 ),
-                None => format!(
-                    "节点「{node_name}」已连接，但流量出不去（经它访问目标超时）。请换一个节点。"
-                ),
+                None => node_unusable_message(&node_name),
             };
             state.with(|i| {
                 i.push_log("app", "error", msg.clone());
@@ -1495,5 +1513,41 @@ mod tests {
                 "结局 {outcome:?} 必须落到 DirectFallback"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 文案不预设原因（task-67）
+    //
+    // 同一现象（经节点访问一直超时）至少三种可能：节点不可用 / 本机网络不通 /
+    // 链路被干扰。界面对三种可能只给一种解释，用户就会在「换节点」和
+    // 「其实应该先断开」之间来回折腾。
+    // -----------------------------------------------------------------------
+
+    /// 节点不可用的提示：**保留观察到的因果**，但给出多种可能性与自救动作。
+    #[test]
+    fn node_unusable_message_keeps_the_cause_but_not_a_presumed_conclusion() {
+        let msg = node_unusable_message("node-abc");
+
+        // 1) 观察到的因果必须保留（这是有证据的部分）
+        assert!(msg.contains("经它访问目标一直超时"), "实际：{msg}");
+        assert!(msg.contains("node-abc"), "要点名是哪个节点：{msg}");
+        // 2) 必须给出**不止一种**可能，且点出「本机网络」这个以前没提过的可能性
+        assert!(msg.contains("节点不可用"), "实际：{msg}");
+        assert!(msg.contains("本机网络"), "实际：{msg}");
+        assert!(msg.contains("可能"), "不确定的部分要用「可能」：{msg}");
+        // 3) 用户已知有效的自救动作
+        assert!(msg.contains("断开"), "要给出「先断开」这条路：{msg}");
+        // 4) 不许退回「唯一归因 + 命令式换节点」的旧写法
+        assert!(!msg.contains("请换一个节点"), "别再把因果唯一归到节点上：{msg}");
+    }
+
+    /// 回退直连的两种结局都必须能被状态机接住（`fell_back_to_direct` 不再不可达）。
+    #[test]
+    fn fallback_outcome_enum_covers_both_endings() {
+        assert_eq!(FallbackOutcome::from_stop(&Ok(())), FallbackOutcome::DirectRestored);
+        assert!(matches!(
+            FallbackOutcome::from_stop(&Err("x".into())),
+            FallbackOutcome::DirectUnverified { .. }
+        ));
     }
 }

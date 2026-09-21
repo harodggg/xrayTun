@@ -212,7 +212,9 @@ impl GateFailure {
                 format!(
                     "节点通过了 TCP 检查，但经它发出的真实请求拿不到响应：{list}。\n\
                      国内网络下「TCP 能连到服务器、代理协议握手被墙」是常见情形。\n\
-                     **已在接管默认路由之前中止**，系统网络未被改动。请换一个节点后重试。"
+                     **已在接管默认路由之前中止**，系统网络未被改动。\
+                     可能是这个节点不可用，也可能本机网络本身不通（或被链路干扰）；\
+                     先试换一个节点；如果整台 Mac 都上不了网，先点「断开」恢复直连。"
                 )
             }
             GateFailure::Commit(msg) => msg.clone(),
@@ -1793,5 +1795,32 @@ mod tests {
             "第二个目标必须是境内、经 CN 分流走 direct 的地址，实际 {}",
             REQUIRED_PROBE_TARGETS[1]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 门禁失败文案：好消息保留、结论不预设（task-67）
+    // -----------------------------------------------------------------------
+
+    /// 门禁拦下时：**「已在接管默认路由之前中止」必须保留**（那是好消息），
+    /// 但「请换一个节点后重试」这种唯一归因要去掉，并点出本机网络的可能性。
+    #[test]
+    fn gate_failure_message_keeps_the_good_news_without_presuming_the_cause() {
+        let failure = GateFailure::Probe {
+            failed: vec![ProbeOutcome {
+                target: "http://www.baidu.com/".into(),
+                http_code: "000".into(),
+            }],
+        };
+        let msg = failure.describe();
+
+        // 好消息：门禁生效了，系统网络没被动过
+        assert!(msg.contains("已在接管默认路由之前中止"), "实际：{msg}");
+        assert!(msg.contains("系统网络未被改动"), "实际：{msg}");
+        // 具体的探测证据要保留（哪个目标、拿到什么码）
+        assert!(msg.contains("www.baidu.com") && msg.contains("000"), "实际：{msg}");
+        // 多种可能 + 自救动作
+        assert!(msg.contains("本机网络"), "实际：{msg}");
+        assert!(msg.contains("断开"), "实际：{msg}");
+        assert!(!msg.contains("请换一个节点后重试"), "别把因果唯一归到节点：{msg}");
     }
 }
