@@ -171,6 +171,29 @@ function Section({
   );
 }
 
+/**
+ * `auto_reconnect`：**后端有、前端类型没有**。
+ *
+ * `crates/xt-core/src/model.rs` 里它是 `#[serde(default = "yes")] pub auto_reconnect: bool`
+ * （默认 `true`），启动时由 `commands/core.rs` 的 `should_auto_reconnect` 决定要不要连回来；
+ * 但 `types.ts` 的 `AppSettings` 从来没有声明它 ⇒ 用户既看不到也关不掉（task-71 修的就是这个）。
+ *
+ * 这里**刻意不改 `types.ts`**（task-68 正在改 `ipc.ts`，避免两个人在同一处动类型；
+ * 少一个声明不影响运行，因为 UI 用的就是后端快照）。代价是读写要绕一层类型，
+ * 所以把这件事**只留在这两个符号里**，别在别处再抄一份。
+ *
+ * ⚠️ 保存能保住 `false`，靠的是 `patch` 里的 `{ ...settings, ...p }` **展开**
+ * —— 未声明的属性会原样带过去，不会被 `serde(default = "yes")` 翻回 `true`。
+ * 这条**有测试钉住**（`autoReconnectSetting.test.tsx` 的「关掉后读回仍是 false」），
+ * 不是靠「恰好用了展开」的运气。
+ */
+type AutoReconnectPatch = Partial<AppSettings> & { auto_reconnect?: boolean };
+
+/** 读开关：后端快照里带着它；万一缺失，按后端的默认值（`true`）显示。 */
+function readAutoReconnect(s: AppSettings): boolean {
+  return (s as { auto_reconnect?: boolean }).auto_reconnect ?? true;
+}
+
 export default function Settings({ focusSection }: { focusSection?: string | null } = {}) {
   const { snapshot, busy, run, runVoid } = useStore();
   const [draft, setDraft] = useState<AppSettings | null>(null);
@@ -248,6 +271,17 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
   const dirty = draft !== null;
 
   const patch = (p: Partial<AppSettings>) => setDraft({ ...settings, ...p });
+  /**
+   * 写 `auto_reconnect`（前端类型里没声明的那个字段）。
+   *
+   * 先赋给一个「带该字段的可选子类型」再交给 `patch` —— 结构化类型下它是
+   * `Partial<AppSettings>` 的子类型，所以这里**不需要 `as` 断言**。
+   * 走的是与其它复选框**完全相同**的保存通路（`patch` → `draft` → `save`）。
+   */
+  const setAutoReconnect = (v: boolean) => {
+    const nextPatch: AutoReconnectPatch = { auto_reconnect: v };
+    patch(nextPatch);
+  };
   const patchTun = (p: Partial<AppSettings["tun"]>) => patch({ tun: { ...settings.tun, ...p } });
   // 有进度就说明在下载：拿它当「正在下载」的判据，不用再开一个状态。
   const downloading = snapshot.update.progress !== null;
@@ -377,6 +411,30 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           />
           允许局域网设备使用本机代理（会监听 0.0.0.0，请确认网络环境可信）
         </label>
+
+        {/* 「自动连回来」——它以前**默认开着、却既看不到也关不掉**（task-71）。
+            后端默认值是 `true`（`crates/xt-core/src/model.rs` 的 `#[serde(default = "yes")]`），
+            所以「退出应用」并不能阻止下次启动把它拉起来：用户以为退出就没事了，
+            而下次启动/登录项自启/自更新重启会**自动连回来**。
+            放在「连接」这一类里、默认分类可见，正是因为它影响高、此前可见性为 0。 */}
+        <label className="row" style={{ gap: 8, fontSize: 12, marginTop: 14 }}>
+          <input
+            type="checkbox"
+            checked={readAutoReconnect(settings)}
+            onChange={(e) => setAutoReconnect(e.target.checked)}
+          />
+          启动时如果上次是连接状态，自动连回来
+        </label>
+        {/* 文案逐句对应 `commands/core.rs` 的 `should_auto_reconnect`
+            （四个条件缺一不可：`was_connected && auto_reconnect && mode != Direct && !already_running`）
+            与 `reconnect_if_needed` 的注释（三种场景）。**不写「开机自动连接」** —— 那不是它的语义：
+            它只在「上次确实连着」且非直连时把上次那条连接重建起来。 */}
+        <div className="field__hint">
+          只在三种情况下起作用：<strong>应用自更新</strong>（先退出、替换 App 后再启动）、
+          <strong>崩溃后</strong>被系统重启、<strong>开机自启</strong>。
+          前提是<strong>上次退出时确实是连着的</strong>，且当前不是「直连」模式 ——
+          你主动点过「停止」的话，这里不会把隧道拉起来。
+        </div>
         <div className="field" style={{ marginTop: 14 }}>
           <label>日志级别</label>
           <select value={settings.log_level} onChange={(e) => patch({ log_level: e.target.value })}>
