@@ -277,6 +277,27 @@ export function TopBar({ view }: { view: View }) {
         ))}
       </div>
 
+      {/* 切换进度：以前这里只有一个 `disabled` —— 那几秒到几十秒里界面完全沉默，
+          用户看到的就是「点了没反应」。（task-54） */}
+      {modeBusy && (
+        <span
+          className="badge badge--unknown"
+          role="status"
+          title="切换模式需要重启核心：先停掉再按新模式起，请等它完成"
+        >
+          {running ? "正在切换模式（重启核心，可能十几秒）…" : "正在切换模式…"}
+        </span>
+      )}
+
+      {/* 行为变更提示：**模式只是一个偏好**。未连接时点它不再隐式连接核心
+          （以前会，代价是一次完整连接）。这条提示由状态直接推导，不是一次性
+          flag —— 所以不会留下过期的「点连接开始」。 */}
+      {!running && mode !== "direct" && !modeBusy && (
+        <span className="badge badge--unknown" title="模式已保存；真正开始连接的是「连接」按钮">
+          已选「{MODE_LABEL[mode]}」，点右侧「连接」开始
+        </span>
+      )}
+
       {/* 自动恢复中的状态：必须是**可读的一句话**，而不是一个沉默的灰点 */}
       {rv.phase === "recovering" && (
         <span className="badge badge--ok" title="看门狗正在自动重建隧道，不需要手动点「连接」">
