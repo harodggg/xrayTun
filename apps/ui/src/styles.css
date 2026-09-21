@@ -12,6 +12,18 @@
   --ok: #34d399;
   --warn: #fbbf24;
   --danger: #f87171;
+  /* 状态线（task-45）：把「流量被代理覆盖到什么程度」编码成 5 个 tone。
+     前四个是既有语义色的别名 —— 不新造色，只给语义一个名字；
+     只有 `--status-off` 是新值。 */
+  --status-on: var(--ok); /* 整机受保护：TUN 在跑 */
+  --status-partial: var(--accent); /* 部分覆盖：系统代理在跑 */
+  --status-off: #566a88; /* 没有代理覆盖：直连 / 未运行。新值：既要在 --bg 上
+                            够得着 3:1（实测 3.34:1），又要明显比绿色/蓝色暗，
+                            让「暗 = 没有覆盖」这个明度顺序本身也带信息。
+                            不用 --border/#334155：它们只有 1.42/1.78:1，达不到
+                            WCAG 1.4.11 对「承载信息的图形」的 3:1。 */
+  --status-busy: var(--warn); /* 正在自愈 / 隧道建好但路由未接管 */
+  --status-failed: var(--danger); /* 代理承诺已破：退回直连 / 核心报错 */
   --radius: 10px;
   --radius-sm: 6px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
@@ -133,11 +145,61 @@ textarea {
   align-items: center;
   gap: 12px;
   padding: 34px 20px 12px;
-  /* 顶栏底边 = 绿色状态条。
-     原来是 1px 的 --border（#263148），那个颜色在深色背景上几乎看不见，
-     所以这里同时加粗到 2px：否则「变成绿色」和「没变」在观感上差不多。 */
-  border-bottom: 2px solid var(--ok);
+  /* 顶栏底边 = 状态线（task-45）。
+   *
+   * 这一行以前是写死的 `2px solid var(--ok)` —— 于是**直连、系统代理、未连接、
+   * 恢复中、已退回直连**全都是绿的。在这套配色里绿色 = 已受保护，所以那种写法
+   * 在直连模式下等于谎报「你受保护了」（实际完全没有代理）。
+   *
+   * 现在默认值是 `--status-off`（中性灰 = 没有代理覆盖），**不是绿**：
+   * 漏配状态、快照还没到、将来新增模式分支时，默认应当是「不可信」而不是
+   * 「已受保护」。具体色调由 `topbar--<tone>` 覆盖（见下方状态线一节）。 */
+  border-bottom: 2px solid var(--status-off);
   -webkit-app-region: drag;
+}
+
+/* ---------------------------------------------------------------- 状态线
+ *
+ * `App.tsx` 的 `topbarStatus` 是唯一真源：它按**真实后端字段**算出 5 种 tone，
+ * 挂成 `topbar--<tone>`。这里的每条规则只做一件事 —— 把 tone 映射到颜色。
+ *
+ *   --on      整机受保护（TUN 在跑）        --ok         绿
+ *   --partial 部分覆盖（系统代理在跑）      --accent     蓝
+ *   --off     没有代理覆盖（直连/未运行）   --status-off 中性灰
+ *   --busy    正在自愈 / 路由尚未接管       --warn       琥珀
+ *   --failed  代理承诺已破（退回直连/报错） --danger     红
+ *
+ * 绿色**只属于** `--on`。对比度（2px 线 vs 页面底 `--bg #0f1420`，实算，
+ * WCAG 1.4.11 要求 ≥3:1）：绿 9.57 · 蓝 5.73 · 琥珀 11.02 · 红 6.65 · 中性灰 3.34。
+ * 中性灰刻意是最暗的一档：明度顺序本身也带信息（暗 = 没有覆盖）。
+ */
+.topbar--on {
+  border-bottom-color: var(--status-on);
+}
+.topbar--partial {
+  border-bottom-color: var(--status-partial);
+}
+.topbar--off {
+  border-bottom-color: var(--status-off);
+}
+.topbar--busy {
+  border-bottom-color: var(--status-busy);
+}
+.topbar--failed {
+  border-bottom-color: var(--status-failed);
+}
+
+/* 屏幕阅读器专用文本：状态线没有文字，必须另给一份可读的等价信息。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .topbar > * {
@@ -488,12 +550,27 @@ input[type="checkbox"] {
 }
 
 .dot--on {
-  background: var(--ok);
+  background: var(--status-on);
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
 }
 
 .dot--warn {
-  background: var(--warn);
+  background: var(--status-busy);
+}
+
+/* 顶栏那条状态线（`.topbar--*`）与这个点**同色** —— 它们相距几像素、
+   说的是同一件事，两处不一致比一处错更难查。见 `App.tsx` 的 `topbarStatus`。 */
+.dot--partial {
+  background: var(--status-partial);
+}
+
+.dot--off {
+  background: var(--status-off);
+}
+
+.dot--failed {
+  background: var(--status-failed);
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
 }
 
 /* ---------------------------------------------------------------- 提示条 */
