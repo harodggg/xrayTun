@@ -429,7 +429,9 @@ cd apps/ui && npx vite --port 5199 --strictPort
 > ✅ **更新（2026-09-20 晚，本文件首次成稿之后）**：仓库的安装说明**已被修正**，
 > 现在 `README.md:106` 与 `release.yml:187` 都用正确的
 > `find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} +`，
-> 并各自写明「这台 macOS 的 `xattr` 没有 `-r`」。**它们现在是可信的真源，官网可照抄命令。**
+> 并各自写明「`xattr` 有两个实现，`-r` 的支持**随实现与版本而异**」
+> （准确表述见下面审计记录那节的订正 —— 不要写成「`xattr` 没有 `-r`」）。
+> **它们现在是可信的真源，官网可照抄命令。**
 >
 > 本文下面那节「红线」保留为**审计记录**（它记录了我在旧版本上实测到的
 > `option -r not recognized`，那条实测正是后来发现产品代码 bug 的线索），
@@ -473,7 +475,7 @@ cd apps/ui && npx vite --port 5199 --strictPort
    >
    > | 旧写法 | 问题 | 我的证据 |
    > |---|---|---|
-   > | `xattr -dr com.apple.quarantine …` | **`xattr` 没有 `-r` 选项** | ✅ **实机执行**：`xattr -dr com.apple.quarantine /tmp/xattr-test` → `option -r not recognized`；`xattr` 的 usage 是 `xattr -d [-s] attr_name file`，**无 `-r`**；`xattr -d com.apple.quarantine <file>` 正常解析 |
+   > | `xattr -dr com.apple.quarantine …` | **裸写 `xattr` 时 `-r` 不被接受**（PATH 先命中的那份不支持） | ✅ **实机执行**：`xattr -dr com.apple.quarantine /tmp/xattr-test` → `option -r not recognized`（exit 64）；该实现的 usage 只有 `-s -l -z -p -w -d -c`；`xattr -d com.apple.quarantine <file>` 正常解析。<br>⚠︎ **订正（2026-09-21）**：这里原来的结论「**`xattr` 没有 `-r` 选项**」**过头了** —— `-r` 的支持**随实现与版本而异**：`/usr/bin/xattr -dr …` 实测 **exit 0**，而且标记真的被递归删掉了 |
    > | 「右键 →「打开」」 | 该绕过方式**被 Apple 在 macOS 15 移除** | `interaction-designer` 实测认定（见 `docs/site/INTERACTION.md`）。**我本人未独立验证** —— 本机 macOS 26.6.2，headless 环境做不了 GUI 拦截测试 |
    >
    > **此后 `1ea96dd` 已把两处文档改对**，并在文档里写明了这个 `-r` 的坑。
@@ -494,8 +496,9 @@ cd apps/ui && npx vite --port 5199 --strictPort
    > ```
    > xattr -d com.apple.quarantine /Applications/XrayTun.app
    > ```
-   > 然后正常双击打开。**注意是 `-d`，不是 `-dr`** —— 旧文档里的 `-dr` 会报
-   > `option -r not recognized`。
+   > 然后正常双击打开。**注意是 `-d`，不是 `-dr`** —— 旧文档里的 `-dr` 在
+   > PATH 先命中 Python 那份 `xattr` 的机器上会报 `option -r not recognized`
+   > （`-r` 的支持随实现与版本而异，见上面的订正）。
    >
    > 三种方法只需要用一次。之后每次打开都不会再被拦。
 
@@ -699,7 +702,10 @@ header 右侧：   功能   下载   FAQ   │   中文 · EN
    **并且这两条的时间背景要说清**：我的审计跑在 `e7189e3`（下午），当时
    `release.yml:165` / `README.md:106` 写的确实是 `xattr -dr`。
    - ✅ **已验证**：本机执行 `xattr -dr com.apple.quarantine /tmp/xattr-test` →
-     `option -r not recognized`；`xattr` 的 usage 明确无 `-r`（只有 `-d`）。
+     `option -r not recognized`（exit 64）；**裸写 `xattr` 时** PATH 先命中的是 Python 的
+     `xattr` 包，它的 usage 只有 `-s -l -z -p -w -d -c`。
+     ⚠︎ **订正（2026-09-21）**：由此推出「`xattr` 没有 `-r`」是**过头**的 ——
+     `-r` 的支持**随实现与版本而异**：`/usr/bin/xattr -dr …` 实测 **exit 0** 且标记真被删掉。
    - ✅ **该问题此后已被修掉**：`1ea96dd` 把仓库文档改成
      `find … -exec xattr -d … {} +` 并写明了这个坑；产品代码里同族的错
      （`crates/xt-core/src/update.rs` 的自动更新脚本）由 task-46 修掉。

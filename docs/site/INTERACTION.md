@@ -103,8 +103,24 @@ $ xattr -dr com.apple.quarantine /Applications/XrayTun.app
 option -r not recognized            ← 本机 macOS 26.6.2 【实测·真机】
 ```
 
-出处：`release.yml:165` 与 `README.md:106` 都写 `xattr -dr com.apple.quarantine …`。
-现代 macOS 的 `xattr` **没有 `-r`**（`xattr -h` 只列 `-s -l -z -p -w -d -c`）。
+出处：`release.yml` 与 `README.md` 当年都写 `xattr -dr com.apple.quarantine …`。
+**⚠︎ 订正（2026-09-21）：这里不能写成「`xattr` 没有 `-r`」—— 那是过头的结论。**
+macOS 上有**两个 `xattr` 实现**：Apple 的 `/usr/bin/xattr`，以及 Python 的 `xattr` 包
+（`pip install xattr` 会装一个同名命令）。本机 macOS 26.6.2 实测：
+
+* `which -a xattr` → `/Library/Frameworks/Python.framework/Versions/3.12/bin/xattr`、
+  两次 `/usr/local/bin/xattr`（同一个包），**`/usr/bin/xattr` 排在最后**；
+* 因此**裸写** `xattr -dr …` → **exit 64**，`option -r not recognized`
+  ——报错的是 Python 那份，它的 usage 只有 `-s -l -z -p -w -d -c`，确实没有 `-r`；
+* `/usr/bin/xattr -dr …` → **exit 0**，而且标记**真的被递归删掉了**（Apple 这份支持 `-r`）。
+
+准确表述是「**`-r` 的支持随实现与版本而异**」。三条建议：
+
+1. **一律写绝对路径 `/usr/bin/xattr`**，不要赌 `PATH` 上先命中哪一份；
+2. **不要依赖递归开关** —— 要递归就 `find <目标> -exec /usr/bin/xattr -d com.apple.quarantine {} +`；
+3. **产品脚本里禁止 `2>/dev/null`**（失败必须留痕，见 §2.3 与 `crates/xt-core/src/update.rs` 那处同族 bug）；
+   用户**手动执行**的安装指引里可以留，那只是为了压掉 `No such xattr` 的刷屏。
+
 正确写法【实测·真机，已跑通】：
 
 ```

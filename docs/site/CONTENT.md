@@ -26,7 +26,7 @@
 | F8 | 包内核心为 **Xray-core v26.9.9**（构建脚本默认值；本应用要求 ≥ 26.1.31） | `scripts/fetch-xray.sh:10` `VERSION="${XRAY_VERSION:-v26.9.9}"`；release.yml 未覆盖该变量；`crates/xt-core` 的 `MIN_CORE_VERSION_NATIVE_TUN = 26.1.31`（`docs/03` §1.1） |
 | F9 | 包是 **ad-hoc 签名、未公证**（`Signature=adhoc`、`TeamIdentifier=not set`、`spctl` rejected、无公证 ticket） | `docs/site/INTERACTION.md` §2.0 真机实测；`.github/workflows/release.yml:171` 自述；`scripts/package-macos.sh:203` `codesign --sign -` |
 | F10 | **下载后一定会被 Gatekeeper 拦**，必须按安装步骤放行 | 同 F9 |
-| F11 | 正确放行命令是 **`xattr -d com.apple.quarantine`**（**没有** `-r`） | `docs/site/INTERACTION.md` §2.0 真机实测（`xattr -dr` → `option -r not recognized`） |
+| F11 | 正确放行命令是 **`xattr -d com.apple.quarantine`**；**不要写 `-r`** —— `xattr` 在 macOS 上有**两个实现**（Apple 的 `/usr/bin/xattr` 与 PATH 上可能先命中的 Python `xattr` 包），**`-r` 的支持随实现与版本而异** | `docs/site/INTERACTION.md` §2.0 真机实测（本机 macOS 26.6.2：`which -a xattr` 先命中 Python 的 `xattr` → **裸写** `xattr -dr` = exit 64 `option -r not recognized`；`/usr/bin/xattr -dr` = exit 0 且标记真被删掉） |
 | F12 | **macOS 15 及以后不能再用「右键 → 打开」绕过**，要经「系统设置 → 隐私与安全性 → 仍要打开」 | Apple Developer News 2024-08-06（原文见 INTERACTION §2.2）；本机 macOS 26.6.2 |
 | F13 | TUN 使用的是 **Xray-core 原生 `tun` 入站（内置 gVisor 协议栈）**，不是 tun2socks 之类旁路进程 | `docs/03-xray-integration.md` §1（上游源码核实） |
 | F14 | 路由用 `0.0.0.0/1` + `128.0.0.0/1` 拆分，而不是替换默认路由 | `README.md` §核心问题；`docs/02` §路由策略 |
@@ -289,7 +289,12 @@ shasum -a 256 XrayTun_0.8.28_x86_64_arm64.dmg
 > ```
 >
 > 这条命令只删除系统给下载文件打的「来自互联网」标记。**注意是 `-d`，不是 `-dr`**：
-> 现代 macOS 的 `xattr` 没有 `-r` 选项，写成 `-dr` 会报 `option -r not recognized`。
+> `xattr` 在 macOS 上有**两个实现** —— Apple 的 `/usr/bin/xattr` 与 PATH 上可能先命中的
+> Python `xattr` 包 —— **`-r` 的支持随实现与版本而异**（本机 macOS 26.6.2 实测：
+> `which -a xattr` 先命中 Python 那份，**裸写** `xattr -dr` 就报 `option -r not recognized`；
+> 而 `/usr/bin/xattr -dr` 是 exit 0、标记真的被删掉）。所以官网只用 `-d`：
+> 要递归就用 `find … -exec /usr/bin/xattr -d … {} +`，并且**一律写绝对路径 `/usr/bin/xattr`**，
+> 不要依赖 PATH 上先命中哪一份。
 
 **第 4 步：在应用里安装特权 helper（TUN 模式需要）**
 > 打开 XrayTun → 设置 → 特权助手 → 「安装」。这一步会要求一次管理员密码。
@@ -595,8 +600,12 @@ shasum -a 256 XrayTun_0.8.28_x86_64_arm64.dmg
 > ```
 >
 > This only removes the "downloaded from the internet" quarantine flag. Note it is `-d`, **not**
-> `-dr`: current versions of `xattr` do not have a `-r` option, and `-dr` fails with
-> `option -r not recognized`.
+> `-dr`: macOS ships **two `xattr` implementations** — Apple's `/usr/bin/xattr` and the Python
+> `xattr` package that may come first on `PATH` — and **`-r` support varies by implementation and
+> version**. On macOS 26.6.2, `which -a xattr` resolves to Python's first, so a bare `xattr -dr`
+> fails with `option -r not recognized`, while `/usr/bin/xattr -dr` exits 0 and does remove the
+> flag. So the site sticks to `-d`; for recursion use `find … -exec /usr/bin/xattr -d … {} +` and
+> **always spell out the absolute path `/usr/bin/xattr`** instead of relying on `PATH`.
 
 **Step 4 — Install the privileged helper inside the app (TUN mode needs it)**
 > Open XrayTun, go to Settings → Privileged helper → Install. This asks for an administrator password
@@ -797,8 +806,15 @@ shasum -a 256 XrayTun_0.8.28_x86_64_arm64.dmg
 1. **安装步骤：照抄仓库现有的 Release Notes 会让用户装不上。**
    `release.yml:163` 与 `README.md:106` 写的是「右键 →「打开」」+ `xattr -dr`。
    实测：macOS 15 起 Apple 已移除 Control-点击绕过（本机 macOS 26.6.2 属受影响范围）；
-   现代 `xattr` **没有 `-r`**，`xattr -dr` 直接报 `option -r not recognized`。
-   官网必须写**分版本两条路径** + `xattr -d`（无 `r`）。这也是唯一一处「照抄我们自己的文档就装不上」。
+   这里**不能写「现代 `xattr` 没有 `-r`」** —— 那是过头的结论。`xattr` 在 macOS 上有**两个实现**
+   （Apple 的 `/usr/bin/xattr` 与 PATH 上可能先命中的 Python `xattr` 包），
+   **`-r` 的支持随实现与版本而异**：本机 macOS 26.6.2 实测，`which -a xattr` 先命中 Python 那份，
+   所以**裸写** `xattr -dr` 报 `option -r not recognized`（exit 64）；而 `/usr/bin/xattr -dr`
+   是 exit 0、标记真的被递归删掉。
+   官网必须写**分版本两条路径** + `xattr -d`（无 `r`）；要递归就用
+   `find … -exec /usr/bin/xattr -d … {} +`，并且**一律写绝对路径 `/usr/bin/xattr`** ——
+   不要写「`xattr` 没有 `-r`」，也不要在产品脚本里 `2>/dev/null` 吞掉失败。
+   这也是唯一一处「照抄我们自己的文档就装不上」。
 2. **「系统代理」模式不写系统代理设置。** 很容易顺手写成「自动配置系统代理」——
    实测全仓库没有任何 `networksetup -setwebproxy` 调用（只有 DNS 相关），helper 协议里也没有代理请求。
    官网只能写「提供本机 SOCKS5/HTTP 入站，需要你自己指向」。
