@@ -40,3 +40,11 @@
 
 # 本地临时资料（Chrome profile、截图、探测脚本）—— 不入库
 .scratch/
+
+# Python 字节码缓存（`scripts/gen-site-*.py` 跑过就会生成）—— 不入库。
+#
+# 为什么必须显式忽略：这些 `.pyc` 出现在 `scripts/` **里面**，而发版时工作区
+# 同时有十几处站点/版本改动 —— 一次 `git add -A` 就会把它们扫进提交。
+# 本项目已经栽过同类事故：art-designer 提交时把别人在途的 `styles.css` 一并暂存了。
+__pycache__/
+*.pyc
