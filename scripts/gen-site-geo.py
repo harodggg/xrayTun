@@ -19,7 +19,7 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 # 域名迁移时两处一起改（生成器里各只有一处；产物由脚本重写，别手改产物）。
 BASE = "https://xraytun.top"
 LAST_PUB = "2026-09-21"
-VERSION = "0.8.29"
+VERSION = "0.8.30"
 DL = f"https://github.com/harodggg/xrayTun/releases/download/v{VERSION}"
 RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 
@@ -34,16 +34,25 @@ RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 # 为什么要有这个开关：`release.yml` 在打包前跑 `check.sh`，而 check.sh 断言
 # 「站点声明的版本 == Cargo.toml 的版本」——先 bump 会让断言失败；而站点要写新版本
 # 又需要真实资产。两阶段是唯一「每个瞬间都不说谎」的解法。
-PUBLISHED = True
+PUBLISHED = False
 
 # 发行资产：**文件名由 VERSION 派生**，字节数取自 `gh release view v{VERSION}` 的**真实值**
 # （不许沿用上一版、不许估算 —— 本项目红线）。
-# ⚠️ 取整陷阱：dmg 47,145,126 B = 44.9611 MiB，站点写的是一位小数 → **45.0**，不是 44.9。
+# ⚠️ 取整陷阱：dmg 某版 44.9611 MiB 要写 **45.0**，不是 44.9。
+#
+# **未发布时（PUBLISHED=False）这些必须留空** —— 留着上一版的数字是个陷阱：
+# 谁把 PUBLISHED 翻成 True 而忘了换数字，站点就会带着**错字节数**上线。
+# 下面的断言会把这种失误直接变成构建失败。
 DMG = f"XrayTun_{VERSION}_x86_64_arm64.dmg"
 ZIP = f"XrayTun_{VERSION}_x86_64_arm64.zip"
-DMG_BYTES, DMG_MIB = "47,148,505", "45.0"
-ZIP_BYTES, ZIP_MIB = "42,652,830", "40.7"
-SHA_BYTES = "200"
+DMG_BYTES, DMG_MIB = "", ""
+ZIP_BYTES, ZIP_MIB = "", ""
+SHA_BYTES = ""
+if PUBLISHED and not (DMG_BYTES and DMG_MIB and ZIP_BYTES and ZIP_MIB and SHA_BYTES):
+    raise SystemExit(
+        "PUBLISHED=True 但 *_BYTES/*_MIB 是空的："
+        "请先用 `gh release view v{VERSION} --json assets` 取真实值填上再发布。"
+    )
 
 # robots.txt 的两组 UA —— **与 Cloudflare 托管段逐条对齐**（原因见 write_robots 的注释）。
 #
