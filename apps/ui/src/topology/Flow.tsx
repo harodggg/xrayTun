@@ -27,6 +27,16 @@ import {
 import type { Rel, Route, Seg, TruckState } from "./flowGeometry";
 
 /**
+ * 回绕（「这趟送到了」）之后货车淡入的时长。
+ *
+ * 回绕那一帧是**瞬时落位**（见下面 `wrapped` 处）：车从分支末端直接出现在主干起点，
+ * 跨度 ~486px。纯突变看起来像掉帧/闪一下；140ms 的不透明度斜坡让这一下读得出
+ * 「上一趟送达、下一趟开始」。刻意**不用 CSS 动画/定时器**：步进由动画循环自己的
+ * `dt` 驱动，所以手动时钟的测试里也是确定的。
+ */
+const WRAP_FADE_SECONDS = 0.14;
+
+/**
  * 在「主干 + 当前分支」这两段弧长区间里找离 `(px, py)` 最近的点（几何变化后重锚用）。
  *
  * 为什么要限定区间：guide 的段序里夹着回程段，而回程段与去程段**几何重合**；
@@ -425,13 +435,25 @@ export function Flow({
 
         st.dist += walk;
         // 送完这一个出口 → 换下一条分支、从主干起点重新开始。
-        // 「从出口跳回入口」那一帧语义就是「这趟货送到了」（老注释的原话）；
-        // 位移由下面的限速变成一段匀速滑行，不会瞬移。
+        // 「从出口跳回入口」那一帧语义就是「这趟货送到了」。
+        //
+        // task-51：这一帧**瞬时落位**（跳过下面的屏幕直线限速）。
+        // 限速器做的是屏幕空间线性插值，而回绕的跨度天生就是「分支末端 → 主干起点」
+        // ≈486px（真机实测 lap 弦 484–505px）——把它摊平等于每圈花 ~2.7s 沿一条直线
+        // 慢慢飞回入口，滑行期间车离开可见线最远 **33.85px**、滑行帧 48.14% 离线
+        // （正常行走帧只有 3.11%），一圈里约 40% 的时间都在滑。用户看到的
+        // 「（蓝车）漂移」就是它：node 分支最长 → 回绕跨度最大 → 幅度最大。
+        // 送到了就该在入口出现，而不是慢慢挪回去。
+        //
+        // 几何变化（resize / 出口增减）**仍然走限速滑行** —— 那才是 cap 当初的目的。
+        let wrapped = false;
         if (st.dist >= lap) {
           st.dist -= lap * Math.floor(st.dist / lap);
           st.branch = (st.branch + 1) % nB;
           br = spans.branches[st.branch]!;
           lap = spans.trunk + br.len;
+          wrapped = true;
+          g.setAttribute("data-wrap-fade", "0"); // 下一帧起 140ms 淡入
         }
 
         // 把「这一圈的路程」映射到 guide 的**弧长**：
@@ -443,7 +465,8 @@ export function Flow({
         let nx = target.x;
         let ny = target.y;
         let capped = false;
-        if (Number.isFinite(st.x) && Number.isFinite(st.y)) {
+        // 回绕那一帧不做屏幕插值：直接落到 `target`（= P(arc)）。
+        if (!wrapped && Number.isFinite(st.x) && Number.isFinite(st.y)) {
           const gap = Math.hypot(target.x - st.x, target.y - st.y);
           // 位置修正速度上限 = **正常行走速度**的 1.5 倍（且不低于这一帧的正常步长）。
           // 几何突变（窗口缩放 / 出口增减）时车**匀速**走过去，而不是一帧跳过去。
@@ -460,7 +483,11 @@ export function Flow({
           }
         }
         const stepLen = Number.isFinite(st.x) ? Math.hypot(nx - st.x, ny - st.y) : walk;
-        if (!capped) st.walkRef = stepLen; // 只有正常行走才更新参考步长
+        // 只有正常行走才更新参考步长。
+        // 回绕帧的 `stepLen` 是 ~486px 的瞬时位移，**绝不能**当参考 —— 否则下一帧的
+        // cap 变成 1.5×486，限速等于失效（这正是「参考量必须在被限速的帧上不更新」
+        // 那条注释防的同一个坑，回绕帧是它的第二个入口）。
+        if (!capped && !wrapped) st.walkRef = stepLen;
         st.x = nx;
         st.y = ny;
         g.setAttribute("transform", `translate(${nx.toFixed(1)} ${ny.toFixed(1)})`);
@@ -479,6 +506,20 @@ export function Flow({
           if (fill !== st.color) {
             rect.setAttribute("fill", fill);
             st.color = fill;
+          }
+          // 回绕后的淡入（见 WRAP_FADE_SECONDS）。进度放在 `<g>` 自己的属性上：
+          // 它纯粹是渲染细节，没必要进 `TruckState`（那是轨迹状态，属于
+          // flowGeometry.ts 的契约）；而且节点重建时它自然跟着重置。
+          const rawFade = g.getAttribute("data-wrap-fade");
+          if (rawFade !== null) {
+            const v = Math.min(1, Number(rawFade) + dt / WRAP_FADE_SECONDS);
+            if (v >= 1) {
+              g.removeAttribute("data-wrap-fade");
+              rect.removeAttribute("opacity");
+            } else {
+              g.setAttribute("data-wrap-fade", v.toFixed(3));
+              rect.setAttribute("opacity", v.toFixed(3));
+            }
           }
         }
       }

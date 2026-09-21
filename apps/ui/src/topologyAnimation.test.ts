@@ -336,11 +336,90 @@ function meanPathLength(): number {
   return median(guidePaths().map(pathLengthOf));
 }
 
-/** 两组位置中**同名货车**的位移。缺席（新增/删除）的车不计入。 */
-function perTruckSteps(from: Map<string, Pt>, to: Map<string, Pt>): number[] {
+// ---------------------------------------------------------------------------
+// 回绕 seam（task-51）：一种**设计好的**单帧大位移，必须从「不得瞬移」里豁免
+// ---------------------------------------------------------------------------
+
+/**
+ * 识别「一圈的接缝」的判据（沿用 tester 在 `docs/ui/topology/DRIFT-EVIDENCE.md` 的口径）：
+ * 同一辆车相邻帧 `data-arc` **骤降 > 300px**，**并且**车落回了一趟的**入口**
+ * （`data-arc < 30px`）。两个条件是分开的实测结论：
+ *
+ * · **幅度**：真实页面上一圈弧长 ≈484–505px（48 次回绕无一漏判）。
+ *   实测各种几何事件的弧长回退幅度：卡片宽 168→250 **82px**、容器 +30% **14.5px**、
+ *   增/删出口 **1.5px** —— 都远在 300px 以下（本文件「豁免判据只认回到入口」那条钉住）。
+ * · **落点**：回绕把 `st.dist` 归一到 `[0, walk)` 再当弧长，而 `walk = lap/420`
+ *   （`TRAVEL_SECONDS=7`、60fps），本几何下 ≈1.1px；实测落点 **0.76–0.83px**。
+ *   30px 给了 25 倍余量。加这条是为了防「大幅几何重锚恰好 >300px」被误豁免 ——
+ *   那种情况落点在**半路**（实测 52.8 / 151.8 / 294.8），不是入口。
+ *   代价：若将来一圈的每帧步长超过 30px（超长路线 / 超大 dt），这条会漏判回绕 ——
+ *   那时尖峰会留在连续性判据里**变红**（响亮），而不是被静默放过（危险）。
+ *
+ * # 为什么要豁免
+ *
+ * 回绕那一帧车从分支末端**直接出现在**主干起点（task-51 的修法：瞬时落位），
+ * 语义是「上一趟送达了」。它是**预期行为**，但会以 ~lap 的单帧位移出现在「不得瞬移」
+ * 的判据里 —— 不豁免就是实现与测试互相矛盾。改前它是被限速器摊成 ~2.7s 的屏幕直线
+ * 滑行，所以那时不需要豁免；现在需要。
+ *
+ * # 豁免窄到什么程度（由「渲染位置必须落在它宣称的弧长位置上」那组测试钉住）
+ *
+ * · 只跳过**这一辆车、这一帧**（按 key 匹配，其余车照旧量）；
+ * · 被跳过的位移必须**真的落在 guide 上**，且落点在一趟的入口（设计的瞬时落位）；
+ * · **几何变化**（resize / 出口增减）产生的重锚位移**不得**被跳过，那些仍要限速滑行。
+ */
+const SEAM_ARC_DROP = 300;
+/** 回绕一定把车放回一趟的**入口**；几何重锚会把它放在半路。见上面的实测数字。 */
+const SEAM_MAX_ARC = 30;
+
+/** 一帧的「车 → (屏幕位置, data-arc)」。回绕判据需要相邻两帧的 `data-arc`。 */
+interface TruckSnap {
+  pos: Map<string, Pt>;
+  arc: Map<string, number>;
+}
+
+function truckSnap(root: ParentNode = document): TruckSnap {
+  const pos = new Map<string, Pt>();
+  const arc = new Map<string, number>();
+  for (const g of root.querySelectorAll("svg.flow g.flow__truck") as NodeListOf<SVGGElement>) {
+    const m = /translate\((-?[\d.]+)\s+(-?[\d.]+)\)/.exec(g.getAttribute("transform") ?? "");
+    if (!m) continue;
+    const key = truckKey(g);
+    pos.set(key, { x: Number(m[1]), y: Number(m[2]) });
+    const a = Number(g.dataset.arc);
+    if (Number.isFinite(a)) arc.set(key, a);
+  }
+  return { pos, arc };
+}
+
+/**
+ * 相邻两帧之间「回绕（= 一趟送到了）」的车。只含这些 key。
+ * 判据见 `SEAM_ARC_DROP` / `SEAM_MAX_ARC`：**弧长骤降 + 落回入口**，缺一不可。
+ */
+function seamKeys(from: TruckSnap, to: TruckSnap): Set<string> {
+  const out = new Set<string>();
+  for (const [key, before] of from.arc) {
+    const after = to.arc.get(key);
+    if (after === undefined) continue;
+    if (before - after > SEAM_ARC_DROP && after < SEAM_MAX_ARC) out.add(key);
+  }
+  return out;
+}
+
+/**
+ * 两组快照中**同名货车**的位移。默认跳过回绕 seam（见 `SEAM_ARC_DROP`）。
+ * `includeSeam: true` 给出**未豁免**的原始序列 —— 用来证明豁免确实必要（不是空壳）。
+ */
+function stepsBetween(
+  from: TruckSnap,
+  to: TruckSnap,
+  opts: { includeSeam?: boolean } = {},
+): number[] {
+  const seam = opts.includeSeam ? new Set<string>() : seamKeys(from, to);
   const out: number[] = [];
-  for (const [key, a] of from) {
-    const b = to.get(key);
+  for (const [key, a] of from.pos) {
+    if (seam.has(key)) continue;
+    const b = to.pos.get(key);
     if (b) out.push(Math.hypot(a.x - b.x, a.y - b.y));
   }
   return out;
@@ -436,14 +515,22 @@ function sampleByArcLength(poly: Polyline, stepPx: number): { x: number; y: numb
   return out;
 }
 
-/** 推 `count` 帧，返回每帧之间的**同名货车**位移（pooled）。 */
-function collectSteps(count: number, dtMs = 1000 / 60): number[] {
+/**
+ * 推 `count` 帧，返回每帧之间的**同名货车**位移（pooled）。
+ * 默认**跳过回绕 seam**（task-51）：那一帧是设计的瞬时落位，见 `SEAM_ARC_DROP`。
+ * `includeSeam: true` 给出未豁免的原始序列。
+ */
+function collectSteps(
+  count: number,
+  dtMs = 1000 / 60,
+  opts: { includeSeam?: boolean } = {},
+): number[] {
   const steps: number[] = [];
-  let prev = new Map<string, Pt>();
+  let prev: TruckSnap | null = null;
   for (let f = 0; f < count; f++) {
     runFrame(dtMs);
-    const cur = truckMap();
-    if (prev.size > 0 && cur.size > 0) steps.push(...perTruckSteps(prev, cur));
+    const cur = truckSnap();
+    if (prev && prev.pos.size > 0 && cur.pos.size > 0) steps.push(...stepsBetween(prev, cur, opts));
     prev = cur;
   }
   return steps;
@@ -704,6 +791,296 @@ describe("沿路径行走的连续性", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 1c. 渲染位置 = 它宣称的弧长位置（task-51 补的护栏：唯一能量到「车漂到线外」的判据）
+// ---------------------------------------------------------------------------
+
+/**
+ * # 为什么必须补这条（原有护栏的**盲区**，task-49 实测量化）
+ *
+ * `data-arc` 是**意图**；用户看到的是 `transform`。改前的限速器在**屏幕空间**做线性
+ * 插值，于是回绕后每圈有 ~2.7s 车沿一条直线飞回入口：`data-arc` 一路正确、
+ * `transform` 一路离线。实测（`docs/ui/topology/DRIFT-EVIDENCE.md`，25s / 1,493 帧）：
+ *
+ * · |渲染 − P(data-arc)| > 1.5px 的帧-车占 **39.26%**；
+ * · 其中 **6,216 帧（37.8%）的意图点仍精确在线上（≤0.5px）**；
+ * · 滑行帧 48.14% 离线 vs 正常行走帧 3.11%；一圈里约 40% 的时间在滑行；
+ * · 按通道：node（蓝）**33.85px** > direct 18.21 > block 9.67 —— 与用户「蓝车漂移」一致。
+ *
+ * 也就是说：**原有全部护栏（连续性 / 弧长区间 / 身份）在这些帧上都是绿的**，
+ * 因为它们量的是 `data-arc`。这条量的是**结果**。
+ *
+ * # 与回绕豁免的关系
+ *
+ * 这条**不需要豁免**：瞬时落位之后，回绕那一帧的渲染点就是 P(arc)（偏差 0），
+ * 所以「每一帧都要落在 P(data-arc) 上」在修好之后是**无条件成立**的。
+ * 反过来说，把回绕改回限速滑行，这条会立刻变红 —— 见同组最后一条。
+ */
+describe("渲染位置必须落在它宣称的弧长位置上（task-51）", () => {
+  /** `data-route-key` → 该路线的 guide 路径（DOM 顺序与 `geo.routes` 一致）。 */
+  function guideByRouteKey(): Map<string, SVGPathElement> {
+    const svg = document.querySelector("svg.flow");
+    if (!svg) throw new Error("没有渲染 svg.flow");
+    const keys = [...svg.querySelectorAll("g[data-route-paths]")].map(
+      (e) => (e as SVGGElement).dataset.routePaths ?? "",
+    );
+    const guides = [...svg.querySelectorAll(":scope > path.flow__guide")] as SVGPathElement[];
+    const out = new Map<string, SVGPathElement>();
+    keys.forEach((k, i) => {
+      const g = guides[i];
+      if (g) out.set(k, g);
+    });
+    return out;
+  }
+
+  interface RenderGap {
+    key: string;
+    arc: number;
+    gap: number;
+  }
+
+  /** 当前这一帧、每辆车的「渲染点 vs P(data-arc)」偏差（用页面里真实的 getPointAtLength）。 */
+  function gapsOfFrame(guides: Map<string, SVGPathElement>): RenderGap[] {
+    const out: RenderGap[] = [];
+    for (const g of document.querySelectorAll(
+      "svg.flow g.flow__truck",
+    ) as NodeListOf<SVGGElement>) {
+      const path = guides.get(g.dataset.routeKey ?? "");
+      const m = /translate\((-?[\d.]+)\s+(-?[\d.]+)\)/.exec(g.getAttribute("transform") ?? "");
+      const arc = Number(g.dataset.arc);
+      if (!path || !m || !Number.isFinite(arc)) continue;
+      const expected = (
+        path as SVGPathElement & { getPointAtLength(l: number): Pt }
+      ).getPointAtLength(arc);
+      out.push({
+        key: truckKey(g),
+        arc,
+        gap: Math.hypot(Number(m[1]) - expected.x, Number(m[2]) - expected.y),
+      });
+    }
+    return out;
+  }
+
+  /** 推 `frames` 帧，统计渲染位置偏差；同时数出窗口里真实的回绕次数（防「窗口里没有接缝」的假绿）。 */
+  function scanRenderGap(frames: number): {
+    samples: number;
+    over: number;
+    max: number;
+    worstKey: string;
+    wraps: number;
+  } {
+    const guides = guideByRouteKey();
+    let samples = 0;
+    let over = 0;
+    let max = 0;
+    let worstKey = "";
+    let wraps = 0;
+    let prev = truckSnap();
+    for (let f = 0; f < frames; f++) {
+      runFrame(1000 / 60);
+      const cur = truckSnap();
+      wraps += seamKeys(prev, cur).size;
+      prev = cur;
+      for (const r of gapsOfFrame(guides)) {
+        samples += 1;
+        if (r.gap > 1.5) over += 1;
+        if (r.gap > max) {
+          max = r.gap;
+          worstKey = r.key;
+        }
+      }
+    }
+    return { samples, over, max, worstKey, wraps };
+  }
+
+  it("每一帧每一辆车：渲染点必须落在 P(data-arc) 上（≤1.5px）", async () => {    await mount(baseTopo());
+    const s = scanRenderGap(500); // 500 帧 ≈ 8.3s，跨过 ≥1 次回绕
+
+    // 非空壳：采样量必须够大，且窗口里**真的发生过回绕**（否则这条对回绕不敏感）。
+    expect(s.samples, "采样太少，判据不成立").toBeGreaterThan(2000);
+    expect(s.wraps, "窗口里没有一次回绕，这条对回绕不敏感").toBeGreaterThan(0);
+
+    expect(
+      s.max,
+      `最大偏差 ${s.max.toFixed(3)}px（阈值 1.5px，最差车 ${s.worstKey}）`,
+    ).toBeLessThan(1.5);
+    expect(s.over, `有 ${s.over} 个帧-车偏差 > 1.5px`).toBe(0);
+  });
+
+  /**
+   * 逐帧找「回绕那一帧」（`data-arc` 骤降），记下这一帧的位移与落点偏差。
+   *
+   * 用途：证明**豁免掉的正是设计的瞬时落位**（落点在 guide 上），
+   * 而不是「随便什么大跳都跳过」。
+   */
+  function collectSeamEvents(frames: number): Array<{
+    key: string;
+    arcDrop: number;
+    step: number;
+    gap: number;
+  }> {
+    const guides = guideByRouteKey();
+    const events: Array<{ key: string; arcDrop: number; step: number; gap: number }> = [];
+    let prev = truckSnap();
+    for (let f = 0; f < frames; f++) {
+      runFrame(1000 / 60);
+      const cur = truckSnap();
+      const gapped = new Map(gapsOfFrame(guides).map((r) => [r.key, r.gap]));
+      for (const key of seamKeys(prev, cur)) {
+        const a = prev.pos.get(key);
+        const b = cur.pos.get(key);
+        if (!a || !b) continue;
+        events.push({
+          key,
+          arcDrop: (prev.arc.get(key) ?? 0) - (cur.arc.get(key) ?? 0),
+          step: Math.hypot(a.x - b.x, a.y - b.y),
+          gap: gapped.get(key) ?? Number.NaN,
+        });
+      }
+      prev = cur;
+    }
+    return events;
+  }
+
+  it("回绕那一帧是「瞬时落位」：落点精确在 guide 上，且确实是单帧大位移", async () => {
+    await mount(baseTopo());
+    const events = collectSeamEvents(500);
+
+    expect(events.length, "窗口里没有回绕，这条断言不成立").toBeGreaterThan(0);
+    for (const e of events) {
+      expect(e.arcDrop, `${e.key} 的判据本身`).toBeGreaterThan(SEAM_ARC_DROP);
+      expect(
+        e.step,
+        `${e.key} 回绕帧的位移只有 ${e.step.toFixed(1)}px —— 说明它又被摊成滑行了`,
+      ).toBeGreaterThan(SEAM_ARC_DROP);
+      expect(
+        e.gap,
+        `${e.key} 回绕后落点偏离 guide ${e.gap.toFixed(3)}px（瞬时落位必须精确落在 P(arc) 上）`,
+      ).toBeLessThan(0.2);
+    }
+  });
+
+  it("豁免判据只认「回到入口」：几何重锚的弧长回退不算回绕（用实测数字）", () => {
+    // 判据是纯函数，这里直接喂**实测到的真实数字**，不依赖「哪一帧恰好回绕」。
+    // 数字来源：本几何下卡片宽 168→250 / 容器 +30% / 删出口 三种几何事件，
+    // 以及一次真实回绕（`mixed#5`，与 resize 撞在同一帧）。
+    const snap = (
+      pos: Record<string, Pt>,
+      arc: Record<string, number>,
+    ): TruckSnap => ({ pos: new Map(Object.entries(pos)), arc: new Map(Object.entries(arc)) });
+
+    // ① 真回绕：弧长 476.6 → 0.76（入口），屏幕位移 393.8px。
+    expect(
+      [...seamKeys(
+        snap({ a: { x: 0, y: 0 } }, { a: 476.62 }),
+        snap({ a: { x: 393.8, y: 0 } }, { a: 0.76 }),
+      )],
+      "真回绕必须被认出来",
+    ).toEqual(["a"]);
+
+    // ② 卡片宽度 168→250：实测各车弧长回退最大 82px —— 幅度就不够，不是回绕。
+    expect(
+      [...seamKeys(
+        snap({ a: { x: 0, y: 0 } }, { a: 134.6 }),
+        snap({ a: { x: 0.2, y: 0 } }, { a: 52.76 }),
+      )],
+      "几何重锚的回退幅度远小于一圈",
+    ).toEqual([]);
+
+    // ③ 假想的「大幅几何重锚」：弧长回退 350px 但落在**半路**（不在入口）——
+    //    这正是加 `SEAM_MAX_ARC` 要挡住的情况：回绕一定把车放回一趟的入口。
+    expect(
+      [...seamKeys(
+        snap({ a: { x: 0, y: 0 } }, { a: 600 }),
+        snap({ a: { x: 1.5, y: 0 } }, { a: 250 }),
+      )],
+      "落在半路的大幅回退不得被当成回绕豁免",
+    ).toEqual([]);
+  });
+
+  it("豁免只跳过真回绕那一辆车：几何重锚的滑行仍留在判据里（且被 cap 压住）", async () => {
+    await mount(baseTopo());
+    const steady = steadyStep();
+    const before = truckSnap();
+
+    layout.cardWidth = 250; // 与「几何变化」那一组同一个扰动
+    fireResize();
+    runFrame(1000 / 60);
+    const after = truckSnap();
+
+    // 这一帧**可能**恰好撞上一次真回绕（实测 `mixed#5` 就会）。允许 —— 但被跳过的
+    // 那辆车必须确实是回绕：落回入口 + 单帧大位移。否则就是豁免被滥用了。
+    const flagged = seamKeys(before, after);
+    for (const k of flagged) {
+      expect(after.arc.get(k) ?? -1, `${k} 被判成回绕却没落回入口`).toBeLessThan(SEAM_MAX_ARC);
+      const p0 = before.pos.get(k)!;
+      const p1 = after.pos.get(k)!;
+      expect(
+        Math.hypot(p0.x - p1.x, p0.y - p1.y),
+        `${k} 被判成回绕却几乎没动`,
+      ).toBeGreaterThan(SEAM_ARC_DROP);
+    }
+
+    // 豁免只跳过 `flagged` 这些车，其余一辆不少 —— 几何重锚的位移**仍在序列里**。
+    const steps = stepsBetween(before, after);
+    expect(steps.length, "豁免多吞了位移").toBe(before.pos.size - flagged.size);
+    expect(steps.length, "没有可量的位移，判据不成立").toBeGreaterThan(0);
+    // 几何变化造成的重锚位移确实还在（车真的动了），而且被 cap 压住（没被一起豁免）。
+    expect(maxOf(steps), "几何变化这一帧车根本没动，判据不成立").toBeGreaterThan(0.05);
+    expect(
+      maxOf(steps),
+      `几何变化的单帧位移 ${maxOf(steps).toFixed(2)}px 超过稳态 ${steady.toFixed(2)}px 的 5 倍`,
+    ).toBeLessThan(5 * steady);
+  });
+
+  it("豁免是必要的、不是空壳：不豁免时 500 帧的尖峰比 > 2，豁免后 < 2", async () => {
+    await mount(baseTopo());
+    const exempt = collectSteps(500);
+    const raw = collectSteps(500, 1000 / 60, { includeSeam: true });
+
+    expect(median(raw), "车没在走，判据不成立").toBeGreaterThan(0.5);
+    // 未豁免：回绕的单帧大位移就是尖峰 —— 这正是豁免存在的**理由**。
+    expect(
+      spikeRatio(raw),
+      `未豁免的尖峰比 ${spikeRatio(raw).toFixed(1)}（回绕若不瞬时落位，这里不该是尖峰）`,
+    ).toBeGreaterThan(2.0);
+    // 豁免后：不算回绕那一帧，其余帧必须平滑。
+    expect(
+      spikeRatio(exempt),
+      `豁免后的尖峰比 ${spikeRatio(exempt).toFixed(2)}（阈值 2.0）`,
+    ).toBeLessThan(2.0);
+  });
+
+  it("瞬时落位后有 140ms 淡入，且会自己清掉（不是每帧都写 opacity）", async () => {
+    await mount(baseTopo());
+    // 推进到第一辆车回绕的那一帧。
+    let prev = truckSnap();
+    let wrapped: SVGGElement | null = null;
+    for (let f = 0; f < 500 && !wrapped; f++) {
+      runFrame(1000 / 60);
+      const cur = truckSnap();
+      const keys = [...seamKeys(prev, cur)];
+      prev = cur;
+      if (keys.length === 0) continue;
+      wrapped = document.querySelector<SVGGElement>(
+        `svg.flow g.flow__truck[data-truck-key="${keys[0]}"]`,
+      );
+    }
+    expect(wrapped, "窗口里没有回绕，这条断言不成立").not.toBeNull();
+    const g = wrapped!;
+    const rect = g.querySelector("rect")!;
+
+    // 回绕帧：淡入属性在，且不透明度 < 1（真的在淡入，不是空壳属性）。
+    expect(g.getAttribute("data-wrap-fade")).not.toBeNull();
+    expect(Number(rect.getAttribute("opacity"))).toBeLessThan(1);
+
+    // ~140ms（9 帧）内跑完并**自己清掉**，不留每帧写属性的开销。
+    for (let f = 0; f < 20; f++) runFrame(1000 / 60);
+    expect(g.getAttribute("data-wrap-fade"), "淡入跑完没有清掉属性").toBeNull();
+    expect(rect.getAttribute("opacity"), "淡入跑完没有恢复完全不透明").toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. 货车数量映射（前置条件：数量不随流量变，就谈不上「数量变化导致重排」）
 // ---------------------------------------------------------------------------
 
@@ -778,15 +1155,15 @@ describe("刷新重排时的位置连续性", () => {
 
     await mount(laneShapes(512));
     const steady = steadyStep();
-    const before = truckMap();
+    const before = truckSnap();
 
     await refresh(laneShapes(4.0 * GiB));
     runFrame(1000 / 60);
-    const after = truckMap();
+    const after = truckSnap();
 
     // 确认场景真的改变了车辆数量（否则这条测试什么也没考）。
-    expect(after.size).not.toBe(before.size);
-    expectNoTeleport(steady, perTruckSteps(before, after));
+    expect(after.pos.size).not.toBe(before.pos.size);
+    expectNoTeleport(steady, stepsBetween(before, after));
   });
 
   it("新增出口（扇出变多）时，已在这条路线上的货车不得瞬移", async () => {
@@ -795,7 +1172,7 @@ describe("刷新重排时的位置连续性", () => {
     // 布局高度变化会让真实 ResizeObserver 重测，这里显式补一次 fireResize()。
     await mount(baseTopo());
     const steady = steadyStep();
-    const before = truckMap();
+    const before = truckSnap();
     const l0 = meanPathLength();
 
     await refresh(
@@ -804,12 +1181,12 @@ describe("刷新重排时的位置连续性", () => {
     fireResize();
     runFrame(1000 / 60);
 
-    const after = truckMap();
-    expect(after.size).toBe(before.size); // 车数不变，只有几何变了
+    const after = truckSnap();
+    expect(after.pos.size).toBe(before.pos.size); // 车数不变，只有几何变了
     const l1 = meanPathLength();
     // 确认几何真的变了（否则这条测试无意义）。
     expect(Math.abs(l1 - l0) / l0).toBeGreaterThan(0.1);
-    expectNoTeleport(steady, perTruckSteps(before, after));
+    expectNoTeleport(steady, stepsBetween(before, after));
   });
 
   it("删除出口（旧 label 被卸载）时，货车不得瞬移", async () => {
@@ -819,7 +1196,7 @@ describe("刷新重排时的位置连续性", () => {
     // 那条怀疑的复现条件。用 fireResize() 模拟容器高度变化触发的重测。
     await mount(baseTopo());
     const steady = steadyStep();
-    const before = truckMap();
+    const before = truckSnap();
     const l0 = meanPathLength();
 
     // 删掉 `block-ads`（一个**用户可见**的出口）。
@@ -832,11 +1209,11 @@ describe("刷新重排时的位置连续性", () => {
     fireResize();
     runFrame(1000 / 60);
 
-    const after = truckMap();
-    expect(after.size).toBe(before.size);
+    const after = truckSnap();
+    expect(after.pos.size).toBe(before.pos.size);
     const l1 = meanPathLength();
     expect(Math.abs(l1 - l0) / l0).toBeGreaterThan(0.05);
-    expectNoTeleport(steady, perTruckSteps(before, after));
+    expectNoTeleport(steady, stepsBetween(before, after));
   });
 });
 
@@ -852,7 +1229,7 @@ describe("几何变化时的位置连续性", () => {
     // 这里把卡片从 168px 改到 250px（复刻 CSS 固定列宽被内容撑宽的情形）。
     await mount(baseTopo());
     const steady = steadyStep();
-    const before = truckMap();
+    const before = truckSnap();
     const l0 = meanPathLength();
 
     layout.cardWidth = 250;
@@ -864,7 +1241,7 @@ describe("几何变化时的位置连续性", () => {
       Math.abs(l1 - l0) / l0,
       `路径长度变化 ${(((l1 - l0) / l0) * 100).toFixed(1)}%`,
     ).toBeGreaterThan(0.2);
-    expectNoTeleport(steady, perTruckSteps(before, truckMap()));
+    expectNoTeleport(steady, stepsBetween(before, truckSnap()));
   });
 
   it("容器宽度 +30%（窗口缩放）时，货车不得瞬移", async () => {
@@ -872,7 +1249,7 @@ describe("几何变化时的位置连续性", () => {
     // 同一帧内所有车都会被整体挪动 —— 单帧位移达稳态的几十倍，看起来就是跳。
     await mount(baseTopo());
     const steady = steadyStep();
-    const before = truckMap();
+    const before = truckSnap();
     const l0 = meanPathLength();
 
     layout.width = Math.round(820 * 1.3);
@@ -881,7 +1258,7 @@ describe("几何变化时的位置连续性", () => {
 
     const l1 = meanPathLength();
     expect(Math.abs(l1 - l0) / l0, "任务书要求覆盖「路径长度变化 ±30%」").toBeGreaterThan(0.2);
-    expectNoTeleport(steady, perTruckSteps(before, truckMap()));
+    expectNoTeleport(steady, stepsBetween(before, truckSnap()));
   });
 
   it("几何只动一点点（≈3%）时，位移必须远小于稳态的 2 倍", async () => {
@@ -890,7 +1267,7 @@ describe("几何变化时的位置连续性", () => {
     // 小几何变化只允许产生小位移。
     await mount(baseTopo());
     const steady = steadyStep();
-    const before = truckMap();
+    const before = truckSnap();
     const l0 = meanPathLength();
 
     layout.cardWidth = 176;
@@ -901,7 +1278,7 @@ describe("几何变化时的位置连续性", () => {
     const rel = Math.abs(l1 - l0) / l0;
     expect(rel).toBeGreaterThan(0.005);
     expect(rel).toBeLessThan(0.1);
-    const steps = perTruckSteps(before, truckMap());
+    const steps = stepsBetween(before, truckSnap());
     expect(steps.length).toBeGreaterThan(0);
     expect(maxOf(steps)).toBeLessThan(2 * steady);
   });
