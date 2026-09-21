@@ -56,6 +56,7 @@ import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import Topology from "./pages/Topology";
+import { TRAVEL_SECONDS } from "./topology/flowGeometry";
 import type { TopoInbound, TopoOutbound, Topology as TopologyData } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -1075,3 +1076,164 @@ describe("回程段：车不得走回程（防止看起来倒着开）", () => {
    */
   it.todo("（无自动回归）车只走去程：几何判据在重复参数化的闭环上不可区分，见上方说明");
 });
+
+// ---------------------------------------------------------------------------
+// 两条行为级不变量护栏（task-36）：车只在去程循环 ｜ 身份按 data-truck-key 稳定
+//
+// 为什么单列：这两条语义**已修好**，但把修复改坏后原有 15 条测试**全绿**
+// （backend-dev 在 /tmp worktree 实测）。它们量的是「位移/跳变指标」，
+// 而「多走回程段」和「身份退化成下标」都**不影响位移连续性**，所以量不到。
+// ---------------------------------------------------------------------------
+
+/**
+ * 量「一圈走过的屏幕路程 / 整环长度」。
+ *
+ * 口径：速度 = span / TRAVEL_SECONDS（见 Flow），所以走满 `TRAVEL_SECONDS` 秒
+ * 恰好走完一轮。把这段时间内每辆车逐帧的屏幕位移累加，再除以**它自己那条路线**
+ * 的整环长度，就得到「一轮走了整环的百分之几」——**不需要**识别回绕点、
+ * 也不需要投影到路径上（回绕那一跳被限速器摊成滑行，已经含在位移里）。
+ *
+ * 判据的意义：
+ *   * 正确（`span = 去程长度`）→ ≈0.6（去程 + 回绕滑行）；
+ *   * `span = total`（历史 bug：走完整圈、含回程）→ ≈1.0。
+ * 两者相差 40 个百分点，阈值放在 0.8 有无风险。
+ */
+function measureLapTravel(): number[] {
+  const svg = document.querySelector("svg.flow");
+  if (!svg) throw new Error("没有渲染 svg.flow");
+  const totals = [...svg.querySelectorAll(":scope > path.flow__guide")].map((e) => pathLengthOf(e));
+  const frames = Math.round(TRAVEL_SECONDS * 60); // 手动时钟固定 1/60s → 一圈 = TRAVEL_SECONDS×60 帧
+  const prev = new Map<string, Pt>();
+  const traveled = new Map<string, number>();
+  const routeOf = new Map<string, number>();
+  for (let f = 0; f < frames; f++) {
+    runFrame(1000 / 60);
+    for (const g of svg.querySelectorAll("g.flow__truck") as NodeListOf<SVGGElement>) {
+      const key = g.dataset.truckKey;
+      const m = /translate\((-?[\d.]+)\s+(-?[\d.]+)\)/.exec(g.getAttribute("transform") ?? "");
+      if (!key || !m) continue;
+      routeOf.set(key, Number(g.dataset.route ?? 0));
+      const p = { x: Number(m[1]), y: Number(m[2]) };
+      const q = prev.get(key);
+      if (q) traveled.set(key, (traveled.get(key) ?? 0) + Math.hypot(p.x - q.x, p.y - q.y));
+      prev.set(key, p);
+    }
+  }
+  return [...traveled.entries()].map(([k, v]) => v / (totals[routeOf.get(k) ?? 0] ?? 1));
+}
+
+interface KeyedTruck {
+  routeKey: string;
+  x: number;
+  y: number;
+}
+
+/** key → { 所属路线 key, 屏幕坐标 }，取自 DOM（`data-truck-key` / `data-route-key`）。 */
+function keyedTrucks(): Map<string, KeyedTruck> {
+  const out = new Map<string, KeyedTruck>();
+  for (const g of document.querySelectorAll("g.flow__truck") as NodeListOf<SVGGElement>) {
+    const key = g.dataset.truckKey;
+    const routeKey = g.dataset.routeKey;
+    const m = /translate\((-?[\d.]+)\s+(-?[\d.]+)\)/.exec(g.getAttribute("transform") ?? "");
+    if (!key || !routeKey || !m) continue;
+    out.set(key, { routeKey, x: Number(m[1]), y: Number(m[2]) });
+  }
+  return out;
+}
+
+/**
+ * 命名契约：`data-truck-key` = `<路线 key>#<序号>`，且与 `data-route-key` 一致。
+ * 退化成 `slot-N` 之类的下标命名会在这一条上直接失败。
+ */
+function expectKeyContract(trucks: Map<string, KeyedTruck>): void {
+  expect(trucks.size).toBeGreaterThan(0);
+  for (const [key, t] of trucks) {
+    expect(key, `key 不以路线 key 开头：${key} / ${t.routeKey}`).toMatch(
+      new RegExp(`^${t.routeKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}#\\d+$`),
+    );
+  }
+  expect(new Set(trucks.keys()).size).toBe(trucks.size); // key 唯一
+}
+
+describe("动画不变量护栏（行为级）", () => {
+  it("车只在去程循环：一圈走的路程是去程（≈60% 整环），不是整环（span 退回 total 会变红）", async () => {
+    // 防的故障：`span = total` —— 车走完整圈，包括回程段（历史上真实发生过，
+    // 屏幕上是「倒着开」）。它**不破坏位移连续性**，所以「最大/中位步长」量不到。
+    // 口径：只统计落在 guide 上的帧，量它们覆盖了整环弧长的百分之几。
+    //   正确（span = 去程）≈ 50%；`span = total` → 100%（此时闭环无缝、没有滑行段）。
+    await mount(baseTopo());
+    const ratios = measureLapTravel();
+
+    expect(ratios.length).toBeGreaterThan(0);
+    const med = median(ratios);
+    // 正确 ≈0.6（去程 + 回绕滑行）；`span = total` ≈1.0（走完整圈、含回程）
+    expect(
+      med,
+      `一轮走了整环的 ${(med * 100).toFixed(0)}%（正确≈60%，span=total≈99%）`,
+    ).toBeLessThan(0.8);
+    expect(maxOf(ratios), `最大 ${(maxOf(ratios) * 100).toFixed(0)}%`).toBeLessThan(0.85);
+    expect(Math.min(...ratios), "过低：车可能根本没在走").toBeGreaterThan(0.3);
+  });
+
+  it("身份按 data-truck-key 稳定：车辆数量变化后，同一 key 仍属同一条路线且位置连续", async () => {
+    // 防的故障：身份退化成数组下标（`slot-N`）。数量一变，同一个 key 会指向
+    // **别的路线上的另一辆车**。原有的「不得瞬移」判据被重锚+限速兜住，量不到它。
+    const laneShape = (down: number): TopologyData =>
+      topoWith({
+        inbound: [
+          inbound("mixed", 0, down),
+          inbound("socks", 4 * MiB, 36 * MiB),
+          inbound("http", 1 * MiB, 1 * MiB),
+          inbound("api", 0, 0, 10085),
+        ],
+      });
+    await mount(laneShape(512));
+    const steady = steadyStep();
+    const before = keyedTrucks();
+    expectKeyContract(before);
+
+    await refresh(laneShape(4.0 * GiB));
+    runFrame(1000 / 60);
+    const after = keyedTrucks();
+    expect(after.size, "场景没有改变车辆数量，这条测试就白测了").not.toBe(before.size);
+    expectKeyContract(after);
+
+    const survivors = [...before].filter(([k]) => after.has(k));
+    expect(survivors.length, "没有幸存的 key").toBeGreaterThan(0);
+    for (const [key, b] of survivors) {
+      const a = after.get(key)!;
+      expect(a.routeKey, `key=${key} 数量变化后换了路线（身份按下标漂移）`).toBe(b.routeKey);
+      expect(Math.hypot(a.x - b.x, a.y - b.y), `key=${key} 位置跳变`).toBeLessThan(5 * steady);
+    }
+  });
+
+  it("身份按 data-truck-key 稳定：入口顺序重排后，同一 key 仍属同一条路线", async () => {
+    // 防的故障同上，但触发方式是**重排**（入口数组顺序变化）。按路线 key 建立身份时
+    // 顺序无关；按下标建立身份时，同一个 key 会落到另一条路线上。
+    await mount(baseTopo());
+    steadyStep();
+    const before = keyedTrucks();
+    expectKeyContract(before);
+
+    await refresh(
+      topoWith({
+        inbound: [
+          inbound("socks", 4 * MiB, 36 * MiB),
+          inbound("mixed", 0.5 * GiB, 4.0 * GiB),
+          inbound("http", 1 * MiB, 1 * MiB),
+          inbound("api", 0, 0, 10085),
+        ],
+      }),
+    );
+    runFrame(1000 / 60);
+    const after = keyedTrucks();
+    expectKeyContract(after);
+
+    const survivors = [...before].filter(([k]) => after.has(k));
+    expect(survivors.length).toBeGreaterThan(0);
+    for (const [key, b] of survivors) {
+      expect(after.get(key)!.routeKey, `key=${key} 重排后换了路线（身份按下标漂移）`).toBe(b.routeKey);
+    }
+  });
+});
+
