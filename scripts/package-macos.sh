@@ -234,7 +234,17 @@ fi
 #
 # 清完 `com.apple.provenance` 可能仍在（系统加的、不可删），但 codesign
 # 容忍它 —— 实测上述 13 个 FinderInfo 清掉后 `--strict` 即通过。
-find "$APP" -exec xattr -c {} + 2>/dev/null || true
+#
+# 为什么用 `-c`（清全部可清属性）而不是 `-d com.apple.FinderInfo`：
+#   * 实测（本机）：`-c` 会清掉 FinderInfo / quarantine / 自定义属性，**留下 provenance**；
+#     它 quiet 且幂等（无可清时 exit 0），适合逐文件批量；
+#   * 而 `-d <名字>` 打在**没有该属性**的文件上会 `No such xattr` + **exit 1**，
+#     `find … -exec … +` 会对每个干净文件报一次错 —— 构建日志里全是噪声；
+#   * 构建产物上没有任何「需要保留的 xattr」，所以「清全部可清属性」在这里是安全的取舍。
+#   * **绝对路径 `/usr/bin/xattr`**：PATH 上可能命中 Python 的 `xattr` 包（口径见 README）。
+#   * **不吞错误**：失败要留在构建日志里（所以没有 `2>/dev/null`）；`|| true` 只是不让
+#     `set -e` 因个别文件失败而中断整个打包。
+find "$APP" -exec /usr/bin/xattr -c {} + || true
 
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1 \
   && echo "  ✓ 已 ad-hoc 签名（签名前已逐文件清 xattr）" \
@@ -306,7 +316,8 @@ if hdiutil makehybrid -quiet -hfs -o "$RAW" -default-volume-name XrayTun "$STAGE
     # 逐文件：`-c` 对目录**不递归**，而 `-r` 的支持**随实现与版本而异**
     # （PATH 上先命中的 Python `xattr` 没有 `-r`，`xattr -cr` 会 exit 64），
     # 所以两者都不能依赖 —— 直接用 `find … -exec … +` 逐个文件清。
-    find "$RMNT" -exec xattr -c {} + 2>/dev/null || true
+    # 绝对路径 + 不吞错误：理由同上（见签名前那一段）。
+    find "$RMNT" -exec /usr/bin/xattr -c {} + || true
     hdiutil detach "$RMNT" >/dev/null 2>&1 || hdiutil detach "$RMNT" -force >/dev/null 2>&1 || true
     CLEANED=1
   fi
