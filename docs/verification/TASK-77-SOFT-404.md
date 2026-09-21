@@ -108,7 +108,70 @@ site/404.html:158:  <li><a data-site-link="wasm/" href="/wasm/">xray-wasm…</a>
 
 ## 4. 部署后实测
 
-（待 `site/404.html` 部署完成后填入：未知路径 / 已删除资源 / 旧缓存 URL / 全部真实页面 200 / 深链锚点。）
+部署：`8f943d5`（Cloudflare Pages run `35598158663` **success**、Pages run `35598158679` **success**）。
+判据同上：**content-type + body sha256**。原始输出 `/tmp/ops-404-probe-after.txt`。
+
+### 4.1 同一批路径：修前 → 修后（`实测`）
+
+| 路径 | 修前（apex） | 修后（apex） | 修后（镜像） |
+|---|---|---|---|
+| `/` | 200 text/html `a02e24a3…` | 200 text/html `a02e24a3…`（**未变**） | 200（同） |
+| `/en/` | 200 `6cc1dd39…` | 200 `6cc1dd39…`（**未变**） | 200（同） |
+| `/wasm/`、`/en/wasm/` | 200 | 200（未变） | — |
+| `/assets/site.css` | 200 text/css `b7f9ffad…` | 200 `b7f9ffad…`（**未变**） | — |
+| `/og-image-0.8.31.png` | 200 image/png `e87db07a…` | 200 `e87db07a…`（**未变**） | 200（同） |
+| `/manifest.webmanifest` | 200 manifest+json | 200（未变） | — |
+| `/sitemap.xml`、`/llms.txt`、`/llms-full.txt` | 200 | 200（sha 全部未变） | — |
+| `/robots.txt` | 200 text/plain 7004 B | 200 text/plain **7215 B**（注释加了 2 行） | — |
+| `/this-path-does-not-exist-xyz` | 200 text/html **= 首页** | **404** `6db7d559…`（9183 B） | **404** 同一份 |
+| `/foo/bar/baz` | 200 text/html **= 首页** | **404** `6db7d559…` | **404** 同一份 |
+| `/old.html` | 200 text/html **= 首页** | **404** `6db7d559…` | 404 |
+| `/_redirects`、`/_headers` | 200 text/html **= 首页** | **404** `6db7d559…` | 404 |
+| `/og-image-0.8.30.png` | 200 text/html `1e12653843e9f902`（43696 B） | **仍 200 / 同一 sha** ← 见 4.3 | 404 |
+
+* 线上 404 页 body 与仓库 `site/404.html` **逐字节相同**（9183 B，`cmp` 通过）。
+* **所有真实页面与静态资源 sha256 与修前完全一致** ⇒ 这次改动**没有碰到任何正常内容**。
+* 深链锚点：`/#faq`、`/en/#faq` 均 200（fragment 不发往服务器）。
+* `/404.html` 直接访问：apex **308 → `/404`**（CF Pages 会剥掉 `.html` 后缀）→ 200，
+  内容仍是本页；镜像直接 200。
+
+### 4.2 真浏览器验证根路径探测（`实测`）
+
+用 CDP 在 headless Chrome 里打开**线上**的 404 页（不是本地副本），读运行时 `href`：
+
+```
+✓ apex 单段   /this-path-does-not-exist-xyz   → ["/","/en/","/wasm/"]
+✓ apex 深层   /foo/bar/baz                    → ["/","/en/","/wasm/"]
+✓ 镜像 单段   /xrayTun/this-path-…            → ["/xrayTun/","/xrayTun/en/","/xrayTun/wasm/"]
+✓ 镜像 深层   /xrayTun/foo/bar/baz            → ["/xrayTun/","/xrayTun/en/","/xrayTun/wasm/"]
+  （四例的 title/h1 与 `robots=noindex, follow` 均正确；无页面错误日志）
+```
+
+⇒ 探测在**真实响应**上成立（镜像与 canonical 都命中，深层路径也对）。
+
+### 4.3 残留：一个 URL 仍返回「200 + HTML」（**如实报告，不是已修好**）
+
+`https://xraytun.top/og-image-0.8.30.png` 修后**仍然 200 + text/html**。机制已实测清楚：
+
+```
+$ curl -sSI https://xraytun.top/og-image-0.8.30.png
+HTTP/2 200
+cache-control: public, max-age=31536000, immutable
+age: 7323                       ← 约 2 小时前被缓存
+cf-cache-status: HIT            ← 命中**边缘缓存**
+
+$ curl -sSI 'https://xraytun.top/og-image-0.8.30.png?bust=1'
+HTTP/2 404
+cache-control: no-store
+cf-cache-status: BYPASS         ← 绕过缓存打到源站 = **源站已经是 404**
+```
+
+⇒ 源站行为**已经正确**（未知路径 404）；这一个 URL 是**部署前的软 404 HTML 被当成图片缓存了一年**
+（`site/_headers` 的 `/og-image*.png → immutable`）。清掉它需要在 Cloudflare 层面
+**purge 缓存**（或等 immutable 过期）—— 仓库里没有 CF 缓存清理权限，**本卡不假装它已归零**。
+
+影响面（`实测`）：同一批里只有**它**残留 —— `/old.html`、`/foo/bar/baz`、`/_redirects`、
+`/_headers` 都已变真 404（它们的响应没有 immutable 规则，缓存可重新验证）。
 
 ## 5. 验证与诚实清单
 
