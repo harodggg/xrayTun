@@ -424,11 +424,20 @@ cd apps/ui && npx vite --port 5199 --strictPort
 
 **事实**（不美化）：包是 **ad-hoc 签名、未公证**的 —— `.github/workflows/release.yml:171` 原文
 「这个包是 **ad-hoc 签名、未公证**的，因为仓库里没有 Developer ID 证书」。
-`README.md:103` 也写了「别人下载后 Gatekeeper 会拦，需要右键『打开』」。**用户一定会遇到。**
+**用户一定会遇到 Gatekeeper 拦截。**
 
-> 🚨 **但现有安装说明本身是错的**（见下方「红线」）——
-> `release.yml:163-165` 与 `README.md:103-106` 给的 `xattr -dr` 命令**我实机验证会直接报错**。
-> 所以这个区块的任务不只是「呈现得好看」，而是**给出能用的路径**。
+> ✅ **更新（2026-09-20 晚，本文件首次成稿之后）**：仓库的安装说明**已被修正**，
+> 现在 `README.md:106` 与 `release.yml:187` 都用正确的
+> `find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} +`，
+> 并各自写明「这台 macOS 的 `xattr` 没有 `-r`」。**它们现在是可信的真源，官网可照抄命令。**
+>
+> 本文下面那节「红线」保留为**审计记录**（它记录了我在旧版本上实测到的
+> `option -r not recognized`，那条实测正是后来发现产品代码 bug 的线索），
+> **但「仓库文档是错的」这个结论已经过期** —— 不要再按它去改 README/release.yml。
+>
+> 同一族的真 bug 在**产品代码**里（自动更新脚本 `crates/xt-core/src/update.rs` 的
+> `/usr/bin/xattr -dr … 2>/dev/null || true`：命令必然失败，且 `2>/dev/null` 把失败也吞了），
+> 已由 task-46 修掉。
 
 #### 视觉配方：用 **warn（琥珀）**，**绝对不用 danger（红）**
 
@@ -456,18 +465,22 @@ cd apps/ui && npx vite --port 5199 --strictPort
    > 安装包是 ad-hoc 签名、未经 Apple 公证的（没有付费开发者账号），
    > macOS 因此会在第一次打开时拦截。**按你的系统版本选一种：**
 
-   #### ⚠️ 红线：仓库现有的安装说明**是错的**，官网必须重写（不能照抄）
+   #### 📌 审计记录（**已过期，勿据此改仓库文档**）：旧版安装说明里的 `xattr -dr` 是错的
 
-   现有说明在 `.github/workflows/release.yml:163-165` 与 `README.md:103-106`，**两处都是错的**：
+   > **这一节是历史记录。** 我在 **2026-09-20 下午**的版本（HEAD `e7189e3`）上审计时，
+   > `release.yml:163-165` 与 `README.md:103-106` 给的确实是
+   > `xattr -dr com.apple.quarantine …`。该写法**必然失败**：
+   >
+   > | 旧写法 | 问题 | 我的证据 |
+   > |---|---|---|
+   > | `xattr -dr com.apple.quarantine …` | **`xattr` 没有 `-r` 选项** | ✅ **实机执行**：`xattr -dr com.apple.quarantine /tmp/xattr-test` → `option -r not recognized`；`xattr` 的 usage 是 `xattr -d [-s] attr_name file`，**无 `-r`**；`xattr -d com.apple.quarantine <file>` 正常解析 |
+   > | 「右键 →「打开」」 | 该绕过方式**被 Apple 在 macOS 15 移除** | `interaction-designer` 实测认定（见 `docs/site/INTERACTION.md`）。**我本人未独立验证** —— 本机 macOS 26.6.2，headless 环境做不了 GUI 拦截测试 |
+   >
+   > **此后 `1ea96dd` 已把两处文档改对**，并在文档里写明了这个 `-r` 的坑。
+   > 所以：**官网可以直接抄仓库现在的命令**；下面这三条路径仍然有效，是因为它们覆盖了
+   > 「不想用终端」的用户，而不是因为文档还错着。
 
-   | 现有写法 | 问题 | 证据 |
-   |---|---|---|
-   | 「右键 →「打开」」 | 该绕过方式**被 Apple 在 macOS 15 移除** | `interaction-designer` 实测认定（见 `docs/site/INTERACTION.md`）。**我本人未独立验证** —— 本机是 macOS 26.6.2，且 headless 环境无法做 GUI 拦截测试 |
-   | `xattr -dr com.apple.quarantine …` | **`xattr` 没有 `-r` 选项**，命令直接报错 | ✅ **我直接执行验证**：`xattr -dr com.apple.quarantine /tmp/xattr-test` → `option -r not recognized`；`xattr` 的 usage 是 `xattr -d [-s] attr_name file`，**无 `-r`**。`xattr -d com.apple.quarantine <file>` 则正常解析 |
-
-   → **官网必须给三条正确路径**（下一节）。这不是文案问题，是「用户装不上」的功能缺陷。
-
-   #### 三条路径（版本分支 + 终端兜底）
+   #### 官网给三条路径（版本分支 + 终端兜底）
 
    > **方法一 · macOS 15 (Sequoia) 及以后**
    > 「系统设置」→「隐私与安全性」→ 滚动到「安全性」→ 找到被拦下的 XrayTun →
@@ -515,8 +528,8 @@ cd apps/ui && npx vite --port 5199 --strictPort
 用 `1. 2. 3.` 编号会让用户以为要做三件事。用「方法一 / 二 / 三」+ 版本徽标才表达了「任选一条」。
 
 **为什么把终端方案也放在明面上**（而不是收进 `<details>`）：
-`xattr -d` 是**唯一在所有 macOS 版本上都有效**的方法，而现有文档给的是错的。
-把它展开写着，能让遇到问题的人**一步到位**，不用去搜。代价是块高了约 60px，可接受。
+`xattr -d` 是**唯一在所有 macOS 版本上都有效**的方法 ——
+不想点系统设置、或 GUI 路径找不到时，它一步到位。代价是块高了约 60px，可接受。
 
 #### 位置
 
@@ -682,11 +695,16 @@ header 右侧：   功能   下载   FAQ   │   中文 · EN
    3:1 是合规下限，**视觉上仍偏暗** —— 建议实现后用截图复核一次。
 6. **截图未做 AVIF/WebP 转码验证。** §4.3 的体积目标（≤120 KiB）是根据「AVIF 通常压到 PNG 的 1/3–1/5」
    给的估计，**我没有实际转码测量**。PNG 的实测体积（209 KiB 等）是真实的。
-7. **`xattr -dr` 的问题我独立验证了，但「右键打开」在 macOS 15 被移除这条没有。**
+7. **`xattr -dr` 的问题我独立验证了；「右键打开」在 macOS 15 被移除这条没有。**
+   **并且这两条的时间背景要说清**：我的审计跑在 `e7189e3`（下午），当时
+   `release.yml:165` / `README.md:106` 写的确实是 `xattr -dr`。
    - ✅ **已验证**：本机执行 `xattr -dr com.apple.quarantine /tmp/xattr-test` →
      `option -r not recognized`；`xattr` 的 usage 明确无 `-r`（只有 `-d`）。
-     所以 `release.yml:165` 与 `README.md:106` 的命令**确实不能用**。
-   - ❓ **未验证**：「右键 →「打开」在 macOS 15 被移除」来自 `interaction-designer` 的实测认定。
+   - ✅ **该问题此后已被修掉**：`1ea96dd` 把仓库文档改成
+     `find … -exec xattr -d … {} +` 并写明了这个坑；产品代码里同族的错
+     （`crates/xt-core/src/update.rs` 的自动更新脚本）由 task-46 修掉。
+     **所以「仓库文档不能用」这个结论已过期**，别据此再改 README/release.yml。
+   - ❓ **仍未验证**：「右键 →「打开」在 macOS 15 被移除」来自 `interaction-designer` 的实测认定。
      我**无法**验证 —— 本机是 **macOS 26.6.2**，且 headless 环境做不了 Gatekeeper 的 GUI 拦截测试，
      也没有一个真正被隔离的 app 可试。§5.3 的三条路径里，「方法一（系统设置）」这一条
      **依赖他人结论**，建议由 `ops` 在一台真实的 macOS 15+ 上复核。
@@ -751,16 +769,19 @@ header 右侧：   功能   下载   FAQ   │   中文 · EN
 
 ### 9.4 需要你决策/授权的四件事
 
-1. **🚨 安装说明是错的，官网必须用新文案（最高优先，且会阻塞实现）。**
-   仓库现有的 `.github/workflows/release.yml:163-165` 与 `README.md:103-106` 两处都写错了：
-   - `xattr -dr …` → **我实机验证：`option -r not recognized`**，命令直接失败；
-   - 「右键 →「打开」」→ 据 `interaction-designer` 在 **macOS 15 已被移除**
+1. **安装区用 §5.3 的三条路径；命令以仓库当前版本为准（已修正，不必再改仓库文档）。**
+   **时间背景**：我的审计跑在 `e7189e3`（下午），当时仓库两处安装说明确实写的是必然失败的
+   `xattr -dr`：
+   - 「`xattr -dr …` → `option -r not recognized`」—— **我实机验证过**，但**此后 `1ea96dd` 已把
+     `README.md:106` / `release.yml:187` 改成正确的 `find … -exec xattr -d … {} +`**；
+   - 「右键 →「打开」→ 据 `interaction-designer` 在 macOS 15 已被移除」
      （**我未独立验证**，本机 macOS 26 且无法做 GUI 拦截测试）。
 
-   §5.3 已给出**三条正确路径**（macOS 15+ 走系统设置 / 14- 右键 / 终端 `xattr -d`）。
-   请确认：**官网用这套新文案，并且 `release.yml` 的 release notes 与 `README.md` 同步改**
-   （否则官网对了、GitHub Release 页还是错的，用户从 Release 页下载照样装不上）。
-   这属于事实层，**`product-manager` 的 `CONTENT.md` 必须与本节一致**，请协调。
+   → **官网直接抄仓库现在的命令即可**（也可参考 `README.md:111-115` 那段已写清的 `-r` 说明）。
+   仍请协调 `product-manager` 的 `CONTENT.md` 用同一套安装文案：
+   **它必须覆盖「不想用终端」的用户**（那正是 §5.3 三条路径的意义），而不只是为了绕过旧 bug。
+   （我另外发现的**产品代码**同族 bug —— `crates/xt-core/src/update.rs` 的自动更新脚本
+   用 `/usr/bin/xattr -dr … 2>/dev/null || true`，命令必然失败且失败被吞 —— 已由 task-46 修掉。）
 2. **截图落地**：5 张 PNG（2160×1440，98–517 KiB，**共 1.2 MiB**）现在在 `/tmp/xraytun-audit/site1080/`。
    我的写入范围只有本文件 —— **请授权**放进 `docs/site/shots/`（规范示例）
    或直接给 `frontend-dev` 放 `site/assets/shots/`。建议**转 AVIF 后**再入仓（首屏目标 ≤120 KiB）。
