@@ -140,3 +140,9 @@ export function connClock(c: ConnectionRecord): string {
 export function pairingPercent(p: PairingStats): number {
   return p.accepted > 0 ? Math.round((p.paired / p.accepted) * 100) : 0;
 }
+
+/** 出口 tag 太长时截断显示（节点 tag 形如 `node-n1d232c6b8c7a5004`）。 */
+export function shortTag(t: string): string {
+  if (t.startsWith("node-")) return `节点 ${t.slice(5, 13)}…`;
+  return t;
+}
