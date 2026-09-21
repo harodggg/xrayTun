@@ -1093,10 +1093,12 @@ describe("回程段：车不得走回程（防止看起来倒着开）", () => {
  * 的整环长度，就得到「一轮走了整环的百分之几」——**不需要**识别回绕点、
  * 也不需要投影到路径上（回绕那一跳被限速器摊成滑行，已经含在位移里）。
  *
- * 判据的意义：
- *   * 正确（`span = 去程长度`）→ ≈0.6（去程 + 回绕滑行）；
- *   * `span = total`（历史 bug：走完整圈、含回程）→ ≈1.0。
- * 两者相差 40 个百分点，阈值放在 0.8 有无风险。
+ * ⚠️ 这条**只是辅助**，主判据是 `measureArcInvariant()`（语义：车不得走进回程段）。
+ *
+ * 这些数字随修法变过：task-37 之后一圈 = 主干 + 一条分支 ≈ **0.21**；
+ * 更早（`span` = 交错段序的前缀）≈ 0.6；`span = total`（走完整圈、含回程）≈ 1.0。
+ * 所以阈值只够区分「远小于整环」与「接近整环」——**不要再拿它当主判据**：
+ * 0.3–0.8 那条带子是按已经错掉的基线校准的。
  */
 function measureLapTravel(): number[] {
   const svg = document.querySelector("svg.flow");
@@ -1120,6 +1122,76 @@ function measureLapTravel(): number[] {
     }
   }
   return [...traveled.entries()].map(([k, v]) => v / (totals[routeOf.get(k) ?? 0] ?? 1));
+}
+
+/**
+ * 语义不变量（task-37）：**车在任何一帧都不得落在回程段上**，且**每条分支都要有车经过**。
+ *
+ * 为什么不再用「一圈覆盖整环的百分比」当主判据：那个比例带（0.3–0.8）是**按有 bug 的
+ * `span ≈ 60%` 校准**的 —— 拿按错误基线校准的代理指标当护栏，正是本项目反复栽的坑
+ * （B1 那次也是：把修复回退掉，12/12 全绿、敏感度为 0）。
+ *
+ * 这里直接量**组件每帧写进 `data-arc` 的弧长位置**，再和「主干 + 各去程段」的区间比：
+ * 回程段进一次就红。`data-arc` 也让「车在哪一段」不必靠屏幕位置反投影 ——
+ * 回程段与去程段是**同一条曲线**，投影会「并列最近」。
+ *
+ * 顺带量「每条分支是否都被访问过」：老实现的 `span ≤ 1331.9` 永远到不了第三个出口，
+ * 这条断言正是为它写的。
+ */
+function measureArcInvariant(): {
+  frameCount: number;
+  samples: number;
+  offAllowed: number;
+  branchCount: number[];
+  visited: number[][];
+} {
+  const svg = document.querySelector("svg.flow");
+  if (!svg) throw new Error("没有渲染 svg.flow");
+
+  // 每条路线的段长（DOM 顺序）→ 主干 / 各去程段 / 各回程段 的弧长区间。
+  const routes = [...svg.querySelectorAll("g[data-route-paths]")].map((g) => {
+    const lens = [...g.querySelectorAll("path.flow__route")].map((p) => pathLengthOf(p));
+    const trunk = lens[0] ?? 0;
+    const allowed: [number, number][] = [[0, trunk]];
+    const fwd: [number, number][] = [];
+    const back: [number, number][] = [];
+    let s = trunk;
+    for (let k = 0; 2 * k + 1 < lens.length - 1; k++) {
+      const f = lens[2 * k + 1] ?? 0;
+      const b = lens[2 * k + 2] ?? 0;
+      fwd.push([s, s + f]);
+      allowed.push([s, s + f]);
+      back.push([s + f, s + f + b]);
+      s += f + b;
+    }
+    return { allowed, fwd, back };
+  });
+
+  const branches = Math.max(1, ...routes.map((r) => r.fwd.length));
+  // 跑够「每条分支都轮一遍」：一圈 = TRAVEL_SECONDS，分支数 × 一圈 + 一点余量。
+  const frameCount = Math.round(TRAVEL_SECONDS * 60 * (branches + 1));
+  const visited: number[][] = routes.map((r) => r.fwd.map(() => 0));
+  let samples = 0;
+  let offAllowed = 0;
+  const tol = 2; // px：边界取整误差
+
+  for (let f = 0; f < frameCount; f++) {
+    runFrame(1000 / 60);
+    for (const g of svg.querySelectorAll("g.flow__truck") as NodeListOf<SVGGElement>) {
+      const ri = Number(g.dataset.route ?? 0);
+      const r = routes[ri];
+      const arc = Number(g.dataset.arc);
+      if (!r || !Number.isFinite(arc)) continue;
+      samples++;
+      const inAllowed = r.allowed.some(([a, b]) => arc >= a - tol && arc <= b + tol);
+      const inBack = r.back.some(([a, b]) => arc > a + tol && arc < b - tol);
+      if (!inAllowed || inBack) offAllowed++;
+      r.fwd.forEach(([a, b], k) => {
+        if (arc >= a - tol && arc <= b - tol) visited[ri]![k] = (visited[ri]![k] ?? 0) + 1;
+      });
+    }
+  }
+  return { frameCount, samples, offAllowed, branchCount: routes.map((r) => r.fwd.length), visited };
 }
 
 interface KeyedTruck {
@@ -1156,23 +1228,39 @@ function expectKeyContract(trucks: Map<string, KeyedTruck>): void {
 }
 
 describe("动画不变量护栏（行为级）", () => {
-  it("车只在去程循环：一圈走的路程是去程（≈60% 整环），不是整环（span 退回 total 会变红）", async () => {
-    // 防的故障：`span = total` —— 车走完整圈，包括回程段（历史上真实发生过，
-    // 屏幕上是「倒着开」）。它**不破坏位移连续性**，所以「最大/中位步长」量不到。
-    // 口径：只统计落在 guide 上的帧，量它们覆盖了整环弧长的百分之几。
-    //   正确（span = 去程）≈ 50%；`span = total` → 100%（此时闭环无缝、没有滑行段）。
+  it("车只在去程循环：任何一帧的弧长都不得落在回程段，且每条分支都要有车经过（task-37）", async () => {
+    // 防两层故障：
+    //  ①「车走回程」——老实现把「交错段序的前缀」当一圈，而前缀必然包含回程段
+    //    （实测覆盖了整段 回₁ [484.0, 798.6]）；
+    //  ②「车永远到不了后面的出口」——老实现 `span ≤ 1331.9 < 去₃ 起点 1448.8`，
+    //    第三个出口那条线上永远没有车（算术可证，与弦长具体值无关）。
+    //
+    // 判据是**不变量本身**（车所在弧长必须落在「主干 + 某条去程段」里），不是
+    // 「一圈覆盖整环的百分比」—— 那个比例带是按已经错掉的基线校准的。
+    await mount(baseTopo());
+    const m = measureArcInvariant();
+
+    expect(m.samples, "没有任何带 data-arc 的车帧").toBeGreaterThan(100);
+    expect(m.offAllowed, `有 ${m.offAllowed} 帧落在回程段（或允许区间之外）`).toBe(0);
+
+    // 每个出口都必须有车经过（老实现第三个出口恒为 0）
+    m.branchCount.forEach((n, ri) => {
+      for (let k = 0; k < n; k++) {
+        expect(m.visited[ri]![k] ?? 0, `第 ${ri} 条路线的第 ${k} 条分支没有任何一帧有车`).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  it("辅助比例断言：一圈远小于整环（span 退回 total 会变红）", async () => {
+    // **只是辅助**：它区分「≈整环」与「远小于整环」，但区分不了「主干 + 一条分支」
+    // 与「主干 + 一条分支 + 半段回程」—— 后者由上面那条语义断言管。
     await mount(baseTopo());
     const ratios = measureLapTravel();
 
     expect(ratios.length).toBeGreaterThan(0);
-    const med = median(ratios);
-    // 正确 ≈0.6（去程 + 回绕滑行）；`span = total` ≈1.0（走完整圈、含回程）
-    expect(
-      med,
-      `一轮走了整环的 ${(med * 100).toFixed(0)}%（正确≈60%，span=total≈99%）`,
-    ).toBeLessThan(0.8);
+    expect(Math.min(...ratios), "过低：车可能根本没在走").toBeGreaterThan(0.1);
+    expect(median(ratios), `一圈走了 ${(median(ratios) * 100).toFixed(0)}%`).toBeLessThan(0.8);
     expect(maxOf(ratios), `最大 ${(maxOf(ratios) * 100).toFixed(0)}%`).toBeLessThan(0.85);
-    expect(Math.min(...ratios), "过低：车可能根本没在走").toBeGreaterThan(0.3);
   });
 
   it("身份按 data-truck-key 稳定：车辆数量变化后，同一 key 仍属同一条路线且位置连续", async () => {

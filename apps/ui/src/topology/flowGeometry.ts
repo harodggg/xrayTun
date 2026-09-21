@@ -94,30 +94,24 @@ export interface Route {
    */
   trunk: Seg;
   /**
-   * 每个出口分支：起点的整圈累计比例 + 颜色（车走到这里就换色）+
-   * 目的出口的 tag（单连接高亮靠它匹配）+ 去程那一段本身（拼高亮路径用）。
+   * 每个出口分支：颜色（车**这一圈**就用它的颜色）+ 目的出口的 tag（单连接高亮靠它匹配）
+   * + 去程那一段本身（拼高亮路径用）。
+   *
+   * ⚠️ 这里**没有「整圈累计比例」**（原来的 `startFrac`）：那个比例按「交错段序的前缀」
+   * 算，而前缀里必然夹着回程段 —— 正是 task-37 修掉的错。
    */
-  branches: { startFrac: number; color: string; tag: string; fwd: Seg }[];
-  /**
-   * **去程**的长度（px）：主干 + 各分支。之后是等长的回程段，用于把路径闭合。
-   *
-   * 车**只在去程段循环** —— 进度对 `outboundLen` 取模，永远不走回程。
-   *
-   * 为什么不「走完整圈」：闭环的回程在屏幕上就是**倒着开**，用户直接指出了
-   * 这一点（「小车怎么是来回的」）。而做成「走完整圈但把回程隐藏」也不行 ——
-   * 实测隐藏占比 **92.8%**：整圈是「主干 + 6×来回 + 回主干」，去程只占约 11%，
-   * 车大部分时间都在看不见的回程上跑。
-   *
-   * 对去程取模没有这个问题：车始终走在看得见的路上；从最后一个出口回到入口
-   * 的那一跳，语义上就是「这趟货送到了」，也不会看起来倒着开。
-   */
-  outboundLen: number;
+  branches: { color: string; tag: string; fwd: Seg }[];
 }
 
 /** 一辆货车跨帧的全部状态。按**稳定身份**保存，不按数组下标。 */
 export interface TruckState {
   /** 沿路径的**绝对路程（px）**，不是「占全程的比例」。 */
   dist: number;
+  /**
+   * 这一圈要送到**第几条分支**（按圈轮换）。一圈 = 主干 + 这一条分支；
+   * 送完就 `(branch + 1) % 分支数` —— 每个出口都轮得到车，而且车不走回程段。
+   */
+  branch: number;
   /** 上一帧写进 `transform` 的屏幕坐标（首帧前为 NaN）。 */
   x: number;
   y: number;
@@ -216,20 +210,3 @@ export function routeToD(segs: Seg[]): string {
   return parts.join(" ");
 }
 
-/**
- * 去程长度（px）：主干 + 各分支。回程段是它们的等长镜像，整圈 = 2×去程 + 主干。
- *
- * 单独抽出来是因为它有一个**容易写错的地方**：段序是
- * `主干, 去₁, 回₁, 去₂, 回₂, …, 回主干` —— 回程各段长度与对应的去程相同，
- * 所以「去程 = 主干 + 各分支」需要按偶数下标累加，不能直接用 `total/2`。
- */
-export function segmentsOutboundLen(trunkLen: number, branchesLen: number, _total: number): number {
-  return trunkLen + branchesLen;
-}
-
-/** 一段的近似长度，只用于把「分支起点」换算成路径上的比例。 */
-export function segApproxLen(s: Seg): number {
-  const dx = s.x2 - s.x1;
-  const dy = s.y2 - s.y1;
-  return Math.hypot(dx, dy);
-}

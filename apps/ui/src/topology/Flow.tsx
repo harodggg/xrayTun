@@ -21,13 +21,45 @@ import {
   OUTBOUND_COLOR,
   TRAVEL_SECONDS,
   clampMid,
-  nearestLength,
   routeToD,
-  segApproxLen,
-  segmentsOutboundLen,
   trucksOnLane,
 } from "./flowGeometry";
 import type { Rel, Route, Seg, TruckState } from "./flowGeometry";
+
+/**
+ * 在「主干 + 当前分支」这两段弧长区间里找离 `(px, py)` 最近的点（几何变化后重锚用）。
+ *
+ * 为什么要限定区间：guide 的段序里夹着回程段，而回程段与去程段**几何重合**；
+ * 全局最近点搜索可能把车重锚到回程段上（那样它下一帧就走回程了）。
+ * 只扫允许的两段，落点一定在「车本来就该走的路」上。
+ */
+function nearestOnOutbound(
+  path: SVGPathElement,
+  trunk: number,
+  branch: { start: number; len: number },
+  px: number,
+  py: number,
+): number {
+  let best = 0;
+  let bestD = Infinity;
+  const scan = (from: number, to: number) => {
+    if (!(to > from)) return;
+    const step = Math.max(2, (to - from) / 64);
+    for (let s = from; s <= to; s += step) {
+      const p = path.getPointAtLength(s);
+      const dx = p.x - px;
+      const dy = p.y - py;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) {
+        bestD = d;
+        best = s;
+      }
+    }
+  };
+  scan(0, trunk);
+  scan(branch.start, branch.start + branch.len);
+  return best;
+}
 
 /**
  * 网络流动：连线 + 沿连线行走的货车。
@@ -226,23 +258,20 @@ export function Flow({
         });
         // 依次拼接：主干 → (去出口1 → 回分叉) → (去出口2 → 回分叉) → … → 回入口。
         // 每一段的终点就是下一段的起点，所以合并路径等于**可见线的并集**，
-        // 且首尾重合（闭环）—— 车走完一圈不会瞬移回起点。
+        // 且首尾重合（闭环）。
+        //
+        // ⚠️ 段序里夹着回程段，它只有一个用途：让「导引路径」与可见线完全重合
+        // （B1 修复：车曾有约 1/4 行程飞在空白处）。**车的行程不再从这条弧序里
+        // 取前缀** —— 交错段序的前缀必然包含回程段，于是车会走整段回程，而且
+        // 永远到不了后面的出口（task-37 实测：`span ≤ 1331.9 < 去₃ 起点 1448.8`）。
+        // 车走哪些段见动画里的「一圈 = 主干 + 一条分支」。
         const segs: Seg[] = [trunk];
         const branches: Route["branches"] = [];
-        let acc = segApproxLen(trunk);
         for (const p of pairs) {
-          branches.push({ startFrac: 0, color: p.color, tag: p.tag, fwd: p.fwd }); // 比例稍后按整圈总长归一化
+          branches.push({ color: p.color, tag: p.tag, fwd: p.fwd });
           segs.push(p.fwd, p.back);
-          acc += segApproxLen(p.fwd) + segApproxLen(p.back);
         }
         segs.push(trunkBack);
-        acc += segApproxLen(trunkBack);
-        const lapApprox = acc || 1;
-        let cum = segApproxLen(trunk);
-        branches.forEach((b, k) => {
-          b.startFrac = cum / lapApprox;
-          cum += segApproxLen(pairs[k]!.fwd) + segApproxLen(pairs[k]!.back);
-        });
 
         routes.push({
           // 稳定身份 = 入口 tag：入口顺序/数量变化时，车的身份不跟着漂。
@@ -253,16 +282,6 @@ export function Flow({
           inlet: i,
           trunk,
           branches,
-          // 去程 = 主干 + 各分支（去/回成对插入，所以分支里偶数下标是去程）。
-            outboundLen: (() => {
-              const trunkLen = segApproxLen(segs[0]!);
-              const total = segs.reduce((a, sg) => a + segApproxLen(sg), 0);
-              const branchesLen = segs
-                .slice(1)
-                .filter((_, k) => k % 2 === 0)
-                .reduce((a, sg) => a + segApproxLen(sg), 0);
-              return segmentsOutboundLen(trunkLen, branchesLen, total);
-            })(),
         });
       });
 
@@ -302,6 +321,35 @@ export function Flow({
     });
     const sigs = geo.routes.map((r) => r.d);
 
+    // 每条路线「主干 + 各分支去程段」在 guide 上的**真实弧长区间**。
+    //
+    // 必须用引擎量的弧长（`getTotalLength`），不能用弦长：车的落点由
+    // `getPointAtLength(dist)` 给出，单位是弧长；用弦长会在段边界错位。
+    // 段序是 `主干, 去₁, 回₁, 去₂, 回₂, …, 回主干`，所以第 k 条分支的去程段
+    // 在弧长上从 `主干 + Σ(去ⱼ + 回ⱼ)` 开始（要跳过它前面的回程段）。
+    const spansByKey = new Map<string, { trunk: number; branches: { start: number; len: number }[] }>();
+    for (const group of container.querySelectorAll<SVGGElement>("g[data-route-paths]")) {
+      const key = group.dataset.routePaths;
+      if (!key || spansByKey.has(key)) continue;
+      const lens = [...group.querySelectorAll<SVGPathElement>("path.flow__route")].map((p) => {
+        try {
+          return p.getTotalLength();
+        } catch {
+          return 0;
+        }
+      });
+      const trunk = lens[0] ?? 0;
+      const branches: { start: number; len: number }[] = [];
+      let start = trunk;
+      // 去程段落在奇数下标；最后一段是「回主干」，不算分支。
+      for (let k = 0; 2 * k + 1 < lens.length - 1; k++) {
+        const fwd = lens[2 * k + 1] ?? 0;
+        branches.push({ start, len: fwd });
+        start += fwd + (lens[2 * k + 2] ?? 0);
+      }
+      if (trunk > 0 && branches.length > 0) spansByKey.set(key, { trunk, branches });
+    }
+
     let raf = 0;
     const step = (now: number) => {
       const prev = prevRef.current;
@@ -334,11 +382,16 @@ export function Flow({
         if (!path || !(total > 0)) continue;
         const route = geo.routes[idx]!;
 
+        const spans = spansByKey.get(route.key);
+        if (!spans) continue; // 还没量到分段弧长：这一轮先不动这辆车
+        const nB = spans.branches.length;
+
         let st = state.get(key);
         if (!st) {
           const phase = Number(g.dataset.phase ?? 0);
           st = {
-            dist: (Number.isFinite(phase) ? phase : 0) * total,
+            dist: (Number.isFinite(phase) ? phase : 0) * (spans.trunk + spans.branches[0]!.len),
+            branch: 0,
             x: NaN,
             y: NaN,
             sig: sigs[idx]!,
@@ -346,32 +399,47 @@ export function Flow({
           };
           state.set(key, st);
         }
-        // 车的活动范围 = **去程长度**（回程段从不进入）。
-        // 早先这里用整圈 `total`，车会走完回程 —— 屏幕上就是「倒着开」。
-        const span = route.outboundLen > 0 ? route.outboundLen : total;
-        // 速度按去程长度算：一轮 = 走完一次去程（TRAVEL_SECONDS 秒）
-        const walk = (span / TRAVEL_SECONDS) * dt;
+        // 出口被删掉时分支数会变少：把下标收敛回合法范围。
+        if (st.branch >= nB) st.branch = 0;
 
-        // 几何变了（这条路的 `d` 变了）→ 用**上一帧的屏幕点**在新路径上取最近点重锚：
-        // 在「必须落到新路上」的前提下，这个落点离原位置最近。
+        // 一圈 = **主干 + 某一条分支**：送到一个出口就算一趟，下一趟换下一条分支。
+        //
+        // 这是 task-37 的修法（方案 C）。老实现把「交错段序的前缀」当一圈，而前缀
+        // 必然包含回程段 → 车走整段回程；而且 `span ≤ 1331.9` 永远小于第三个出口的
+        // 起点 1448.8 → **第三个出口永远没有车经过**（真实 DOM 量出来的）。
+        // 现在车在任何一帧都只落在「主干」或「某一条分支的去程段」上；回程段只用来
+        // 让导引路径与可见线重合（B1 修复），车一步也不走它。
+        let br = spans.branches[st.branch]!;
+        let lap = spans.trunk + br.len;
+        if (!(lap > 0)) continue;
+        const walk = (lap / TRAVEL_SECONDS) * dt;
+
+        // 几何变了（这条路的 `d` 变了）→ 用**上一帧的屏幕点**在新路径上取最近点重锚，
+        // 而且只在「主干 + 当前分支」这两段里找 —— 免得重锚把车丢到回程段上。
         if (st.sig !== sigs[idx]) {
           if (Number.isFinite(st.x) && Number.isFinite(st.y)) {
-            st.dist = nearestLength(path, span, st.x, st.y);
+            st.dist = nearestOnOutbound(path, spans.trunk, br, st.x, st.y);
           }
           st.sig = sigs[idx]!;
         }
-        st.dist += walk;
-        // **对去程长度取模 —— 车只在去程循环，永远不走回程段。**
-        //
-        // 这条是「小车怎么是来回的」的正解。早先路线是闭环、车走完整圈，回程在
-        // 屏幕上就是倒着开。改成「走完整圈 + 把回程隐藏」也不行：实测隐藏占比
-        // 92.8%，因为整圈里只有主干是重复的，去程只占约 11%。
-        //
-        // 对去程取模后，车始终走在看得见的路上；从最后一个出口回到入口的那一跳，
-        // 语义上就是「这趟货送到了」。
-        if (st.dist >= span) st.dist -= span * Math.floor(st.dist / span);
 
-        const target = path.getPointAtLength(st.dist);
+        st.dist += walk;
+        // 送完这一个出口 → 换下一条分支、从主干起点重新开始。
+        // 「从出口跳回入口」那一帧语义就是「这趟货送到了」（老注释的原话）；
+        // 位移由下面的限速变成一段匀速滑行，不会瞬移。
+        if (st.dist >= lap) {
+          st.dist -= lap * Math.floor(st.dist / lap);
+          st.branch = (st.branch + 1) % nB;
+          br = spans.branches[st.branch]!;
+          lap = spans.trunk + br.len;
+        }
+
+        // 把「这一圈的路程」映射到 guide 的**弧长**：
+        //   dist < 主干长 → 就在主干上；
+        //   否则 → 第 branch 条分支的去程段（跳过它前面的所有回程段）。
+        // 用引擎量的真实弧长，所以落点与 `getPointAtLength` 一致。
+        const arc = st.dist < spans.trunk ? st.dist : br.start + (st.dist - spans.trunk);
+        const target = path.getPointAtLength(arc);
         let nx = target.x;
         let ny = target.y;
         let capped = false;
@@ -396,21 +464,18 @@ export function Flow({
         st.x = nx;
         st.y = ny;
         g.setAttribute("transform", `translate(${nx.toFixed(1)} ${ny.toFixed(1)})`);
+        // 车在 guide 上的**弧长位置**：既是给护栏的准确落点，也让探针不必再从屏幕
+        // 位置反投影 —— 回程段与去程段是**同一条曲线**，投影会「并列最近」。
+        g.dataset.arc = arc.toFixed(2);
 
-        // 车**不走回程**：进度对去程长度取模（见下面的 `st.dist` 处理），
+        // 车**不走回程**：一圈 = 主干 + 一条分支（见上面的 `lap` / `arc`），
         // 所以不存在「倒着开」。这里只是兜底清掉可能残留的隐藏状态。
         if (g.style.visibility === "hidden") g.style.visibility = "";
 
-        // 颜色跟着**当前所在的分支**变：取整圈里**最靠后**那条已进入的分支，
-        // 回程（回到分叉那段）沿用刚离开的那条分支的颜色，不闪回。
+        // 颜色跟着**这一圈要送的分支**走（一趟一个颜色），不再按「整圈比例」猜。
         const rect = g.querySelector("rect");
         if (rect) {
-          const u = st.dist / total;
-          let color = "";
-          for (const b of route.branches) {
-            if (u >= b.startFrac) color = b.color;
-          }
-          const fill = color || route.branches[0]?.color || NEUTRAL;
+          const fill = route.branches[st.branch]?.color || NEUTRAL;
           if (fill !== st.color) {
             rect.setAttribute("fill", fill);
             st.color = fill;
@@ -476,7 +541,7 @@ export function Flow({
       {/* 连线本体：主干中性，各扇出分支按**目的地的出口类别**着色。
           着色依据是出口的 kind（实测数据），所以图例对得上。 */}
       {geo.routes.map((r) => (
-        <g key={`p-${r.key}`}>
+        <g key={`p-${r.key}`} data-route-paths={r.key}>
           {r.segs.map((sg, k) => (
             <path
               key={`p-${r.key}-${k}`}
