@@ -337,31 +337,14 @@ pub(crate) fn should_rebuild_tunnel(still_mine: bool, user_wants_it: bool, conse
 /// 经本地 SOCKS 入站发一个**真实请求**，返回 HTTP 状态码（失败时空串）。
 ///
 /// 用 `--socks5-hostname` 让节点去解析域名，所以这一个检查同时覆盖
-/// 「能不能转发」和「节点侧能不能解析」两件事。抽出来是因为连接后的
-/// 一次性检查和看门狗都要用它。
+/// 「能不能转发」和「节点侧能不能解析」两件事。
+///
+/// **实现在 [`crate::supervisor::socks_http_probe`]**（一处实现、两处调用：
+/// 看门狗/连通性检查，以及接管默认路由**之前**的端到端门禁）。
+/// 这里保留原名与原签名，调用点不用改；复制第二份 curl 调用必然漂移。
 pub(crate) async fn tunnel_probe(port: u16, timeout_secs: u32) -> String {
-    let probe = xt_core::xray::DEFAULT_PROBE_URL.to_string();
-    tauri::async_runtime::spawn_blocking(move || {
-        std::process::Command::new("/usr/bin/curl")
-            .args([
-                "-sS",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "--max-time",
-                &timeout_secs.to_string(),
-                "--socks5-hostname",
-                &format!("127.0.0.1:{port}"),
-                &probe,
-            ])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default()
+    crate::supervisor::socks_http_probe(port, xt_core::xray::DEFAULT_PROBE_URL.to_string(), timeout_secs)
+        .await
 }
 
 /// 隧道看门狗：**只要用户没主动断开，网络就不该是坏的。**

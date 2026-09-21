@@ -98,6 +98,165 @@ async fn tcp_reachable(addr: std::net::SocketAddr, timeout: Duration) -> bool {
         .unwrap_or(false)
 }
 
+/// 经**本机 SOCKS 入站**发一个真实 HTTP 请求，返回 HTTP 状态码（拿不到时空串）。
+///
+/// `--socks5-hostname` 让**节点**去解析域名，所以这一个检查同时覆盖
+/// 「能不能转发」与「节点侧能不能解析」；而且**不依赖本机 DNS** ——
+/// 这点很关键：连接期间系统的 DNS 已被换成隧道内哨兵地址，用本机解析
+/// 会测出假结果。
+///
+/// # 为什么放在 supervisor 而不是 commands/core.rs
+///
+/// 它是接管默认路由**之前**那道端到端门禁的实现，而门禁在
+/// [`Supervisor::start`] 里。看门狗与连通性检查（`commands/core.rs`）
+/// 也复用同一实现（那边只是薄封装 `tunnel_probe`）—— 一处实现、两处调用，
+/// 依赖方向仍是 `commands → supervisor`（本来就存在）。
+/// 复制第二份 curl 调用必然漂移，正是本项目反复踩过的坑。
+pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u32) -> String {
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/usr/bin/curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--max-time",
+                &timeout_secs.to_string(),
+                "--socks5-hostname",
+                &format!("127.0.0.1:{port}"),
+                &target,
+            ])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// 接管默认路由**之前**的端到端门禁
+// ---------------------------------------------------------------------------
+
+/// 接管默认路由之前必须通过的探测目标。
+///
+/// **两个目标不是冗余，是分工**：
+/// * **境外**走代理链路 —— 拦「TCP 能连、代理协议握手被墙」；
+/// * **境内**命中 CN 分流规则、走 `direct` 出站 —— 拦「境内路径不通」。
+///
+/// 只探境外会让「国内断、国外正常」这种症状**恒通过**，门禁形同虚设
+/// （见 `docs/09-network-drop/SELF-HEAL-GAPS.md` 的读法 B）。
+///
+/// **境内为什么用域名而不是硬编码 IP**：一个写死的 IP 一旦失效，会把**所有**
+/// 用户误拦在门外（失败方向错了）。`www.baidu.com` 是必活的境内 HTTP 服务；
+/// 经 SOCKS 时由节点侧解析，**不依赖本机 DNS**，所以没有引入本机解析的干扰。
+/// 若将来要改成 IP 字面量，必须先在境内验证该 IP 确实提供 HTTP 响应。
+const REQUIRED_PROBE_TARGETS: &[&str] = &[
+    // 境外：项目现有的探测目标（`http://cp.cloudflare.com/generate_204`）。
+    xt_core::xray::DEFAULT_PROBE_URL,
+    // 境内：命中 CN 分流、走 direct 出站的真实 HTTP 服务。
+    "http://www.baidu.com/",
+];
+
+/// 门槛探测的单次超时（秒）。
+///
+/// 5–8s 是刻意的：跨国首次握手可能 1s 以上，太短会误拦；而它挂在启动路径上，
+/// 两个目标最坏约 12s，不能再长。
+const PRE_COMMIT_PROBE_TIMEOUT_SECS: u32 = 6;
+
+/// 一次门禁探测的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeOutcome {
+    pub target: String,
+    /// curl 报的 HTTP 码；空串 / `000` = 没拿到响应（超时、被 reset、代理不可用）。
+    pub http_code: String,
+}
+
+impl ProbeOutcome {
+    /// 「拿到了真实 HTTP 响应」。**任何**状态码都算通 —— 要证明的是
+    /// 「数据出得去、对端回得来」，不是某个站点返回 200。
+    pub(crate) fn responded(&self) -> bool {
+        !self.http_code.is_empty() && self.http_code != "000"
+    }
+
+    fn describe(&self) -> String {
+        if self.http_code.is_empty() {
+            format!("{}（无响应/超时）", self.target)
+        } else {
+            format!("{}（HTTP {}）", self.target, self.http_code)
+        }
+    }
+}
+
+/// 门禁失败。**两种必须分开**：
+/// * `Probe` —— 默认路由**还没**被接管（系统网络是干净的）；
+/// * `Commit` —— 探测全过，但接管动作本身被 helper 拒绝（调用方回滚）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GateFailure {
+    /// 有目标没拿到真实响应 → **不得接管默认路由**。
+    Probe { failed: Vec<ProbeOutcome> },
+    /// 探测全过，但 `CommitRoutes` 自己失败。
+    Commit(String),
+    /// 配置错误：一个探测目标都没有 → fail-safe，拒绝接管。
+    NoTargets,
+}
+
+impl GateFailure {
+    /// 给用户看的说明（节点名等上下文由调用方补）。
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            GateFailure::Probe { failed } => {
+                let list = failed.iter().map(ProbeOutcome::describe).collect::<Vec<_>>().join("、");
+                format!(
+                    "节点通过了 TCP 检查，但经它发出的真实请求拿不到响应：{list}。\n\
+                     国内网络下「TCP 能连到服务器、代理协议握手被墙」是常见情形。\n\
+                     **已在接管默认路由之前中止**，系统网络未被改动。请换一个节点后重试。"
+                )
+            }
+            GateFailure::Commit(msg) => msg.clone(),
+            GateFailure::NoTargets => {
+                "端到端门禁没有配置探测目标，拒绝接管默认路由（配置错误，不是网络问题）".to_string()
+            }
+        }
+    }
+}
+
+/// **接管默认路由之前的端到端门禁**：所有目标都拿到真实 HTTP 响应之后，
+/// 才允许执行 `commit`（= `Request::CommitRoutes`）。
+///
+/// `commit` 作为参数注入，是为了让测试能**断言调用序列** —— 探测不过时
+/// 它一次都不能被调用。「接管了默认路由但真实路径不通」正是当前零覆盖的
+/// 致命组合，只断言返回值是抓不住的。
+pub(crate) async fn verify_paths_then_commit<Pr, Pf, Cm, Cf>(
+    targets: &[&str],
+    mut probe: Pr,
+    commit: Cm,
+) -> Result<(), GateFailure>
+where
+    Pr: FnMut(String) -> Pf,
+    Pf: std::future::Future<Output = String>,
+    Cm: FnOnce() -> Cf,
+    Cf: std::future::Future<Output = Result<(), xt_proto::HelperError>>,
+{
+    if targets.is_empty() {
+        return Err(GateFailure::NoTargets);
+    }
+    let mut failed = Vec::new();
+    for target in targets {
+        let http_code = probe((*target).to_string()).await;
+        let outcome = ProbeOutcome { target: (*target).to_string(), http_code };
+        if !outcome.responded() {
+            failed.push(outcome);
+        }
+    }
+    if !failed.is_empty() {
+        return Err(GateFailure::Probe { failed });
+    }
+    commit().await.map_err(|e| GateFailure::Commit(e.message))
+}
+
 /// 去哪儿找 xray 可执行文件。
 ///
 /// 这两个目录**类型完全一样**，作为相邻的位置参数极容易被写反 ——
@@ -324,11 +483,41 @@ impl Supervisor {
                 tracing::info!(%target, "提交路由前：服务器可达");
             }
 
+            // ---- 端到端门禁：TCP 通 ≠ 代理能用 ----
+            //
+            // 上面那次 `tcp_reachable` 只是**直连 TCP 三次握手**。国内
+            // 「TCP 能连到 443、但 REALITY/TLS 握手被墙」是常态 —— 两道 TCP
+            // 检查都会通过，然后我们就会把默认路由接管过去，用户看到「已连接」
+            // 而整机断网（这正是线上事故的形态）。
+            //
+            // 所以接管之前必须问一句**真实用户路径**：经本机 SOCKS 发真实
+            // HTTP 请求，境外 + 境内各一个目标；不过就**不接管**。
+            // 此时默认路由还没动，回滚只需拆掉 bypass 路由与 utun，系统网络干净。
+            let socks_port = settings.socks_port;
             let session_id = self.session_id.clone().unwrap_or_default();
-            if let Err(e) = helper.call(&Request::CommitRoutes { session_id }) {
-                let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
-                self.rollback_tun(helper);
-                return Err(format!("接管默认路由失败（已回滚）：{}", e.message));
+            let gate = verify_paths_then_commit(
+                REQUIRED_PROBE_TARGETS,
+                |target| socks_http_probe(socks_port, target, PRE_COMMIT_PROBE_TIMEOUT_SECS),
+                || async {
+                    helper
+                        .call(&Request::CommitRoutes { session_id: session_id.clone() })
+                        .map(|_| ())
+                },
+            )
+            .await;
+            match gate {
+                Ok(()) => {}
+                Err(GateFailure::Commit(msg)) => {
+                    let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+                    self.rollback_tun(helper);
+                    return Err(format!("接管默认路由失败（已回滚）：{msg}"));
+                }
+                Err(e) => {
+                    let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+                    self.rollback_tun(helper);
+                    tracing::warn!(reason = %e.describe(), "端到端门禁未通过，已放弃接管默认路由");
+                    return Err(e.describe());
+                }
             }
 
             // 关键检查：默认路由已经指向隧道，此时**从本机**再连一次服务器。
@@ -1308,5 +1497,204 @@ mod tests {
         let mut ops = FakeOps::new(vec![Ok(())], false);
         assert!(tun_up_with_self_heal(&mut ops, a_tun_request()).is_ok());
         assert_eq!(ops.calls, ["tun_up"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // 接管默认路由之前的端到端门禁（task-42）
+    //
+    // 这组测试的重点是**调用序列**：探测不过时 `commit` 一次都不能被调用。
+    // 「接管了默认路由但真实路径不通」是线上事故的形态，只断言返回值抓不住它。
+    // -----------------------------------------------------------------------
+
+    /// 记录探测/提交的调用序列。
+    #[derive(Default)]
+    struct GateLog(std::sync::Mutex<Vec<String>>);
+
+    impl GateLog {
+        fn push(&self, step: &str) {
+            self.0.lock().unwrap().push(step.to_string());
+        }
+        fn seq(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// 境外通、境内通 → **唯一允许**调用 commit 的组合。
+    #[tokio::test]
+    async fn gate_commits_only_after_every_target_responds() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            &["overseas", "domestic"],
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                async { "204".to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        assert!(res.is_ok(), "两个目标都通时必须通过：{res:?}");
+        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic", "commit"]);
+    }
+
+    /// **本卡的核心反例（读法 B）**：境外通、境内黑洞 —— 不得接管默认路由。
+    ///
+    /// 若只探境外，这个组合会恒通过，门禁形同虚设；这里断言到**调用序列**上：
+    /// `commit` 必须一次都没被调用。
+    #[tokio::test]
+    async fn gate_refuses_commit_when_domestic_path_is_blackholed() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            &["overseas", "domestic"],
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                let code = if t.as_str() == "domestic" { "000" } else { "204" };
+                async move { code.to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        match &res {
+            Err(GateFailure::Probe { failed }) => {
+                assert_eq!(failed.len(), 1);
+                assert_eq!(failed[0].target, "domestic");
+                assert_eq!(failed[0].http_code, "000");
+            }
+            other => panic!("境内黑洞时必须 Probe 失败，实际 {other:?}"),
+        }
+        assert_eq!(
+            log.seq(),
+            ["probe:overseas", "probe:domestic"],
+            "探测不过时 commit 一次都不能被调用（否则默认路由已被接管）"
+        );
+    }
+
+    /// 境外黑洞（S1：「TCP 通、协议被墙」的形态）→ 同样不得接管。
+    #[tokio::test]
+    async fn gate_refuses_commit_when_overseas_proxy_path_is_dead() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            &["overseas", "domestic"],
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                let code = if t.as_str() == "overseas" { "000" } else { "204" };
+                async move { code.to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        assert!(matches!(res, Err(GateFailure::Probe { .. })), "实际 {res:?}");
+        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic"]);
+    }
+
+    /// 超时（curl 拿不到码 → 空串）也必须算**不通**，且不得接管。
+    #[tokio::test]
+    async fn gate_treats_empty_code_as_timeout_and_refuses() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            &["overseas", "domestic"],
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                let code = if t.as_str() == "domestic" { "" } else { "204" };
+                async move { code.to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        match &res {
+            Err(GateFailure::Probe { failed }) => {
+                assert_eq!(failed[0].http_code, "", "空串要保留原样，便于排障");
+                assert!(failed[0].describe().contains("无响应"), "文案要能读");
+            }
+            other => panic!("超时必须 Probe 失败，实际 {other:?}"),
+        }
+        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic"]);
+    }
+
+    /// 一个目标的响应码不是 204 也算通（403/301 都证明路径真的通）。
+    #[test]
+    fn probe_responded_accepts_any_real_http_code() {
+        for ok in ["200", "204", "301", "403", "500"] {
+            assert!(
+                ProbeOutcome { target: "t".into(), http_code: ok.into() }.responded(),
+                "{ok} 是真实响应，应算通"
+            );
+        }
+        for dead in ["", "000"] {
+            assert!(
+                !ProbeOutcome { target: "t".into(), http_code: dead.into() }.responded(),
+                "{dead:?} 不是响应，应算不通"
+            );
+        }
+    }
+
+    /// 探测全过、commit 自己失败 → 必须报 `Commit` 而不是 `Probe`
+    /// （两者的用户文案不同：一个说网络没被动过，一个说已回滚）。
+    #[tokio::test]
+    async fn gate_surfaces_commit_failure_after_probes_pass() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            &["overseas", "domestic"],
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                async { "204".to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Err(xt_proto::HelperError::new(xt_proto::ErrorCode::Internal, "boom")) }
+            },
+        )
+        .await;
+
+        assert_eq!(res, Err(GateFailure::Commit("boom".into())));
+        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic", "commit"]);
+    }
+
+    /// 目标列表为空是**配置错误**，必须 fail-safe（拒绝接管），不能静默放行。
+    #[tokio::test]
+    async fn gate_refuses_when_no_targets_are_configured() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            &[],
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                async { "204".to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        assert_eq!(res, Err(GateFailure::NoTargets));
+        assert!(log.seq().is_empty(), "没配置目标时不该探测、更不该提交");
+    }
+
+    /// 门禁确实配了「境外 + 境内」两个目标 —— 少一个就等于把自己测盲。
+    #[test]
+    fn required_probe_targets_cover_overseas_and_domestic() {
+        assert_eq!(REQUIRED_PROBE_TARGETS.len(), 2, "至少要两个目标：境外 + 境内");
+        assert_eq!(REQUIRED_PROBE_TARGETS[0], xt_core::xray::DEFAULT_PROBE_URL);
+        assert!(
+            REQUIRED_PROBE_TARGETS[1].contains("baidu.com"),
+            "第二个目标必须是境内、经 CN 分流走 direct 的地址，实际 {}",
+            REQUIRED_PROBE_TARGETS[1]
+        );
     }
 }
