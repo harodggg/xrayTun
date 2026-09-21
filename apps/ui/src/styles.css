@@ -1239,11 +1239,14 @@ input[type="checkbox"] {
 }
 
 /* 选中态**不只靠颜色**：左侧一条强调条 + 文字提亮 + 加粗。
-   只靠背景色的话，色觉差异的用户读不出「现在在哪一类」。 */
+   只靠背景色的话，色觉差异的用户读不出「现在在哪一类」。
+   ⚠️ 这里**刻意不画边框**：曾经有一行 `border-color: var(--border-interactive)`，而那个 token
+   在应用侧**从未定义**（只在官网 site.css 里有）→ `var()` 无兜底 ⇒ 声明在计算值阶段失效、
+   `border-color` 落到 `currentColor` ⇒ 选中项多了一圈计划外的**近白描边**（实测 14.19:1，
+   比意图中的 #5c7290 抢眼得多）。三个非颜色线索已经够了，边框是多余的。 */
 .set__tab.is-active {
   background: var(--bg-elevated);
   color: var(--text);
-  border-color: var(--border-interactive);
   box-shadow: inset 2px 0 0 var(--accent);
   font-weight: 600;
 }
