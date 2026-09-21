@@ -195,3 +195,35 @@ cf-cache-status: BYPASS         ← 绕过缓存打到源站 = **源站已经是
   §1 注解 2 的「旧图 URL 可能仍被边缘缓存」是**推断**，部署后以实测替换。
 * CF 部署传播延迟：部署后我会**分两次**（刚上完 / 等一分钟）重复探测，若两次不一致会如实写出，
   不把「传播中的中间态」当成最终结论。
+
+---
+
+## 附录 A：原始输出（**逐字入库**，含采集信息与不可复现项）
+
+`/tmp` 会被清空 —— 「不可复制的现场只存在于临时目录」等于不存在。所以两份原始输出**逐字**入库
+（未重新格式化、未重新摘录），并与 `/tmp` 原件做过 `cmp` 逐字节校验：
+
+| 入库文件 | 字节 | sha256 | 与 /tmp 原件 |
+|---|---|---|---|
+| `docs/verification/TASK-77-PROBE-BEFORE.txt` | 2924 | `c8c45d9eac2cde8060abad51c7f7a52f2a2fc3d476db8eab997db97fafc082fc` | **IDENTICAL**（`cmp`） |
+| `docs/verification/TASK-77-PROBE-AFTER.txt` | 2958 | `098406f3461049c4fcefb66157266720bda9dcbbc78d065e139f26cf9eedcfaa` | **IDENTICAL**（`cmp`） |
+
+**采集信息**
+
+* 采集时间：BEFORE 文件 mtime **2026-09-21 19:11:36 +0800**；AFTER **2026-09-21 20:13**（部署 `8f943d5` 之后）；
+* 采集命令：`bash /tmp/ops-404-probe.sh "<标签>" > /tmp/ops-404-probe-<before|after>.txt 2>&1`；
+* 判据：**content-type + body sha256 双判**（**不用裸状态码**）；首页 sha 作为对照基准；
+* 环境：本机 macOS（与 CI 无关），`curl` 直连；
+* 为什么 AFTER 也入库：它与 BEFORE 是**同一脚本、同一批路径**的前后对照，配对才有意义；
+* **采集脚本本身没有入库**：`scripts/verify-live-site.sh`（`ef1d213`）已用同一判据
+  （content-type + body sha 双判，且处理「陈旧缓存体」）做得更完整，不重复造第二份。
+
+**哪些读数不可复现（重要，别拿新现场去核对旧数字）**
+
+| 读数 | 现在/以后的状态 |
+|---|---|
+| apex 上 6 条未知路径 = `200` + `text/html` + body 与首页相同 | **永久不可复现** —— `404.html` 已生效，同一批路径现在是 404 |
+| apex `/robots.txt` = 7004 B | 不可复现（现在是 7215 B，多了那 2 行注释） |
+| 镜像上未知路径 = 9379 B（GitHub 默认 404 页） | 不可复现（现在是我们自己的 `404.html`，9183 B） |
+| apex `/og-image-0.8.30.png` = `200` + 43696 B 缓存体 | **会随 CF purge 或 immutable 过期消失**；purge 后应表现为 `?bust` 那种 `BYPASS` + 404 |
+| 真实页面的 sha（`a02e24a38f9d…`、`6cc1dd39…` 等） | 只要线上仍是 `8f943d5` 那次部署就可复现；**任何后续站点提交都会改变** |

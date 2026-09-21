@@ -1,0 +1,27 @@
+########## [修后（8f943d5 部署完成）] apex https://xraytun.top ##########
+  首页 / 的 body sha256（对照基准）= a02e24a38f9d5dc5
+  /                                  http=200  ct=text/html; charset=utf-8   bytes=43980   sha256=a02e24a38f9d5dc5
+  /en/                               http=200  ct=text/html; charset=utf-8   bytes=45083   sha256=6cc1dd39d7fbfed8
+  /wasm/                             http=200  ct=text/html; charset=utf-8   bytes=25471   sha256=c7806ade85bbb9eb
+  /en/wasm/                          http=200  ct=text/html; charset=utf-8   bytes=27200   sha256=7692442981fd2374
+  /assets/site.css                   http=200  ct=text/css; charset=utf-8    bytes=10707   sha256=b7f9ffadf0af4b30
+  /og-image-0.8.31.png               http=200  ct=image/png                  bytes=58984   sha256=e87db07a8ec44b38
+  /manifest.webmanifest              http=200  ct=application/manifest+json  bytes=757     sha256=e66b8924dfb89163
+  /robots.txt                        http=200  ct=text/plain; charset=utf-8  bytes=7215    sha256=c60690117a20ecfd
+  /sitemap.xml                       http=200  ct=application/xml            bytes=1787    sha256=8f2ecf603d980c3a
+  /llms.txt                          http=200  ct=text/plain; charset=utf-8  bytes=5026    sha256=7b4b3e7e80e0f6e2
+  /llms-full.txt                     http=200  ct=text/plain; charset=utf-8  bytes=63437   sha256=f9f790ac36a34b45
+  /og-image-0.8.30.png               http=200  ct=text/html; charset=utf-8   bytes=43696   sha256=1e12653843e9f902
+  /this-path-does-not-exist-xyz      http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+  /foo/bar/baz                       http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+  /old.html                          http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+  /_redirects                        http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+  /_headers                          http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+########## [修后（8f943d5 部署完成）] 镜像 https://harodggg.github.io/xrayTun ##########
+  镜像首页 / 的 body sha256（对照基准）= a02e24a38f9d5dc5
+  /                                  http=200  ct=text/html; charset=utf-8   bytes=43980   sha256=a02e24a38f9d5dc5
+  /en/                               http=200  ct=text/html; charset=utf-8   bytes=45083   sha256=6cc1dd39d7fbfed8
+  /og-image-0.8.31.png               http=200  ct=image/png                  bytes=58984   sha256=e87db07a8ec44b38
+  /og-image-0.8.30.png               http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+  /this-path-does-not-exist-xyz      http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
+  /foo/bar/baz                       http=404  ct=text/html; charset=utf-8   bytes=9183    sha256=6db7d5598f0705ac
