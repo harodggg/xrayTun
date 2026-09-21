@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, recoveryView } from "./ipc";
 // 状态语义的**唯一真源**（task-45 建、task-47 合并）：顶栏的线/点与仪表盘的状态区
 // 都从 `appStatus` 取，任何地方再抄一份判断都是把同一族「假陈述」种回去。
@@ -12,7 +12,7 @@ import Routing from "./pages/Routing";
 import Globe from "./pages/Globe";
 import Topology from "./pages/Topology";
 import Logs from "./pages/Logs";
-import Settings from "./pages/Settings";
+import Settings, { categoryOfSection } from "./pages/Settings";
 
 type View = "dashboard" | "nodes" | "subscriptions" | "routing" | "topology" | "globe" | "logs" | "settings";
 
@@ -45,12 +45,43 @@ export default function App() {
 function initialViewFromUrl(): View | undefined {
   if (!import.meta.env.DEV) return undefined;
   const v = new URLSearchParams(location.search).get("view");
-  return NAV.some((n) => n.id === v) ? (v as View) : undefined;
+  if (NAV.some((n) => n.id === v)) return v as View;
+  // 分节深链（如 `#set-helper`）：直接落在设置页的对应分类，不必先进仪表盘。
+  // 这一段**不受预览开关限制** —— 它是正式版的 URL 契约，不是调试参数。
+  if (initialSectionFromHash()) return "settings";
+  return undefined;
+}
+
+/**
+ * 从 URL 锚点取出设置页分节 id：`#set-helper` → `"set-helper"`。
+ *
+ * 只有确实属于设置页的分节才认（用设置页自己的分类表判断）；其他页面的锚点
+ * 或未知 id 一律返回 null，免得把任意 `#foo` 都当成「要进设置页」。
+ */
+function initialSectionFromHash(): string | null {
+  const id = location.hash.replace(/^#/, "");
+  return id && categoryOfSection(id) ? id : null;
 }
 
 function Shell({ initialView }: { initialView?: View }) {
   const [view, setView] = useState<View>(initialView ?? "dashboard");
+  // 要跳到的设置分节。只有「从别处带着目标进设置」时才非空（深链、或状态卡片
+  // 上的按钮）；用户自己点侧栏进设置时是 null，设置页就按记忆/默认分类走。
+  const [settingsTarget, setSettingsTarget] = useState<string | null>(() => initialSectionFromHash());
   const { snapshot, error, clearError, recoveredAttempt, dismissRecovered } = useStore();
+
+  // 入参用 string 而不是 View：Dashboard 的 onNavigate 契约就是 `(view: string)`，
+  // 这里收窄一次即可；等它加上可选的 target 参数（状态卡片直接指到某个设置分节）
+  // 也不用再改这里。
+  const onNavigate = useCallback((next: string, target?: string) => {
+    setView(next as View);
+    setSettingsTarget(target ?? null);
+  }, []);
+
+  // 离开设置页就把目标丢掉：否则下次进来会莫名其妙跳到上一回那个分节。
+  useEffect(() => {
+    if (view !== "settings") setSettingsTarget(null);
+  }, [view]);
 
   const nodeCount = snapshot?.nodes.length ?? 0;
   const subCount = snapshot?.subscriptions.length ?? 0;
@@ -131,14 +162,14 @@ function Shell({ initialView }: { initialView?: View }) {
               </button>
             </div>
           )}
-          {view === "dashboard" && <Dashboard onNavigate={(v) => setView(v as View)} />}
+          {view === "dashboard" && <Dashboard onNavigate={onNavigate} />}
           {view === "nodes" && <Nodes />}
           {view === "subscriptions" && <Subscriptions />}
           {view === "routing" && <Routing />}
         {view === "topology" && <Topology />}
         {view === "globe" && <Globe />}
           {view === "logs" && <Logs />}
-          {view === "settings" && <Settings />}
+          {view === "settings" && <Settings focusSection={settingsTarget} />}
         </div>
       </main>
     </div>

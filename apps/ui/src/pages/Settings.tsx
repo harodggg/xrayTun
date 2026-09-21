@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import {
@@ -7,9 +7,128 @@ import {
   MODE_LABEL,
   UpdateProgress,
   type AppSettings,
+  type AppSnapshot,
   type DnsHandling,
   type Ipv6Mode,
 } from "../types";
+
+/**
+ * 设置页的两级结构：**分类 → 分节**（task-48）。
+ *
+ * ## 为什么分这四类
+ *
+ * 与用户的**任务顺序**一致，也与旧导航的四个词对齐（连接 / DNS / 内核与更新 / 系统与助手）：
+ * 先把流量接进来（代理入口、TUN、Fake-IP）→ 再管域名解析（DNS、解析器）→ 再管核心与数据更新
+ * → 最后是系统集成（开机自启动、特权助手、其他）。
+ *
+ * ## 它是**唯一真源**
+ *
+ * 导航、深链解析（`#set-helper`）、跨页意图（`onNavigate("settings", "set-helper")`）、
+ * 分类上的注意力徽标，全部从这张表读。所以「10 个分节一个不漏、不重」只需要在这张表里
+ * 成立一次，并由测试逐项断言（`ALL_SETTINGS_SECTIONS`）。
+ */
+export const SETTINGS_CATEGORIES = [
+  {
+    id: "conn",
+    label: "连接",
+    sections: [
+      { id: "set-entry", title: "代理入口" },
+      { id: "set-tun", title: "TUN 模式" },
+      { id: "set-fakeip", title: "Fake-IP" },
+    ],
+  },
+  {
+    id: "dns",
+    label: "DNS",
+    sections: [
+      { id: "set-dns", title: "DNS" },
+      { id: "set-dns-probe", title: "DNS 解析器" },
+    ],
+  },
+  {
+    id: "core",
+    label: "内核与更新",
+    sections: [
+      { id: "set-core", title: "内核" },
+      { id: "set-update", title: "核心与数据更新" },
+    ],
+  },
+  {
+    id: "system",
+    label: "系统与助手",
+    sections: [
+      { id: "set-autostart", title: "开机自启动" },
+      { id: "set-helper", title: "特权助手" },
+      { id: "set-misc", title: "其他" },
+    ],
+  },
+] as const;
+
+export type SettingsCategoryId = (typeof SETTINGS_CATEGORIES)[number]["id"];
+
+/** 全部 10 个分节 id（顺序 = 表里的顺序）。测试用它断言「不漏不重」。 */
+export const ALL_SETTINGS_SECTIONS: string[] = SETTINGS_CATEGORIES.flatMap((c) =>
+  c.sections.map((s) => s.id),
+);
+
+/**
+ * 分节 id → 分类 id。
+ *
+ * **深链（`#set-helper`）与跨页意图（`onNavigate("settings", "set-helper")`）共用这一处解析** ——
+ * 不许各写一份，否则两级结构一旦调整，两条入口就会有一条落错分类。
+ * 这不是猜测：`Dashboard.tsx` 里「helper 没就绪 → 把用户送去设置页」正需要它，
+ * 落错分类等于让用户去找一个看不见的东西。
+ */
+export function categoryOfSection(sectionId: string): SettingsCategoryId | null {
+  for (const c of SETTINGS_CATEGORIES) {
+    if (c.sections.some((s) => s.id === sectionId)) return c.id;
+  }
+  return null;
+}
+
+/** 当前 hash 指向的分节（`#set-helper` → `set-helper`）。 */
+function hashSection(): string | null {
+  const raw = window.location.hash.replace(/^#/, "");
+  return raw ? raw : null;
+}
+
+/**
+ * 每个分类里有没有**需要用户处理**的状态。
+ *
+ * 两级之后最危险的新问题就是「把该看见的东西藏起来」：某分类里的失败状态如果只能切过去
+ * 才看得到，那就是新的「看不见的问题」。所以这里算出来给**分类标签**当徽标用
+ * （选择「标签给指示」而不是「自动选中出问题的分类」：后者会在用户没要求时
+ * 把内容换掉，属于静默跳转；徽标则是不打扰的常驻提示）。
+ *
+ * 只认**明确的失败/未就绪**：读数缺失（例如刚启动还没查更新）不算「有事」——
+ * 不把「不知道」说成「有问题」。
+ */
+export function categoryAttention(snapshot: AppSnapshot): Record<SettingsCategoryId, boolean> {
+  const helperDown = !snapshot.helper.socket_present || !snapshot.helper.reachable;
+  return {
+    // TUN 模式依赖 helper：正在用 TUN 而 helper 没就绪 → 连接这一类里确有事要处理
+    conn: snapshot.settings.mode === "tun" && helperDown,
+    dns: Boolean(snapshot.dns.error || snapshot.dns.foreign_error),
+    core: Boolean(snapshot.core.error || snapshot.update.check_error),
+    system: helperDown,
+  };
+}
+
+/** 上次看过的分类（会话级，见 `selectCategory` 的理由）。 */
+const LAST_CATEGORY_KEY = "xraytun.settings.category";
+
+/** 落地时该选哪一类：**明确目标优先** → 上次看过 → 默认第一类。 */
+function resolveInitialCategory(target: string | null | undefined): SettingsCategoryId {
+  const fromTarget = target ? categoryOfSection(target) : null;
+  if (fromTarget) return fromTarget;
+  try {
+    const saved = sessionStorage.getItem(LAST_CATEGORY_KEY);
+    if (saved && SETTINGS_CATEGORIES.some((c) => c.id === saved)) return saved as SettingsCategoryId;
+  } catch {
+    /* 隐私模式拿不到 sessionStorage：用默认分类 */
+  }
+  return SETTINGS_CATEGORIES[0].id;
+}
 
 const HELPER_STATE_LABEL: Record<string, string> = {
   ready: "已就绪",
@@ -28,11 +147,101 @@ function helperStateLabel(state: string, version: string | null, protocol: numbe
   return base;
 }
 
-export default function Settings() {
+/**
+ * 一个分节。**只渲染当前分类里的分节** —— 其他分类的分节**不在 DOM 里**。
+ *
+ * 为什么不是「用 CSS 藏起来」：藏起来的东西照样在 a11y 树里可被读屏读到、也可能被
+ * Tab 聚焦到，而且「当前页面里到底有什么」这件事没法用 DOM 断言。不渲染就没有这些歧义。
+ */
+function Section({
+  id,
+  active,
+  children,
+}: {
+  id: string;
+  active: boolean;
+  children: ReactNode;
+}) {
+  if (!active) return null;
+  return (
+    <section className="card set__sec" id={id}>
+      {children}
+    </section>
+  );
+}
+
+export default function Settings({ focusSection }: { focusSection?: string | null } = {}) {
   const { snapshot, busy, run, runVoid } = useStore();
   const [draft, setDraft] = useState<AppSettings | null>(null);
+  const [cat, setCat] = useState<SettingsCategoryId>(() => resolveInitialCategory(focusSection));
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 切换分类。
+   *
+   * ## 滚动位置：**切完回到内容顶部**
+   *
+   * 旧内容整个从 DOM 里消失，之前的滚动偏移在新分类里指向的是一段**无关**的中段；
+   * 保持偏移会让人以为「点错了/内容没变」。回到顶部是唯一确定的位置。
+   *
+   * ## 记住上次分类：**记住**（会话级 sessionStorage）
+   *
+   * 设置页是「回来接着改」的地方：每次重新进入都回到第一类，会让连续调整（改 DNS →
+   * 离开看日志 → 回来再改）每次都多点一次。记住的风险是「以为设置丢了」—— 这个风险
+   * 很小，因为**记住的是用户自己上一次的选择**，而且分类标签上一直有明确的选中态。
+   * 明确目标（跨页意图 / 深链）永远优先于记忆。
+   */
+  const selectCategory = useCallback((next: SettingsCategoryId) => {
+    setCat(next);
+    try {
+      sessionStorage.setItem(LAST_CATEGORY_KEY, next);
+    } catch {
+      /* 隐私模式：记不住就算了，不影响功能 */
+    }
+    bodyRef.current?.scrollIntoView({ block: "start" });
+  }, []);
+
+  // 带目标的落地：**跨页意图**（`onNavigate("settings", "set-helper")`）与
+  // **深链**（`#set-helper`）走同一套「目标 → 分类」解析。
+  useEffect(() => {
+    const target = focusSection ?? hashSection();
+    if (!target) return;
+    const targetCat = categoryOfSection(target);
+    if (!targetCat) return;
+    selectCategory(targetCat);
+    // 落到分类还不够：目标分节要**被看见** —— 两级结构最容易把该看见的东西藏起来。
+    // 用一次性类名（而不是 state）做强调：它不驱动重渲染，只是给用户「就是这里」的落点。
+    const scrollTimer = window.setTimeout(() => {
+      const el = document.getElementById(target);
+      el?.scrollIntoView({ block: "center" });
+      el?.classList.add("is-target");
+    }, 0);
+    const clearTimer = window.setTimeout(() => {
+      document.getElementById(target)?.classList.remove("is-target");
+    }, 2400);
+    return () => {
+      window.clearTimeout(scrollTimer);
+      window.clearTimeout(clearTimer);
+      document.getElementById(target)?.classList.remove("is-target");
+    };
+  }, [focusSection, selectCategory]);
+
+  // 用户手改 hash（或从别处点 `#set-helper`）也走同一套解析。
+  useEffect(() => {
+    const onHash = () => {
+      const id = hashSection();
+      const c = id ? categoryOfSection(id) : null;
+      if (c) selectCategory(c);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [selectCategory]);
 
   if (!snapshot) return <div className="empty">正在加载…</div>;
+
+  const active = SETTINGS_CATEGORIES.find((c) => c.id === cat) ?? SETTINGS_CATEGORIES[0];
+  const activeIds = new Set<string>(active.sections.map((s) => s.id));
+  const attention = categoryAttention(snapshot);
 
   const settings = draft ?? snapshot.settings;
   const dirty = draft !== null;
@@ -75,16 +284,63 @@ export default function Settings() {
         </div>
       )}
 
-      <nav className="set__nav">
-        <a href="#set-entry">连接</a>
-        <a href="#set-dns">DNS</a>
-        <a href="#set-core">内核与更新</a>
-        <a href="#set-helper">系统与助手</a>
-      </nav>
+      {/* 分类导航 = 两级结构的第一级。
+          为什么用 tablist/tab 而不是 `<a href="#set-…">` 锚点：
+          ① 选中态要能被读出来（`aria-selected`），锚点读不出「当前是哪一类」；
+          ② 键盘要能用 ←/→ 在分类间移动（WAI-ARIA tabs 的惯例），锚点只能逐个 Tab。
+          深链仍然支持，但指向的是**分节 id**（`#set-helper`），由同一套解析落到所属分类。 */}
+      <div className="set__tabs" role="tablist" aria-label="设置分类">
+        {SETTINGS_CATEGORIES.map((c, i) => (
+          <button
+            key={c.id}
+            type="button"
+            role="tab"
+            id={`set-tab-${c.id}`}
+            aria-selected={cat === c.id}
+            aria-controls={`set-panel-${c.id}`}
+            // roving tabindex：Tab 进 tablist 停一次，之后用 ←/→ 换分类
+            tabIndex={cat === c.id ? 0 : -1}
+            className={`set__tab${cat === c.id ? " is-active" : ""}`}
+            onClick={() => selectCategory(c.id)}
+            onKeyDown={(e) => {
+              const last = SETTINGS_CATEGORIES.length - 1;
+              let next = i;
+              if (e.key === "ArrowRight") next = i === last ? 0 : i + 1;
+              else if (e.key === "ArrowLeft") next = i === 0 ? last : i - 1;
+              else if (e.key === "Home") next = 0;
+              else if (e.key === "End") next = last;
+              else return;
+              e.preventDefault();
+              selectCategory(SETTINGS_CATEGORIES[next]!.id);
+              document.getElementById(`set-tab-${SETTINGS_CATEGORIES[next]!.id}`)?.focus();
+            }}
+          >
+            {c.label}
+            {/* 注意力徽标：这一类里有**明确的**失败/未就绪。
+                选「标签给指示」而不是「自动选中出问题的分类」—— 后者会在用户没要求时
+                把内容换掉（静默跳转），徽标则是不打扰的常驻提示。
+                用 role="img" + aria-label，不只用颜色表达。 */}
+            {attention[c.id] && (
+              <span
+                className="set__tab-dot"
+                role="img"
+                aria-label="这一类里有需要处理的状态"
+                title="这一类里有需要处理的状态"
+              />
+            )}
+          </button>
+        ))}
+      </div>
 
-      <div className="set__body">
+      <div
+        className="set__body"
+        role="tabpanel"
+        id={`set-panel-${cat}`}
+        aria-labelledby={`set-tab-${cat}`}
+        ref={bodyRef}
+      >
       {/* ------------------------------------------------------- 代理入口 */}
-      <section className="card set__sec" id="set-entry">
+      <Section id="set-entry" active={activeIds.has("set-entry")}>
         <h2 className="card__title">代理入口</h2>
         <p className="card__desc">
           SOCKS 入站的 UDP 支持是 TUN 模式和 QUIC 转发的必要条件，因此始终开启。
@@ -133,13 +389,13 @@ export default function Settings() {
             debug 会产生大量日志。排查连接问题时临时打开，用完记得调回去。
           </div>
         </div>
-      </section>
+      </Section>
 
       {/* ------------------------------------------------------- TUN */}
       {/* 用户的头号需求是「开机后自动连上，不需要点连接」，而开机自启动正是
           让这件事成立的开关 —— 所以它必须在上半屏。此前它在最底下的「其他」卡里，
           720px 窗口实测 top≈2997px（完全在折叠线下）。实测放在这里 top≈402px，抬头可见。 */}
-      <section className="card set__sec" id="set-autostart">
+      <Section id="set-autostart" active={activeIds.has("set-autostart")}>
         <h2 className="card__title">开机自启动</h2>
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
           <input
@@ -174,9 +430,9 @@ export default function Settings() {
           </div>
         )}
 
-      </section>
+      </Section>
 
-      <section className="card set__sec" id="set-tun">
+      <Section id="set-tun" active={activeIds.has("set-tun")}>
         <h2 className="card__title">TUN 模式</h2>
         <p className="card__desc">
           当前模式：<strong>{MODE_LABEL[settings.mode]}</strong>。
@@ -265,10 +521,10 @@ export default function Settings() {
           />
           把内网 / 链路本地 / 多播地址排除在隧道之外（强烈建议保持开启）
         </label>
-      </section>
+      </Section>
 
       {/* ------------------------------------------------------- DNS */}
-      <section className="card set__sec" id="set-dns">
+      <Section id="set-dns" active={activeIds.has("set-dns")}>
         <h2 className="card__title">DNS</h2>
         <p className="card__desc">
           macOS 的 DNS 是<strong>按网络服务</strong>配置的。helper 会在改动前备份、在回滚时还原 ——
@@ -321,10 +577,10 @@ export default function Settings() {
         <div className="field__hint" style={{ marginTop: 6 }}>
           关闭嗅探后，域名分流只能依赖 DNS 阶段的信息，对「直接用 IP 发起连接」的程序会失效。
         </div>
-      </section>
+      </Section>
 
       {/* ------------------------------------------------------- Fake-IP */}
-      <section className="card set__sec" id="set-fakeip">
+      <Section id="set-fakeip" active={activeIds.has("set-fakeip")}>
         <h2 className="card__title">Fake-IP</h2>
         <p className="card__desc">
           很多人以为 Fake-IP 是 sing-box 独有 —— <strong>不是</strong>。Xray 有原生的
@@ -370,10 +626,10 @@ export default function Settings() {
             </div>
           </>
         )}
-      </section>
+      </Section>
 
       {/* ------------------------------------------------------- 内核 */}
-      <section className="card set__sec" id="set-core">
+      <Section id="set-core" active={activeIds.has("set-core")}>
         <h2 className="card__title">内核</h2>
         <div className="field">
           <label>Xray 可执行文件路径</label>
@@ -397,10 +653,10 @@ export default function Settings() {
             保存并重启核心
           </button>
         </div>
-      </section>
+      </Section>
 
       {/* ------------------------------------------------------- helper */}
-      <section className="card set__sec" id="set-helper">
+      <Section id="set-helper" active={activeIds.has("set-helper")}>
         <h2 className="card__title">特权助手（helper）</h2>
         <p className="card__desc">
           macOS 上创建 utun 必须具备 root 权限，而把整个界面跑在 root 下是不可接受的。
@@ -467,10 +723,10 @@ export default function Settings() {
           发行版应改用 <span className="mono">SMAppService</span>（macOS 13+）：
           无需密码，但用户需要在「系统设置 → 通用 → 登录项与扩展 → 后台允许」里启用。
         </div>
-      </section>
+      </Section>
 
       {/* ------------------------------------------------- DNS 解析器 */}
-      <section className="card set__sec" id="set-dns-probe">
+      <Section id="set-dns-probe" active={activeIds.has("set-dns-probe")}>
         <h2 className="card__title">DNS 解析器</h2>
 
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
@@ -550,10 +806,10 @@ export default function Settings() {
           不一致的标为可疑（明文入墙会被抢答，抢答者延迟一定漂亮、答案却可能是错的）。
           国外那组走的是加密 DoH，基本不可能被抢答。
         </div>
-      </section>
+      </Section>
 
       {/* --------------------------------------------- 核心与 geo 更新 */}
-      <section className="card set__sec" id="set-update">
+      <Section id="set-update" active={activeIds.has("set-update")}>
         <h2 className="card__title">核心与数据更新</h2>
 
         <div className="kv">
@@ -679,10 +935,10 @@ export default function Settings() {
             日志在 <span className="mono">~/Library/Logs/XrayTun/app-update.log</span>。
           </div>
         </div>
-      </section>
+      </Section>
 
       {/* ------------------------------------------------------- 杂项 */}
-      <section className="card set__sec" id="set-misc">
+      <Section id="set-misc" active={activeIds.has("set-misc")}>
         <h2 className="card__title">其他</h2>
         <label className="row" style={{ gap: 8, fontSize: 12, marginBottom: 10 }}>
           <input
@@ -723,7 +979,7 @@ export default function Settings() {
         <div className="field__hint" style={{ marginTop: 10 }}>
           数据目录：<span className="mono">{snapshot.runtime.config_path?.replace(/\/runtime\/.*$/, "") ?? "~/Library/Application Support/com.xraytun.desktop"}</span>
         </div>
-      </section>
+      </Section>
       </div>
     </div>
   );

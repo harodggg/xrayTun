@@ -61,7 +61,10 @@ function renderSettings(update: Partial<Update>) {
   mocks.snapshot.mockResolvedValue(snapshotWith(update));
   return render(
     <StoreProvider>
-      <Settings />
+      {/* task-48 之后「核心与数据更新」属于「内核与更新」这一类，默认分类不渲染它 →
+          这里用**带目标的落地**进去（`focusSection`）。
+          顺带说明：这条也间接证明分类是真收敛（不渲染），而不是用 CSS 藏起来。 */}
+      <Settings focusSection="set-update" />
     </StoreProvider>,
   );
 }
