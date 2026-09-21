@@ -34,9 +34,29 @@ const RECOVERED_NOTICE_MS = 8000;
 
 
 
+/**
+ * 日志**读取**状态（区别于「读到了，但是空的」）。
+ *
+ * **只由后端返回值决定**：IPC 成功就是 loaded，抛错就是 failed ——
+ * 不按时间、不按次数、也不按「列表是不是空的」猜。这是 task-23 的硬要求：
+ * 日志页曾经把「读不到」显示成「核心还没启动过」，而且给的是**错误的原因**。
+ *
+ * 界面用它 + `snapshot.runtime.running` 派生出三种互不相同的说法：
+ *   · `failed`                    → 读取失败：显示后端给的原文 + 重试
+ *   · `loaded` + 空 + 核心没在跑   → 核心还没启动过
+ *   · `loaded` + 空 + 核心在跑     → 核心已启动，但还没产出日志
+ */
+export interface LogsLoad {
+  phase: "loading" | "loaded" | "failed";
+  /** 失败原因（后端或传输层给的原文）；成功时为 null。 */
+  error: string | null;
+}
+
 interface StoreValue {
   snapshot: AppSnapshot | null;
   logs: LogEntry[];
+  /** 日志读取本身的状态 —— 「没读到」与「读到但是空的」是两件事。 */
+  logsLoad: LogsLoad;
   /** 正在执行的操作名，用于按钮转圈与防重复点击。 */
   busy: string | null;
   error: string | null;
@@ -59,7 +79,9 @@ interface StoreValue {
   /** 执行一个不返回快照的操作。 */
   runVoid: (name: string, action: () => Promise<void>) => Promise<boolean>;
   clearError: () => void;
-  clearLogs: () => void;
+  clearLogs: () => Promise<void>;
+  /** 重新拉一次日志（失败态里的「重试」）。 */
+  reloadLogs: () => Promise<void>;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -67,6 +89,8 @@ const StoreContext = createContext<StoreValue | null>(null);
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  /** 日志读取状态：最初是「正在读」，成败由 IPC 的真实结果决定。 */
+  const [logsLoad, setLogsLoad] = useState<LogsLoad>({ phase: "loading", error: null });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
@@ -263,18 +287,42 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   // ---- 拉取历史日志（后端保留了进程启动以来的全部日志） ----
-  useEffect(() => {
-    void api
-      .tailLogs(500)
-      .then((entries) => setLogs((prev) => (prev.length ? prev : entries)))
-      .catch(() => {
-        /* 日志拿不到不影响主功能，静默即可 */
-      });
+  // ---- 拉取历史日志（后端保留了进程启动以来的全部日志） ----
+  //
+  // 这里以前是 `.catch(() => { /* 日志拿不到不影响主功能，静默即可 */ })`。
+  // 静默的代价是：**读失败和「真的没有日志」在界面上长得一模一样**，
+  // 而日志页的文案直接把空列表解释成「核心还没启动过」—— 于是用户被告知了一个
+  // 错误的原因。这属于本项目反复修过的「查不到 ≠ 没有」（流量、连接数、域名配对
+  // 之后这是第四处），而且比前几处更糟：前几处只是没数据，这里是**给错因**。
+  //
+  // 现在失败必须留下痕迹：记下真实错误，由日志页显示原因并给出重试。
+  const loadLogs = useCallback(async () => {
+    setLogsLoad({ phase: "loading", error: null });
+    try {
+      const entries = await api.tailLogs(500);
+      // 事件推送可能已经先到了：已有内容时不要用历史覆盖实时。
+      setLogs((prev) => (prev.length ? prev : entries));
+      setLogsLoad({ phase: "loaded", error: null });
+    } catch (e) {
+      setLogsLoad({ phase: "failed", error: errorText(e) });
+    }
   }, []);
 
-  const clearLogs = useCallback(() => {
-    setLogs([]);
-    void api.clearLogs().catch(() => undefined);
+  useEffect(() => {
+    void loadLogs();
+  }, [loadLogs]);
+
+  const clearLogs = useCallback(async () => {
+    try {
+      await api.clearLogs();
+      // **只在后端确认删掉之后**才清空界面。反过来先清界面的话，清空失败时
+      // 界面会显示「空的」而日志文件还在 —— 刷新一次日志全回来，
+      // 那是我们自己制造「说的与事实不符」。
+      setLogs([]);
+      setLogsLoad({ phase: "loaded", error: null });
+    } catch (e) {
+      setError(`清空日志失败：${errorText(e)}`);
+    }
   }, []);
 
   /** 从快照派生：恢复状态是 `runtime` 的一部分，事件与刷新两条路都会更新它。 */
@@ -284,6 +332,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     () => ({
       snapshot,
       logs,
+      logsLoad,
       busy,
       error,
       probing,
@@ -296,10 +345,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       runVoid,
       clearError: () => setError(null),
       clearLogs,
+      reloadLogs: loadLogs,
     }),
     [
       snapshot,
       logs,
+      logsLoad,
       busy,
       error,
       probing,
@@ -311,6 +362,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       run,
       runVoid,
       clearLogs,
+      loadLogs,
     ],
   );
 

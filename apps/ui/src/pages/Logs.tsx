@@ -21,6 +21,7 @@
 
 import { useMemo, useState } from "react";
 import { api } from "../ipc";
+import { InlineConfirm } from "../InlineConfirm";
 import { useFollowScroll } from "../useFollowScroll";
 import { useStore } from "../store";
 
@@ -39,7 +40,10 @@ const LEVEL_LABEL: Record<Level, string> = {
 const NOTABLE: readonly Level[] = ["error", "warn"];
 
 export default function Logs() {
-  const { logs, clearLogs, runVoid } = useStore();
+  const { logs, logsLoad, reloadLogs, clearLogs, runVoid, snapshot } = useStore();
+  // 「核心有没有在跑」取自**后端快照**（`runtime.running`），不是按日志条数或时间猜。
+  // 它只用来区分**两种不同的空**：核心没启动过 / 启动过但还没输出。
+  const coreRunning = snapshot?.runtime.running === true;
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
   const [level, setLevel] = useState<Level>("all");
   const [query, setQuery] = useState("");
@@ -128,10 +132,29 @@ export default function Logs() {
         >
           诊断
         </button>
-        <button className="btn btn--ghost" onClick={clearLogs}>
-          清空
-        </button>
+        <InlineConfirm
+          label="清空"
+          className="btn btn--ghost btn--danger"
+          title="删除日志文件（无法撤销）"
+          question="清空日志？会删除日志文件本身，无法撤销。"
+          confirmLabel="确认清空"
+          onConfirm={() => void clearLogs()}
+        />
       </div>
+
+      {/* 读取失败必须留痕：给出后端原文 + 一个真的能再取一次的动作。
+          以前这里是静默 catch，于是「读不到」与「没有日志」在界面上无法区分，
+          而下面的空态文案又把它解释成「核心还没启动过」—— 那是**错误的原因**。 */}
+      {logsLoad.phase === "failed" && (
+        <div className="banner banner--error logs__banner" role="alert">
+          <strong>读取日志失败</strong>
+          <span className="logs__banner-text">{logsLoad.error ?? "（后端没有给出原因）"}</span>
+          <span className="spacer" />
+          <button className="btn btn--ghost" onClick={() => void reloadLogs()}>
+            重试
+          </button>
+        </div>
+      )}
 
       {diagnostics && (
         <div className="logs-diag">
@@ -155,13 +178,19 @@ export default function Logs() {
       <div className="logs" ref={boxRef} onScroll={onScroll}>
         {filtered.length === 0 ? (
           <div className="logs__empty">
-            {logs.length === 0 ? (
-              <>
-                还没有日志。核心的 stdout/stderr 会被实时转发到这里 ——
-                如果一直是空的，通常意味着核心还没启动过。
-              </>
-            ) : (
+            {logs.length > 0 ? (
               <>当前筛选条件下没有日志（共 {logs.length} 条，换个等级或清空关键字试试）。</>
+            ) : logsLoad.phase === "loading" ? (
+              <>正在读取日志…</>
+            ) : logsLoad.phase === "failed" ? (
+              <>
+                日志没读到 —— 这不等于「没有日志」，读日志本身就失败了（原因见上方），
+                点「重试」再取一次。
+              </>
+            ) : coreRunning ? (
+              <>核心已在运行，但还没有产生日志 —— 刚启动时这样是正常的，有输出会被实时转发到这里。</>
+            ) : (
+              <>还没有日志：核心还没启动过。启动后它的 stdout/stderr 会被实时转发到这里。</>
             )}
           </div>
         ) : (
