@@ -1,0 +1,103 @@
+# task-77：CF Pages 未知路径返回 200 + index.html（软 404）—— 取证、判定与处置
+
+> 结论一句话：**站点没有任何前端路径路由，也没有任何页面依赖这个兜底**；
+> 兜底是「CF Pages 没有顶层 `404.html` 时的默认行为」这一**纯副作用** ⇒ 加 `site/404.html` 让未知路径返回**真 404**。
+
+状态标记：`实测` = 我用命令跑出来的原始输出；`读码` = 读仓库源码得出的结论；`推断` = 未直接实测。
+
+---
+
+## 1. 修前现场（**不可复制的现场**，务必留档）
+
+现场时间：2026-09-21（`site/404.html` 部署**之前**）。判据 = **content-type + body sha256 双判**，
+**不用裸状态码** —— 状态码恰恰是会被这个兜底骗到的东西。完整原始输出在
+`/tmp/ops-404-probe-before.txt`（脚本 `/tmp/ops-404-probe.sh`），关键读数如下（`实测`）：
+
+```
+apex https://xraytun.top        首页 / body sha256 = a02e24a38f9d5dc5 （43980 B）
+  路径                             状态  content-type                    字节     body sha256(前16)
+  /                               200  text/html                        43980   a02e24a38f9d5dc5
+  /en/                            200  text/html                        45083   6cc1dd39d7fbfed8
+  /wasm/                          200  text/html                        25471   c7806ade85bbb9eb
+  /en/wasm/                       200  text/html                        27200   7692442981fd2374
+  /assets/site.css                200  text/css                         10707   b7f9ffadf0af4b30
+  /og-image-0.8.31.png            200  image/png                        58984   e87db07a8ec44b38
+  /manifest.webmanifest           200  application/manifest+json          757   e66b8924dfb89163
+  /robots.txt                     200  text/plain                        7004   0d76be21828ad01a
+  /sitemap.xml                    200  application/xml                   1787   8f2ecf603d980c3a
+  /llms.txt                       200  text/plain                        5026   7b4b3e7e80e0f6e2
+  /llms-full.txt                  200  text/plain                       63437   f9f790ac36a34b45
+
+  ---- 以下全是「软 404」：状态 200、content-type text/html、body 与首页逐字节相同 ----
+  /og-image-0.8.30.png            200  text/html                        43696   1e12653843e9f902  ← 见下方注解
+  /this-path-does-not-exist-xyz   200  text/html                        43980   a02e24a38f9d5dc5
+  /foo/bar/baz                    200  text/html                        43980   a02e24a38f9d5dc5
+  /old.html                       200  text/html                        43980   a02e24a38f9d5dc5
+  /_redirects                     200  text/html                        43980   a02e24a38f9d5dc5
+  /_headers                       200  text/html                        43980   a02e24a38f9d5dc5
+
+镜像 https://harodggg.github.io/xrayTun   同一批路径 = 真 404（9379 B，GitHub 默认 404 页，sha b620507312c5e975）
+```
+
+两条注解（`实测` + `推断`）：
+
+1. `/_redirects`、`/_headers` 返回 200 + 首页，与仓库里 `site/_redirects` 的注释一致
+   （那两份 CF 配置文件不会被当静态资源提供）。
+2. `/og-image-0.8.30.png` 的 body 是 **43696 B / sha `1e12653843e9f902`**，**不是**当前首页
+   （43980 B / `a02e24a3`）—— 它是**提交 1 那次部署的 index.html** 被 CF 边缘缓存住的那一份：
+   该路径命中 `site/_headers` 的 `/og-image*.png → max-age=31536000, immutable`，
+   于是「软 404 的 HTML」被当成图片**缓存了一年**。
+   **推断**：加 `404.html` 后，这个**具体 URL** 仍可能从边缘缓存返回 200 + HTML，直到缓存过期或被 purge
+   （我们的 token 没有 purge 权限）；而**从未被请求过**的未知路径应当立刻变真 404。
+   部署后实测两条都记录（见 §4）。
+
+## 2. 关键问题：这个兜底被有意依赖吗？—— **没有**
+
+### 2.1 读码结论（`读码`）
+
+| 检查项 | 结果 |
+|---|---|
+| `site/assets/site.js`（站点唯一的脚本，108 行） | 只读 `document.documentElement.lang` 与 `localStorage`，可选地 fetch GitHub API 取最新 tag；**无 `location.pathname` / `location.search` / `location.hash` / `history.*` / `pushState` / `URLSearchParams` / 路由表** |
+| 4 个页面（`/`、`/en/`、`/wasm/`、`/en/wasm/`）的内联脚本 | 只有 `application/ld+json` 数据块（不可执行），**没有**任何内联可执行脚本 |
+| `<base>` 标签 | 全站 **0 处** |
+| `site/_redirects` | **零规则**（文件里写明「故意不含任何规则」；SPA 兜底不是它配的） |
+| 站点结构 | 4 个真实目录页，站内导航全是 `<a href>` + `#锚点` |
+
+### 2.2 更强的证据（`实测`）：**没有任何链接需要兜底**
+
+把 4 个页面里的**站内相对链接**逐条解析到 `site/` 文件系统：
+
+```
+四个页面里的站内相对链接共 46 条；解析后在 site/ 里找不到对应文件/目录的：0 条
+⇒ 所有站内链接都指向真实存在的文件/目录（不需要任何兜底路由）
+```
+
+这条把结论从「我没找到路由代码」升级为「**即使有路由，也没有任何链接依赖它**」。
+
+⇒ 兜底是**纯副作用**，按 task-77 第一节的判据，应当让未知路径返回**真 404**。
+
+## 3. 处置
+
+* 新增 `site/404.html`（自包含：样式内联、图标 data URI、**不写任何版本号**、`noindex`）。
+  三条约束与原因写在文件头部注释里 —— 其中最重要的一条：404 页会被**任意深度**的路径命中，
+  所以**不能引用相对路径资源**，站内链接的根由页面内脚本探测（CF 根 `/`；GH Pages 镜像 `/xrayTun/`）。
+* `site/robots.txt` 的 CF 托管段字节数注释改为**不再陈述成当前事实**（改的是生成器
+  `scripts/gen-site-geo.py` 那一行，再重跑生成器 —— 只改产物会被下次生成静默覆盖）。
+
+## 4. 部署后实测
+
+（待 `site/404.html` 部署完成后填入：未知路径 / 已删除资源 / 旧缓存 URL / 全部真实页面 200 / 深链锚点。）
+
+## 5. 验证与诚实清单
+
+* `check.sh` 的 6 条站点版本断言：在**隔离 worktree**（HEAD + 本卡改动，不含他人在途改动）里跑
+  完整 `./scripts/check.sh --no-release-build` → **exit 0**，其中「站点版本一致性」步骤全绿
+  （前端 197 passed + 1 todo；Rust 全部通过；CSS token 检查绿）。
+  为什么用 worktree：共享工作区里 `apps/ui/src/pages/Settings.tsx` 有他人未提交的在途改动，
+  在共享工作区跑会把那份 WIP 一起编译/测试 —— 那是别人的提交面，不该由我引入变量。
+* `scripts/gen-site-geo.py` 改完**重跑生成器两次**，`site/robots.txt` 的 sha256 前后相同（幂等），
+  且 `git status` 里**只多出这一处产物差异**（没有第二处）。
+* §1 的资料来自 `xraytun.top` 与 GitHub Pages 镜像的**实测**；§2.1 是**读码**；§2.2 是**实测**；
+  §1 注解 2 的「旧图 URL 可能仍被边缘缓存」是**推断**，部署后以实测替换。
+* CF 部署传播延迟：部署后我会**分两次**（刚上完 / 等一分钟）重复探测，若两次不一致会如实写出，
+  不把「传播中的中间态」当成最终结论。
