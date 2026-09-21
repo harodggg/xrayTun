@@ -22,13 +22,19 @@
 > interaction-designer 的 task-68 落地后它才转绿。⇒ **一张卡写下的红基线，成了下一张卡的验收标准**；
 > 这也说明「验收数字必须与修订号绑定」，否则同一句话在两个提交上含义不同。
 
-> **最新读数（修订 `5223a01`，隔离 worktree `/tmp/xt-t2`，本文件写定时）**：
-> UI `vitest run` = **188 passed + 1 todo（16 files）、0 failed**；
-> Rust `cargo test -p xraytun-desktop --lib` = **121 passed / 0 failed / 1 ignored**。
+> **最新读数（隔离 worktree，本文件写定时）**：两个修订都是**全绿**——
+>
+> | 修订 | UI `vitest run` | Rust `cargo test -p xraytun-desktop --lib` |
+> |---|---|---|
+> | `5223a01` | 188 passed + 1 todo（16 files）、0 failed | 121 passed / 0 failed / 1 ignored |
+> | `c62a4ae`（含本文件的提交，代码同 495e291） | **192 passed + 1 todo（17 files）、0 failed** | **125 passed / 0 failed / 1 ignored** |
+>
+> 唯一 ignored 的 Rust 用例是 `commands::globe::tests::real_lookup_returns_a_plausible_location`（「需要网络」）。
 > 其中我 task-66 写下的那条**红**验收断言
 > `【要求】probe_failures ≥ 1 时界面必须有可见信号` **已转绿** ——
 > 即 task-68（`5223a01`）的修复在**提交修订**上被我独立复验通过：
-> **一张卡写下的红基线，被下一张卡关掉了**（这一步不是我采信作者结论，是我自己在那条修订上重跑出来的）。
+> **一张卡写下的红基线，被下一张卡关掉了**（这一步不是我采信作者结论，是我自己在那些修订上重跑出来的）。
+> ⚠️ 这两个数是**当时的点读数**；lead 的发布口径必须自己在**冻结修订**上重跑。
 
 ---
 
@@ -283,5 +289,7 @@ art-designer 的 190 与我的 192 是**同一事实的两个等价边界**。
 * CSS 去重实验（/tmp）：`/tmp/css-orig`、`/tmp/css-dedup`、`/tmp/css-diff.mjs`、`/tmp/css-*.json`
 * 隔离 worktree：`/tmp/xt-tester`（detached `bdeee46`）
 * 目标 2 的隔离 worktree：`/tmp/xt-t2`（detached `5223a01`，只软链了资源/依赖，**源码未改**）
+* 全绿点读数的隔离 worktree：`/tmp/xt-t3`（detached `c62a4ae`），原始输出
+  `/tmp/t3-ui.log`（192 passed + 1 todo）与 `/tmp/t3-rust.log`（125 passed / 1 ignored）
 * 目标 2 的后端测试输出：`/tmp/t2-tests.log`（121 passed / 0 failed / 1 ignored）
 * Rust 依赖缓存（绕沙箱只读 `~/.cargo`）：`CARGO_HOME=/tmp/xt-cargo-home`、`CARGO_TARGET_DIR=/tmp/xt-target`
