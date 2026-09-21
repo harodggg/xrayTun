@@ -89,6 +89,17 @@ step "TypeScript 类型检查"
 # 项目路径必须显式给：见文件开头的说明。
 npm --prefix apps/ui exec tsc -- --noEmit -p apps/ui/tsconfig.json
 
+step "CSS token 定义性（被 var() 引用但未定义的 token）"
+# 为什么要有这一步：这一类「**静默失效的声明**」已经咬过本项目三次 ——
+#   1. `--line` 从未定义 → 拓扑那条分隔线从未渲染（task-12 / e7ed509）；
+#   2. `xattr -dr` 必然失败，而 `2>/dev/null` 把证据吞了（task-46）；← 同族：失败不报错
+#   3. `--border-interactive` 在**应用 bundle 里**未定义 → border-color 落到 currentColor
+#      → 选中态多一圈近白描边（task-57 / b91ffb1）。
+# 浏览器不报错、样式表不报错、tsc 不报错 —— 只有人拿放大镜量计算样式才看得出来。
+# 判据的作用域**按 bundle**（不是全仓库）：见 scripts/check-css-tokens.py 头部注释，
+# 这条正是第 3 个 bug 逃过所有人眼睛的原因（「全仓库搜一下，官网那边有啊」）。
+python3 scripts/check-css-tokens.py
+
 step "前端构建"
 # 注意这条是对的：`npm run` 会把 cwd 切到包目录，脚本里的 `tsc --noEmit`
 # 因此能找到 tsconfig.json。上一行那个 `npm exec` 不会。
