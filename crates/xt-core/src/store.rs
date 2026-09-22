@@ -224,20 +224,82 @@ impl Store {
 
     /// 读最近 `limit` 条日志（按时间从旧到新），跨轮转。
     ///
-    /// 解析失败的行直接跳过：日志是排障用的，一行坏掉不该让整页打不开。
+    /// 语义与 [`Store::tail_logs_with_stats`] 完全相同，只是丢掉统计 ——
+    /// **新调用方请用带统计的那个**，否则「读的时候丢了多少」又变得看不见。
     pub fn tail_logs<T: serde::de::DeserializeOwned>(&self, limit: usize) -> Vec<T> {
+        self.tail_logs_with_stats(limit).0
+    }
+
+    /// 读最近 `limit` 条日志，**并把「读的时候发生了什么」一并返回**。
+    ///
+    /// # 为什么不再「逐行 `from_str` + `.ok()`」（task-107）
+    ///
+    /// 旧实现是 `text.lines().filter_map(|l| from_str::<T>(l).ok())`：一行里若有
+    /// **两个 JSON 对象**（task-104 实测 4 行，错误原文 `trailing characters at
+    /// line 1 column 14`），整行解析失败 ⇒ **那一行里的两条记录一起被静默丢掉**。
+    /// 界面日志页与诊断报告都走这条路，于是「全天零自动恢复」这个错觉
+    /// **在用户界面里也成立** —— 两边都靠原始文本 grep 才发现。
+    ///
+    /// 现在：① 每行按「**可能含多个对象**」解析（与 `scripts/net-metrics.py` 的
+    /// `raw_decode` 循环同口径，用 `serde_json` 的流式解析器实现）；
+    /// ② 丢了多少**说得出来**（[`TailLogStats`]），不再有静默丢弃。
+    ///
+    /// # 既有语义**刻意未变**
+    ///
+    /// * `limit` 仍是「最近 limit 条」、返回仍是**从旧到新**；
+    /// * 仍是**活动文件优先**（备份在前、活动在后，拼起来才是时间顺序），
+    ///   且活动文件够数就提前 `break`（备份没被读 —— 统计里的 `files_read`
+    ///   会把这件事如实说出来，别把它读成「备份丢了」）；
+    /// * 跨代重叠（轮转把尾部复制进两代）**仍然不去重** —— 那是 task-105 的事，
+    ///   本卡不动它。
+    pub fn tail_logs_with_stats<T: serde::de::DeserializeOwned>(
+        &self,
+        limit: usize,
+    ) -> (Vec<T>, TailLogStats) {
         let dir = self.logs_dir();
         let mut out: Vec<T> = Vec::new();
+        let mut stats = TailLogStats::default();
         // 备份在前、活动文件在后 —— 这样拼出来就是时间顺序。
         for name in log_file_names().iter().rev() {
             let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+                stats.files_unreadable += 1;
                 continue;
             };
-            let mut batch: Vec<T> = text
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter_map(|l| serde_json::from_str::<T>(l).ok())
-                .collect();
+            stats.files_read += 1;
+            let mut batch: Vec<T> = Vec::new();
+            for (idx, line) in text.lines().enumerate() {
+                if line.trim().is_empty() {
+                    stats.empty_lines += 1;
+                    continue;
+                }
+                stats.lines += 1;
+                // **一行可能含多个对象**：流式解析逐个取，取到失败为止。
+                // 取到几个算几个 —— 前半段合法、后半段残缺的行也能救回前半段。
+                let mut parsed_here = 0usize;
+                let mut failed = false;
+                for item in serde_json::Deserializer::from_str(line).into_iter::<T>() {
+                    match item {
+                        Ok(v) => {
+                            batch.push(v);
+                            parsed_here += 1;
+                        }
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                stats.records += parsed_here;
+                if parsed_here > 1 {
+                    stats.multi_object_lines += 1;
+                }
+                if failed {
+                    stats.malformed_lines += 1;
+                    if stats.bad_lines.len() < MAX_BAD_LINE_SAMPLES {
+                        stats.bad_lines.push(format!("{name}:{}", idx + 1));
+                    }
+                }
+            }
             batch.extend(out);
             out = batch;
             if out.len() >= limit {
@@ -245,9 +307,74 @@ impl Store {
             }
         }
         let skip = out.len().saturating_sub(limit);
-        out.split_off(skip)
+        stats.truncated = skip;
+        if stats.malformed_lines > 0 {
+            // 注意：tracing 走 **stderr**（`lib.rs` 的 `with_writer(std::io::stderr)`），
+            // GUI 从 Finder 启动时看不到 —— 所以它**不是**用户可见的替代品，
+            // 用户可见靠调用方把 `TailLogStats` 显示出来。这里留一份给开发/终端。
+            tracing::warn!(
+                files_read = stats.files_read,
+                lines = stats.lines,
+                records = stats.records,
+                multi_object_lines = stats.multi_object_lines,
+                malformed_lines = stats.malformed_lines,
+                where = ?stats.bad_lines,
+                "读取日志时有无法解析的行（不再静默丢弃，见 store::TailLogStats）"
+            );
+        }
+        (out.split_off(skip), stats)
     }
 }
+
+/// 日志读取统计（task-107）：**丢了多少必须说得出来**。
+///
+/// 字段刻意分成「读到了什么」与「丢掉了什么」两组 —— 后者此前根本不存在，
+/// 于是任何丢行都只能靠人拿原始文本 grep 才发现。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TailLogStats {
+    /// 实际读到（打开成功）的文件数。跨代读取有提前退出，所以不一定是 2。
+    pub files_read: usize,
+    /// 打开失败的文件数（不存在 / 没权限）。
+    pub files_unreadable: usize,
+    /// 读到的非空行数。
+    pub lines: usize,
+    /// 空行数（跳过；**不计入 `records`**）。
+    pub empty_lines: usize,
+    /// 解析出的**对象**总数 —— 多对象行会贡献 >1（这正是旧实现丢掉的东西）。
+    pub records: usize,
+    /// 含 ≥2 个对象的行数。
+    pub multi_object_lines: usize,
+    /// 至少有一个对象解析失败的行数（**这些行不再静默**）。
+    pub malformed_lines: usize,
+    /// 因 `limit` 被丢掉的条数（**不是**解析失败，别混为一谈）。
+    pub truncated: usize,
+    /// 前几条坏行的 `文件名:行号`（最多 [`MAX_BAD_LINE_SAMPLES`] 条），给日志与报告引用。
+    pub bad_lines: Vec<String>,
+}
+
+impl TailLogStats {
+    /// 有没有**无法解析**的内容（= 曾经的静默丢弃）。
+    pub fn has_loss(&self) -> bool {
+        self.malformed_lines > 0
+    }
+
+    /// 一行给用户/报告看的摘要。
+    pub fn summary(&self) -> String {
+        format!(
+            "读取：{} 个文件 / {} 行（空行 {}）/ {} 条记录；多对象行 {}、**无法解析的行 {}**、因 limit 截断 {}",
+            self.files_read,
+            self.lines,
+            self.empty_lines,
+            self.records,
+            self.multi_object_lines,
+            self.malformed_lines,
+            self.truncated
+        )
+    }
+}
+
+/// 坏行最多留几条样本（够定位即可，避免统计本身变成内存与日志噪声）。
+const MAX_BAD_LINE_SAMPLES: usize = 3;
 
 /// 活动日志文件与备份的文件名（顺序 = 时间顺序）。
 ///
@@ -650,6 +777,103 @@ mod tests {
                 panic!("第 {} 行不是合法 JSON（并发写入把两条记录挤到一行了）: {e}\n{line}", n + 1);
             }
         }
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    // -----------------------------------------------------------------------
+    // task-107：读侧不再静默丢行 —— 一行可能含多个对象，坏行必须说得出来
+    // -----------------------------------------------------------------------
+
+    /// **task-107 主回归**：一行两个对象 ⇒ **两条都要读到**。
+    ///
+    /// fixture 用的是**真实日志行的原文**（`app.jsonl:20724`，task-104 那 4 行之一：
+    /// 一条 `app`「隧道已自动恢复」+ 一条 `core` 启动横幅）。旧实现
+    /// （逐行 `from_str().ok()`）对整行报 `trailing characters` ⇒ **两条一起丢**，
+    /// 于是那 3 次自愈在**界面日志页与诊断报告里也看不见**。
+    ///
+    /// **敏感性**：把解析退回「逐行 `from_str().ok()`」⇒ 本测试红（见 task-107 报告）。
+    #[test]
+    fn a_line_with_two_objects_yields_both_records() {
+        let store = temp_store("tail-multi");
+        let logs = store.logs_dir();
+        std::fs::create_dir_all(&logs).unwrap();
+        // 真实行原文（未做任何改写；最后再补一条正常行，证明坏行不影响上下文）。
+        let doubled = concat!(
+            r#"{"ts_unix":1790051357,"source":"app","level":"info","message":"隧道已自动恢复（第 1 次自动重建）"}"#,
+            r#"{"ts_unix":1790051357,"source":"core","level":"info","message":"Xray 26.9.9 (Xray, Penetrates Everything.) 52a412d (go1.27.1 darwin/arm64)"}"#,
+        );
+        let next = r#"{"ts_unix":1790051358,"source":"app","level":"info","message":"下一条正常记录"}"#;
+        std::fs::write(logs.join("app.jsonl"), format!("{doubled}\n{next}\n")).unwrap();
+
+        let (got, stats) = store.tail_logs_with_stats::<serde_json::Value>(10);
+        assert_eq!(got.len(), 3, "多对象行贡献 2 条 + 正常行 1 条：{got:?}");
+        assert!(
+            got.iter().any(|v| v["message"] == "隧道已自动恢复（第 1 次自动重建）"),
+            "多对象行里的 app 记录必须读到（旧实现正是把它整行丢了）"
+        );
+        assert!(
+            got.iter()
+                .any(|v| v["source"] == "core" && v["message"].as_str().unwrap_or("").starts_with("Xray 26.9.9")),
+            "同一行里的 core 横幅也要读到"
+        );
+        assert_eq!(stats.records, 3);
+        assert_eq!(stats.multi_object_lines, 1, "要能说出「有 1 行含多个对象」");
+        assert_eq!(stats.malformed_lines, 0, "多对象行**不是**坏行");
+        assert!(!stats.has_loss());
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 残缺行**不再静默**：计数 + 可定位，且**不影响后面的行**（也不丢同行前半段）。
+    #[test]
+    fn a_malformed_line_is_counted_and_later_lines_still_read() {
+        let store = temp_store("tail-bad");
+        let logs = store.logs_dir();
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("app.jsonl"),
+            "{\"n\":1}\n{\"n\":2} {\"n\":99\"\n{\"n\":3}\n{ 这不是 JSON\n{\"n\":4}\n",
+        )
+        .unwrap();
+
+        let (got, stats) = store.tail_logs_with_stats::<serde_json::Value>(10);
+        let ns: Vec<i64> = got.iter().map(|v| v["n"].as_i64().unwrap_or(-1)).collect();
+        assert_eq!(ns, vec![1, 2, 3, 4], "坏行不许吞掉其它行；第 2 行前半段合法 ⇒ 应救回 n=2");
+        assert_eq!(stats.malformed_lines, 2, "第 2 行（尾部残缺）与第 4 行（完全不是 JSON）都要计数");
+        assert_eq!(
+            stats.bad_lines,
+            vec!["app.jsonl:2".to_string(), "app.jsonl:4".to_string()],
+            "坏行要能定位到 文件:行号"
+        );
+        assert!(stats.has_loss());
+        let summary = stats.summary();
+        assert!(summary.contains("无法解析的行 2"), "摘要要能给人看：{summary}");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// **既有语义不许变**：活动文件优先、够数就提前退出、从旧到新、limit 截断。
+    ///
+    /// 这三条正是 after 对照协议依赖的行为（`files_read` 把「备份读没读」如实说出来）。
+    #[test]
+    fn tail_logs_stats_document_early_break_and_truncation() {
+        let store = temp_store("tail-break");
+        let logs = store.logs_dir();
+        std::fs::create_dir_all(&logs).unwrap();
+        // 备份（旧）：1,2,3；活动（新）：4,5,6
+        std::fs::write(logs.join("app.1.jsonl"), "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n").unwrap();
+        std::fs::write(logs.join("app.jsonl"), "{\"n\":4}\n{\"n\":5}\n{\"n\":6}\n").unwrap();
+
+        // limit 小于活动文件条数 ⇒ 备份**根本没被读**（提前 break）
+        let (small, s1) = store.tail_logs_with_stats::<serde_json::Value>(2);
+        assert_eq!(small.iter().map(|v| v["n"].as_i64().unwrap()).collect::<Vec<_>>(), vec![5, 6]);
+        assert_eq!(s1.files_read, 1, "活动文件够数就该提前退出（备份没读 —— 别误读成「备份丢了」）");
+        assert_eq!(s1.truncated, 1, "因 limit 丢 1 条，且要与「解析失败」分开报");
+
+        // limit 更大 ⇒ 两个文件都读，仍是**从旧到新**
+        let (big, s2) = store.tail_logs_with_stats::<serde_json::Value>(10);
+        assert_eq!(big.iter().map(|v| v["n"].as_i64().unwrap()).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(s2.files_read, 2);
+        assert_eq!(s2.truncated, 0);
+        assert!(!s2.has_loss(), "业务上没问题时不许报「丢行」");
         let _ = std::fs::remove_dir_all(store.root());
     }
 }
