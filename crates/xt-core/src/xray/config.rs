@@ -441,6 +441,45 @@ fn build_outbounds(nodes: &[Node], input: &CoreConfigInput<'_>) -> Value {
     //
     // 所以这里逐出站显式写 `sockopt.interface`。这条路走的是
     // `applyOutboundSocketOptions`，不依赖任何全局状态，是确定性的。
+    //
+    // # `autoOutboundsInterface` 我们**保留**，不删（task-93 的结论）
+    //
+    // 上面那个全局 controller 在核心 26.9.9 上会刷同一条日志 —— 实测本机
+    // `app.jsonl` 里 **673 次**：
+    //
+    //     proxy/tun: [tun] falied to set interface > invalid argument
+    //
+    // 机制已经用受控实验定下来了（见 `crate::net::bind_to_interface_fd` 的文档
+    // 和它的测试）：`IPPROTO_IP` + `IP_BOUND_IF` **只对 AF_INET socket 有效**，
+    // 喂给 AF_INET6 socket 在**任何状态下**都是 `EINVAL`；v6 要用
+    // `IPPROTO_IPV6` + `IPV6_BOUND_IF`。日志自己就把族露出来了：
+    //
+    //     dialing to udp:218.30.118.6:53
+    //       → proxy/tun: [tun] falied to set interface > invalid argument
+    //     proxy/freedom: connection opened to udp:218.30.118.6:53,
+    //                    local endpoint [::]:55819, remote endpoint 218.30.118.6:53
+    //
+    // 目标是 v4 字面量，**local endpoint 却是 `[::]`** —— Go 建的是 dual-stack
+    // socket，v4 选项必然失败。EINVAL 的目标里多数本来就是 IPv6 目标
+    // （`tcp:[240e:…]:80`，国内电信 v6）。所以核心缺的是这条**按族分支**。
+    //
+    // 由此三个判断：
+    //
+    // 1. 这层兜底在**这些** socket 上没生效（错误被 LogInfo 吞掉，dial 继续）。
+    //    这是核心的缺陷，配置改不了 socket 的地址族，`sockopt` 里也没有这种开关。
+    // 2. 但**删掉 `autoOutboundsInterface` 不是治病**：日志会消失，那些 socket
+    //    照样是没绑上的状态；而它还是**自己没有 `sockopt.interface` 的那些 dialer**
+    //    （节点出站就是 `sockopt: null`）唯一的兜底 —— 删了只会更差。
+    //    「错误没了」不等于「病好了」。
+    // 3. 我们**不靠它**：每个出站的 `sockopt.interface` 才是确定性那条路。DNS
+    //    上游的查询经 dispatcher 落到**承载它的出站**（国内明文 DNS 就是
+    //    `direct`，见 `build_routing` 的 `preset-cn-ip` 注释），绑网卡由那个出站
+    //    负责；走节点的 DoH 靠 xt-tun 给代理服务器装的 host 路由直接出物理口。
+    //
+    // 结论：保留它，当作「已知缺陷 + 兜底」，升级捆绑核心时复查这条日志是否
+    // 消失（等上游补上 v6 分支），并考虑向上游报。**未验证项**：`direct` 出站
+    // 自己的 `sockopt.interface` 在 `[::]` 双栈 socket 上是否真的绑上了 ——
+    // 日志里没有第二条绑卡错误，但我们没有直接证据（见 task-93 报告）。
     let mut direct_sockopt = serde_json::Map::new();
     direct_sockopt.insert("domainStrategy".into(), "UseIP".into());
     if let Some(iface) = input.physical_interface {
@@ -1079,6 +1118,28 @@ mod tests {
         assert!(routes.contains(&Value::String("0.0.0.0/1".into())));
         assert!(routes.contains(&Value::String("128.0.0.0/1".into())));
         assert!(!routes.contains(&Value::String("default".into())));
+    }
+
+    /// task-93：`direct` 出站**显式**绑物理网卡。
+    ///
+    /// 这条是 DNS 上游（国内明文 DNS 走 `preset-cn-ip` → `direct`）和直连流量
+    /// 逃出隧道的确定性依赖，**不依赖** tun 入站的全局 controller
+    /// （那个在 v6 族 socket 上 EINVAL，见 `build_outbounds` 的注释）。
+    /// 同时钉住：配置里没有「强制某个出站用 v4 socket 族」这种开关可加。
+    #[test]
+    fn direct_outbound_binds_the_physical_interface() {
+        let s = settings();
+        let profile = tun_profile(&s);
+        let cfg = build(&CoreConfigInput { settings: &s, nodes: &[], selected: None, rules: &[], profile, physical_interface: Some("en0") });
+        let direct = cfg["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "direct").unwrap();
+        assert_eq!(direct["streamSettings"]["sockopt"]["interface"], "en0");
+        assert_eq!(direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIP");
+
+        // 拿不到物理网卡时**不要**写出空的 `interface`：宁可明显不绑，
+        // 也不要写一个坏值让核心去猜。
+        let cfg = build(&CoreConfigInput { settings: &s, nodes: &[], selected: None, rules: &[], profile: tun_profile(&s), physical_interface: None });
+        let direct = cfg["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "direct").unwrap();
+        assert!(direct["streamSettings"]["sockopt"].get("interface").is_none());
     }
 
     #[test]
