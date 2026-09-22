@@ -241,7 +241,24 @@ export interface HelperAvailability {
   stale_session: string | null;
   needs_approval: boolean;
   error: string | null;
+  /** 已安装助手 vs App 包内助手的版本对照（task-84）。 */
+  version_check: HelperVersionCheck;
 }
+
+/**
+ * 已安装助手 vs App 包内助手的版本对照（task-84）。
+ *
+ * App 更新**不会**刷新特权 helper（只有「重新安装助手」才会把包内那份拷过去），
+ * 而路由/DNS 的安装与回滚都在 helper 里 —— 所以「装的」与「包里带的」不一致时，
+ * helper 侧那一部分修复就没生效。
+ *
+ * 三态**必须分开**：`unreadable` 不等于 `mismatch`（读不到时不许提示重装，
+ * 否则是狼来了）；`match` 时界面不该提示任何东西。
+ */
+export type HelperVersionCheck =
+  | { state: "match"; version: string }
+  | { state: "mismatch"; installed: string; bundled: string }
+  | { state: "unreadable"; installed: string | null; bundled: string | null; reason: string };
 
 export interface CoreAvailability {
   path: string | null;

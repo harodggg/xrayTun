@@ -504,6 +504,58 @@ pub struct HelperAvailability {
     pub error: Option<String>,
     /// 精确状态，UI 据此给出**不同的**操作指引。
     pub state: HelperState,
+    /// 已安装助手 vs App 包内助手的**版本对照**（task-84）。
+    ///
+    /// 与 `version` 的区别：`version` 是**运行中**助手在 HELLO 里自报的版本
+    /// （需要守护进程在跑）；这里是**磁盘上那两个工件**各自自报的版本，
+    /// 磁盘上没有也能读（守护进程没跑也照样能判断「装了的是不是随包的那份」）。
+    pub version_check: HelperVersionCheck,
+}
+
+/// 已安装 helper 与 App 包内 helper 的**版本对照**（task-84）。
+///
+/// # 为什么需要它
+///
+/// **App 更新不会刷新特权 helper**：`restart_helper` 只是 `kickstart` 已经装在
+/// 磁盘上的那份二进制，只有 `install_helper` 才会把**包内**那份拷过去。
+/// 而路由/DNS 的安装与回滚都发生在 helper 里 —— 于是用户「更新到最新版」之后，
+/// helper 侧那一部分修复**一点都没生效，而且完全无声**。
+///
+/// # 三态必须分开
+///
+/// 「读不到」**不许猜成「不一致」**：那会让用户去重装一个本来没问题的助手，
+/// 属于本项目最忌讳的「用没验证的事吓人」；反过来，「一致」时**不许提示任何东西**，
+/// 否则就是狼来了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum HelperVersionCheck {
+    /// 两边都读到了，且版本一致 → **界面不该提示**。
+    Match { version: String },
+    /// 两边都读到了、版本不同 → 提示 + 「重新安装助手」入口。
+    Mismatch {
+        /// 磁盘上安装的那份（`/Library/PrivilegedHelperTools/…`）自报的版本。
+        installed: String,
+        /// App 包内那份自报的版本。
+        bundled: String,
+    },
+    /// **至少一边读不到** → 如实降级：不提示重装，但把读到的部分带着。
+    Unreadable {
+        installed: Option<String>,
+        bundled: Option<String>,
+        /// 为什么读不到（给人看的）。
+        reason: String,
+    },
+}
+
+impl Default for HelperVersionCheck {
+    fn default() -> Self {
+        // 默认是「还没查过」。**不能默认成 `Match`** —— 那等于在没有证据时宣布一致。
+        Self::Unreadable {
+            installed: None,
+            bundled: None,
+            reason: "尚未检查".to_string(),
+        }
+    }
 }
 
 /// helper 的精确状态。每种状态对应一个不同的用户动作。

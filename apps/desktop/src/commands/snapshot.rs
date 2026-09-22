@@ -17,7 +17,12 @@ pub(crate) async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<
     let socket_present = crate::helper_client::socket_present(std::path::Path::new(helper_socket));
 
     let mut guard = state.helper.lock().await;
-    let helper = guard.availability(socket_present);
+    let mut helper = guard.availability(socket_present);
+    // task-84：**App 更新不会刷新特权 helper**（只有 `install_helper` 会把包内那份
+    // 拷过去），而路由/DNS 的安装与回滚都在 helper 里 —— 所以这里读**实际工件**
+    // 对照版本，三态进快照供界面判断。读不到就如实说读不到，**不许猜成不一致**。
+    // 纯只读：只执行两个二进制的 `version` 子命令（不安装、不重启、不需要管理员）。
+    helper.version_check = helper_version_check(app);
     drop(guard);
 
     // ⚠️ **这几项必须在 `state.with` 闭包外面算完。**

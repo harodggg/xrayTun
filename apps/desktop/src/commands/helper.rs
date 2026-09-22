@@ -72,3 +72,219 @@ pub async fn restore_stale(
     }
     snapshot::build_snapshot(&app, &state).await
 }
+
+// ---------------------------------------------------------------------------
+// task-84：已安装 helper vs App 包内 helper 的版本对照
+//
+// **为什么不能省**：App 更新**不会**刷新特权 helper（`restart_helper` 只
+// `kickstart` 磁盘上那份旧二进制，只有 `install_helper` 会把包内那份拷过去），
+// 而**路由/DNS 的安装与回滚都在 helper 里** —— 于是「我更新了 App」并不等于
+// 「helper 侧修复生效了」，而且这件事完全无声（只校验协议号，不校验版本）。
+// ---------------------------------------------------------------------------
+
+use crate::state::HelperVersionCheck;
+
+/// 从 `<binary> version` 的输出里取版本号。
+///
+/// 期望形如 `xraytun-helper 0.8.31 (protocol 1)`（`xt-helper/src/main.rs` 的
+/// `Version` 子命令）。**认不出来就返回 `None`** —— 调用方据此如实说「读不到」，
+/// 而不是猜一个版本出来。
+pub(crate) fn parse_helper_version(output: &str) -> Option<String> {
+    let line = output.lines().next()?.trim();
+    let mut parts = line.split_whitespace();
+    let name = parts.next()?;
+    let version = parts.next()?;
+    let looks_like_version = version.chars().next().is_some_and(|c| c.is_ascii_digit());
+    (name == "xraytun-helper" && looks_like_version).then(|| version.to_string())
+}
+
+/// 读一个 helper 二进制**自报的**版本：直接执行它（`version` 子命令）。
+///
+/// * 读的是**实际工件**，不是「App 版本」这种间接推断 —— 包内那份与 App 版本
+///   本来就会一起变，用 App 版本当包内版本会漏掉「包里带的其实是别的版本」；
+/// * `version` 子命令是**纯打印**：clap 解析后 `println` 退出，不需要 root、
+///   不连 socket、不碰任何系统配置（本机实测 p50 2.7ms）；
+/// * 任何失败（文件不在 / 不能执行 / 老版本没有这个子命令 / 输出认不出来）
+///   一律 `None` ⇒ 上层表达成「读不到」。
+fn read_binary_version(binary: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new(binary)
+        .arg("version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_helper_version(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// 三态判定：**两边都读到才能比**。
+///
+/// 抽成纯函数是为了能测 —— 尤其是「**读不到不许猜成不一致**」这条反例。
+pub(crate) fn classify_helper_versions(
+    installed: Option<String>,
+    bundled: Option<String>,
+) -> HelperVersionCheck {
+    match (installed, bundled) {
+        (Some(i), Some(b)) if i == b => HelperVersionCheck::Match { version: i },
+        (Some(i), Some(b)) => HelperVersionCheck::Mismatch {
+            installed: i,
+            bundled: b,
+        },
+        (installed, bundled) => {
+            let reason = match (&installed, &bundled) {
+                (None, None) => "已安装的助手与包内助手的版本都读不到".to_string(),
+                (None, Some(_)) => "读不到已安装助手的版本（文件不存在或无法执行）".to_string(),
+                (Some(_), None) => "读不到包内助手的版本（App 包里没有或无法执行）".to_string(),
+                (Some(_), Some(_)) => unreachable!("两边都读到时上面已返回"),
+            };
+            HelperVersionCheck::Unreadable {
+                installed,
+                bundled,
+                reason,
+            }
+        }
+    }
+}
+
+/// 读**已安装**与**包内**两个 helper 的版本，判定三态（快照用）。
+///
+/// 全程**只读、无副作用、不需要管理员**：只执行两个二进制的 `version` 子命令。
+/// **绝不做任何安装/重启动作** —— 重装是特权操作，必须由用户点界面上的按钮。
+pub(crate) fn helper_version_check(app: &AppHandle) -> HelperVersionCheck {
+    let installed = read_binary_version(std::path::Path::new(xt_proto::HELPER_INSTALLED_PATH));
+    let bundled = crate::helper_install::helper_binary_path(app)
+        .ok()
+        .and_then(|p| read_binary_version(&p));
+    classify_helper_versions(installed, bundled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **三态**之一：版本相同 ⇒ 「一致」（反例：不许只要检测就提示）。
+    #[test]
+    fn same_version_is_match_not_mismatch() {
+        assert_eq!(
+            classify_helper_versions(Some("0.8.31".into()), Some("0.8.31".into())),
+            HelperVersionCheck::Match {
+                version: "0.8.31".into()
+            },
+            "版本相同必须判「一致」——否则就是狼来了",
+        );
+    }
+
+    /// **三态**之二：版本不同 ⇒ 「不一致」（要提示重装）。
+    #[test]
+    fn different_version_is_mismatch() {
+        assert_eq!(
+            classify_helper_versions(Some("0.8.11".into()), Some("0.8.31".into())),
+            HelperVersionCheck::Mismatch {
+                installed: "0.8.11".into(),
+                bundled: "0.8.31".into()
+            },
+            "磁盘上装的与包里带的不一样 ⇒ 不一致",
+        );
+    }
+
+    /// **三态**之三（反例）：读不到**不许猜成不一致**，也不许猜成一致。
+    #[test]
+    fn unreadable_version_is_not_reported_as_mismatch() {
+        for (installed, bundled) in [
+            (None, None),
+            (None, Some("0.8.31".to_string())),
+            (Some("0.8.11".to_string()), None),
+        ] {
+            let got = classify_helper_versions(installed.clone(), bundled.clone());
+            assert!(
+                matches!(got, HelperVersionCheck::Unreadable { .. }),
+                "读不到时必须如实降级成 Unreadable，实际：{got:?}（installed={installed:?} bundled={bundled:?}）",
+            );
+            assert!(
+                !matches!(got, HelperVersionCheck::Mismatch { .. }),
+                "**不许**把「读不到」猜成「不一致」——那会让用户去重装一个没问题的助手",
+            );
+            assert!(
+                !matches!(got, HelperVersionCheck::Match { .. }),
+                "也不许猜成「一致」——那是没有证据时宣布好",
+            );
+        }
+    }
+
+    /// 读不到时要**说清是哪一边**读不到（否则用户不知道该修什么）。
+    #[test]
+    fn unreadable_reason_names_the_missing_side() {
+        let both = classify_helper_versions(None, None);
+        let installed = classify_helper_versions(None, Some("0.8.31".into()));
+        let bundled = classify_helper_versions(Some("0.8.31".into()), None);
+        let text = |c: &HelperVersionCheck| match c {
+            HelperVersionCheck::Unreadable { reason, .. } => reason.clone(),
+            other => panic!("应当是 Unreadable：{other:?}"),
+        };
+        assert!(text(&both).contains("都读不到"), "{}", text(&both));
+        assert!(
+            text(&installed).contains("已安装"),
+            "要说清是已安装那份读不到：{}",
+            text(&installed),
+        );
+        assert!(
+            text(&bundled).contains("包内"),
+            "要说清是包内那份读不到：{}",
+            text(&bundled),
+        );
+    }
+
+    /// 版本行解析：**认不出来就不给版本**（宁可说读不到，也不要猜）。
+    #[test]
+    fn version_line_parsing_is_strict() {
+        assert_eq!(
+            parse_helper_version("xraytun-helper 0.8.31 (protocol 1)\n"),
+            Some("0.8.31".into()),
+        );
+        assert_eq!(
+            parse_helper_version("xraytun-helper 0.8.31"),
+            Some("0.8.31".into())
+        );
+        // 认不出来的：空、缺字段、错程序名、版本不像版本
+        assert_eq!(parse_helper_version(""), None);
+        assert_eq!(parse_helper_version("xraytun-helper"), None, "没有版本字段");
+        assert_eq!(
+            parse_helper_version("some-other-tool 0.8.31"),
+            None,
+            "不是我们的程序"
+        );
+        assert_eq!(
+            parse_helper_version("xraytun-helper abc"),
+            None,
+            "版本不像版本"
+        );
+    }
+
+    /// 真实执行路径：**文件不在 ⇒ 读不到**（不是 panic、也不是编一个版本）。
+    #[test]
+    fn missing_binary_is_unreadable_instead_of_fatal() {
+        let missing = std::path::Path::new("/nonexistent/xraytun-helper-probe");
+        assert_eq!(read_binary_version(missing), None);
+        // 能执行、但输出认不出来 ⇒ 同样是「读不到」
+        assert_eq!(
+            read_binary_version(std::path::Path::new("/usr/bin/true")),
+            None
+        );
+    }
+
+    /// **防「读不到被静默丢掉」**：快照里必须真的把三态塞进去。
+    ///
+    /// 那个赋值点在 `snapshot.rs` 的 async 流程里（要 Tauri `AppHandle` 才跑得到），
+    /// 纯函数测试证明不了「它还在」。源码级断言：删掉那行 → 本测试红。
+    #[test]
+    fn snapshot_still_reports_the_helper_version_check() {
+        let prod = include_str!("snapshot.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        assert!(
+            prod.contains("helper.version_check = helper_version_check(app)"),
+            "快照必须把 helper 版本三态塞进去 —— 否则界面永远看不到「助手过旧」",
+        );
+    }
+}

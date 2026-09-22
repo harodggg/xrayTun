@@ -207,7 +207,7 @@ pub fn plist_contents() -> String {
 ///
 /// 注意是 `Contents/MacOS/`（不是 `Resources/`）：`SMAppService` 约定
 /// daemon 必须在这里，我们为了将来能平滑切到方式 A，从一开始就按这个布局放。
-fn helper_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn helper_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("无法定位当前可执行文件：{e}"))?;
     let macos_dir = exe
         .parent()
