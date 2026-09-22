@@ -1,6 +1,6 @@
 # XrayTun — 全文（llms-full.txt）
 
-> 站点：https://xraytun.top/ ｜ 版本：v0.8.33（2026-09-22）｜ 生成方式：由页面 HTML 直接转换，
+> 站点：https://xraytun.top/ ｜ 版本：v0.8.34（2026-09-22）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
 > 结构化数据见各页面 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是 SoftwareApplication，
 > xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与 `/en/wasm/`
@@ -36,9 +36,9 @@
 
 XrayTun 是一个面向 macOS 的 Xray 图形客户端。它调用 Xray-core 的原生 `tun` 入站（内置 gVisor 协议栈）创建 utun 网卡，用 `0.0.0.0/1` 与 `128.0.0.0/1` 两条路由拆分默认路由，并接管系统 DNS，从而让整台 Mac 的流量按规则走代理。只有「建网卡、装路由、改 DNS」这三件事在特权 helper（root 守护进程）里执行，Xray 核心本身以普通用户身份运行。
 
-[下载 macOS 版 v0.8.33 · dmg · 45.0 MiB](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.dmg) [备用 .zip · 40.7 MiB](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.zip)
+[下载 macOS 版 v0.8.34 · dmg（大小见 Releases）](https://github.com/harodggg/xrayTun/releases) [备用 .zip（大小见 Releases）](https://github.com/harodggg/xrayTun/releases)
 
-v0.8.33（2026-09-22 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dmg 45.0 MiB
+v0.8.34 正在发布 · 仅 macOS · 通用包（arm64 + x86_64）· 大小以 Releases 页面为准
 
 首次打开需要多一步？[看安装说明](#install)（Gatekeeper 会拦截，这是预期行为）。
 
@@ -96,7 +96,7 @@ v0.8.33（2026-09-22 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dm
 
 - 路由用 `0.0.0.0/1` 与 `128.0.0.0/1` 拆分而不是替换默认路由：最坏情况是「一部分流量走错路」，而不是「完全没有默认路由」。
 
-- **系统代理模式不会修改 macOS 的系统代理设置**（截至 v0.8.33）。它只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你自己把应用指向这两个端口； 要自动接管请用 TUN 模式。
+- **系统代理模式不会修改 macOS 的系统代理设置**（截至 v0.8.34）。它只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809）入站，需要你自己把应用指向这两个端口； 要自动接管请用 TUN 模式。
 
 - 权限最小化：建 utun、装路由、改 DNS 由特权 helper 完成， **Xray 核心以普通用户身份运行**；helper 只接受来自本应用、通过代码签名校验的连接。
 
@@ -144,17 +144,17 @@ v0.8.33（2026-09-22 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dm
 
 ## 下载
 
-[下载 macOS 版 v0.8.33 · dmg · 45.0 MiB](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.dmg)
+[下载 macOS 版 v0.8.34 · dmg（大小见 Releases）](https://github.com/harodggg/xrayTun/releases)
 
 | 文件 | 大小 | 链接 |
 
 |---|---|---|
 
-| dmg（主） | 47,230,254 字节（45.0 MiB） | [XrayTun_0.8.33_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.dmg) |
+| dmg（主） | 发布后填入（见 Releases） | [XrayTun_0.8.34_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases) |
 
-| zip（备用） | 42,726,199 字节（40.7 MiB） | [XrayTun_0.8.33_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.zip) |
+| zip（备用） | 发布后填入（见 Releases） | [XrayTun_0.8.34_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases) |
 
-| 校验和 | 200 字节 | [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/SHA256SUMS.txt) |
+| 校验和 | — | [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases) |
 
 | 所有版本 | — | [GitHub Releases](https://github.com/harodggg/xrayTun/releases/latest) |
 
@@ -174,8 +174,8 @@ v0.8.33（2026-09-22 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dm
 
 ```bash
 # 与 release 里的 SHA256SUMS.txt 对比
-grep XrayTun_0.8.33_x86_64_arm64.dmg SHA256SUMS.txt
-shasum -a 256 XrayTun_0.8.33_x86_64_arm64.dmg
+grep XrayTun_0.8.34_x86_64_arm64.dmg SHA256SUMS.txt
+shasum -a 256 XrayTun_0.8.34_x86_64_arm64.dmg
 ```
 
 两行的哈希应当一致。注意 `SHA256SUMS.txt` 由 `shasum -a 256 ./*` 生成，行里带 `./` 前缀，所以用 `grep` 取行再肉眼比对，比直接 `shasum -c` 更稳。
@@ -256,7 +256,7 @@ xattr -d com.apple.quarantine /Applications/XrayTun.app
 
 ### 「系统代理」模式会自动设置 macOS 的系统代理吗？
 
-不会（截至 v0.8.33）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809） 入站，需要你手动把应用或系统代理指向这两个端口。要让整机流量自动按规则走，请使用 TUN 模式。
+不会（截至 v0.8.34）。系统代理模式只在本机启动 SOCKS5（127.0.0.1:10808）与 HTTP（127.0.0.1:10809） 入站，需要你手动把应用或系统代理指向这两个端口。要让整机流量自动按规则走，请使用 TUN 模式。
 
 ### 支持哪些节点协议和订阅格式？
 
@@ -336,7 +336,7 @@ v0.7.0（2026-09-20 发布）· 纯 Rust（二进制里没有 Go 的 Xray-core�
 
 - 两个项目只是**同一个作者、同一个 GitHub 账号**（ [harodggg](https://github.com/harodggg)）下的兄弟项目：代码仓库、版本号、许可证、 发行方式各自独立。
 
-- **两套版本号不要互相套用**：本页说的是 xray-wasm 的 **v0.7.0**； XrayTun 的当前版本是另一个序列（**v0.8.33**，见[首页](../)）。
+- **两套版本号不要互相套用**：本页说的是 xray-wasm 的 **v0.7.0**； XrayTun 的当前版本是另一个序列（**v0.8.34**，见[首页](../)）。
 
 ## 它解决什么问题
 
@@ -470,9 +470,9 @@ docker run --rm -p 8443:8443 \
 
 XrayTun is an Xray GUI client for macOS. It uses Xray-core's native `tun` inbound (with a built-in gVisor network stack) to create a utun interface, splits the default route with `0.0.0.0/1` and `128.0.0.0/1`, and takes over system DNS so that traffic on the Mac follows routing rules. Only three operations run with root privileges inside a privileged helper — creating the utun interface, installing routes and changing DNS. The Xray core itself runs as your normal user.
 
-[Download for macOS v0.8.33 · dmg · 45.0 MiB](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.dmg) Alternative .zip · 40.7 MiB
+[Download for macOS v0.8.34 · dmg (size per Releases page)](https://github.com/harodggg/xrayTun/releases) Alternative .zip (size per Releases page)
 
-v0.8.33 (released 2026-09-22) · macOS only · universal build (arm64 + x86_64) · dmg 45.0 MiB
+v0.8.34 publishing now · macOS only · universal build (arm64 + x86_64) · size per Releases page
 
 First launch needs one extra step. [See the install notes](#install) (Gatekeeper will block the app — that is expected).
 
@@ -530,7 +530,7 @@ Every statement below can be checked against the documents in the GitHub reposit
 
 - Routes use a `0.0.0.0/1` + `128.0.0.0/1` split instead of replacing the default route: the worst case is some traffic taking the wrong path, not losing the default route entirely.
 
-- **System proxy mode does not modify macOS system proxy settings** (as of v0.8.33). It only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps at those ports yourself. Use TUN mode to capture traffic automatically.
+- **System proxy mode does not modify macOS system proxy settings** (as of v0.8.34). It only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps at those ports yourself. Use TUN mode to capture traffic automatically.
 
 - Least privilege: creating the utun interface, installing routes and changing DNS are done by a privileged helper, while the **Xray core runs as your normal user**. The helper only accepts connections from the app that pass code-signature validation.
 
@@ -578,17 +578,17 @@ Every statement below can be checked against the documents in the GitHub reposit
 
 ## Download
 
-[Download for macOS v0.8.33 · dmg · 45.0 MiB](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.dmg)
+[Download for macOS v0.8.34 · dmg (size per Releases page)](https://github.com/harodggg/xrayTun/releases)
 
 | File | Size | Link |
 
 |---|---|---|
 
-| dmg (primary) | 47,230,254 bytes (45.0 MiB) | [XrayTun_0.8.33_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.dmg) |
+| dmg (primary) | Filled in at release (see Releases) | [XrayTun_0.8.34_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases) |
 
-| zip (alternative) | 42,726,199 bytes (40.7 MiB) | [XrayTun_0.8.33_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/XrayTun_0.8.33_x86_64_arm64.zip) |
+| zip (alternative) | Filled in at release (see Releases) | [XrayTun_0.8.34_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases) |
 
-| Checksums | 200 bytes | [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases/download/v0.8.33/SHA256SUMS.txt) |
+| Checksums | — | [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases) |
 
 | All releases | — | [GitHub Releases](https://github.com/harodggg/xrayTun/releases/latest) |
 
@@ -607,8 +607,8 @@ Every statement below can be checked against the documents in the GitHub reposit
 ### Verify the download (optional)
 
 ```bash
-grep XrayTun_0.8.33_x86_64_arm64.dmg SHA256SUMS.txt
-shasum -a 256 XrayTun_0.8.33_x86_64_arm64.dmg
+grep XrayTun_0.8.34_x86_64_arm64.dmg SHA256SUMS.txt
+shasum -a 256 XrayTun_0.8.34_x86_64_arm64.dmg
 ```
 
 The two hashes should match. `SHA256SUMS.txt` is generated with `shasum -a 256 ./*`, so each line starts with `./`; extracting the line with `grep` and comparing it manually is more reliable than running `shasum -c` on the file.
@@ -689,7 +689,7 @@ Because creating the utun interface, changing the routing table and changing sys
 
 ### Does "system proxy" mode configure the macOS system proxy automatically?
 
-No (as of v0.8.33). System proxy mode only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps or system proxy settings at those ports yourself. To capture all traffic automatically, use TUN mode.
+No (as of v0.8.34). System proxy mode only starts local SOCKS5 (127.0.0.1:10808) and HTTP (127.0.0.1:10809) inbounds; you point your apps or system proxy settings at those ports yourself. To capture all traffic automatically, use TUN mode.
 
 ### Which node protocols and subscription formats are supported?
 
@@ -769,7 +769,7 @@ This section comes first because it is the thing most often mixed up — by peop
 
 - The two projects are simply sibling projects under **the same author and the same GitHub account** ([harodggg](https://github.com/harodggg)): separate repositories, separate version numbers, separate licenses, separate release processes.
 
-- **Do not mix up the version numbers.** This page describes xray-wasm **v0.7.0**; XrayTun's current version is a different sequence (**v0.8.33**, see the [home page](../../)).
+- **Do not mix up the version numbers.** This page describes xray-wasm **v0.7.0**; XrayTun's current version is a different sequence (**v0.8.34**, see the [home page](../../)).
 
 ## What problem it solves
 
