@@ -148,21 +148,52 @@ pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), 
     let app_handle = app.clone();
     let forward_pid = runtime.pid;
     tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let level = classify_log(&event.line);
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                // 顺手统计各出口的连接数。放在这里而不是另起一个日志 tail：
-                // 这是核心输出的**单点**，重复读取会带来两份不一致的时间线。
-                //
-                // 为什么需要连接数：`dns-out`（UDP）与 `api`（本机回环）的
-                // 字节计数器恒为 0，那是测量盲区 —— 只显示 `0 B` 会让人以为
-                // 这两个出口没在用（本机实测各有 4769 / 5374 条连接）。
-                state.with(|i| {
-                    i.connections.observe(&event.line);
-                });
-                state.log("core", level, event.line.clone());
+        let mut throttle = LogThrottle::default();
+        // 每秒一次：把被限流掉的行数**补成可见的摘要**（task-91 A 的红线：
+        // 不许静默丢弃）。空闲时 take_summary() 返回 None，不会打噪音。
+        let mut flush = tokio::time::interval(LOG_THROTTLE_SUMMARY_INTERVAL);
+        loop {
+            tokio::select! {
+                maybe = rx.recv() => {
+                    let Some(event) = maybe else { break };
+                    let level = classify_log(&event.line);
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        // 顺手统计各出口的连接数。放在这里而不是另起一个日志 tail：
+                        // 这是核心输出的**单点**，重复读取会带来两份不一致的时间线。
+                        //
+                        // 为什么需要连接数：`dns-out`（UDP）与 `api`（本机回环）的
+                        // 字节计数器恒为 0，那是测量盲区 —— 只显示 `0 B` 会让人以为
+                        // 这两个出口没在用（本机实测各有 4769 / 5374 条连接）。
+                        state.with(|i| {
+                            i.connections.observe(&event.line);
+                        });
+                        // **原文照旧完整落盘 + 进环形缓冲**：限流只影响下面那条界面事件。
+                        state.log("core", level, event.line.clone());
+                        if throttle.admit(xt_core::util::now_unix(), &event.line) {
+                            let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: event.line.clone(), level: level.into() });
+                        }
+                    }
+                }
+                _ = flush.tick() => {
+                    if let Some((n, sample)) = throttle.take_summary() {
+                        if let Some(state) = app_handle.try_state::<AppState>() {
+                            let msg = throttled_summary_message(n, &sample);
+                            state.log("app", "warn", msg.clone());
+                            let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: msg, level: "warn".into() });
+                        }
+                    }
+                }
             }
-            let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: event.line, level: level.into() });
+        }
+
+        // 循环结束时把最后一批省略数补上 —— 否则核心退出前那一段被压下的行
+        // **永远不可见**（这正是不许静默丢弃的意思）。
+        if let Some((n, sample)) = throttle.take_summary() {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                let msg = throttled_summary_message(n, &sample);
+                state.log("app", "warn", msg.clone());
+                let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: msg, level: "warn".into() });
+            }
         }
 
         // 循环结束 = 核心的 stdout 关了 = **核心已经不在了**。
@@ -1461,6 +1492,164 @@ pub(crate) fn classify_log(line: &str) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// task-91 A：持续失败时的日志洪水（**界面可见**）
+//
+// 实测（用户机器 2026-09-22 12:05–12:35，`loglevel: debug`）：
+//   30 分钟 56,292 行核心日志 ⇒ **平均 31.3 行/秒、峰值 801 行/秒、379 种「形状」**；
+//   其中 `app/dns:` 26,054 行，但真正 `[Error]` 的只有 69 行 —— 洪水的主体是
+//   debug 级的 DNS 记账（用户自己开的 debug）。
+// 界面日志页只有 1500 行 ⇒ 被灌满并**持续滚动**（用户两次投诉的「关闭跟随还在跳」）。
+// ---------------------------------------------------------------------------
+
+/// 同一「形状」的日志，推给界面的最小间隔（秒）。
+pub(crate) const LOG_SHAPE_WINDOW_SECS: u64 = 5;
+/// 推给界面的核心日志**全局**上限（行/秒）—— 压住 801 行/秒那样的突发。
+pub(crate) const LOG_UI_LINES_PER_SEC: u32 = 5;
+/// 限流摘要的补发间隔：被压下的条数最多延迟这么久就可见。
+pub(crate) const LOG_THROTTLE_SUMMARY_INTERVAL: Duration = Duration::from_secs(1);
+/// 形状记忆的容量上限。它不是账本，超了整体清一次即可（代价：这些形状各重放行一次）。
+const LOG_SHAPE_MEMORY: usize = 1024;
+
+/// 把一行日志折成「形状」：时间戳、域名/IP、数字、引号内容都换成占位符。
+///
+/// 目的：**同一类故障反复出现**在限流器眼里是同一个形状（否则 379 种形状里
+/// 每种都放行一次，等于没限流 —— 这是模拟实测数据后才定下来的口径）。
+/// **保守替换**：宁可少折一点，也不要把两类不同故障折成一条（那会丢信息）。
+pub(crate) fn log_shape(line: &str) -> String {
+    // 1) 引号内的内容整体折掉：URL、规则全集这些全是可变噪声
+    let mut masked = String::with_capacity(line.len());
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                if !in_quotes {
+                    masked.push_str("\"<q>\"");
+                }
+                in_quotes = !in_quotes;
+            }
+            _ if !in_quotes => masked.push(ch),
+            _ => {}
+        }
+    }
+    // 2) 逐 token 折；开头两个 token 是 xray 自己的时间戳（`2026/09/22 12:16:00.226232`）
+    let mut out = String::with_capacity(masked.len());
+    for (i, tok) in masked.split_whitespace().enumerate() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        if i < 2 && looks_like_timestamp(tok) {
+            out.push_str("<ts>");
+            continue;
+        }
+        // `UDP:1.2.4.8:53` / `tcp:127.0.0.1:10808` 这类按 ':' 拆开逐段判
+        let parts: Vec<String> = tok.split(':').map(mask_token).collect();
+        out.push_str(&parts.join(":"));
+    }
+    out
+}
+
+fn looks_like_timestamp(tok: &str) -> bool {
+    (tok.contains('/') && tok.chars().any(|c| c.is_ascii_digit()))
+        || (tok.contains(':') && tok.contains('.') && tok.chars().any(|c| c.is_ascii_digit()))
+}
+
+/// 折掉一个 token 里「像数字 / 像主机名」的核心部分，保留首尾标点。
+fn mask_token(tok: &str) -> String {
+    let boundary = |c: char| c.is_ascii_alphanumeric() || c == '.';
+    let Some(start) = tok.find(boundary) else {
+        return tok.to_string();
+    };
+    let end = tok.rfind(boundary).map(|i| i + 1).unwrap_or(tok.len());
+    if start >= end {
+        return tok.to_string();
+    }
+    let (pre, core, post) = (&tok[..start], &tok[start..end], &tok[end..]);
+    let masked = if core.chars().all(|c| c.is_ascii_digit()) {
+        "<n>".to_string()
+    } else if core.contains('.')
+        && core
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        // 域名或 IPv4
+        "<host>".to_string()
+    } else {
+        core.to_string()
+    };
+    format!("{pre}{masked}{post}")
+}
+
+/// 推给界面的核心日志**限流器**。
+///
+/// # 一行都不丢
+///
+/// * 原文照旧进后端环形缓冲与**日志文件**（调用点里 `state.log` 不受本限流影响）；
+/// * 本限流只决定「哪些行**立即**推给界面」；
+/// * 被压下的条数**必须可见**：调用方每秒（以及循环结束时）补一条
+///   「已省略 N 条」的摘要 —— 界面永远不会「比事实少而看不出来」。
+#[derive(Default)]
+pub(crate) struct LogThrottle {
+    /// 形状 → 上次推给界面的秒。
+    last_sent: std::collections::HashMap<String, u64>,
+    second: u64,
+    sent_this_second: u32,
+    suppressed: u64,
+    sample: Option<String>,
+}
+
+impl LogThrottle {
+    /// 这一行现在能不能推给界面？被压下的会计入 `suppressed`（由 `take_summary` 兑现可见性）。
+    pub(crate) fn admit(&mut self, now_unix: u64, line: &str) -> bool {
+        let shape = log_shape(line);
+        if now_unix != self.second {
+            self.second = now_unix;
+            self.sent_this_second = 0;
+        }
+        let shape_ok = match self.last_sent.get(&shape) {
+            None => true, // 这个形状还没见过 → 放行（第一现场）
+            Some(&last) => now_unix.saturating_sub(last) >= LOG_SHAPE_WINDOW_SECS,
+        };
+        // 全局上限对**所有**行生效（新形状也一样）：否则「很多种形状」的突发等于没限流。
+        // 被压下的新形状下一秒就会轮到（配额逐秒重置），最多晚 1 秒，且摘要里可见。
+        let global_ok = self.sent_this_second < LOG_UI_LINES_PER_SEC;
+        if shape_ok && global_ok {
+            if self.last_sent.len() >= LOG_SHAPE_MEMORY {
+                self.last_sent.clear();
+            }
+            self.last_sent.insert(shape, now_unix);
+            self.sent_this_second += 1;
+            true
+        } else {
+            self.suppressed += 1;
+            if self.sample.is_none() {
+                self.sample = Some(shape);
+            }
+            false
+        }
+    }
+
+    /// 取走「自上次取走以来被压下的条数 + 一个形状示例」。
+    /// `None` = 这段时间没压过任何行（**不打无谓的噪音**）。
+    pub(crate) fn take_summary(&mut self) -> Option<(u64, String)> {
+        if self.suppressed == 0 {
+            return None;
+        }
+        let n = self.suppressed;
+        self.suppressed = 0;
+        let sample = self.sample.take().unwrap_or_else(|| "（无示例）".to_string());
+        Some((n, sample))
+    }
+}
+
+/// 限流摘要的文案。**必须说清「有 N 条没实时显示」并指出原文在哪** ——
+/// 界面不许比事实弱。
+pub(crate) fn throttled_summary_message(n: u64, sample: &str) -> String {
+    format!(
+        "核心日志已限流：最近有 {n} 条未实时显示（原文已完整写入日志文件；刷新日志页可看到最近 2000 条）。示例格式：{sample}"
+    )
+}
+
 /// 物理出口的「身份」。隧道是照它建的，换网之后要拿它比对。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Egress {
@@ -2522,5 +2711,138 @@ mod tests {
             out.push(c);
         }
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // task-91 A：日志洪水的**限流**（量化依据：实测 31.3 行/秒、峰值 801、379 形状）
+    // -----------------------------------------------------------------------
+
+    /// 「形状」要能把**同类故障**折成同一条（域名/时间戳/数字都是噪声）。
+    #[test]
+    fn log_shape_collapses_volatile_parts() {
+        let a = log_shape(
+            "2026/09/22 12:16:00.226232 [Debug] app/dns: domain a.b.com matches following rules: [geosite:cn]",
+        );
+        let b = log_shape(
+            "2026/09/22 12:16:03.111111 [Debug] app/dns: domain x.y.net matches following rules: [geosite:cn]",
+        );
+        assert_eq!(a, b, "同一类故障必须折成同一形状（否则限流等于没做）：\n{a}\n{b}");
+        assert!(a.contains("<ts>"), "时间戳要折掉：{a}");
+        assert!(a.contains("<host>"), "域名要折掉：{a}");
+    }
+
+    /// **反例**：不同的故障**不许**折成同一条（那会丢信息）。
+    #[test]
+    fn log_shape_keeps_different_failures_apart() {
+        let lookup = log_shape(
+            "2026/09/22 12:16:00.1 [Error] app/dns: failed to lookup ip for domain x.com at server UDP:1.2.4.8:53",
+        );
+        let hit = log_shape(
+            "2026/09/22 12:16:00.1 [Debug] app/dns: UDP:1.2.4.8:53 cache HIT x.com. -> [1.2.3.4]",
+        );
+        assert_ne!(lookup, hit, "不同故障折成一条就等于把它们混成一条：\n{lookup}\n{hit}");
+    }
+
+    /// 同一形状：首条立刻放行，窗口内不再放行，且**被压下的条数能对账**。
+    #[test]
+    fn throttle_admits_first_of_a_shape_and_limits_repeats() {
+        let mut t = LogThrottle::default();
+        let a = "2026/09/22 12:16:00.1 [Error] app/dns: failed to lookup ip for domain x.com";
+        let b = "2026/09/22 12:16:00.2 [Error] app/dns: failed to lookup ip for domain y.com";
+        assert!(t.admit(100, a), "第一次见到这个形状 → 放行（第一现场）");
+        assert!(!t.admit(100, b), "同一形状在窗口内不再推给界面");
+        assert_eq!(
+            t.take_summary(),
+            Some((1, log_shape(a))),
+            "被压下的 1 条必须能对账（这就是「不许静默丢弃」）",
+        );
+        assert_eq!(t.take_summary(), None, "没有新的省略就不该打噪音");
+        assert!(
+            t.admit(100 + LOG_SHAPE_WINDOW_SECS, b),
+            "窗口过后放行",
+        );
+    }
+
+    /// **全局上限**对「很多种形状」同样生效；被压下的照样进账。
+    #[test]
+    fn throttle_caps_distinct_shapes_per_second_and_accounts_for_the_rest() {
+        let mut t = LogThrottle::default();
+        let mut admitted = 0;
+        for i in 0..50 {
+            // 每条形状都不同（不同子系统前缀），但仍受全局 5 行/秒约束
+            let line = format!("2026/09/22 12:16:00.1 [Info] subsystem{i}: something happened");
+            if t.admit(100, &line) {
+                admitted += 1;
+            }
+        }
+        assert_eq!(
+            admitted, LOG_UI_LINES_PER_SEC,
+            "一秒内的全局上限必须生效（否则「形状多」的突发等于没限流）",
+        );
+        let (n, _) = t.take_summary().expect("被压下的必须有摘要");
+        assert_eq!(n, 50 - u64::from(LOG_UI_LINES_PER_SEC), "省略数必须精确对账");
+        // 下一秒：剩下的 45 种形状会各放行一次（又被 5 行/秒截住）
+        let mut admitted_next = 0;
+        for i in 0..50 {
+            let line = format!("2026/09/22 12:16:01.1 [Info] subsystem{i}: something happened");
+            if t.admit(101, &line) {
+                admitted_next += 1;
+            }
+        }
+        assert_eq!(admitted_next, LOG_UI_LINES_PER_SEC, "配額逐秒重置");
+    }
+
+    /// 用实测速率搭一个洪流（**31 行/秒、两种形状、10 分钟**），界面入库行数必须有界。
+    ///
+    /// 依据：用户机器 12:05–12:35 实测平均 31.3 行/秒；前两种形状占 14%。
+    /// 界面日志页只有 1500 行 ⇒ 不限制的话 10 分钟就是 18,600 行灌进去、持续滚动。
+    #[test]
+    fn throttle_cuts_a_realistic_flood_to_a_bounded_ui_rate() {
+        let mut t = LogThrottle::default();
+        let mut admitted = 0u64;
+        let mut summaries = 0u64;
+        let mut accounted = 0u64;
+        for sec in 0..600u64 {
+            for i in 0..31 {
+                let line = if i % 2 == 0 {
+                    format!("2026/09/22 12:16:00.{i} [Debug] app/dns: domain host{i}.com matches following rules: [geosite:cn]")
+                } else {
+                    format!("2026/09/22 12:16:00.{i} [Debug] app/dns: UDP:1.2.4.8:53 cache HIT host{i}.com. -> [1.2.3.4]")
+                };
+                if t.admit(sec, &line) {
+                    admitted += 1;
+                }
+            }
+            if let Some((n, _)) = t.take_summary() {
+                summaries += 1;
+                accounted += n;
+            }
+        }
+        let total = 600 * 31;
+        assert_eq!(
+            admitted + accounted,
+            total,
+            "**每一行都要有着落**：放行的 + 明确记账省略的 = 全部（不许静默丢弃）",
+        );
+        assert!(
+            admitted <= 600 / LOG_SHAPE_WINDOW_SECS * 2 + 2,
+            "两种形状 × 每 {LOG_SHAPE_WINDOW_SECS}s 一条 ⇒ 放行数必须有界，实际 {admitted}",
+        );
+        assert_eq!(summaries, 600, "每秒一条摘要（被压下过的那一秒）");
+        // 换算：31 行/秒 → 放行 ≤ (2/5) 行/秒 + 摘要 1 行/秒
+        assert!(
+            (admitted as f64) / 600.0 <= 0.5,
+            "界面入库速率必须从 31 行/秒降到 ≤0.5 行/秒（实测数据模拟），实际 {}",
+            (admitted as f64) / 600.0,
+        );
+    }
+
+    /// 摘要文案必须**明确说出省略了多少条**并指出原文在哪（红线：界面不许比事实弱）。
+    #[test]
+    fn throttled_summary_says_how_many_were_omitted() {
+        let msg = throttled_summary_message(137, "app/dns: failed to lookup ip for domain <host>");
+        assert!(msg.contains("137"), "要点出省略条数：{msg}");
+        assert!(msg.contains("日志文件"), "要指出完整原文在哪：{msg}");
+        assert!(msg.contains("刷新"), "要告诉用户怎么看全（刷新日志页）：{msg}");
     }
 }
