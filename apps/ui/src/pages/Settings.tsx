@@ -172,29 +172,6 @@ function Section({
   );
 }
 
-/**
- * `auto_reconnect`：**后端有、前端类型没有**。
- *
- * `crates/xt-core/src/model.rs` 里它是 `#[serde(default = "yes")] pub auto_reconnect: bool`
- * （默认 `true`），启动时由 `commands/core.rs` 的 `should_auto_reconnect` 决定要不要连回来；
- * 但 `types.ts` 的 `AppSettings` 从来没有声明它 ⇒ 用户既看不到也关不掉（task-71 修的就是这个）。
- *
- * 这里**刻意不改 `types.ts`**（task-68 正在改 `ipc.ts`，避免两个人在同一处动类型；
- * 少一个声明不影响运行，因为 UI 用的就是后端快照）。代价是读写要绕一层类型，
- * 所以把这件事**只留在这两个符号里**，别在别处再抄一份。
- *
- * ⚠️ 保存能保住 `false`，靠的是 `patch` 里的 `{ ...settings, ...p }` **展开**
- * —— 未声明的属性会原样带过去，不会被 `serde(default = "yes")` 翻回 `true`。
- * 这条**有测试钉住**（`autoReconnectSetting.test.tsx` 的「关掉后读回仍是 false」），
- * 不是靠「恰好用了展开」的运气。
- */
-type AutoReconnectPatch = Partial<AppSettings> & { auto_reconnect?: boolean };
-
-/** 读开关：后端快照里带着它；万一缺失，按后端的默认值（`true`）显示。 */
-function readAutoReconnect(s: AppSettings): boolean {
-  return (s as { auto_reconnect?: boolean }).auto_reconnect ?? true;
-}
-
 export default function Settings({ focusSection }: { focusSection?: string | null } = {}) {
   const { snapshot, busy, run, runVoid } = useStore();
   const [draft, setDraft] = useState<AppSettings | null>(null);
@@ -272,17 +249,6 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
   const dirty = draft !== null;
 
   const patch = (p: Partial<AppSettings>) => setDraft({ ...settings, ...p });
-  /**
-   * 写 `auto_reconnect`（前端类型里没声明的那个字段）。
-   *
-   * 先赋给一个「带该字段的可选子类型」再交给 `patch` —— 结构化类型下它是
-   * `Partial<AppSettings>` 的子类型，所以这里**不需要 `as` 断言**。
-   * 走的是与其它复选框**完全相同**的保存通路（`patch` → `draft` → `save`）。
-   */
-  const setAutoReconnect = (v: boolean) => {
-    const nextPatch: AutoReconnectPatch = { auto_reconnect: v };
-    patch(nextPatch);
-  };
   const patchTun = (p: Partial<AppSettings["tun"]>) => patch({ tun: { ...settings.tun, ...p } });
   // 有进度就说明在下载：拿它当「正在下载」的判据，不用再开一个状态。
   const downloading = snapshot.update.progress !== null;
@@ -431,8 +397,8 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
         <label className="row" style={{ gap: 8, fontSize: 12, marginTop: 14 }}>
           <input
             type="checkbox"
-            checked={readAutoReconnect(settings)}
-            onChange={(e) => setAutoReconnect(e.target.checked)}
+            checked={settings.auto_reconnect}
+            onChange={(e) => patch({ auto_reconnect: e.target.checked })}
           />
           启动时如果上次是连接状态，自动连回来
         </label>

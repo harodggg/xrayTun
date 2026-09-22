@@ -94,10 +94,12 @@ describe("预览快照的保真度（task-87）", () => {
     const snap = scenarioSnapshot() as unknown as Record<string, unknown>;
     const problems: string[] = [];
 
-    // 防空壳：字段提取如果真的失效（全 0 个字段），下面的比较会**恒真**
+    // 防空壳：字段提取如果真的失效（全 0 个字段），下面的比较会**恒真**。
+    // 当前精确值是 **132**（task-89 补 `auto_reconnect` 之前是 **131**）；
+    // 新增字段时**同步上调**，这样「解析器失效」与「字段被误缩进」都会先在这里暴露。
     const extracted = BLOCKS.map((b) => fieldsOf(src, b.iface));
     const total = extracted.reduce((n, f) => n + f.length, 0);
-    expect(total, "从 types.ts 抽出的字段总数为 0 —— 这条断言就成了空壳").toBeGreaterThan(60);
+    expect(total, "从 types.ts 抽出的字段总数太少 —— 这条断言基本成了空壳").toBeGreaterThan(130);
     expect(
       fieldsOf(src, "HelperAvailability"),
       "抽查：HelperAvailability 必须含 version_check（否则是解析器没跟上）",
@@ -136,6 +138,9 @@ describe("预览快照的保真度（task-87）", () => {
     expect(s.subscriptions[0]!.enabled, "订阅 enabled").toBe(true);
     expect(s.subscriptions[0]!.update_interval_hours, "订阅间隔（Rust 默认 24）").toBe(24);
     expect(s.dns.probes[0]!.kind, "探测分组取值域").toBe("domestic");
+    // task-89：`auto_reconnect` 现在**声明进 TS** 了（撤掉 task-71 的类型旁路），
+    // 所以它进了本断言的射程；预览值取 Rust 默认 true。
+    expect(s.settings.auto_reconnect, "auto_reconnect（Rust 默认 true）").toBe(true);
     // helper 的版本核对：**明确的预览态**，不是假装成 match/mismatch
     expect(s.helper.version_check.state).toBe("unreadable");
     expect(

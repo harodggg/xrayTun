@@ -163,6 +163,23 @@ export interface AppSettings {
   launch_at_login: boolean;
   log_level: string;
   restore_system_proxy_on_exit: boolean;
+  /**
+   * 启动时如果上次是连着的，要不要自动连回来
+   * （`model.rs`：`#[serde(default = "yes")] pub auto_reconnect: bool`，**默认 true**）。
+   *
+   * # 为什么它曾经不在这个类型里（task-71 → task-89）
+   *
+   * task-71 加设置页控件时**有意**没补声明（避免与当时的并发改动撞车），
+   * 把「读/写这个未声明字段」收在两个辅助符号里绕开类型。
+   * 代价是：**凡是靠 TS 声明比对的机制都覆盖不到它** —— 包括
+   * `previewFidelity.test.ts`（预览字段集 ⊇ 真实类型字段集）与
+   * `apps/desktop/tests/type_contract.rs` 里那张「Rust 有、TS 没有」的登记表。
+   * task-89 把它收回来，射程才真正覆盖到它。
+   *
+   * ⚠️ 它**不控制**看门狗的自愈（看门狗只认 `was_connected` 这个意图）；
+   * 生效条件见 `commands/core.rs` 的 `should_auto_reconnect`（四个条件缺一不可）。
+   */
+  auto_reconnect: boolean;
   /** 实时网速显示在窗口标题栏与菜单栏。 */
   show_speed_in_title: boolean;
 }
