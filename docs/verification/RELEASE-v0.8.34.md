@@ -19,7 +19,7 @@
 | 发布提交 2 | `442d65d5a8212f060dbe837a9e56244caa3d3df8`（site/** + CHANGELOG） |
 | 本地 HEAD == `origin/main` | `442d65d`（`git rev-list --left-right --count HEAD...origin/main` = `0  0`） |
 | Release workflow | run `35694476730` → `completed` / `success`；`publishedAt` = `2026-09-22T06:45:31Z` |
-| 门禁 | `./scripts/check.sh --no-release-build` → **exit 0**（**Lead 在冻结修订 `dd95fdb` 上跑的**；我的独立复现见 §2 —— 六套单测/前端/站点全绿，唯一红的是**一步并发 doctest**，隔离重跑即绿） |
+| 门禁 | **隔离 CI runner 上三次 `success`**：`35696466193`(`442d65d`) / `35694470992`(`6aa3b5e`) / `35693699077`(`dd95fdb`)，run id 我用 `gh run view` 逐个复核过（§2.7）；本地我自己的复现见 §2 —— 六套单测/前端/站点全绿，唯一红的是**一步并发 doctest**（隔离 CI 上不存在该并发） |
 
 ## 1. 修订身份（artifact identity）——**每条都能自己复算**
 
@@ -151,6 +151,22 @@ EXIT=0        （2026-09-22 15:02:46）
 我的进程先 `Blocking waiting for file lock on build directory`、**拿到锁之后独占跑完** ⇒ 它是「锁序列化后的干净跑」。
 **我没有把并发竞争的精确机制证明到行级**（只能说：红/绿两次的差别只有「是否有另一个 cargo 同时在同一 target dir 上」这一项）。
 
+**更强的物证（Lead 提供，我用 `gh run view` 逐个复核过）**：同一套检查在**隔离 CI runner**（无本地并发）上，
+对**同一批提交**都是 `completed / success`：
+
+```
+35696466193  CI  completed success  sha=442d65d   ← 提交 2（最终发布态）
+35694470992  CI  completed success  sha=6aa3b5e   ← 被 tag 的那一版
+35693699077  CI  completed success  sha=dd95fdb   ← 冻结修订
+
+$ gh run view <id> --json databaseId,headSha,conclusion,status,workflowName \
+    --jq '"\(.databaseId) \(.workflowName) status=\(.status) conclusion=\(.conclusion) sha=\(.headSha[0:7])"'
+```
+
+⇒ **我那次 `exit 1` 是并发构建的假红**：同一提交在隔离环境跑的是**完整**门禁（不只是那一步）且 success。
+这比「我单独重跑那一步也是 0」更强 —— 因为它覆盖整条链路。**两条都写下来**，因为它们证明的是不同的事：
+隔离 runner 证明**产品与门禁本身没问题**；我本地那次证明**并发会把它弄红**（已由 Lead 立卡 `task-109` 做成构建锁）。
+
 ### 2.8 计数差异（**可逐项对上**）：我量到 `xt-core 226`，发布说明写 `223`
 
 发布说明的计数是 Lead 在**冻结修订 `dd95fdb`** 上跑出来的；我这次跑的工作区**带着别人未提交的改动**
@@ -170,9 +186,12 @@ $ git diff -- crates/xt-core/src/store.rs | grep -E '^\+\s+fn [a-z_]+\(\) \{'
 
 ### 2.9 本节的结论（**不夸大**）
 
-1. **发布门禁成立**（Lead 在冻结修订上的 exit 0 + 我这次各项独立复现）；
+1. **发布门禁成立**：隔离 CI runner 上三次 `success`（覆盖 `dd95fdb` / `6aa3b5e` / `442d65d`，§2.7），
+   我本地的独立复现除一步并发 doctest 外全绿；
 2. 我这次**没有**在「干净且无人并发」的条件下从头跑完一遍 `check.sh`（共享 `CARGO_TARGET_DIR` 就是并发的现场）
-   —— 这条**如实写在 §8**，不拿「重跑一步绿了」冒充「整条重跑绿了」。
+   —— 这条**如实写在 §8**，不拿「重跑一步绿了」冒充「整条重跑绿了」；
+3. 本地那次 `exit 1` **不构成对发布的反对意见**，但**构成对流程的反对意见**：它说明「并行跑 cargo 会把门禁弄红」
+   —— 这一点已由 Lead 立卡 `task-109`（给 `check.sh` 加可观测的构建锁）变成**机制**，而不是一句「注意别并行」。
 
 ## 3. 资产与完整性：**三方独立结果一致**
 
@@ -316,6 +335,11 @@ $ git diff --stat v0.8.33..v0.8.34 -- crates/xt-tun crates/xt-proto
    我**自己**只复核了本机可复算的部分：修订/tag/版本三处、站点常量与 pinned 数、§5.1 的指标、§6 的四条依赖命令。
 10. **§2.7 的机制没有证明到行级**：我只能证明「红的那次有另一个 cargo 在同一 target dir，绿的那次没有并发竞态」，
     不能指出是哪一个文件被替换。
+11. **⚠️ `v4-only` 连接的 `408 vs 480`（**+72**）至今**未解释** —— 见 `docs/verification/NET-METRICS.md` §8 那张
+    「与卡片基线逐项对齐」表。我试过「单行 session」与「某个 72 条的桶」两种解释，**都不成立**。
+    **本版不以任何方式解释它，也不拿它当修复效果** —— 如实保留，不猜。
+    （**不是** v0.8.34 引入的回归：它是**口径/时点差异**下的现象，v0.8.34 的修复与 v4-only 分类无因果关系；
+    要在 v0.8.34 装上后用同一口径头再量一次才谈得上解释 —— 这也是 §0 之后「改前 vs 改后」对照的待办项之一。）
 
 ## 9. 复现命令清单（照抄即可）
 
