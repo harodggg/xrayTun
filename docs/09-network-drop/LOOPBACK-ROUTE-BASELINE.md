@@ -122,7 +122,51 @@ nc -z 127.0.0.2 <一个只听 .1 的端口>     # 期望：连接被**拒绝**�
 bash scripts/diagnose-network-drop.sh --out /tmp/diag-after.txt   # §10 期望不再出现「127.0.0.2 未走 lo0」
 ```
 
-## 5. 诚实清单
+## 5. T3（2026-09-22 13:43 CST）：**用户已升到 0.8.33、helper 也重装了，但回环仍然是坏的**
+
+§4 的第 1、2 步**用户当天下午已经做完**，读数如下（全部只读）：
+
+| 项 | T3 读数（2026-09-22 13:43） | 与 §3 的 T2 对比 |
+|---|---|---|
+| 已安装 App | **`0.8.33`**（`defaults read /Applications/XrayTun.app/Contents/Info.plist CFBundleShortVersionString`） | T2 是 `0.8.31` ⇒ **已升级** |
+| 特权 helper | `/Library/PrivilegedHelperTools/com.xraytun.helper`、mtime **2026-09-22 13:17**、**4,180,656 B**、内嵌版本串 **`0.8.33`** | T2 是 9/21 20:26、4,147,568 B、0.8.31 ⇒ **已重装，且与 App 同版** |
+| 隧道 | `0/1 → utun6`、`128.0/1 → utun6`、DNS `198.18.0.2`、**xray 在跑** | T2 是**断开**态 ⇒ **T3 是新的第三种状态：连着但回环仍坏** |
+
+**关键证据（T2 没采到的那一格）** —— 在**隧道连接**状态下：
+
+```
+$ netstat -rn -f inet | grep -E '^(127|128|0/1|default)'
+0/1                utun6              UScg                utun6
+default            192.168.0.1        UGScg                 en0
+default            192.168.0.1        UGScIg                en0
+127.0.0.1          127.0.0.1          UH                    lo0        ← 只有 /32
+128.0/1            utun6              USc                 utun6
+
+$ route -n get 127.0.0.2
+    destination: default
+           mask: 128.0.0.0
+      interface: utun6                     ← ⚠️ 被 0/1 吞进隧道（T2 是 en0，因为那时没隧道）
+
+$ ifconfig lo0
+    inet 127.0.0.1 netmask 0xff000000      ← ⚠️ 接口**仍然是 127/8**，但表里没有 127/8 那条
+
+$ ping -c 2 127.0.0.2   → 2 packets transmitted, 0 received, 100.0% packet loss
+$ curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/  → 401   （.1 走 /32，正常）
+```
+
+**T3 比 T2 多说明的两件事**：
+
+1. **升级 + 重装 helper 不会修复这一条** —— 它是**已写进路由表的残留状态**，
+   与 `63b84dc` 的代码修复无关（代码修复只保证「以后不再装那条路由」，已装出来的要清掉）。
+   ⇒ **§4 第 2 步做完 ≠ after 通过**；必须**重启**（或 `sudo route add -net 127.0.0.0/8 -interface lo0`）才能回到干净基线。
+2. **`ifconfig lo0` 的 netmask 仍是 `0xff000000`** ⇒ 「这台机器本来就没有 `127/8 → lo0` 表项」（§5 里的第二种可能）
+   **被削弱**：接口层仍然声明自己覆盖 `127/8`，缺的是**路由表里那条连通路由**。
+   （严格说这仍不是「干净机器对照」，但比 T2 时的证据强了一档，记在这里。）
+
+**判据不变**（§4 第 3 步）：`route -n get 127.0.0.2` 的 `interface` 必须是 **`lo0`**；
+`ping 127.0.0.2` 不再 100% 丢包。**这条以后由 tester 独立复核，判据以路由层为准。**
+
+## 6. 诚实清单
 
 * **T1 当时没有采 `route -n get 127.0.0.2`** —— 这是我采集上的缺口；T2 才补上，所以「T1 的路由出口是什么」
   严格说**没有直接观测**（我从 `netstat` 的 `127 → 192.168.0.1 UGSc en0` 行 + `ping` 失败推断，属**推断**）。
