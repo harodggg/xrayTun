@@ -480,8 +480,35 @@ fn build_outbounds(nodes: &[Node], input: &CoreConfigInput<'_>) -> Value {
     // 消失（等上游补上 v6 分支），并考虑向上游报。**未验证项**：`direct` 出站
     // 自己的 `sockopt.interface` 在 `[::]` 双栈 socket 上是否真的绑上了 ——
     // 日志里没有第二条绑卡错误，但我们没有直接证据（见 task-93 报告）。
+    // # `domainStrategy` 为什么是 `UseIPv4` 而不是 `UseIP`（task-97，实测）
+    //
+    // `UseIP` = 让核心**自己解析域名并拨解析出来的 IP**，于是 AAAA 也会被用上。
+    // 而这台机器根本没有可用的 IPv6（`ifconfig en0` 只有 `fe80::…%en0`；
+    // `route -n get -inet6 default` = not in table）。实测（本机 `app.jsonl`
+    // 2026-09-22 全天 123,541 行，按 session id 归并连接）：
+    //
+    //     只有 v6 目标改写的连接 42 条 → **40 条**随后 `proxy/freedom:
+    //       failed to open connection`（95.2%）
+    //     只有 v4 目标改写的连接 408 条 → **0 条**失败（0%）
+    //     `replace destination with tcp:[240e:` 534 次；47 条连接失败里
+    //     40 条是纯 v6 dial（85%）
+    //
+    // 典型轨迹（同一连接）：客户端给的是 **IPv4** 目标 `tcp:183.2.172.177:443`
+    // → sniff 出 `www.baidu.com` → `[preset-cn-domain] → direct` → 核心解析出
+    // AAAA → `replace destination with tcp:[240e:…]:443` 连试 5 次 → 全失败 →
+    // 放弃。同域名走 `:80` 那次抽到 v4 就成功 —— 这正是用户说的
+    // 「国外可以、国内时不时直接断掉」。
+    //
+    // 选 `UseIPv4` 而不是 DNS 层 `queryStrategy: "UseIPv4"`：后者会改**内建 DNS
+    // 模块的答案**（客户端要的 AAAA 一起吞掉、并波及境外解析），比缺陷本身大；
+    // 这里只收敛 `direct` 这一个 dialer。也不用 `AsIs`：官方文档写明 AsIs 走 Go 的
+    // Happy Eyeballs，**TCP 仍然优先 IPv6**，等于没修（`https://xtls.github.io/config/transports/sockopt.html`）。
+    //
+    // 代价（两条修法共同）：**双栈用户对国内站点也走 v4**，不再享受 v6。
+    // `UseIPv4` 在域名只有 AAAA、没有任何 A 时会按官方文档回退到 `AsIs`（不是硬失败）。
+    // 境外/代理路径不受影响：节点出站的 `sockopt` 仍是 `null`，目标域名交给节点侧解析。
     let mut direct_sockopt = serde_json::Map::new();
-    direct_sockopt.insert("domainStrategy".into(), "UseIP".into());
+    direct_sockopt.insert("domainStrategy".into(), "UseIPv4".into());
     if let Some(iface) = input.physical_interface {
         direct_sockopt.insert("interface".into(), Value::String(iface.to_string()));
     }
@@ -1133,13 +1160,56 @@ mod tests {
         let cfg = build(&CoreConfigInput { settings: &s, nodes: &[], selected: None, rules: &[], profile, physical_interface: Some("en0") });
         let direct = cfg["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "direct").unwrap();
         assert_eq!(direct["streamSettings"]["sockopt"]["interface"], "en0");
-        assert_eq!(direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIP");
+        assert_eq!(direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4");
 
         // 拿不到物理网卡时**不要**写出空的 `interface`：宁可明显不绑，
         // 也不要写一个坏值让核心去猜。
         let cfg = build(&CoreConfigInput { settings: &s, nodes: &[], selected: None, rules: &[], profile: tun_profile(&s), physical_interface: None });
         let direct = cfg["outbounds"].as_array().unwrap().iter().find(|o| o["tag"] == "direct").unwrap();
         assert!(direct["streamSettings"]["sockopt"].get("interface").is_none());
+    }
+
+    /// task-97：`direct` 出站**只解析 IPv4** —— 「国外可以、国内断掉」的修复。
+    ///
+    /// 依据是本机实测（`app.jsonl` 2026-09-22，按 session id 归并连接）：
+    /// 只有 v6 目标改写的连接 42 条里 40 条失败（95.2%），只有 v4 改写的
+    /// 408 条里 0 条失败。`UseIP` 会让核心把客户端**已经给出的 v4 目标**
+    /// （sniff 成域名之后）重新解析成 AAAA，而这台机器没有可用的 v6。
+    #[test]
+    fn direct_outbound_never_picks_the_v6_family() {
+        let s = settings();
+        let cfg = build(&CoreConfigInput { settings: &s, nodes: &[node()], selected: None, rules: &[], profile: tun_profile(&s), physical_interface: Some("en0") });
+        let outbounds = cfg["outbounds"].as_array().unwrap();
+        let direct = outbounds.iter().find(|o| o["tag"] == "direct").unwrap();
+
+        // 正向：就是选定的那个值。
+        assert_eq!(
+            direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIPv4",
+            "direct 出站必须只解析 IPv4：本机没有可用 v6，而 UseIP 会把 v4 目标改写成 AAAA 后全灭"
+        );
+        // 反向：回到 `UseIP` 就是把这条故障放回来（task-97 实测 95.2% 失败率）。
+        assert_ne!(
+            direct["streamSettings"]["sockopt"]["domainStrategy"], "UseIP",
+            "回到 UseIP 等于放回「国内时不时断掉」；见 build_outbounds 的注释与 task-97 的 before 指标"
+        );
+
+        // 境外/代理路径**一律不动**：节点出站没有 sockopt（解析发生在节点侧）。
+        let node_ob = outbounds
+            .iter()
+            .find(|o| o["tag"].as_str().is_some_and(|t| t.starts_with("node-")))
+            .expect("给了节点就应当有 node-* 出站");
+        let node_sockopt = node_ob["streamSettings"].get("sockopt");
+        assert!(
+            node_sockopt.is_none() || node_sockopt == Some(&Value::Null),
+            "境外路径不许被改动，实际 node 出站的 sockopt = {node_sockopt:?}"
+        );
+
+        // DNS 层的 `queryStrategy` 仍然是**用户设置**：我们没有选「在 DNS 层
+        // 做 UseIPv4」那条更宽的修法（那会把客户端要的 AAAA 也一起吞掉）。
+        assert_eq!(
+            cfg["dns"]["queryStrategy"], s.dns.query_strategy,
+            "DNS 层的 queryStrategy 必须保持用户设置（本卡只收敛 direct 出站的解析）"
+        );
     }
 
     #[test]
