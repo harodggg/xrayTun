@@ -124,3 +124,39 @@ CHECK_LOCK2_EXIT=0
 另外记录一次**带并发**的运行（同一 worktree，但没有先等空闲）：开跑时 `pgrep` 有 **76 个**未持锁的
 cargo/rustc（另一位成员 `task-107` 的敏感性实验），日志里出现了那条警告；那次也 **exit 0**，
 但它**不能**当作「无并发」的证据 —— 所以上面那次才是本卡的验收依据。
+
+## 6. 发版前的门禁怎么跑（**固化为流程**）
+
+```bash
+BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build
+```
+
+**为什么加这个变量**：门禁唯一的职责是回答「这份代码能不能发」。14:46 那次假红说明，
+在**有未持锁的 cargo 并发**时，`check.sh` 可能给出**看起来像产品缺陷**的红
+（`Doc-tests` → `E0463: can't find crate`）。加 `BUILD_LOCK_STRICT=1` 后，同样的情形会**明确失败**：
+
+```
+  ⚠️  检测到 N 个**没有持锁**的 cargo/rustc 进程 —— 本锁挡不住它们（它们不会看到这把锁）：
+       <pid> <命令>（折行、截断 140 字符、最多列 5 条）
+  ✗ BUILD_LOCK_STRICT=1：检测到未持锁的 cargo ⇒ 明确失败（退出码 75），不带着未知并发去跑门禁
+```
+
+**失败长什么样、怎么读**：
+
+| 退出码 | 含义 | 该怎么办 |
+|---|---|---|
+| `0` | 全绿 | 可以发 |
+| `75` | **环境问题：拿不到锁，或检测到未持锁的 cargo**（`EX_TEMPFAIL`） | **不要**当成产品缺陷；等对方结束，或请对方改用 `./scripts/build-lock.sh run -- <命令>`，然后重跑 |
+| 其它非 0 | 检查失败（前端/站点/clippy/测试…） | 按日志修代码 |
+
+`75` 与「检查失败」分开，是为了让「门禁失败」和「环境问题」可区分 —— 这正是这张卡存在的理由。
+
+**它在 CI 上是无害的 no-op**：`ci.yml` / `release.yml` 跑在**隔离 runner** 上，没有并发 cargo；
+不设这个变量也完全正常（脚本末尾会打一行提示，提醒发版的人该用它）。`release.yml` 的实质语义**未改**。
+
+**其它两个档**（按需）：
+
+```bash
+BUILD_LOCK_FOREIGN_WAIT=1800 ./scripts/check.sh --no-release-build   # 可视地等未持锁的 cargo 结束（最多 30 分钟）
+./scripts/build-lock.sh run -- cargo test -p xt-core --lib           # 手写 cargo 也走同一把锁（根治办法）
+```
