@@ -2460,21 +2460,67 @@ mod tests {
         // 只看 `#[cfg(test)]` 之前的部分：测试代码里也会拼 `FailureExit::X`
         // （构造具体变体做断言），那不该算进锚点计数。
         let strip = |src: &str| src.split("#[cfg(test)]").next().unwrap_or("").to_string();
-        let prod = format!(
-            "{}{}",
-            strip(include_str!("core.rs")),
-            strip(include_str!("nodes.rs")),
-        );
+        let prod = strip(include_str!("core.rs")) + &strip(include_str!("nodes.rs"));
+        // **必须先去掉注释**：把作废调用**注释掉**同样让它失效，而纯文本计数会
+        // 把它算成「还在」—— 第一次做这张卡的敏感性实验时就被它骗过（守卫仍绿）。
+        let code = strip_comments(&prod);
         for exit in FailureExit::ALL {
             let anchor = format!("FailureExit::{exit:?}");
-            let count = prod.matches(&anchor).count();
+            let count = code.matches(&anchor).count();
             assert_eq!(
                 count, 1,
-                "退场点 `{anchor}` 在生产源码里应当**恰好出现一次**（那一处作废调用），\
-                 现在出现 {count} 次。新增退场点请三件事一起做：加变体、登记进 \
-                 `FailureExit::ALL`、在出口调用 `invalidate_after_failure`；\
-                 若是**删掉了**某处调用，请恢复它 —— 那正是 task-75 要防的回归。",
+                "退场点 `{anchor}` 在**去掉注释后的**生产源码里应当恰好出现一次\
+                 （那一处作废调用），现在出现 {count} 次。删掉它、或把它注释掉，\
+                 都等于这处作废失效 —— 那正是本测试要防的回归。",
+            );
+            assert!(
+                code.contains(&format!("({anchor})")) || code.contains(&format!(", {anchor})")),
+                "`{anchor}` 必须**作为调用参数**出现（`invalidate_after_failure(&state, {anchor})`\
+                 或 `SwitchEnd::NoTunnel({anchor})`）—— 只是提到它、没传进调用，等于没作废。",
             );
         }
+    }
+
+    /// 去掉 `//` 行注释与 `/* */` 块注释（保留换行，保证行结构不变）。
+    ///
+    /// 守卫测试专用。只管 Rust 注释，不管字符串字面量里出现的 `//` ——
+    /// 在这个用途下够用且**更安全**：过度截断只会让计数变少（更容易变红），
+    /// 不会把「注释掉的调用」误算成存在。而 7 个锚点各自独占一行、行首是代码，
+    /// 所以截断不会影响它们。
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut chars = src.chars().peekable();
+        let mut in_block = false;
+        while let Some(c) = chars.next() {
+            if in_block {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block = false;
+                }
+                continue;
+            }
+            if c == '/' {
+                match chars.peek() {
+                    Some('/') => {
+                        // 行注释：丢到行尾，但保留那个换行
+                        for c in chars.by_ref() {
+                            if c == '\n' {
+                                out.push('\n');
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    Some('*') => {
+                        chars.next();
+                        in_block = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            out.push(c);
+        }
+        out
     }
 }
