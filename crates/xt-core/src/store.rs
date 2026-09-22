@@ -489,11 +489,21 @@ fn write_record<W: std::io::Write>(w: &mut W, text: &str) -> std::io::Result<()>
     w.write_all(&buf)
 }
 
-/// 把活动文件修剪到 [`LOG_KEEP_BYTES`]：旧内容整体成为备份，新文件只留尾部。
+/// 把活动文件修剪到 [`LOG_KEEP_BYTES`]：**被丢弃的头部进备份，活动文件只留尾部**。
+///
+/// 两代文件**不重叠**（task-105）：`app.1.jsonl` 恰好是这次丢掉的那段（更旧），
+/// `app.jsonl` 是保留的尾部（更新）；合起来正好是修剪前的全部内容，交集为空。
+/// 这既让跨代读取不会重复，也让同样的两个文件装下更多**不同的**历史
+/// （旧实现把整份旧文件留作备份、又把尾部复制一份 —— 一半容量白费在重复上）。
 ///
 /// **按整行保留**（从后往前累加，直到超过目标字节）—— 按字节硬截会把一行 JSON
-/// 切成两半，读回来那一行解析失败。也**不做「保留整份 + 复制尾部」**：
-/// 那会让同一行同时存在于两代文件里，跨代读取时显示两遍。
+/// 切成两半，读回来那一行解析失败。「整行」的边界始终是 `\n`，
+/// **不因为「一行里可能含多个对象」而改变**：切了 `\n` 同样会把一个对象切成两半。
+///
+/// 顺序：**先写备份、再收缩活动文件**（理由见函数体内注释，不许颠倒）。
+///
+/// ⚠️ **历史文件不会因此变干净**：旧版本留下的那两代文件里的重叠（本机实测
+/// 39,931 行）仍在原地，`scripts/net-metrics.py` 的跨代去重**必须保留**。
 fn trim_log_file(path: &Path) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
@@ -508,26 +518,44 @@ fn trim_log_file(path: &Path) {
         }
         keep_from = i;
     }
-    if keep_from == 0 {
-        return; // 整个文件都没超过目标，不该走到这里
+    if keep_from == 0 || keep_from >= lines.len() {
+        return; // 没有可丢的头部、或没有可留的尾部：不该走到这里
     }
-    let keep = lines[keep_from..].join("\n") + "\n";
+    let discarded = lines[..keep_from].join("\n") + "\n";
+    let kept = lines[keep_from..].join("\n") + "\n";
     let Some(dir) = path.parent() else { return };
-    // 旧内容整体挪成备份（覆盖上一份备份），再写一个只含尾部的新活动文件。
-    if std::fs::rename(path, dir.join(LOG_FILE_BAK)).is_err() {
+    // 顺序**不许颠倒**：
+    // * 先备份：这步失败 ⇒ 活动文件一个字都没动 ⇒ **一条不丢**（只是仍重叠，可重试）；
+    // * 若先收缩活动文件、而备份写失败 ⇒ 那段头部**永久消失**。
+    if replace_log_file(&dir.join(LOG_FILE_BAK), &discarded).is_err() {
         return;
     }
-    // 临时文件也是 0600，写内容之前权限就已收紧（不留「有内容但权限宽松」的窗口）。
-    let tmp = dir.join("app.jsonl.tmp");
+    let _ = replace_log_file(path, &kept);
+}
+
+/// 原子替换一个日志文件：先写同目录临时文件（**0600**，权限在写入前就已收紧），
+/// 再 `rename` 覆盖目标 —— 同文件系统内的 `rename` 才是原子的。
+///
+/// 为什么不「先 remove 再写」：那会留下「文件不存在」的窗口，读的人正好撞上就
+/// 一条日志都读不到。
+fn replace_log_file(final_path: &Path, text: &str) -> Result<()> {
+    let Some(dir) = final_path.parent() else {
+        return Err(Error::Store(format!("{} 没有父目录", final_path.display())));
+    };
+    let name = final_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app.jsonl");
+    let tmp = dir.join(format!("{name}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    match append_lines_to(&tmp, keep.trim_end_matches('\n')) {
-        Ok(()) => {
-            let _ = std::fs::rename(&tmp, path);
-        }
-        Err(_) => {
-            let _ = std::fs::remove_file(&tmp);
-        }
+    if let Err(e) = append_lines_to(&tmp, text.trim_end_matches('\n')) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    std::fs::rename(&tmp, final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        Error::Store(format!("替换 {} 失败: {e}", final_path.display()))
+    })
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -874,6 +902,135 @@ mod tests {
         assert_eq!(s2.files_read, 2);
         assert_eq!(s2.truncated, 0);
         assert!(!s2.has_loss(), "业务上没问题时不许报「丢行」");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    // -----------------------------------------------------------------------
+    // task-105：轮转后两代**不重叠**（并集无损 + 交集为空 + 跨代读不重复）
+    // -----------------------------------------------------------------------
+
+    /// 读出某个日志文件里的**记录** id 列表。
+    ///
+    /// 口径与 `tail_logs` 一致：**一行可能含多个对象** ⇒ 按记录收集，不是按行
+    /// （按行算会把「一行两个对象」当 1 个元素，于是重叠可能假通过）。
+    fn record_ids(store: &Store, name: &str) -> Vec<u64> {
+        let Ok(text) = std::fs::read_to_string(store.logs_dir().join(name)) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            for item in serde_json::Deserializer::from_str(line).into_iter::<serde_json::Value>() {
+                match item {
+                    Ok(v) => {
+                        if let Some(n) = v["n"].as_u64() {
+                            out.push(n);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        out
+    }
+
+    /// **task-105 主回归**：每次轮转后，两代文件必须**并集无损 + 交集为空**，
+    /// 且跨代读取里**每条记录只出现一次**。
+    ///
+    /// 旧实现是「rename 整份活动文件 → 备份，再把尾部复制进新活动文件」⇒
+    /// 那段尾部同时活在两代里（本机实测 39,931 行重叠），跨代读会**重复**
+    /// （`tail_logs(limit > 活动文件行数)` 时真的能看到）。
+    ///
+    /// 三条断言**每次轮转后立即做**（不是跑完才比一次 —— 那样中间态会被掩盖）：
+    /// ① 并集无损：轮转后的「活动 + 备份」== 轮转前的活动文件内容；
+    /// ② 交集为空（新契约）；③ 用户可见：`tail_logs` 里没有重复记录。
+    ///
+    /// **敏感性**：把轮转改回「rename 整份 + 写尾部」⇒ 本测试红（见 task-105 报告）。
+    #[test]
+    fn each_rotation_is_lossless_disjoint_and_leaves_no_duplicates() {
+        let store = temp_store("rotate");
+        std::fs::create_dir_all(store.logs_dir()).unwrap();
+        let mut next_id = 0u64;
+
+        for round in 1..=2u32 {
+            // 把活动文件堆到触发线以上（直接写盘：比 append_log 快几百倍）
+            let mut text = String::new();
+            while (text.len() as u64) <= LOG_MAX_BYTES {
+                text.push_str(&format!("{{\"n\":{next_id}}}\n"));
+                next_id += 1;
+            }
+            // 第 1 轮加一条脏行：一行两个对象（历史文件里真实存在这种行）
+            if round == 1 {
+                text.push_str(&format!("{{\"n\":{next_id}}}{{\"n\":{}}}\n", next_id + 1));
+                next_id += 2;
+            }
+            std::fs::write(store.logs_dir().join(LOG_FILE), &text).unwrap();
+            let before = record_ids(&store, LOG_FILE);
+
+            // 再追加一条 ⇒ 触发这一轮轮转
+            store.append_log(&format!(r#"{{"n":{next_id}}}"#)).unwrap();
+            next_id += 1;
+
+            let active = record_ids(&store, LOG_FILE);
+            let backup = record_ids(&store, LOG_FILE_BAK);
+
+            // ⓪ 并集里**不许有重复**：旧轮转语义（整份进备份 + 尾部复制）必然重复，
+            //    而「按记录」的定义也要求每条只出现一次。放在最前面：它的失败信息
+            //    最长也被我限成几条样本（否则 80 万个 id 会把输出淹掉）。
+            let mut union = active.clone();
+            union.extend(backup.iter().copied());
+            let union_set: std::collections::BTreeSet<u64> = union.iter().copied().collect();
+            if union_set.len() != union.len() {
+                let dup = union.len() - union_set.len();
+                panic!(
+                    "第 {round} 次轮转后并集里有 {dup} 条重复（两代文件重叠 ⇒ 旧语义）—— \
+                     跨代读取会把同一条记录显示两遍"
+                );
+            }
+
+            // ① 并集无损：轮转后的「活动 + 备份」== 轮转前的活动文件内容
+            let mut expected = before.clone();
+            expected.push(next_id - 1);
+            let expected_set: std::collections::BTreeSet<u64> = expected.iter().copied().collect();
+            if union_set != expected_set {
+                let missing: Vec<u64> = expected_set.difference(&union_set).take(5).copied().collect();
+                let extra: Vec<u64> = union_set.difference(&expected_set).take(5).copied().collect();
+                panic!(
+                    "第 {round} 次轮转：并集与轮转前不一致 —— 少了 {} 条（例 {missing:?}）、多了 {} 条（例 {extra:?}）",
+                    expected_set.difference(&union_set).count(),
+                    union_set.difference(&expected_set).count()
+                );
+            }
+
+            // ② 交集为空（新契约）
+            let sa: std::collections::BTreeSet<u64> = active.iter().copied().collect();
+            let sb: std::collections::BTreeSet<u64> = backup.iter().copied().collect();
+            assert!(
+                sa.is_disjoint(&sb),
+                "第 {round} 次轮转后两代文件重叠了（task-105 修的就是这个）"
+            );
+            // 语义方向也要对：备份装的是**更旧**的那段
+            assert!(
+                sb.iter().max() < sa.iter().min(),
+                "备份应当是被丢弃的**头部**（更旧），活动文件是保留的尾部（更新）"
+            );
+
+            // ③ 用户可见：跨代读一次，每条记录只出现一次
+            let all: Vec<serde_json::Value> = store.tail_logs(usize::MAX);
+            let ids: Vec<u64> = all.iter().filter_map(|v| v["n"].as_u64()).collect();
+            let mut uniq = ids.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            assert_eq!(
+                uniq.len(),
+                ids.len(),
+                "第 {round} 次轮转后跨代读取出现重复记录：{} 条里只有 {} 条不同",
+                ids.len(),
+                uniq.len()
+            );
+        }
         let _ = std::fs::remove_dir_all(store.root());
     }
 }
