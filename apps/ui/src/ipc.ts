@@ -17,7 +17,6 @@ import type {
   AppSnapshot,
   AppSettings,
   CoreRuntime,
-  HelperAvailability,
   LogEntry,
   ProbeResult,
   ProxyMode,
@@ -72,7 +71,6 @@ export const api = {
   testLatency: (nodeIds?: string[]) =>
     invoke<AppSnapshot>("test_latency", { nodeIds: nodeIds ?? null }),
 
-  probeHelper: () => invoke<HelperAvailability>("probe_helper"),
   installHelper: () => invoke<AppSnapshot>("install_helper"),
   restartHelper: () => invoke<AppSnapshot>("restart_helper"),
   uninstallHelper: () => invoke<AppSnapshot>("uninstall_helper"),

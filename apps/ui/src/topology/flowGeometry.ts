@@ -136,42 +136,6 @@ export interface Rel {
 /** 一辆车走完全程需要的秒数（视觉节奏）。 */
 export const TRAVEL_SECONDS = 7;
 
-/**
- * 在 `path` 上找离点 `(px, py)` **最近**的弧长（px）。
- *
- * 用途：几何变化（卡片被撑宽、出口增减、窗口缩放）后，把货车的「上一帧屏幕点」
- * 投到新路径上作为新路程 —— 在「必须落到新路上」的前提下，这个落点位移最小。
- * 先粗采样 65 点，再在最优点两侧做黄金分割细化；只算距离，不依赖 `getPathSegAtLength`。
- */
-export function nearestLength(path: SVGPathElement, total: number, px: number, py: number): number {
-  const dist2 = (l: number): number => {
-    const p = path.getPointAtLength(l);
-    const dx = p.x - px;
-    const dy = p.y - py;
-    return dx * dx + dy * dy;
-  };
-  const N = 64;
-  let best = 0;
-  let bestD = Infinity;
-  for (let i = 0; i <= N; i++) {
-    const l = (i / N) * total;
-    const d = dist2(l);
-    if (d < bestD) {
-      bestD = d;
-      best = l;
-    }
-  }
-  let lo = Math.max(0, best - total / N);
-  let hi = Math.min(total, best + total / N);
-  for (let it = 0; it < 12; it++) {
-    const m1 = lo + (hi - lo) * 0.382;
-    const m2 = lo + (hi - lo) * 0.618;
-    if (dist2(m1) < dist2(m2)) hi = m2;
-    else lo = m1;
-  }
-  return (lo + hi) / 2;
-}
-
 export function clampMid(x1: number, x2: number): number {
   const lo = Math.min(x1, x2);
   const hi = Math.max(x1, x2);

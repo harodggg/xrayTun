@@ -441,31 +441,6 @@ input[type="checkbox"] {
   gap: 14px;
 }
 
-.stat {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-}
-
-.stat__label {
-  font-size: 11px;
-  color: var(--text-faint);
-  margin-bottom: 6px;
-}
-
-.stat__value {
-  font-size: 20px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat__sub {
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-top: 4px;
-  word-break: break-all;
-}
 
 /* ---------------------------------------------------------------- 列表 */
 
@@ -847,7 +822,7 @@ input[type="checkbox"] {
  * 这一版按「极简」重排：用留白与字阶代替卡片边框，把同权重信息降级，
  * 让「现在通不通」成为页面上唯一的第一眼信息。
  *
- * 命名统一带 `dash__` 前缀，与上面的通用类（.card/.stat/.banner）分开，
+ * 命名统一带 `dash__` 前缀，与上面的通用类（.card/.banner）分开，
  * 避免为了仪表盘去改那些别处还在用的规则。
  */
 
