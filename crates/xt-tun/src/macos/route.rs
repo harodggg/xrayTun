@@ -47,18 +47,85 @@ pub fn default_route_v6() -> Option<DefaultRoute> {
     parse_route_get(&out)
 }
 
-fn parse_route_get(output: &str) -> Option<DefaultRoute> {
-    let mut interface = None;
-    let mut gateway = None;
-    for line in output.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("interface:") {
-            interface = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("gateway:") {
-            gateway = rest.trim().parse::<IpAddr>().ok();
+/// 一条**已经存在**的路由（用于「装之前先记下原本是什么」，task-85）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingRoute {
+    pub interface: Option<String>,
+    pub gateway: Option<IpAddr>,
+}
+
+impl ExistingRoute {
+    /// 还原它该用的 `RouteVia`。
+    ///
+    /// 实测样本（`route -n get -net 192.168.0.0/24`）：**接口路由没有 `gateway:` 行**，
+    /// 只有 `interface: en0` ⇒ 用 `Interface` 还原；有 `gateway:` 的用 `Gateway` 还原。
+    /// 两者都读不到 ⇒ `None`（不还原，避免瞎猜一条路由出来）。
+    pub fn to_via(&self) -> Option<RouteVia> {
+        match (&self.interface, self.gateway) {
+            (Some(name), None) => Some(RouteVia::Interface { name: name.clone() }),
+            (_, Some(addr)) => Some(RouteVia::Gateway { addr }),
+            (None, None) => None,
         }
     }
+}
+
+/// 查**恰好这个前缀**上是否已经有路由（`route -n get -net <cidr>`）。
+///
+/// 为什么用这个命令（**实测**，macOS 26.6.2）：`route -n get -net` 是**精确前缀查找**，
+/// 不是最长前缀匹配 ——
+/// * `route -n get -net 127.0.0.0/8` 在这台被留下空洞的机器上回 `not in table`
+///   （**不会**退回默认路由，所以它答的正是「这个前缀上有没有东西」）；
+/// * `route -n get -net 192.168.0.0/24` 直接返回那条 on-link 接口路由
+///   （`interface: en0`、**没有** `gateway:` 行）。
+///
+/// 查不到 / 出错 ⇒ `None`（= 原本这个前缀上什么都没有）。
+pub fn existing_route(destination: &Cidr) -> Option<ExistingRoute> {
+    let dest = destination.network().to_string();
+    let mut argv: Vec<&str> = vec!["-n", "get"];
+    if destination.addr.is_ipv6() {
+        argv.push("-inet6");
+    }
+    argv.push("-net");
+    argv.push(&dest);
+    let out = run(ROUTE, &args(&argv)).ok()?;
+    parse_route_get_info(&out)
+}
+
+/// 解析 `route -n get` 的输出，取「默认路由」需要的两个字段。
+///
+/// 它**不要求** `destination:` 行（历史行为：只有 `interface:` 也算解析成功，
+/// 有测试钉着）。要判断「**这个前缀上到底有没有路由**」用下面的
+/// [`parse_route_get_info`] —— 那个更严（必须有 `destination:`）。
+fn parse_route_get(output: &str) -> Option<DefaultRoute> {
+    let (interface, gateway, _) = route_get_fields(output);
     interface.map(|interface| DefaultRoute { interface, gateway })
+}
+
+/// 解析 `route -n get` 的输出。**只有出现 `destination:` 才算「查到了」** ——
+/// 空洞的前缀上 `route` 什么都不输出（或只有一行 `not in table`）。
+fn parse_route_get_info(output: &str) -> Option<ExistingRoute> {
+    let (interface, gateway, has_destination) = route_get_fields(output);
+    has_destination.then_some(ExistingRoute { interface, gateway })
+}
+
+/// `route -n get` 输出的字段抽取（两个解析函数共用，避免各写一份循环）。
+///
+/// 返回 `(interface, gateway, 是否有 destination 行)`。
+fn route_get_fields(output: &str) -> (Option<String>, Option<IpAddr>, bool) {
+    let mut interface = None;
+    let mut gateway = None;
+    let mut has_destination = false;
+    for line in output.lines() {
+        let line = line.trim();
+        if line.starts_with("destination:") {
+            has_destination = true;
+        } else if let Some(rest) = line.strip_prefix("gateway:") {
+            gateway = rest.trim().parse::<IpAddr>().ok();
+        } else if let Some(rest) = line.strip_prefix("interface:") {
+            interface = Some(rest.trim().to_string());
+        }
+    }
+    (interface, gateway, has_destination)
 }
 
 /// 安装一条路由。目标网段已由 [`Cidr`] 归一化。
@@ -284,5 +351,79 @@ destination: default
         assert!(is_missing_route("route: writing to routing socket: not in table"));
         assert!(is_missing_route("delete net 0.0.0.0: not in table"));
         assert!(!is_missing_route("route: permission denied"));
+    }
+
+    // -----------------------------------------------------------------------
+    // task-85：查「这个前缀上原本有没有路由」（回滚时要不只删除、还要恢复）
+    // -----------------------------------------------------------------------
+
+    /// **实测样本**（本机 `route -n get -net 192.168.0.0/24`）：
+    /// 接口路由**没有 `gateway:` 行**，只有 `interface:`。
+    #[test]
+    fn parses_an_existing_interface_route() {
+        let sample = "\
+   route to: 192.168.0.0
+destination: 192.168.0.0
+       mask: 255.255.255.0
+  interface: en0
+      flags: <UP,DONE,CLONING,STATIC>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500         0 \n";
+        let info = parse_route_get_info(sample).expect("有 destination 行 ⇒ 查到了");
+        assert_eq!(info.interface.as_deref(), Some("en0"));
+        assert_eq!(info.gateway, None, "接口路由没有 gateway 行（实测）");
+        assert_eq!(
+            info.to_via(),
+            Some(RouteVia::Interface { name: "en0".into() }),
+            "接口路由必须还原成 Interface（不是 Gateway）——回滚要靠它把 lo0 那条装回去",
+        );
+    }
+
+    /// 网关路由按网关还原。
+    #[test]
+    fn parses_an_existing_gateway_route() {
+        let sample = "\
+destination: 10.0.0.0
+       mask: 255.0.0.0
+    gateway: 192.168.1.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC>\n";
+        let info = parse_route_get_info(sample).expect("查到了");
+        assert_eq!(
+            info.to_via(),
+            Some(RouteVia::Gateway {
+                addr: "192.168.1.1".parse().unwrap()
+            }),
+        );
+    }
+
+    /// **空洞的前缀**：`route` 没有输出（或只有一行 `not in table`）⇒ 什么都没查到。
+    ///
+    /// **实测**：这台被留下空洞的机器上 `route -n get -net 127.0.0.0/8` 就是空输出。
+    /// 这一条决定「回滚时不许凭空造路由」。
+    #[test]
+    fn empty_output_means_the_prefix_has_no_route() {
+        assert_eq!(parse_route_get_info(""), None);
+        assert_eq!(
+            parse_route_get_info("route: writing to routing socket: not in table\n"),
+            None,
+        );
+        // 只有 interface 行、没有 destination 行 —— 不算查到（宁可当没有）
+        assert_eq!(parse_route_get_info("  interface: en0\n"), None);
+    }
+
+    /// 默认路由的解析没被这次重构改坏（`destination: default` 同样算 destination 行）。
+    #[test]
+    fn default_route_still_parses_after_the_refactor() {
+        let sample = "\
+   route to: default
+destination: default
+       mask: default
+    gateway: 192.168.0.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC>\n";
+        let r = parse_route_get(sample).expect("默认路由仍应解析");
+        assert_eq!(r.interface, "en0");
+        assert_eq!(r.gateway, Some("192.168.0.1".parse().unwrap()));
     }
 }

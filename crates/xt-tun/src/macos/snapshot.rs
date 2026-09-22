@@ -152,6 +152,7 @@ mod tests {
         snap.installed_routes.push(InstalledRoute {
             destination: "0.0.0.0/1".parse().unwrap(),
             via: xt_proto::RouteVia::Interface { name: "utun4".into() },
+            replaced: None,
         });
         snap.dns_backups.push(DnsBackup {
             service: "Wi-Fi".into(),
@@ -202,8 +203,16 @@ mod tests {
         // 模拟一次完整的两阶段启动：pending 里的路由被提交进 installed。
         let destination = "0.0.0.0/1".parse().unwrap();
         let via = xt_proto::RouteVia::Interface { name: "utun4".into() };
-        snap.pending_routes.push(InstalledRoute { destination, via: via.clone() });
-        snap.installed_routes.push(InstalledRoute { destination, via });
+        snap.pending_routes.push(InstalledRoute {
+            destination,
+            via: via.clone(),
+            replaced: None,
+        });
+        snap.installed_routes.push(InstalledRoute {
+            destination,
+            via,
+            replaced: None,
+        });
         snap.pending_routes.clear();
         snap.state = SessionState::Up;
 

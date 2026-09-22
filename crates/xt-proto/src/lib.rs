@@ -365,6 +365,18 @@ pub struct InstalledRoute {
     pub destination: Cidr,
     /// `-interface utun4` 或 `-gateway 192.168.1.1`。
     pub via: RouteVia,
+    /// **装这条之前，同一个前缀上原本是什么路由**（task-85）。
+    ///
+    /// 为什么必须有它：`route add` 对**同前缀**是**替换**语义，不是新增 ——
+    /// 我们装「`127.0.0.0/8` → 物理网关」时会把内核那条 on-link 的
+    /// `127/8 → lo0` 顶掉；回滚若只删自己那条，**内核原来那条不会自己回来**，
+    /// 于是留下一个空洞（**实测**：`127.0.0.2` 从此 100% 丢包、`lo0` 少了本该
+    /// 有的那条接口路由）。
+    ///
+    /// 记下它，回滚就能**恢复**而不只是删除。`None` = 原本同前缀上什么都没有
+    /// （那就只删自己那条，**不许凭空造**）。
+    #[serde(default)]
+    pub replaced: Option<RouteVia>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

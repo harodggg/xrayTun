@@ -17,7 +17,7 @@
 
 use std::net::IpAddr;
 
-use xt_proto::{Cidr, DnsMode, Ipv6Mode, RouteVia, TunUpRequest};
+use xt_proto::{Cidr, DnsMode, InstalledRoute, Ipv6Mode, RouteVia, TunUpRequest};
 
 use crate::error::{Error, Result};
 use crate::validate::validate_cidr_text;
@@ -115,6 +115,49 @@ impl TunPlan {
         r.reverse();
         r
     }
+}
+
+/// 回滚时要执行的一个动作（task-85）。
+///
+/// # 为什么不能只有「删除」
+///
+/// `route add` 对**同一个前缀**是**替换**语义，不是新增：我们装
+/// `127.0.0.0/8 → 物理网关` 时，会把内核那条 on-link 的 `127/8 → lo0` 顶掉。
+/// 回滚若只按快照「反序删除自己装的那些」，**内核原来那条不会自己回来** ——
+/// 于是机器从此缺一条本该有的接口路由（**实测**：`127.0.0.2` 永久 100% 丢包，
+/// 而 `en0` 的同类 on-link 路由还在，形成不对称）。所以：
+///
+/// * **删除**我们装的那条；
+/// * **恢复**装之前同前缀上原本存在的那条（如果当时记下了）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RollbackAction {
+    /// 删掉我们装的那条。
+    Delete { destination: Cidr, via: RouteVia },
+    /// 把我们装之前同前缀上原本存在的那条**装回去**。
+    ///
+    /// 只有 `InstalledRoute::replaced` 有值时才产生 —— **原本没有就不许凭空造**。
+    Restore { destination: Cidr, via: RouteVia },
+}
+
+/// 按快照算回滚动作：**安装顺序反序**；每条先删自己、再恢复被顶掉的那条。
+///
+/// 纯函数（不碰系统），所以「回滚到底会不会恢复」这件事可以被断言 ——
+/// 这是本卡的核心（以前的实现只删除，空洞就是这么留下的）。
+pub fn rollback_plan(routes: &[InstalledRoute]) -> Vec<RollbackAction> {
+    let mut actions = Vec::new();
+    for installed in routes.iter().rev() {
+        actions.push(RollbackAction::Delete {
+            destination: installed.destination,
+            via: installed.via.clone(),
+        });
+        if let Some(prior) = &installed.replaced {
+            actions.push(RollbackAction::Restore {
+                destination: installed.destination,
+                via: prior.clone(),
+            });
+        }
+    }
+    actions
 }
 
 /// 根据请求与物理出口计算变更计划。
@@ -515,5 +558,103 @@ mod tests {
         let host_idx = dests.iter().position(|d| d == "203.0.113.7/32").unwrap();
         let split_idx = dests.iter().position(|d| d == "0.0.0.0/1").unwrap();
         assert!(host_idx < split_idx);
+    }
+
+    // -----------------------------------------------------------------------
+    // task-85：**删除 ≠ 恢复**
+    //
+    // `route add` 对**同前缀**是替换语义：装「127.0.0.0/8 → 物理网关」会把内核那条
+    // on-link 的 `127/8 → lo0` 顶掉；回滚若只删自己那条，内核原来那条**不会回来**
+    // ⇒ 留下空洞（**实测**：127.0.0.2 从此永久 100% 丢包，而 en0 的同类路由还在）。
+    // -----------------------------------------------------------------------
+
+    fn gw_via() -> RouteVia {
+        RouteVia::Gateway {
+            addr: "192.168.1.1".parse().unwrap(),
+        }
+    }
+
+    fn lo0_via() -> RouteVia {
+        RouteVia::Interface { name: "lo0".into() }
+    }
+
+    fn installed_route(dest: &str, via: RouteVia, replaced: Option<RouteVia>) -> InstalledRoute {
+        InstalledRoute {
+            destination: dest.parse().unwrap(),
+            via,
+            replaced,
+        }
+    }
+
+    /// **核心断言**：原本该前缀上有一条接口路由 ⇒ 回滚动作**必须包含「把它装回去」**。
+    #[test]
+    fn rollback_restores_the_route_we_shadowed_instead_of_only_deleting() {
+        let actions = rollback_plan(&[installed_route("127.0.0.0/8", gw_via(), Some(lo0_via()))]);
+        assert!(
+            actions.contains(&RollbackAction::Delete {
+                destination: "127.0.0.0/8".parse().unwrap(),
+                via: gw_via(),
+            }),
+            "我们装的那条仍然要删掉",
+        );
+        assert!(
+            actions.contains(&RollbackAction::Restore {
+                destination: "127.0.0.0/8".parse().unwrap(),
+                via: lo0_via(),
+            }),
+            "**必须把内核原本那条 127/8 → lo0 装回来** —— 只删自己那条会留下空洞\
+             （实测：127.0.0.2 永久 100% 丢包）",
+        );
+    }
+
+    /// **反例**：原本同前缀上什么都没有 ⇒ **不得凭空造**一条（只删自己那条）。
+    #[test]
+    fn rollback_never_invents_a_route_that_was_not_there() {
+        let actions = rollback_plan(&[installed_route("192.168.0.0/16", gw_via(), None)]);
+        assert_eq!(actions.len(), 1, "只删自己那条：{actions:?}");
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RollbackAction::Restore { .. })),
+            "原本没有同前缀路由 ⇒ 不许恢复（不许凭空造）：{actions:?}",
+        );
+    }
+
+    /// 顺序：**安装顺序反序**，且每条自己的 Delete 在它的 Restore 之前。
+    #[test]
+    fn rollback_actions_are_reverse_install_order_with_restore_after_delete() {
+        // 安装顺序：先 a（顶掉了 lo0 那条）、后 b（原本没有）
+        let actions = rollback_plan(&[
+            installed_route("127.0.0.0/8", gw_via(), Some(lo0_via())),
+            installed_route("10.0.0.0/8", gw_via(), None),
+        ]);
+        assert_eq!(
+            actions,
+            vec![
+                RollbackAction::Delete {
+                    destination: "10.0.0.0/8".parse().unwrap(),
+                    via: gw_via(),
+                },
+                RollbackAction::Delete {
+                    destination: "127.0.0.0/8".parse().unwrap(),
+                    via: gw_via(),
+                },
+                RollbackAction::Restore {
+                    destination: "127.0.0.0/8".parse().unwrap(),
+                    via: lo0_via(),
+                },
+            ],
+            "先处理后装的那条（b），再处理 a 的删除与恢复",
+        );
+    }
+
+    /// **老快照兼容**：没有 `replaced` 字段的条目反序列化后是 `None` ⇒ 回滚只删不造。
+    #[test]
+    fn old_snapshots_without_the_replaced_field_still_parse() {
+        let json = r#"{"destination":"127.0.0.0/8","via":{"kind":"gateway","addr":"192.168.1.1"}}"#;
+        let r: InstalledRoute = serde_json::from_str(json).expect("老快照必须还能反序列化");
+        assert_eq!(r.replaced, None, "缺字段 ⇒ None（向后兼容）");
+        let actions = rollback_plan(&[r]);
+        assert_eq!(actions.len(), 1, "老条目回滚时只删自己那条：{actions:?}");
     }
 }

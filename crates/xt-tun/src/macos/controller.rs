@@ -23,7 +23,9 @@ use crate::macos::netif;
 use crate::macos::route;
 use crate::macos::snapshot::{SessionSnapshot, SessionState};
 use crate::macos::utun::UtunDevice;
-use crate::plan::{build_plan, PhysicalUplink, PlannedRoute, RouteKind, TunPlan};
+use crate::plan::{
+    build_plan, rollback_plan, PhysicalUplink, PlannedRoute, RollbackAction, RouteKind, TunPlan,
+};
 
 pub struct BringUpOutcome {
     pub snapshot: SessionSnapshot,
@@ -135,7 +137,14 @@ fn apply(
         if defer_default_routes {
             // 记进 pending：崩溃时回滚逻辑会尝试删除它（删不存在的路由是安全的空操作），
             // 因此「不确定装没装」也能被正确处理。
-            snap.pending_routes.push(InstalledRoute { destination: planned.destination, via });
+            //
+            // `replaced` 此刻还是 `None`：**它要到真正安装的那一刻**（`commit_routes_and_dns`）
+            // 才去查「这个前缀上原本有什么」—— 提前查会查到还没被顶掉的自己。
+            snap.pending_routes.push(InstalledRoute {
+                destination: planned.destination,
+                via,
+                replaced: None,
+            });
             snap.save()?;
         } else {
             install_route_or_skip(snap, planned, &via)?;
@@ -161,11 +170,15 @@ fn install_route_or_skip(
     planned: &PlannedRoute,
     via: &RouteVia,
 ) -> Result<()> {
+    // **装之前先记下同前缀上原本是什么**（task-85）：`route add` 是同前缀替换，
+    // 不记就永远不知道顶掉了什么，回滚只能删不能恢复 —— 那正是 127/8 空洞的成因。
+    let replaced = route::existing_route(&planned.destination).and_then(|r| r.to_via());
     match route::add(&planned.destination, via) {
         Ok(()) => {
             snap.installed_routes.push(InstalledRoute {
                 destination: planned.destination,
                 via: via.clone(),
+                replaced,
             });
             // 增量落盘：即使下一条路由就崩了，这条也能被回滚。
             snap.save()?;
@@ -204,7 +217,11 @@ fn apply_dns(snap: &mut SessionSnapshot, plan: &TunPlan) -> Result<()> {
 /// 之所以要同时传 `plan`：DNS 服务器列表来自 `TunPlan`，而 `TunPlan` 不落盘
 /// （它含非序列化的中间状态），所以只能由在内存里持有它的调用方传进来。
 pub fn commit_routes_and_dns(snap: &mut SessionSnapshot, plan: &TunPlan) -> Result<()> {
-    for installed in std::mem::take(&mut snap.pending_routes) {
+    for mut installed in std::mem::take(&mut snap.pending_routes) {
+        // **接管默认路由之前也要先记账**（task-85）：同前缀的 `route add` 是替换，
+        // 这里顶掉的可能是**另一个 VPN 的 `0.0.0.0/1`+`128.0.0.0/1`**（用户机器上
+        // 就有 Karing / Tailscale）或内核的接口路由 —— 不记下来，回滚就只删不恢复。
+        installed.replaced = route::existing_route(&installed.destination).and_then(|r| r.to_via());
         route::add(&installed.destination, &installed.via)?;
         snap.installed_routes.push(installed);
         snap.save()?;
@@ -248,19 +265,36 @@ pub fn rollback(snap: &SessionSnapshot) -> Result<()> {
         }
     }
 
-    // 2) 再倒序删路由。
+    // 2) 再倒序处理路由：**先删自己那条，再恢复被顶掉的那条**（task-85）。
     //
-    // `pending_routes` 也要删：两阶段启动期间崩溃时，我们无法确定它到底装上了没有，
+    // 「删除 ≠ 恢复」：`route add` 对同前缀是**替换**语义 —— 我们装
+    // `127.0.0.0/8 → 物理网关` 会把内核那条 on-link 的 `127/8 → lo0` 顶掉，
+    // 只删除的话内核原来那条**不会自己回来**（实测：`127.0.0.2` 从此永久丢包）。
+    // 所以动作由 `plan::rollback_plan` 算：Delete +（当时记下了的）Restore。
+    //
+    // `pending_routes` 也要处理：两阶段启动期间崩溃时，我们无法确定它到底装上了没有，
     // 而 `route delete` 对「不存在」是安全的空操作（已显式忽略 not-in-table），
     // 所以「宁可多删一次」是这里唯一正确的策略。
-    let all_routes: Vec<&InstalledRoute> = snap
+    let all_routes: Vec<InstalledRoute> = snap
         .installed_routes
         .iter()
         .chain(snap.pending_routes.iter())
+        .cloned()
         .collect();
-    for installed in all_routes.into_iter().rev() {
-        if let Err(e) = route::delete(&installed.destination, &installed.via) {
-            failures.push(format!("删除路由 {} 失败: {e}", installed.destination));
+    for action in rollback_plan(&all_routes) {
+        match action {
+            RollbackAction::Delete { destination, via } => {
+                if let Err(e) = route::delete(&destination, &via) {
+                    failures.push(format!("删除路由 {destination} 失败: {e}"));
+                }
+            }
+            RollbackAction::Restore { destination, via } => {
+                if let Err(e) = route::add(&destination, &via) {
+                    failures.push(format!(
+                        "恢复路由 {destination}（原本经由 {via:?}）失败: {e}"
+                    ));
+                }
+            }
         }
     }
 
