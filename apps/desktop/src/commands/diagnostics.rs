@@ -20,12 +20,40 @@ pub async fn tail_logs(
     // 读整个文件 + 逐行 JSON 解析（上限约 10MB），直接在这里做会占住
     // tokio worker（本 crate 别处的阻塞工作也是走 spawn_blocking）。
     let root = state.store.root().to_path_buf();
-    let from_file: Vec<crate::state::LogEntry> = tauri::async_runtime::spawn_blocking(move || {
-        xt_core::store::Store::new(root).tail_logs(limit)
-    })
-    .await
-    .unwrap_or_default();
+    let (mut from_file, stats): (Vec<crate::state::LogEntry>, _) =
+        tauri::async_runtime::spawn_blocking(move || {
+            xt_core::store::Store::new(root).tail_logs_with_stats(limit)
+        })
+        .await
+        .unwrap_or_default();
     if !from_file.is_empty() {
+        // **读的时候丢了东西 ⇒ 必须在用户看得见的地方说出来**（task-110）。
+        //
+        // 为什么不能只 `tracing::warn!`：tracing 走 stderr（`lib.rs` 的
+        // `with_writer(std::io::stderr)`），而 GUI 从 Finder/Dock 启动时看不到
+        // stderr —— 那条通道只有开发者用。日志页的数据源就是这个文件，所以
+        // 「读侧发现的问题」只能**变成日志里的一条记录**才谈得上用户可见。
+        //
+        // 去重（见 `LossNotify`）：坏行会一直留在文件里，不去重就会每刷新一次
+        // 日志就写一条自己的提醒，把日志刷爆。
+        if let Some(warning) = loss_warning(&stats) {
+            let first_time = {
+                let mut guard = LOSS_NOTIFY.lock().unwrap_or_else(|e| e.into_inner());
+                guard.mark(loss_signature(&stats))
+            };
+            if first_time {
+                state.log("app", "warn", warning);
+                // 让这一条**本次**就能被用户看到：重读一次（只在首次提醒时发生）。
+                let root = state.store.root().to_path_buf();
+                if let Ok((again, _)) = tauri::async_runtime::spawn_blocking(move || {
+                    xt_core::store::Store::new(root).tail_logs_with_stats(limit)
+                })
+                .await
+                {
+                    from_file = again;
+                }
+            }
+        }
         return Ok(from_file);
     }
     // 文件还没有（首次运行、或写入失败）：退回内存缓冲，至少不空手。
@@ -35,6 +63,95 @@ pub async fn tail_logs(
             i.logs.iter().skip(skip).cloned().collect::<Vec<_>>()
         })
         .ok_or_else(|| "应用状态不可用".to_string())
+}
+
+/// 进程内「丢行提醒」的去重状态：**同一个签名只提醒一次**。
+///
+/// 签名变化（坏行数量或样本变了）说明出现了**新的**读取问题，值得再提醒一次。
+#[derive(Debug, Default)]
+pub(crate) struct LossNotify {
+    last: Option<String>,
+}
+
+impl LossNotify {
+    /// 这个签名要不要提醒？返回 `true` 表示「是新的，去提醒」，并记住它。
+    pub(crate) fn mark(&mut self, signature: String) -> bool {
+        if self.last.as_deref() == Some(signature.as_str()) {
+            return false;
+        }
+        self.last = Some(signature);
+        true
+    }
+}
+
+/// 进程级的丢行去重状态（跨 Tauri 命令调用保持）。
+static LOSS_NOTIFY: std::sync::Mutex<LossNotify> = std::sync::Mutex::new(LossNotify { last: None });
+
+/// 丢行的**签名**：坏行数与坏行样本都相同才算「同一个问题」。
+pub(crate) fn loss_signature(stats: &xt_core::store::TailLogStats) -> String {
+    format!("{}|{}", stats.malformed_lines, stats.bad_lines.join(","))
+}
+
+/// 有内容读不出来时的**用户可见**提醒（没有丢失则 `None`）。
+///
+/// 措辞要求：**不许把「有丢失」说成「正常」**；说清「读不出来的是哪几行」，
+/// 并给出下一步（把这行一起贴出去）。
+pub(crate) fn loss_warning(stats: &xt_core::store::TailLogStats) -> Option<String> {
+    if !stats.has_loss() {
+        return None;
+    }
+    let samples = if stats.bad_lines.is_empty() {
+        String::new()
+    } else {
+        format!("（具体位置：{}）", stats.bad_lines.join("、"))
+    };
+    Some(format!(
+        "读取日志时发现 {} 行无法解析，这些行的内容读不出来{samples}；其余日志不受影响，已继续读出（这不是正常情况）",
+        stats.malformed_lines
+    ))
+}
+
+/// 诊断报告里的**读取统计**一行（用户会把它贴到 issue 里 ⇒ 必须自解释、无黑话）。
+pub(crate) fn read_stats_line(stats: &xt_core::store::TailLogStats, shown: usize) -> String {
+    let mut parts = vec![format!("读取 {} 个日志文件", stats.files_read)];
+    // **行与记录都写**：多对象行存在时两者不相等，而「记录」才是用户关心的条数
+    // （旧版本会在这种行上整行丢两条）。
+    parts.push(format!("共 {} 行 / {} 条记录", stats.lines, stats.records));
+    if stats.multi_object_lines > 0 {
+        parts.push(format!(
+            "其中 {} 行一条里含多条记录（已全部读出，旧版本会整行丢掉）",
+            stats.multi_object_lines
+        ));
+    }
+    if stats.has_loss() {
+        parts.push(format!(
+            "**{} 行无法解析、内容读不出来**（具体位置：{}）",
+            stats.malformed_lines,
+            if stats.bad_lines.is_empty() {
+                "未记录".to_string()
+            } else {
+                stats.bad_lines.join("、")
+            }
+        ));
+    } else {
+        parts.push("0 行无法解析".to_string());
+    }
+    if stats.files_unreadable > 0 {
+        parts.push(format!("另有 {} 个日志文件打不开", stats.files_unreadable));
+    }
+    // **别把「只显示最近 N 条」写成「截断」**：真实日志上这一项是 35 万量级，
+    // 写成「截断 354428 行」会让用户以为丢了东西 —— 而这行存在的意义恰恰是
+    // 让人分清「丢」与「没丢」。
+    let intact = !stats.has_loss() && stats.files_unreadable == 0;
+    if stats.truncated > 0 {
+        parts.push(format!(
+            "{}只列出最近 {shown} 条（更早的日志没丢，只是没显示）",
+            if intact { "内容完整，" } else { "" }
+        ));
+    } else {
+        parts.push(format!("全部列出（{shown} 条）"));
+    }
+    format!("日志读取统计：{}\n", parts.join("；"))
 }
 
 #[tauri::command]
@@ -91,12 +208,21 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
     out.push_str("\n最近日志:\n");
     // 与 `tail_logs` 用**同一个来源**：报告是用户贴到 issue 里的东西，
     // 而重启之后内存缓冲是空的 —— 那时报告里最该有的恰恰是重启前那段日志。
-    let recent: Vec<crate::state::LogEntry> = state.store.tail_logs(50);
+    //
+    // 这一行**读取统计**（task-110）是给用户看的：读的时候有没有丢行、
+    // 有没有「一行里多条记录」（旧版本会整行丢），都在这里说清楚。
+    // 报告是贴出去给维护者的产物 ⇒ 措辞不许含糊、不许把「有丢失」说成「正常」。
+    let (recent, read_stats): (Vec<crate::state::LogEntry>, _) =
+        state.store.tail_logs_with_stats(50);
     let recent = if recent.is_empty() {
         state.with(|i| i.logs.iter().rev().take(50).cloned().collect::<Vec<_>>()).unwrap_or_default()
     } else {
         recent
     };
+    out.push_str(&read_stats_line(&read_stats, recent.len()));
+    if let Some(warning) = loss_warning(&read_stats) {
+        out.push_str(&format!("⚠ {warning}\n"));
+    }
     if !recent.is_empty() {
         for entry in recent {
             out.push_str(&format!("[{}] {} {}\n", entry.source, entry.level, redact_secrets(&entry.message)));
@@ -208,5 +334,84 @@ mod tests {
             // 恰好 36 字符但不是 UUID 形状 -> 不动
             let not_uuid = "a".repeat(36);
             assert_eq!(redact_secrets(&not_uuid), not_uuid);
+        }
+
+        // -------------------------------------------------------------------
+        // task-110：读取统计必须**用户可见**，且不许把「有丢失」说成「正常」
+        // -------------------------------------------------------------------
+
+        fn stats_with_loss() -> xt_core::store::TailLogStats {
+            xt_core::store::TailLogStats {
+                files_read: 2,
+                lines: 100,
+                records: 104,
+                multi_object_lines: 4,
+                malformed_lines: 2,
+                bad_lines: vec!["app.jsonl:12".into(), "app.1.jsonl:88".into()],
+                ..Default::default()
+            }
+        }
+
+        /// 没有丢失时：报告那行必须**明说 0 行无法解析**（而不是含糊不提）。
+        #[test]
+        fn read_stats_line_reports_zero_loss_explicitly() {
+            let stats = xt_core::store::TailLogStats {
+                files_read: 2,
+                lines: 441_032,
+                records: 441_036,
+                multi_object_lines: 4,
+                truncated: 441_036 - 50,
+                ..Default::default()
+            };
+            let line = read_stats_line(&stats, 50);
+            assert!(line.starts_with("日志读取统计："), "{line}");
+            assert!(line.contains("0 行无法解析"), "没有丢失也要明说 0：{line}");
+            assert!(line.contains("441036") || line.contains("441,036"), "数值要带出来：{line}");
+            assert!(line.contains("只列出最近 50 条"), "{line}");
+            assert!(line.contains("内容完整"), "没丢东西时要敢说「内容完整」：{line}");
+            assert!(
+                !line.contains("截断"),
+                "「只显示最近 N 条」不许写成「截断」（真实日志上那是 35 万量级，会吓人也误导）：{line}"
+            );
+            assert!(!line.contains("**"), "没有丢失时不该有加粗告警：{line}");
+
+            // 没被显示上限砍过时（读取量 ≤ limit）不许说「只列出最近 N 条」。
+            let small = xt_core::store::TailLogStats { files_read: 1, lines: 3, records: 3, ..Default::default() };
+            let line = read_stats_line(&small, 3);
+            assert!(line.contains("全部列出（3 条）"), "{line}");
+        }
+
+        /// **有丢失时必须写成丢失** —— 这是本卡的敏感性核心：
+        /// 把统计换成恒为「0 / 无丢失」的假值 ⇒ 本测试红。
+        #[test]
+        fn read_stats_line_and_warning_do_not_hide_the_loss() {
+            let stats = stats_with_loss();
+            let line = read_stats_line(&stats, 3);
+            assert!(line.contains("2 行无法解析"), "必须报出坏行数：{line}");
+            assert!(line.contains("app.jsonl:12"), "必须报出可定位的样本：{line}");
+            assert!(line.contains("读不出来"), "要说清后果，而不是只给数字：{line}");
+
+            let warning = loss_warning(&stats).expect("有丢失就必须有提醒");
+            assert!(warning.contains("这不是正常情况"), "不许把它说成正常：{warning}");
+            assert!(warning.contains("2 行无法解析"), "{warning}");
+            assert!(warning.contains("app.1.jsonl:88"), "样本要跟上：{warning}");
+
+            // 没有丢失时**不许**凭空生成提醒（狼来了会让人忽略真的告警）。
+            assert!(loss_warning(&Default::default()).is_none());
+        }
+
+        /// 提醒去重：同一个签名只提醒一次；签名变化（新的坏行）要再提醒。
+        #[test]
+        fn loss_notify_fires_once_per_signature() {
+            let mut n = LossNotify::default();
+            let s1 = loss_signature(&stats_with_loss());
+            assert!(n.mark(s1.clone()), "第一次要提醒");
+            assert!(!n.mark(s1.clone()), "同一个问题不许每次刷新都写一遍（会把日志刷爆）");
+            let mut other = stats_with_loss();
+            other.bad_lines.push("app.jsonl:900".into());
+            assert!(
+                n.mark(loss_signature(&other)),
+                "出现**新的**坏行（签名变了）要再提醒一次"
+            );
         }
 }
