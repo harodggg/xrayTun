@@ -485,6 +485,75 @@ pub(crate) fn invalidate_connect_intent(state: &AppState, drop_kind: IntentDrop,
     }
 }
 
+/// **每一个「已知失败」的退场点**（task-75 ③）。
+///
+/// 列成枚举有两个用处：
+///
+/// 1. 让「该不该作废意图」成为**可断言的值**（`what_happened()` 是给日志的文案）；
+/// 2. 让「调用点还在不在」**能被测试抓住** —— 这些调用点各自埋在 async 流程里
+///    （要 Tauri `AppHandle` 才执行得到），纯函数测试证明不了「它还在」。
+///    测试 `every_failure_exit_still_invalidates_intent_in_production_source`
+///    按 `FailureExit::<Variant>` 这个标记在生产源码里逐个计数，**删一个就红**。
+///
+/// ⚠️ 新增退场点时：加变体 + 在 [`FailureExit::ALL`] 里登记 +
+/// 在出口调用 [`invalidate_after_failure`]。三件事缺一，守卫测试都会红。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailureExit {
+    /// 看门狗重建隧道失败，已退回直连。
+    WatchdogRebuild,
+    /// 换网后重建隧道失败，已退回直连。
+    NetworkWatchRebuild,
+    /// 自动重连试满 `RECONNECT_ATTEMPTS` 仍未成功（门禁没过）。
+    ReconnectExhausted,
+    /// 切换节点：目标起不来，且**没有可回退的节点**。
+    NodeSwitchNoFallback,
+    /// 切换节点：目标起不来，且取不到回退所需的状态。
+    NodeSwitchFallbackStateUnavailable,
+    /// 切换节点：目标起不来，且回退节点的选择没能落盘。
+    NodeSwitchFallbackPersistFailed,
+    /// 切换节点：目标起不来，回退节点也起不来。
+    NodeSwitchFallbackFailed,
+}
+
+impl FailureExit {
+    /// 全部退场点。**新增变体必须登记在这里**；`ALL` 与生产调用点的一致性
+    /// 由源码守卫测试保证。
+    ///
+    /// 只有测试读它（生产代码不需要遍历退场点），所以非测试构建里显式关掉
+    /// `dead_code`。但**它必须留在生产模块里**：它就是「清单」本身 —— 守卫测试
+    /// 靠它知道该检查哪些变体；挪进测试模块，新增变体就能悄悄溜过守卫。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const ALL: [FailureExit; 7] = [
+        Self::WatchdogRebuild,
+        Self::NetworkWatchRebuild,
+        Self::ReconnectExhausted,
+        Self::NodeSwitchNoFallback,
+        Self::NodeSwitchFallbackStateUnavailable,
+        Self::NodeSwitchFallbackPersistFailed,
+        Self::NodeSwitchFallbackFailed,
+    ];
+
+    /// 给人看的「发生了什么」。**只陈述事实**，不猜原因（不许写「节点被封了」这种）。
+    pub(crate) fn what_happened(self) -> &'static str {
+        match self {
+            Self::WatchdogRebuild => "看门狗重建隧道失败，已退回直连",
+            Self::NetworkWatchRebuild => "换网后重建隧道失败，已退回直连",
+            Self::ReconnectExhausted => "自动重连多次仍未成功（门禁未过）",
+            Self::NodeSwitchNoFallback => "切换到该节点失败，且没有可回退的节点",
+            Self::NodeSwitchFallbackStateUnavailable => "切换到该节点失败，且取不到回退所需的状态",
+            Self::NodeSwitchFallbackPersistFailed => "切换到该节点失败，且回退节点的选择未能落盘",
+            Self::NodeSwitchFallbackFailed => "切换到该节点失败，回退节点也未能启动",
+        }
+    }
+}
+
+/// **已知失败退场**：登记是哪个出口，并作废「自动重连」意图（落盘 + 留痕）。
+///
+/// `exit` 是枚举而不是散文案，所以每个调用点都能被源码守卫测试逐个计数。
+pub(crate) fn invalidate_after_failure(state: &AppState, exit: FailureExit) {
+    invalidate_connect_intent(state, IntentDrop::KnownFailure, exit.what_happened());
+}
+
 /// 看门狗该不该继续盯着这条隧道。
 ///
 /// 判据是**意图 + 代次**，而不是观测到的 `runtime.running`：
@@ -826,11 +895,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             // 不退的话，用户「退出应用」恢复的网络会在下次启动被同一个坏节点
             // 再接管一次（见 `connect_intent_after_stop` 的说明）。
             // 注意只碰意图：上面刚写的 recovery/notice 是界面显示失败原因的依据。
-            invalidate_connect_intent(
-                &state,
-                IntentDrop::KnownFailure,
-                "看门狗重建隧道失败，已退回直连",
-            );
+            invalidate_after_failure(&state, FailureExit::WatchdogRebuild);
             events::runtime_changed(&handle, &state);
             return;
         }
@@ -923,12 +988,15 @@ pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard
                 // 而这条路径恰恰是「用户报『切了节点就没网』」时最该看的地方。
                 if let Err(e) = select_node(handle.clone(), state, back).await {
                     if let Some(state) = handle.try_state::<AppState>() {
-                        state.log("app", "error", format!("自动退回上一个可用节点也失败：{e}"));
-                        invalidate_connect_intent(
-                            &state,
-                            IntentDrop::KnownFailure,
-                            "自动回退节点失败",
-                        );
+                        // **意图由 `select_node` 自己的失败出口处理**（它比我们清楚
+                        // 隧道最后起没起来，见 nodes.rs 的 `settle_switch`）——
+                        // 这里只把错误落日志。
+                        //
+                        // **不再自己解释结果**：`select_node` 的 Err 既可能是
+                        // 「回退成功但目标失败」，也可能是「回退也失败」，多写一句
+                        // 就是猜（旧文案「自动退回上一个可用节点也失败」在后一种
+                        // 之外的情况就是错的）。
+                        state.log("app", "error", format!("自动回退节点未成功：{e}"));
                     }
                 }
             }
@@ -1180,11 +1248,7 @@ pub(crate) fn spawn_network_watch(
                     });
                     // 已知失败 ⇒ 作废「自动重连」意图（task-64 的机制）：否则下次启动
                     // 会拿这个新出口再试一次同样的失败。
-                    invalidate_connect_intent(
-                        &state,
-                        IntentDrop::KnownFailure,
-                        "换网后重建隧道失败",
-                    );
+                    invalidate_after_failure(&state, FailureExit::NetworkWatchRebuild);
                     events::runtime_changed(&handle, &state);
                 }
             }
@@ -1345,11 +1409,7 @@ pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
     // 试满 `RECONNECT_ATTEMPTS` 仍不通 = **已知失败**（这门禁没过）。
     // 作废意图：否则下次启动会照原样把「一个已知失败的行为」再重复一遍，
     // 而用户已经在提示里被要求「手动连接」了。
-    invalidate_connect_intent(
-        state,
-        IntentDrop::KnownFailure,
-        "自动重连多次仍未成功（门禁未过）",
-    );
+    invalidate_after_failure(state, FailureExit::ReconnectExhausted);
     events::runtime_changed(app, state);
 }
 
@@ -2382,5 +2442,39 @@ mod tests {
             !prod.contains("请断开后重新连接"),
             "旧文案「隧道不再有效，请断开后重新连接」= 只报不修，不许回来",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // task-75 ③：**已知失败的退场点必须能被测试抓住**
+    //
+    // 这些作废调用各自埋在 async 流程里（要 Tauri `AppHandle` 才执行得到），
+    // 纯函数测试证明不了「它还在」；而 Lead 已明确否决「搭假 Tauri harness」。
+    // 所以这里做**源码级守卫**：每个 `FailureExit` 变体在生产源码里**必须恰好
+    // 出现一次**（= 那一处作废调用）。**删掉任意一处 → 本测试变红。**
+    //
+    // 它只保证「调用还在」，不保证运行时时序或文案 —— 这一点写在测试名里。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn every_failure_exit_still_invalidates_intent_in_production_source() {
+        // 只看 `#[cfg(test)]` 之前的部分：测试代码里也会拼 `FailureExit::X`
+        // （构造具体变体做断言），那不该算进锚点计数。
+        let strip = |src: &str| src.split("#[cfg(test)]").next().unwrap_or("").to_string();
+        let prod = format!(
+            "{}{}",
+            strip(include_str!("core.rs")),
+            strip(include_str!("nodes.rs")),
+        );
+        for exit in FailureExit::ALL {
+            let anchor = format!("FailureExit::{exit:?}");
+            let count = prod.matches(&anchor).count();
+            assert_eq!(
+                count, 1,
+                "退场点 `{anchor}` 在生产源码里应当**恰好出现一次**（那一处作废调用），\
+                 现在出现 {count} 次。新增退场点请三件事一起做：加变体、登记进 \
+                 `FailureExit::ALL`、在出口调用 `invalidate_after_failure`；\
+                 若是**删掉了**某处调用，请恢复它 —— 那正是 task-75 要防的回归。",
+            );
+        }
     }
 }
