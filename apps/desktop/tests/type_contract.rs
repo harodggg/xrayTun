@@ -391,3 +391,261 @@ fn core_runtime_shape_matches_the_frontend_types() {
     let extra: Vec<_> = rust.difference(&ts).collect();
     assert!(extra.is_empty(), "\nRecoveryState: Rust 多出字段 {extra:?}");
 }
+
+// ---------------------------------------------------------------------------
+// task-96：命令契约 —— `generate_handler!` 注册集 vs `ipc.ts` 的 `invoke()` 字面量集
+// ---------------------------------------------------------------------------
+
+fn lib_rs() -> String {
+    let p = repo_root().join("apps/desktop/src/lib.rs");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 {}: {e}", p.display()))
+}
+
+fn ipc_ts() -> String {
+    let p = repo_root().join("apps/ui/src/ipc.ts");
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 {}: {e}", p.display()))
+}
+
+/// 去掉注释，**保留长度**（注释字节换成空格），并且尊重字符串字面量。
+///
+/// 为什么必须尊重字面量：若注释里出现 `//`，朴素地"从 `//` 截到行尾"会把
+/// 同一行真正的调用（或字符串里的 URL）一起吃掉 —— 那正是**假绿**的来源。
+/// 换行原样保留，免得把两行粘成一行后产生新的误匹配。
+fn strip_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = vec![b' '; b.len()];
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            out[i] = c;
+            if c == b'\\' && i + 1 < b.len() {
+                out[i + 1] = b[i + 1];
+                i += 2;
+            } else {
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            b'"' | b'\'' | b'`' => {
+                quote = Some(c);
+                out[i] = c;
+                i += 1;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+            }
+            _ => {
+                out[i] = c;
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| src.to_string())
+}
+
+fn skip_ws(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && (b[i] as char).is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Rust 侧真源：`lib.rs` 里 `invoke_handler(tauri::generate_handler![…])` 的注册列表。
+///
+/// 取的是**注册**不是定义：`#[tauri::command]` 只说明"这个函数能当命令"，
+/// 只有进了 `generate_handler!` 才会出现在派发表里（task-94 实测：
+/// 删注册、留定义时编译与 clippy 都没有任何信号）。
+fn registered_commands(lib_rs_src: &str) -> BTreeSet<String> {
+    let src = strip_comments(lib_rs_src);
+    let at = src
+        .find("generate_handler!")
+        .expect("lib.rs 里应当有 generate_handler!");
+    let open = src[at..]
+        .find('[')
+        .map(|i| at + i)
+        .expect("generate_handler! 后面应当有 [");
+    let mut depth = 0usize;
+    let mut close = None;
+    for (off, ch) in src[open..].char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + off);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.expect("generate_handler![ 应当有配对的 ]");
+    src[open + 1..close]
+        .split("commands::")
+        .skip(1)
+        .filter_map(|rest| {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
+}
+
+/// TS 侧真源：`ipc.ts` 里每个 `invoke(…)` 调用的第一个参数。
+///
+/// 返回 `(字符串字面量命令名, 非字面量调用的原文片段)`。
+///
+/// **真源是 `invoke()` 里的字符串**，不是 `export const api = { … }` 的属性名：
+/// `start_proxy` 的封装叫 `start`、`stop_proxy` 的叫 `stop` —— task-94 的审计
+/// 按属性名换算 camelCase，正是因此把它们误报成死代码。
+fn ipc_invoke_calls(src: &str) -> (BTreeSet<String>, Vec<String>) {
+    let src = strip_comments(src);
+    let b = src.as_bytes();
+    let mut literals = BTreeSet::new();
+    let mut non_literal = Vec::new();
+    let mut i = 0usize;
+    while let Some(pos) = src[i..].find("invoke") {
+        let at = i + pos;
+        let after = at + "invoke".len();
+        let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let prev_ok = at == 0 || !ident(b[at - 1]);
+        let next_ok = after >= b.len() || !ident(b[after]);
+        i = after;
+        if !prev_ok || !next_ok {
+            continue;
+        }
+        let mut j = skip_ws(b, after);
+        if b.get(j) == Some(&b'<') {
+            // 跳过泛型实参（`invoke<AppSnapshot>("snapshot")`），支持嵌套。
+            let mut depth = 0usize;
+            while j < b.len() {
+                match b[j] {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            j = skip_ws(b, j);
+        }
+        if b.get(j) != Some(&b'(') {
+            continue; // `import { invoke }`、文档里提到的 `invoke` 字样
+        }
+        let arg = skip_ws(b, j + 1);
+        if b.get(arg) == Some(&b'"') {
+            let mut k = arg + 1;
+            while k < b.len() && b[k] != b'"' {
+                k += 1;
+            }
+            literals.insert(src[arg + 1..k.min(b.len())].to_string());
+        } else {
+            let end = (arg + 60).min(b.len());
+            non_literal.push(
+                src[arg..end]
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            );
+        }
+    }
+    (literals, non_literal)
+}
+
+/// 前端 `invoke()` 传**非字面量**的豁免清单（显式、且会被打印出来）。
+///
+/// 目前为空：`ipc.ts` 的 34 个调用全是字符串字面量。留这个常量是为了将来真有
+/// 动态命令名时有个**显式出口** —— 而不是让测试静默跳过（那种"跳过"就是假绿）。
+const NON_LITERAL_INVOKE_EXEMPT: &[&str] = &[];
+
+/// **跨语言命令契约**：`lib.rs` 的 `generate_handler!` 注册集，必须与
+/// `apps/ui/src/ipc.ts` 里 `invoke("<名字>")` 的字面量集**双向相等**。
+///
+/// # 为什么需要它（task-94 实测出的**单向**盲区）
+///
+/// * 删定义、留注册 → 编译器当场红（`error[E0433]: cannot find __cmd__…`），**挡得住**；
+/// * **删注册、留定义 → 编译 0、clippy 0 warning，毫无信号**（`pub` + `pub use`
+///   不会被判 dead_code），只有运行期 invoke 到未知命令才会暴露。本测试补的就是它。
+///
+/// # 它挡不住什么（别高估）
+///
+/// * 只比**名字**：不校验**参数形状**（`{ nodeId }` 写成 `{ id }` 照样通过）、
+///   不校验 `ipc.ts` 封装的返回类型、也不校验运行期是否真的注册成功；
+/// * 不做 TS/Rust 解析：是**行文约定**级的扫描，故两侧数量都写死做哨兵
+///   （解析退化 ⇒ 数量断言先红，不会两边都空而"相等"）。
+#[test]
+fn registered_commands_match_the_frontend_invoke_literals() {
+    let rust = registered_commands(&lib_rs());
+    let (ts, non_literal) = ipc_invoke_calls(&ipc_ts());
+
+    // 非字面量调用**不许静默跳过**：打印清单，未登记的一律红。
+    let exempt: BTreeSet<&str> = NON_LITERAL_INVOKE_EXEMPT.iter().copied().collect();
+    let unexpected: Vec<&String> = non_literal
+        .iter()
+        .filter(|s| !exempt.contains(s.as_str()))
+        .collect();
+    println!(
+        "ipc.ts 非字面量 invoke：{} 处 {non_literal:?}；显式豁免清单：{NON_LITERAL_INVOKE_EXEMPT:?}",
+        non_literal.len()
+    );
+    assert!(
+        unexpected.is_empty(),
+        "\nipc.ts 里有 invoke() 的第一个参数不是字符串字面量，契约测试无法判定它调的是哪个命令 \
+         —— 请改成字面量，或把它加进 NON_LITERAL_INVOKE_EXEMPT（会随本测试一起打印）：\n  {unexpected:?}\n"
+    );
+
+    // 哨兵：数量写死，增删命令时必须同步改这里（否则解析退化会假绿）。
+    assert_eq!(
+        rust.len(),
+        34,
+        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 34。\
+         增删命令请同步更新这个数字与 ipc.ts。实际注册: {rust:?}",
+        rust.len()
+    );
+    assert_eq!(
+        ts.len(),
+        34,
+        "\nipc.ts 的 invoke 字面量有 {} 个，预期 34；实际: {ts:?}",
+        ts.len()
+    );
+
+    // canary：专盯 task-94 那次误报的成因 —— 按封装名换算 camelCase 会漏掉它们。
+    for canary in ["start_proxy", "stop_proxy"] {
+        assert!(
+            ts.contains(canary),
+            "ipc.ts 里应当有 invoke(\"{canary}\")（它的封装名是 start/stop，不是 camelCase）"
+        );
+    }
+
+    assert_eq!(
+        rust,
+        ts,
+        "\n命令契约必须双向相等：\n  只在 Rust 注册、前端没声明: {:?}\n  只在前端声明、Rust 没注册: {:?}\n",
+        rust.difference(&ts).collect::<Vec<_>>(),
+        ts.difference(&rust).collect::<Vec<_>>()
+    );
+}
