@@ -27,14 +27,31 @@
      这就是「隧道被拆掉后多久没有隧道」的量化。
    * **它回答**：看门狗误判的**代价**（用户实际断多久），以及自愈到底有没有成功过（`隧道已自动恢复` 行数）。
 
-## 口径（**会写进输出的那种**）
+## 口径（**会写进输出的那种** —— 见输出的「口径头」那一段）
 
-* 去重：**按 `(ts_unix, message)` 去重**。`app.jsonl` 与 `app.1.jsonl` **有重叠** ——
-  实测某次 255,927 行 → 215,986 条（丢掉 39,934 条重复）。**不去重会把同一件事算两遍。**
-* 时间是**时点值**：日志在被持续追加。要拿到可复现的数字，用 `--until`/`--since` 固定窗口；
-  脚本会同时打印**日志文件的大小/mtime**作为快照标识。
-* 「探针轮」= 探针连接按时间排序后，**相邻间隔 > 5s** 就分子一轮（沿 task-95/task-100 的口径）。
-* 耗时用**消息体内的微秒时间戳**（`2026/09/22 13:32:36.785649`），不用 `ts_unix`（只有秒级）。
+输出开头有**口径头**（⓪–⑤ 六行）。引用本报告里的**任何数字**，都必须连口径头一起引用；
+只引一个数、不引口径，就是本项目反复栽的那类错。
+
+* **切（窗口）**：`--since` / `--until` 把「时点快照」变成「可复现的选择集」。
+  日志在被**持续追加**：**N**（窗口内命中条数）与 **T**（窗口右端）都是**移动标记**。
+* **解（解析）**：一行**可能含多个 JSON 对象**（`…}{…`，中间没有换行），用 `raw_decode`
+  循环解析到行尾。坏行分**四类**计数：**多对象行** / 截断·残缺 / 非 JSON / 空行。
+* **匹配（去重）**：**按 `(ts_unix, message)` 去重，先见者胜**；跨文件顺序
+  `app.1.jsonl` → `app.jsonl`。两个文件**有重叠**（`trim_log_file` 把同一段尾部写了两代，
+  实测重叠 ~39.9k 行）⇒ **不去重会把同一件事算两遍**。
+* **单位**：事件时间用 `ts_unix`（秒）；耗时用**消息体内的微秒时间戳**
+  （`2026/09/22 13:32:36.785649`，`ts_unix` 只有秒级）；「探针轮」= 相邻探针间隔 **> 5s** 分轮；
+  探针超时 = **6s**；字节 = B。
+* **行内上报的写入侧前提**：`message 含 LF 的记录数`。
+  写入侧（`AppState::log`，`apps/desktop/src/state.rs:387`）把 `\n` 转义成字面 `\n`、删掉 `\r`，
+  所以这个数**应当恒为 0**。它被写进输出，是因为「安全」必须是**被监控的量**而不是一句前提。
+* **选择内容指纹**（sha256，口径随本文件冻结）：
+  对「本次选中的记录」按 `(ts_unix, message)` 排序，逐条拼接**帧**再取 sha256。
+  帧 = `<body 的 UTF-8 字节数>:<body>\n`，`body = "<ts_unix>|<message>"`（**不含 source**）。
+  长度前缀把**记录边界**写进字节里 ⇒ **一条 message 含真实 LF 的记录永远 ≠ 两条记录**；
+  朴素的 `<ts>|<msg>\n` 拼接**不是单射**（self_test 夹具C 就是那个碰撞）。
+  ⚠️ **它不是「日志文件指纹」**：只覆盖「本次选中的记录」（窗口 + 去重之后）。
+  换窗口、换去重键、换文件顺序都会让它变；文件里**没被选中**的行它一无所知。
 
 ## 已知边界（**测不到什么**）
 
@@ -52,10 +69,14 @@
   python3 scripts/net-metrics.py --until 13:42:30     # 固定到某个时点（可复现）
   python3 scripts/net-metrics.py --since 13:00 --until 14:00
   python3 scripts/net-metrics.py --json
+  python3 scripts/net-metrics.py --export /tmp/selection.blob   # 证据子集（被指纹的字节）
   python3 scripts/net-metrics.py --self-test          # 人造小日志的自测 + 敏感性（不联网、只写 /tmp）
+
+⚠️ 引用任何数字都要连**口径头**（切/解/匹配/单位 + 选择内容指纹）一起引用；
+   同一个命令在不同时刻会给出不同数字（日志在追加）⇒ 可复现的前提是**钉住 --until**。
 """
 from __future__ import annotations
-import argparse, json, os, re, statistics as st, sys, tempfile
+import argparse, hashlib, json, os, re, statistics as st, sys, tempfile
 from datetime import datetime, timedelta
 
 # ---------------------------------------------------------------- 常量 / 正则
@@ -64,6 +85,11 @@ LOG_FILES = ("app.1.jsonl", "app.jsonl")          # 旧 → 新；两者有重�
 DEFAULT_PROBE_TARGETS = ("cp.cloudflare.com:80", "www.baidu.com:80")
 ROUND_GAP_SECS = 5.0        # 分轮阈值（写在输出里）
 PROBE_TIMEOUT_SECS = 6.0    # 应用侧探针超时（v0.8.33；用于统计「>6s 才成功」）
+DEDUPE_KEY = "(ts_unix, message)"   # 去重键（写在输出里；改它必须改同名的自测）
+# 口径版本：改口径（切/解/匹配/单位/指纹）就必须改这个字符串，
+# 好让文档里的旧数字一眼能看出「不是同一把尺子量的」。
+CALIBER_VERSION = "口径头 v2（2026-09-22：切/解/匹配/单位 + 选择内容指纹）"
+FINGERPRINT_ALGO = "sha256"
 
 RE_ID = re.compile(r"\[(\d{6,})\]\s")
 RE_CONNECT = re.compile(r"proxy/socks: TCP Connect request to (tcp:[^ ]+)")
@@ -121,11 +147,13 @@ def load_records(paths, since=None, until=None):
     去重是**必须**的：app.jsonl 与 app.1.jsonl 有重叠。
 
     「坏行」**分三类**统计（不再混成一个数）：**多对象行** / 截断·残缺行 / 非 JSON 行。
+    另外统计 `lf_in_message`：**选中的**记录里 message 含真实 LF 的条数（写入侧前提的被监控量）。
     """
     seen, out = set(), []
     stats = {"lines": 0, "objects": 0, "multi_object_lines": 0, "blank_lines": 0,
              "dup": 0, "kept": 0, "truncated_lines": 0, "non_json_lines": 0,
-             "src_app": 0, "src_core": 0, "src_other": 0}
+             "src_app": 0, "src_core": 0, "src_other": 0, "lf_in_message": 0,
+             "dup_in_window": 0}
     for p in paths:
         if not os.path.exists(p):
             continue
@@ -155,6 +183,12 @@ def load_records(paths, since=None, until=None):
                     key = (d.get("ts_unix"), d.get("message"))
                     if key in seen:
                         stats["dup"] += 1
+                        # 「丢弃了几条」有两个意思：**全文件扫描**丢了多少，
+                        # 与**本窗口内**丢了多少。两个都算，输出里分列 —— 否则
+                        # 读者会把一个全文件口径的数当成窗口内的数（这是本项目的常见栽法）。
+                        td = d.get("ts_unix") or 0
+                        if (since is None or td >= since) and (until is None or td <= until):
+                            stats["dup_in_window"] += 1
                         continue
                     seen.add(key)
                     t = d.get("ts_unix") or 0
@@ -164,13 +198,48 @@ def load_records(paths, since=None, until=None):
                         continue
                     src = d.get("source")
                     stats["src_app" if src == "app" else ("src_core" if src == "core" else "src_other")] += 1
-                    out.append({"t": t, "src": src, "level": d.get("level"),
-                                "msg": d.get("message") or ""})
+                    msg = d.get("message") or ""
+                    if "\n" in msg:                      # 写入侧本该把 LF 转义掉 ⇒ 期望恒为 0
+                        stats["lf_in_message"] += 1
+                    out.append({"t": t, "src": src, "level": d.get("level"), "msg": msg})
                     stats["kept"] += 1
     out.sort(key=lambda r: r["t"])
     return out, stats
-    out.sort(key=lambda r: r["t"])
-    return out, stats
+
+
+# ---------------------------------------------------------------- 选择内容指纹
+def frame_record(t, msg):
+    """单条记录的**帧**：`<body 的 UTF-8 字节数>:<body>\\n`，其中 `body = "<ts>|<message>"`。
+
+    长度前缀是**分帧安全**的关键：朴素的 `<ts>|<msg>\\n` 拼接**不是单射** ——
+    一条 message 含真实 LF 的记录（`"C1\\n3001|C2"`）与两条记录（`"C1"` / `"C2"`）
+    会拼出**完全相同**的字节串（self_test 夹具C 就是这个碰撞）。
+    把长度写进帧之后，「记录边界」不再依赖 message 的内容。
+
+    实测：本机 2026-09-22 的日志里 **message 含 LF 的记录 = 0** ⇒ 今天两种口径的指纹
+    *恰好*一致；**正因为如此**，这个前提必须被行内上报、被监控，而不是被假设。
+    """
+    body = f"{int(t)}|{msg}"
+    return f"{len(body.encode('utf-8'))}:{body}\n"
+
+
+def selection_blob(records):
+    """被哈希的字节串本身：按 `(ts_unix, message)` 排序后逐条拼帧。
+
+    排序是**口径的一部分**（与文件顺序、去重时谁先见无关）⇒ 同一选择集**必然**同指纹。
+    """
+    ordered = sorted(records, key=lambda r: (int(r["t"]), r["msg"]))
+    return "".join(frame_record(r["t"], r["msg"]) for r in ordered)
+
+
+def selection_fingerprint(records):
+    """**选择内容指纹**（sha256 of [`selection_blob`]）。
+
+    ⚠️ **它不是「日志文件指纹」**：只覆盖「本次选中的记录」（窗口 + 去重之后）。
+    日志在被持续追加 ⇒ 同一条命令在不同时刻得到**不同**指纹，除非同时钉住 `--until`。
+    想指纹整个日志文件是**另一件事**，本脚本不提供、也不假装提供。
+    """
+    return hashlib.sha256(selection_blob(records).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------- ① task-97
@@ -351,16 +420,47 @@ def hm(t):
     return datetime.fromtimestamp(t).strftime("%H:%M:%S") if t else "—"
 
 
-def print_report(recs, stats, m1, m2, m3, window):
+def full(t):
+    """窗口端点用**带日期**的格式：只写 HH:MM:SS 在跨天窗口里是有歧义的。"""
+    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S") if t else "—"
+
+
+def caliber_lines(stats, m2, ctx):
+    """**口径头**（六行）。引用本报告任何数字时**必须**连它一起引用。
+
+    ⓪ 身份 + 移动标记（N/T） ① 切（窗口） ② 解（解析） ③ 匹配（去重） ④ 单位 ⑤ 选择内容指纹
+    """
+    win = ctx["window"]
+    return [
+        "口径头（引用任何数字请连这一段一起引用）：",
+        f"  ⓪ 身份/移动标记：工具=scripts/net-metrics.py；{CALIBER_VERSION}",
+        f"     N=窗口内命中 {stats['kept']} 条（**移动标记**：日志在被持续追加）；"
+        f"T=窗口右端 {win['until']}（**移动标记**）",
+        f"     日志目录={ctx['log_dir']}；文件 {ctx['n_present']}/{len(LOG_FILES)} 个存在：{ctx['snap']}",
+        f"  ① 切（窗口）  ：{win['since']} → {win['until']}（本地时区）",
+        f"  ② 解（解析）  ：**全文件扫描**：读 {stats['lines']} 行 → {stats['objects']} 个对象；"
+        f"多对象行 {stats['multi_object_lines']} 行（一行含 >1 个 JSON 对象，已全部计入）",
+        f"     坏行分四类：截断·残缺 {stats['truncated_lines']} / 非 JSON {stats['non_json_lines']} / "
+        f"空行 {stats['blank_lines']}",
+        f"     **message 含 LF 的记录数 = {stats['lf_in_message']}**"
+        f"（写入侧 `AppState::log` 转义后应恒为 0 —— 这是**被监控的量**，不是假设）",
+        f"  ③ 匹配（去重）：键 = {DEDUPE_KEY}，先见者胜；跨文件顺序 {' → '.join(LOG_FILES)}；"
+        f"丢弃重复 **{stats['dup']} 条（全文件扫描口径）**，其中落在本窗口内 {stats['dup_in_window']} 条；"
+        f"命中 {stats['kept']} 条",
+        f"     来源：source=app {stats['src_app']} / source=core {stats['src_core']} / 其它 {stats['src_other']}",
+        f"  ④ 单位        ：时间=ts_unix(秒)；耗时=消息内微秒时间戳；"
+        f"探针轮=相邻间隔>{m2['round_gap_secs']:.0f}s；探针超时={m2['timeout_secs']:.0f}s；字节=B",
+        f"  ⑤ 选择内容指纹：{FINGERPRINT_ALGO}:{ctx['fingerprint']}",
+        f"     ⚠️ 这是「本次选中的 {stats['kept']} 条」的指纹，**不是日志文件指纹**"
+        f"（换窗口 / 换去重键即变；未选中的行不覆盖）",
+    ]
+
+
+def print_report(stats, m1, m2, m3, ctx):
     print("=" * 78)
     print("net-metrics：XrayTun 日志指标（只读）")
-    print(f"  窗口：{window}")
-    print(f"  解析：读 {stats['lines']} 行 → 解析出 {stats['objects']} 个对象；"
-          f"其中**多对象行 {stats['multi_object_lines']} 行**（一行含 >1 个 JSON 对象，已全部计入）")
-    print(f"  去重：保留 {stats['kept']} 条；丢弃重复 {stats['dup']} 条；"
-          f"截断·残缺行 {stats['truncated_lines']}；非 JSON 行 {stats['non_json_lines']}；空行 {stats['blank_lines']}")
-    print(f"  来源：source=app {stats['src_app']} 条 / source=core {stats['src_core']} 条 / 其它 {stats['src_other']} 条")
-    print(f"  分轮口径：相邻探针间隔 > {m2['round_gap_secs']:.0f}s 分轮；探针超时={m2['timeout_secs']:.0f}s（用于「>超时才对」计数）")
+    for ln in caliber_lines(stats, m2, ctx):
+        print(ln)
     print("=" * 78)
 
     print("\n【① task-97：目标改写 × failed to open connection】")
@@ -552,11 +652,115 @@ def self_test():
     print(f"  改前 口径A={m3['void_intents'][0]['gap_to_next_core_secs']}s  改后 口径A={m3b['void_intents'][0]['gap_to_next_core_secs']}s")
     check("敏感性 3：口径A 变 180s", m3b["void_intents"][0]["gap_to_next_core_secs"], 180)
 
+    # ---------- 夹具 A/B/C：指纹口径的**六个写死的期望值** ----------
+    # 口径（本文件冻结，见模块 docstring）：键 = (ts_unix, message)；串 = "<ts>|<message>"；分帧安全。
+    #
+    # ⚠️ 每个「错误口径」**只偏一个自由度**，并且**按偏差写标签** ——
+    #    只写「错误口径」这四个字，本身就是一个**没写死的口径**（2026-09-22 真的因此算错过两个值）：
+    #      夹具A 错误 = **仅**帧里的串改成含 src（去重键与排序不变）
+    #      夹具B 错误 = **仅**去重键改成 (ts, src, message)（串与排序不变）
+    #      夹具C      = 分帧安全性：**一条 message 含真实 LF 的记录 ≠ 两条记录**
+    print("\n=== 夹具：选择内容指纹（三个夹具 / 六个期望值 / 每个错误口径只偏一个自由度）===")
+
+    FP = {
+        # 六个期望值：**写死的常量**。它们只对「本文件的帧口径」（见 frame_record）成立；
+        # 想跨实现核对，看下面打印出来的**规范化字节串**（digest 只是它的 sha256）。
+        "A_correct": "fb823743341ac392f201f700e078604c06741c2821d076919e2bc76895566f4a",
+        "A_wrong_src": "4119d46d0c291d3459df2da7ebeaf5b7aaa375fa26c3538a4377375e177ff484",
+        "B_correct": "f1648152cbbe8db8ed94452ca6a63ecea4d518682868e132a7550064e5678b79",
+        "B_wrong_key": "46c953690bb58b122163786a7681cbe72bed0ff10084cecd4e596fec941884b6",
+        "C_one": "72d7b49ebbc8d725bdf31e0f56ca9c0037bb15a92e201ccdb57bf698cf20d3d1",
+        "C_two": "9e36ab5bc974241444d282109127d0a75f33efa29a4c24a6fc1b1e9f1cf88dfe",
+    }
+
+    def fp_variant(records, *, key_uses_src=False, body_uses_src=False, framed=True):
+        """自测用的**偏差实现**（生产代码里没有这些旋钮）。三个自由度各对应一个夹具。"""
+        seen, sel = set(), []
+        for r in sorted(records, key=lambda r: (int(r["t"]), r["msg"])):
+            k = (int(r["t"]), r["src"], r["msg"]) if key_uses_src else (int(r["t"]), r["msg"])
+            if k in seen:
+                continue
+            seen.add(k)
+            sel.append(r)
+        def body(r):
+            return (f"{int(r['t'])}|{r['src']}|{r['msg']}" if body_uses_src
+                    else f"{int(r['t'])}|{r['msg']}")
+        if framed:
+            blob = "".join(f"{len(body(r).encode('utf-8'))}:{body(r)}\n" for r in sel)
+        else:
+            blob = "".join(body(r) + "\n" for r in sel)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def dedupe_correct(records):
+        seen, sel = set(), []
+        for r in records:
+            k = (int(r["t"]), r["msg"])
+            if k in seen:
+                continue
+            seen.add(k)
+            sel.append(r)
+        return sel
+
+    # --- 夹具A：钉「帧里的串怎么组成」。**内部没有**跨源同 (ts,msg) ⇒ 对去重键这个自由度不敏感。
+    fx_a = [{"t": 1000, "src": "app", "level": "info", "msg": "A1"},
+            {"t": 1001, "src": "core", "level": "info", "msg": "A2"},
+            {"t": 1002, "src": "app", "level": "info", "msg": "A3"}]
+    fp_a_ok = selection_fingerprint(dedupe_correct(fx_a))
+    fp_a_wrong = fp_variant(fx_a, body_uses_src=True)
+    check("期望_夹具A_正确（键=(ts,msg)、串=ts|msg、分帧安全）", fp_a_ok, FP["A_correct"])
+    check("期望_夹具A_错误（**仅**串改含 src；键与排序不变）", fp_a_wrong, FP["A_wrong_src"])
+    check("夹具A 确实**对去重键不敏感**（所以 A 钉的是「串」、B 钉的是「键」）",
+          fp_variant(fx_a, key_uses_src=True) == fp_a_ok, True)
+
+    # --- 夹具B：钉「去重键」。**故意**含一对「同 (ts,msg) 不同 src」的重复 ⇒ 换键就换选择集。
+    fx_b = [{"t": 2000, "src": "app", "level": "info", "msg": "B-dup"},
+            {"t": 2000, "src": "core", "level": "info", "msg": "B-dup"},
+            {"t": 2001, "src": "app", "level": "info", "msg": "B-uniq"}]
+    fp_b_ok = selection_fingerprint(dedupe_correct(fx_b))
+    fp_b_wrong = fp_variant(fx_b, key_uses_src=True)
+    check("期望_夹具B_正确（键=(ts,msg)、串=ts|msg、分帧安全）", fp_b_ok, FP["B_correct"])
+    check("期望_夹具B_错误（**仅**键改 (ts,src,msg)；串与排序不变）", fp_b_wrong, FP["B_wrong_key"])
+    check("夹具B 正确口径下 (ts,msg) 重复被去掉：3 条 → 2 条", len(dedupe_correct(fx_b)), 2)
+    check("夹具B 错误口径下不去重：3 条 → 3 条",
+          len({(int(r["t"]), r["src"], r["msg"]) for r in fx_b}), 3)
+
+    # --- 夹具C：分帧安全性。**一条含真实 LF 的 message** vs **两条记录**。
+    #     ts 必须是 3000/3001，message 里那截必须是 "3001|C2" —— 这样朴素拼接才会**逐字节相同**。
+    c_one = {"t": 3000, "src": "app", "level": "info", "msg": "C1\n3001|C2"}
+    c_two = [{"t": 3000, "src": "app", "level": "info", "msg": "C1"},
+             {"t": 3001, "src": "app", "level": "info", "msg": "C2"}]
+    fp_c_one = selection_fingerprint([c_one])
+    fp_c_two = selection_fingerprint(c_two)
+    fp_c_one_naive = fp_variant([c_one], framed=False)
+    fp_c_two_naive = fp_variant(c_two, framed=False)
+    check("期望_夹具C_一条（message 含真实 LF）", fp_c_one, FP["C_one"])
+    check("期望_夹具C_两条", fp_c_two, FP["C_two"])
+    check("反例_夹具C：朴素拼接（非分帧）下「一条 == 两条」← 这正是被分帧挡住的碰撞",
+          fp_c_one_naive == fp_c_two_naive, True)
+    check("夹具C：分帧后「一条 ≠ 两条」", fp_c_one != fp_c_two, True)
+    # 跨实现核对**不需要猜 digest 口径**：把规范化字节串打出来，任何实现都能逐字节比。
+    print(f"  夹具C 规范化字节串：一条 = {selection_blob([c_one])!r}")
+    print(f"  夹具C 规范化字节串：两条 = {selection_blob(c_two)!r}")
+    naive_one = c_one["msg"] + "\n"
+    naive_two = c_two[0]["msg"] + "\n" + f"{int(c_two[1]['t'])}|{c_two[1]['msg']}" + "\n"
+    print(f"  朴素拼接字节串：一条 = {naive_one!r}")
+    print(f"  朴素拼接字节串：两条 = {naive_two!r}；**逐字节相同 = {naive_one == naive_two}**")
+
+    # --- LF 上报口径的端到端检查：JSON 里写的是转义 `\n`，解析后是**真实 LF** ⇒ 计数必须为 1。
+    p_lf = os.path.join(tmp, "lf.jsonl")
+    with open(p_lf, "w") as f:
+        f.write(json.dumps({"ts_unix": 4000, "source": "app", "level": "info",
+                            "message": "第一行\n第二行"}) + "\n")
+    _, stats_lf = load_records([p_lf])
+    check("行内上报：message 含 LF 的记录数（夹具=1）", stats_lf["lf_in_message"], 1)
+    check("行内上报：本自测的「正常」人造日志里为 0", stats["lf_in_message"], 0)
+
     print()
     if fails:
         print(f"self-test：**失败**（{len(fails)} 项）：{fails}")
         return 1
-    print("self-test：**全部通过**（去重 / 多对象行 / v6-v4 分类 / 探针三种结局 / 分轮 / 空档 / 四项敏感性）")
+    print("self-test：**全部通过**（去重 / 多对象行 / v6-v4 分类 / 探针三种结局 / 分轮 / 空档 / "
+          "LF 上报 / 指纹三夹具六期望值 / 六项敏感性）")
     return 0
 
 
@@ -585,8 +789,10 @@ def main(argv=None):
     ap.add_argument("--log-dir", default=LOG_DIR_DEFAULT, help="日志目录（默认：macOS 应用日志目录）")
     ap.add_argument("--since", type=parse_when, help="起始时间 HH:MM[:SS] 或 'YYYY-MM-DD HH:MM[:SS]'")
     ap.add_argument("--until", type=parse_when, help="截止时间（推荐固定它，数字才可复现）")
-    ap.add_argument("--json", action="store_true", help="以 JSON 输出（便于机器比对）")
+    ap.add_argument("--json", action="store_true", help="以 JSON 输出（便于机器比对；含口径头字段）")
     ap.add_argument("--self-test", action="store_true", help="人造小日志的自测 + 敏感性（只写 /tmp）")
+    ap.add_argument("--export", metavar="PATH",
+                    help="把「被指纹的那串字节」导出到 PATH（证据子集；可 shasum -a 256 自校验）")
     a = ap.parse_args(argv)
 
     if a.self_test:
@@ -601,15 +807,47 @@ def main(argv=None):
         print("✗ 窗口内没有记录（检查 --since/--until）", file=sys.stderr)
         return 2
     m1, m2, m3 = analyze_task97(recs), analyze_probes(recs), analyze_selfheal(recs)
-    window = f"{'全部' if a.since is None else hm(a.since)} → {'全部' if a.until is None else hm(a.until)}；共 {len(recs)} 条记录"
+    fingerprint = selection_fingerprint(recs)
+    win = {"since": "全部" if a.since is None else full(a.since),
+           "until": "全部" if a.until is None else full(a.until)}
     snap = "；".join(f"{f}={os.path.getsize(os.path.join(a.log_dir,f))}B/mtime{datetime.fromtimestamp(os.path.getmtime(os.path.join(a.log_dir,f))).strftime('%H:%M:%S')}"
                      for f in LOG_FILES if os.path.exists(os.path.join(a.log_dir, f)))
+    ctx = {"window": win, "fingerprint": fingerprint, "snap": snap,
+           "log_dir": a.log_dir, "n_present": sum(1 for p in paths if os.path.exists(p))}
+
+    if a.export:
+        # 证据子集：写出来的**就是**被指纹的那串字节 ⇒ 任何人拿它跑 `shasum -a 256` 就能复算指纹，
+        # 不需要 80MB 的原始日志、也不需要本脚本。原始日志**只读**，不被改动。
+        if os.path.abspath(a.export).startswith(os.path.abspath(a.log_dir) + os.sep):
+            print("✗ 导出路径不能落在日志目录里（会在日志目录里造出非日志文件）", file=sys.stderr)
+            return 2
+        blob = selection_blob(recs)
+        with open(a.export, "w", encoding="utf-8", newline="") as f:
+            f.write(blob)
+        to = sys.stderr if a.json else sys.stdout
+        print(f"证据子集已导出：{a.export}（{len(blob.encode('utf-8'))} 字节；内容 = 被指纹的那串字节）", file=to)
+        print(f"  自校验：`shasum -a 256 {a.export}` 的第一个字段应当等于 {fingerprint}", file=to)
+
     if a.json:
         m2.pop("_rounds", None); m2.pop("_conns", None)
-        print(json.dumps({"window": window, "snapshot": snap, "stats": stats,
-                          "task97": m1, "probes": m2, "selfheal": m3}, ensure_ascii=False, indent=2))
+        print(json.dumps({
+            "caliber": {
+                "version": CALIBER_VERSION,
+                "window_since": win["since"], "window_until": win["until"],
+                "log_dir": a.log_dir, "log_files_order": list(LOG_FILES),
+                "files_present": ctx["n_present"], "snapshot": snap,
+                "parse": "raw_decode 循环（一行可含多个 JSON 对象）",
+                "dedupe_key": DEDUPE_KEY, "duplicates_dropped": stats["dup"],
+                "duplicates_dropped_in_window": stats["dup_in_window"],
+                "hits": stats["kept"], "message_with_lf_records": stats["lf_in_message"],
+                "selection_fingerprint": f"{FINGERPRINT_ALGO}:{fingerprint}",
+                "selection_fingerprint_is_not_file_fingerprint": True,
+            },
+            "window": f"{win['since']} → {win['until']}；共 {len(recs)} 条记录",
+            "snapshot": snap, "stats": stats,
+            "task97": m1, "probes": m2, "selfheal": m3}, ensure_ascii=False, indent=2))
     else:
-        print_report(recs, stats, m1, m2, m3, window)
+        print_report(stats, m1, m2, m3, ctx)
         print(f"\n快照标识（日志在增长 ⇒ 请连同时点一起引用）：{snap}")
     return 0
 
