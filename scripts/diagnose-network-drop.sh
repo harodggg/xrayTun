@@ -344,7 +344,9 @@ section "2c. 回环可用性（127.0.0.1 **以及其它 127.x.x.x**）"
   echo "  修复前 crates/xt-proto/src/lib.rs 的 default_bypass_networks() 里含 \"127.0.0.0/8\"（与连接态实读的旁路集合逐条吻合），"
   echo "  而 crates/xt-tun/src/plan.rs 把**所有 IPv4 旁路网段一律指向物理网关**；"
   echo "  修复 63b84dc（task-83）已把 127/8 移出该列表，并在规划层加防御。"
-  echo "  ⇒ 机器上仍看到它，最可能是**已安装的 App 还是旧版本**（新代码尚未上机）。"
+  echo "  ⇒ 机器上仍看到它，说明**修复还没在真机生效**：本机特权 helper 仍是 9月13 的旧构建"
+  echo "     （/Library/Application Support/com.xraytun.helper/com.xraytun.helper），而 App 包已是新的；"
+  echo "     `63b84dc` 的防御在 helper 侧，**要重装助手才生效**。"
   echo
   for A in 127.0.0.1 127.0.0.2; do
     echo "-- ${A}"
@@ -359,20 +361,32 @@ section "2c. 回环可用性（127.0.0.1 **以及其它 127.x.x.x**）"
       echo "    （未检测到 SOCKS 端口，跳过 nc/curl 那两行；可用 --socks-port 指定）"
     fi
   done
-  # 判读：127.0.0.1 通而 127.0.0.2 不通 ⇒ 回环是**局部**坏的
+  # 判读：光看「nc 通不通」不够 —— nc 对「被拒绝」和「路由不通」都返回非 0。
+  # **决定性判据是路由层**：`route -n get 127.0.0.2` 的 interface **必须是 lo0**。
+  # （实测教训：隧道断开、`127 → 网关` 那条显式路由已经不在了，但 `route -n get 127.0.0.2`
+  #   仍然落到 `default → 192.168.0.1 / en0` —— 也就是说「坏路由消失」≠「回环恢复」。）
   run_cap 4 nc -z -G 2 -w 2 127.0.0.1 "${SOCKS_PORT:-1}"
   RC_LO1=$RUN_RC
   run_cap 4 nc -z -G 2 -w 2 127.0.0.2 "${SOCKS_PORT:-1}"
   RC_LO2=$RUN_RC
+  run_cap 5 route -n get 127.0.0.2
+  LO2_IF="$(printf '%s\n' "$RUN_OUT" | awk '/interface:/{print $2; exit}')"
+  LO2_GW="$(printf '%s\n' "$RUN_OUT" | awk '/gateway:/{print $2; exit}')"
+  echo "    route -n get 127.0.0.2：$(printf '%s' "$RUN_OUT" | tr '\n' ' ' | cut -c1-140)"
+  echo "    （决定性判据：interface 应为 lo0；若落到 default/物理网卡 ⇒ **回环被绕开了**）"
   echo
   echo "-- 判读"
-  if [ "$RC_LO1" = "0" ] && [ "$RC_LO2" != "0" ]; then
-    echo "    [异常] 127.0.0.1 可达但 127.0.0.2 不可达 ⇒ **回环局部失效**（与 §3c 的路由形态一起看）"
+  if [ "$LO2_IF" != "lo0" ]; then
+    echo "    [异常] 127.0.0.2 的路由出口是「${LO2_IF:-（读不到）}」而不是 lo0（gateway=${LO2_GW:-无}）"
+    echo "           ⇒ 除 127.0.0.1（自带 /32）之外的 127.x.x.x **被绕开回环**（当前状态：${RC_LO2}）"
+    note_anomaly "127.0.0.2 未走 lo0（route get 出口=${LO2_IF:-?}，gateway=${LO2_GW:-?}）（§2c）"
+  elif [ "$RC_LO1" = "0" ] && [ "$RC_LO2" != "0" ]; then
+    echo "    [异常] 路由出口是 lo0，但 127.0.0.2 仍不可连（rc=${RC_LO2}）⇒ 回环**局部**失效（端口/绑定层）"
     note_anomaly "回环局部失效：127.0.0.1 通、127.0.0.2 不通（§2c）"
   elif [ "$RC_LO1" = "0" ] && [ "$RC_LO2" = "0" ]; then
-    echo "    [正常] 127.0.0.1 与 127.0.0.2 都可连"
+    echo "    [正常] 127.0.0.2 走 lo0，且 127.0.0.1 与 127.0.0.2 都可连"
   else
-    echo "    （没有可比对的监听端口，或两个都不通 —— 结合 §3c 的路由判读看）"
+    echo "    （没有可比对的监听端口；路由出口已是 lo0 ⇒ 回环本身没被绕开）"
   fi
 } >> "$OUT"
 

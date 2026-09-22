@@ -39,6 +39,7 @@ PREV=${PREV:-}
 ALLOW_STALE_LATEST=${ALLOW_STALE_LATEST:-0}
 SKIP_MIRROR=${SKIP_MIRROR:-0}
 TIMEOUT=${TIMEOUT:-30}
+SELF_TEST=0
 
 usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -47,14 +48,16 @@ while [ $# -gt 0 ]; do
     --ver)  VER=${2:-}; shift 2 ;;
     --prev) PREV=${2:-}; shift 2 ;;
     --base) BASE=${2:-}; shift 2 ;;
+    --self-test) SELF_TEST=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数：$1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-if [ -z "$VER" ] || [ -z "$PREV" ]; then
+if [ "$SELF_TEST" != "1" ] && { [ -z "$VER" ] || [ -z "$PREV" ]; }; then
   echo "✗ 必须给出目标版本与上一版本（不写死在脚本里，否则下一版就过期）：" >&2
   echo "    VER=0.8.31 PREV=0.8.30 $0          # 或 --ver 0.8.31 --prev 0.8.30" >&2
+  echo "    $0 --self-test                     # 离线自检：只跑 §2b 的判读逻辑，不联网" >&2
   exit 2
 fi
 
@@ -92,6 +95,90 @@ ct_matches() { # <actual> <expected-family>
   esac
   return 1
 }
+
+# judge_prev_asset <status> <content-type> <bytes> <sha256> <期望族> <标签> <已知页面指纹...>
+#
+# 判「已从仓库删除的旧资产」现在处于什么状态。返回值：
+#   0 = 已消失（真 404）—— 正常
+#   2 = **观察项**：缓存残留的合法旧资产（content-type 与期望族一致、且 sha 不像任何页面）
+#       —— 语义是「删掉的东西还能从边缘取到」，属缓存行为，**不阻断退出码**
+#   1 = **异常**：图片路径返回 text/html（一个 HTML 页在冒充图片），
+#       或 content-type 像图片但 body sha 命中已知页面指纹（同样是冒充）
+#
+# 为什么要有这条区分：`site/_headers` 给 `/og-image*.png` 设了
+# `max-age=31536000, immutable`，于是**被删掉的旧图会在边缘继续 200 一年**；
+# 而更早那次事故留下的是「软 404 的 HTML 被当成图片缓存」—— 两者都返回 200，
+# 但一个无害、一个是真异常。只看状态码（甚至只看 200/404）分不出来。
+judge_prev_asset() {
+  local code=$1 ct=$2 bytes=$3 sha=$4 family=$5 label=$6 pshas=$7
+  local ps hit_page=0
+  for ps in $pshas; do [ "$sha" = "$ps" ] && hit_page=1; done
+  if [ "$code" = "404" ] || [ "$code" = "410" ]; then
+    echo "  ✓ ${label}：真 404（不存在）"
+    return 0
+  fi
+  if [ "$code" = "200" ] && ct_matches "$ct" html; then
+    echo "  ✗ ${label}：**异常** —— 图片路径返回 text/html · $bytes B · sha ${sha:0:16}…"
+    echo "       ⇒ 一个 HTML 页在冒充图片（软 404 的缓存体，或站点兜底）"
+    return 1
+  fi
+  if [ "$code" = "200" ] && ct_matches "$ct" "$family"; then
+    if [ "$hit_page" = "1" ]; then
+      echo "  ✗ ${label}：**异常** —— content-type 是 ${family}，但 body sha 命中已知页面指纹（${sha:0:16}…）⇒ 冒充"
+      return 1
+    fi
+    echo "  ⚠️  ${label}：**观察项** —— 缓存残留的合法旧资产（$family · $bytes B · sha ${sha:0:16}…）"
+    echo "       已从仓库删除但仍在边缘缓存（immutable）⇒ **不阻断**；要清需在 CF 侧 purge。"
+    return 2
+  fi
+  echo "  ✗ ${label}：**异常** —— HTTP $code / content-type「${ct:-（无）}」不符合任何正常形态"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# --self-test：用**真实采样**验证 §2b 的判读真的能区分两类 200（离线，不联网）
+# ---------------------------------------------------------------------------
+# 四个样例全部来自 2026-09-22 11:08–11:15 在 https://xraytun.top 上的真实响应
+# （`curl -s -L -D hdr -o body -w '%{http_code}'` 后取 content-type + 字节数 + sha256）。
+# 「页面体」指纹用当时实测的首页与 404 页（两者逐字节不同）。
+run_self_test() {
+  local rc=0
+  local PAGE_FIX=" 3c720dce2d5d785cb263d9fb6e0a81134a8256f0ab996260deb4d617231d7106 6db7d5598f0705ac9678978043e686590c4d494d954f6f03a49b182c8c821f66"
+  _case() { # <期望码> <标题> <status> <ct> <bytes> <sha> <family>
+    local want=$1 title=$2; shift 2
+    local out got
+    echo "==================================================================="
+    echo "样例：$title"
+    echo "  输入：HTTP $1 · content-type: $2 · $3 bytes · sha256 $4 · 期望族 $5"
+    out="$(judge_prev_asset "$1" "$2" "$3" "$4" "$5" "被检对象" "$PAGE_FIX")"
+    got=$?
+    printf '%s\n' "$out"
+    echo "  → 判定码 = ${got}（期望 ${want}；0=已消失 2=观察项(不阻断) 1=异常）"
+    if [ "$got" = "$want" ]; then echo "  ✓ 符合预期"; else echo "  ✗ 不符合预期（敏感性失败）"; rc=1; fi
+  }
+  echo "=== verify-live-site.sh --self-test：§2b 判读的双向敏感性验证 ==="
+  echo "「页面体」指纹（fixture 用）：首页 3c720dce… + 404 页 6db7d559…"
+  _case 1 "真实样例 A：/og-image-0.8.30.png —— 图片路径返回 text/html（真异常，必须 ✗）" \
+    200 "text/html; charset=utf-8" 43696 1e12653843e9f902598f3491ca72fe2c3be181ac53907a1e616cf45e36af2d85 png
+  _case 2 "真实样例 B：/og-image-0.8.31.png —— image/png 的缓存残留旧图（必须只 WARN，不阻断）" \
+    200 "image/png" 58984 e87db07a8ec44b38d39b514f63b44c0f973279f3a5d85c4192408cdc7fcd77b1 png
+  _case 1 "反例 C：image/png 但 body sha 命中「页面体」指纹（冒充，必须 ✗）" \
+    200 "image/png" 9183 6db7d5598f0705ac9678978043e686590c4d494d954f6f03a49b182c8c821f66 png
+  _case 0 "反例 D：真 404（正常，必须 0）" \
+    404 "text/html; charset=utf-8" 9183 6db7d5598f0705ac9678978043e686590c4d494d954f6f03a49b182c8c821f66 png
+  echo "==================================================================="
+  if [ "$rc" = "0" ]; then
+    echo "self-test：四例全部符合预期（异常样例 ✗ / 缓存残留只 WARN / 真 404 正常）"
+  else
+    echo "self-test：**失败**"
+  fi
+  return "$rc"
+}
+
+if [ "$SELF_TEST" = "1" ]; then
+  run_self_test
+  exit $?
+fi
 
 echo "================================================================"
 echo "线上站点验收（双判：content-type + body sha256）"
@@ -132,6 +219,14 @@ if [ "$CODE" = "200" ] && ct_matches "$CT" html; then
   fi
 else
   ok "未观察到 SPA 兜底：$PROBE → HTTP ${CODE}（content-type ${CT:-（无）}）"
+fi
+
+# 「页面体」指纹集合：首页 + 404 页 —— 用来识破「图片路径返回了某个页面」的冒充。
+PAGE_SHAS="$HOME_SHA"
+if [ "$CODE" = "404" ] && ct_matches "$CT" html; then
+  NF404_SHA="$SHA"
+  PAGE_SHAS="$PAGE_SHAS $SHA"
+  echo "      404 页体指纹 = ${SHA}（$BYTES bytes）—— 计入「页面体」集合"
 fi
 
 # ---------------------------------------------------------------- 2) 真资产必须真存在
@@ -176,35 +271,29 @@ rm -f "$TMP/asset"
 
 # ---------------------------------------------------------------- 2b) 上一版产出物必须已消失
 echo
-echo "[2b] 上一版的产出物**必须已经不存在** —— 这一节同时就是**敏感性验证**："
-echo "     裸状态码在 apex 上会被软 404 兜底骗成「存在(200)」，双判才是对的。"
+echo "[2b] 上一版的产出物现在处于什么状态（**区分「缓存残留」与「HTML 冒充图片」**）"
+echo "     为什么不能只看状态码：/og-image*.png 有 immutable 缓存 ⇒ 删掉的旧图仍可能 200；"
+echo "     而更早的事故留下的是「软 404 的 HTML 被当成图片缓存」—— 两者都 200，但一个无害、一个是异常。"
+echo "     判据：content-type 为主 + body sha 是否命中「页面体」指纹（首页/404 页）。"
 GONE="
 /og-image-$PREV.png|png|上一版中文 OG 图
 /og-image-en-$PREV.png|png|上一版英文 OG 图
 "
 while IFS='|' read -r path family label; do
   [ -z "${path:-}" ] && continue
-  echo "-- ${label}：$BASE$path （期望：**不存在**）"
+  echo "-- ${label}：$BASE$path"
   fetch "$BASE$path" "$TMP/gone" || true
   bare=$(curl -s -o /dev/null -w '%{http_code}' "$BASE$path" 2>/dev/null)
   bare_verdict="不存在"
   [ "$bare" = "200" ] && bare_verdict="存在"
   echo "     \$ curl -s -o /dev/null -w '%{http_code}' $BASE$path   →  **$bare**"
-  echo "       裸状态码判据会说：「${bare_verdict}」；本脚本双判说：见下"
-  if [ "$CODE" = "404" ] || [ "$CODE" = "410" ]; then
-    ok "${label}：真 404（不存在）"
-  elif [ "$CODE" = "200" ] && ct_matches "$CT" html; then
-    problem "${label}：**软 404/不存在** —— 裸状态码 ${bare}（会被误判成「存在」），但 content-type 是 text/html（期望 ${family}），body $BYTES bytes / sha ${SHA:0:16}…"
-    case " $HTML_FALLBACK_SHAS " in
-      *" $SHA "*) : ;;
-      *) HTML_FALLBACK_SHAS="$HTML_FALLBACK_SHAS $SHA"
-         echo "      （新的兜底指纹，且 != 当前首页 ⇒ 边缘缓存里的陈旧 index.html）" ;;
-    esac
-  elif [ "$CODE" = "200" ]; then
-    problem "${label}：200 且 content-type 是「${CT:-（无）}」—— 上一版的资产不该还在"
-  else
-    problem "${label}：HTTP $CODE"
-  fi
+  echo "       裸状态码判据会说：「${bare_verdict}」"
+  judge_prev_asset "$CODE" "$CT" "$BYTES" "$SHA" "$family" "$label" "$PAGE_SHAS"
+  case $? in
+    0) : ;;
+    2) WARNINGS=$((WARNINGS+1)) ;;
+    1) PROBLEMS=$((PROBLEMS+1)) ;;
+  esac
 done <<EOF
 $(echo "$GONE" | sed '/^$/d')
 EOF
