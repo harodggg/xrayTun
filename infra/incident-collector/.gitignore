@@ -1,0 +1,4 @@
+# wrangler 本地状态（不要提交）
+.wrangler/
+node_modules/
+.dev.vars

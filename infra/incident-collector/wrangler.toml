@@ -1,0 +1,45 @@
+#:schema node_modules/wrangler/config-schema.json
+# XrayTun 现场包接收端点（task-114）
+#
+# 部署（由 lead 用**临时授权**执行；token 绝不进仓库）：
+#   CF_ACCOUNT_ID=<account-id> CF_API_TOKEN="$(cat ~/.cf-incident-token)" \
+#     npx wrangler deploy --config infra/incident-collector/wrangler.toml
+#
+# ⚠️ 只会创建/更新 **xraytun-incident-collector**（Worker）与 **xraytun-incidents**（R2 桶）。
+#    账号里已有的其它 Worker（eth-arb-scout / vless / …）与别的桶（mymutlicloud）**一律不动**：
+#    本目录里没有任何 delete/prune 命令；若你的输出里出现别的名字，说明命令写错了 —— 停下来。
+#
+# 路由为什么用 `xraytun.top/api/incident/*` 而不是 `*.workers.dev`：
+#   用户的机器在中国大陆，`*.workers.dev` 经常不可达；`xraytun.top` 已实测可达。
+#   同 zone 上的 Workers Route **优先于 Pages**，因此不需要新 DNS。
+#   若部署时报「路由需要 Zone 权限 / hostname 要有 DNS 记录」，**停手报 lead**，
+#   备选是 `incident.xraytun.top`（同 zone、走 CF 代理）。
+name = "xraytun-incident-collector"
+main = "src/worker.mjs"
+compatibility_date = "2026-09-22"
+
+# R2：**只存 zip 与 manifest**（不含 IP、不含账号/订阅信息 —— 见 PRIVACY.md）
+[[r2_buckets]]
+binding = "INCIDENT_BUCKET"
+bucket_name = "xraytun-incidents"
+
+# 保留 30 天：这里的 RETENTION_DAYS 是 worker 侧**惰性过期**判据；
+# R2 侧的 lifecycle 规则要单独设（见 README「R2 lifecycle」；命令也写在 README 里）。
+[vars]
+BASE_PATH = "/api/incident"
+MAX_BYTES = "10485760"          # 10 MiB
+RETENTION_DAYS = "30"
+RATE_LIMIT_MAX = "5"            # 每窗口最多 5 次
+RATE_LIMIT_WINDOW_SECONDS = "3600"
+ALLOWED_TYPES = "application/zip,application/octet-stream,application/x-zip-compressed"
+
+# ⚠️ INCIDENT_TOKEN 是**秘密**，不放 [vars]：
+#     npx wrangler secret put INCIDENT_TOKEN --config infra/incident-collector/wrangler.toml
+#
+# 同 zone 路由（Workers Route 优先于 Pages）
+routes = [
+  { pattern = "xraytun.top/api/incident/*", zone_name = "xraytun.top" }
+]
+
+[observability]
+enabled = false   # 不采集请求日志（日志里可能有客户端信息）；排查用 curl 即可
