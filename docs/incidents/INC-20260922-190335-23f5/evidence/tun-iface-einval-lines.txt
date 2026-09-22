@@ -1,0 +1,6 @@
+# 最小证据切片：core-tail.txt 里含 `falied to set interface` 的行（共 5 行，这里贴前 5 行，每行截断到 220 字符）
+{"ts_unix":1790075093,"source":"core","level":"info","message":"2026/09/22 19:04:53.900477 [Info] proxy/tun: [tun] falied to set interface > invalid argument"}
+{"ts_unix":1790075094,"source":"app","level":"warn","message":"核心日志已限流：最近有 13 条未实时显示（原文已完整写入日志文件；刷新日志页可看到最近 2000 条）。示例格式：<ts> <ts> [Info] proxy/tun: [tun] falied to set interface > invalid argument"}
+{"ts_unix":1790075095,"source":"core","level":"info","message":"2026/09/22 19:04:55.912395 [Info] proxy/tun: [tun] falied to set interface > invalid argument"}
+{"ts_unix":1790075198,"source":"core","level":"info","message":"2026/09/22 19:06:38.565000 [Info] proxy/tun: [tun] falied to set interface > invalid argument"}
+{"ts_unix":1790075201,"source":"core","level":"info","message":"2026/09/22 19:06:41.600705 [Info] proxy/tun: [tun] falied to set interface > invalid argument"}

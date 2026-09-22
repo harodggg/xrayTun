@@ -1,0 +1,9 @@
+# 最小证据切片：network.txt 里 route -n get 127.0.0.2 那一段（原文见包内 network.txt）
+## route -n get 127.0.0.2      （判据：interface 必须是 lo0；不是 ⇒ loopback 空洞）
+   route to: 127.0.0.2
+destination: default
+       mask: 128.0.0.0
+  interface: utun6
+      flags: <UP,DONE,STATIC,PRCLONING,GLOBAL>
+ recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+       0         0         0         0         0         0      1500         0

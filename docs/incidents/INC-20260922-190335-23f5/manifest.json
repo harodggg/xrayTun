@@ -1,0 +1,98 @@
+{
+  "bundle_format": "xraytun-incident/1",
+  "collected_at_utc": "2026-09-22T11:08:50Z",
+  "window": {
+    "since_epoch": 1790073964,
+    "until_epoch": 1790075330,
+    "since_local": "2026-09-22 18:46:04",
+    "until_local": "2026-09-22 19:08:50",
+    "source": "**退让口径**：最近一次核心启动（ps 取不到 App 启动时刻 ⇒ 窗口不是 App 启动至今）",
+    "degraded": true,
+    "note": "窗口**不是**「本次 App 启动至今」：取不到进程启动时刻，已退让并在此标注"
+  },
+  "versions": {
+    "app": {
+      "value": "0.8.34",
+      "source": "/Applications/XrayTun.app/Contents/Info.plist CFBundleShortVersionString"
+    },
+    "core": {
+      "value": "26.9.9",
+      "source": "日志横幅 `core: Xray <ver>`（实际在跑的那一份）"
+    },
+    "helper": {
+      "check": {
+        "state": "Match",
+        "version": "0.8.34"
+      },
+      "source": "执行 `/Library/PrivilegedHelperTools/com.xraytun.helper version` 与包内 `/Applications/XrayTun.app/Contents/MacOS/xraytun-helper version`（与产品同一口径）"
+    }
+  },
+  "system": {
+    "macos": "26.6.2",
+    "arch": "arm64",
+    "kernel": "25.6.0"
+  },
+  "settings": {
+    "mode": "tun",
+    "log_level": "debug",
+    "source": "/Users/xbtg-/Library/Application Support/com.xraytun.desktop/settings.json（只取这两个非敏感键）"
+  },
+  "files": {
+    "README.txt": {
+      "bytes": 2087,
+      "sha256": "00dc2802b1a34481673b1be549f1412206eb112bf3752d12c97cb0051c9540f5"
+    },
+    "core-tail.txt": {
+      "bytes": 2097298,
+      "sha256": "f17bc7096742c89dad58a9924bf6ade1fa4ebcf42204b698978b1b1218375f60"
+    },
+    "events.jsonl": {
+      "bytes": 424130,
+      "sha256": "a57bac65ad5ec6e26a9ba268f532735473f95a4e38d24471f64f99ac990c931f"
+    },
+    "metrics.json": {
+      "bytes": 2808,
+      "sha256": "234a4af6fc43f09ca166fae1f782b0c393c575ed598045d07728f0b1c10a9fdc"
+    },
+    "network.txt": {
+      "bytes": 3952,
+      "sha256": "149c462718cb030b66aea1522526a65d482235a2cc9b74fdfc032995325cc5da"
+    }
+  },
+  "redaction": {
+    "where": "本机（上传之前）",
+    "rules": [
+      "URI → scheme://host[:port]（去掉 userinfo/path/query/fragment）",
+      "UUID（含 32 位十六进制）→ <uuid>",
+      "password/passwd/pwd/token/secret/uuid/api_key/private_key/auth/psk 的值 → <redacted>",
+      "Authorization / Proxy-Authorization → <redacted>"
+    ],
+    "kept": [
+      "域名与 IP（含节点 IP）",
+      "错误消息原文结构",
+      "路由与 DNS 结构"
+    ],
+    "not_collected": [
+      "订阅 URL 原文",
+      "UUID/口令/密钥原文",
+      "浏览内容/站点清单",
+      "账号信息"
+    ]
+  },
+  "truncation": {
+    "core_tail_bytes_cap": 2097152,
+    "total_bytes_cap": 10485760,
+    "core_tail": {
+      "truncated": true,
+      "window_lines": 56879,
+      "window_bytes": 11407203,
+      "kept_lines": 10416
+    },
+    "events": {
+      "truncated": false
+    },
+    "metrics_available": true,
+    "metrics_note": null,
+    "note": "任何截断都在 README.txt、core-tail.txt 首行与采集时的 stdout 各说一次（不许静默）"
+  }
+}

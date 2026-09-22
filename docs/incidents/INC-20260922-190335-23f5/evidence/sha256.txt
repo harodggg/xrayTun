@@ -1,0 +1,20 @@
+# 本目录的指纹（两层：**原件**不入库，只留指纹；**入库的切片**也留指纹，便于核对没被改过）
+
+## 1) 原件（完整 bundle **不入库**，可能含隐私）
+bundle_zip_sha256                                                 d148a7a2e1e96c6b69886f222d7c84758dbd16e029b9f6f63359da096979d798
+README.txt                                                        00dc2802b1a34481673b1be549f1412206eb112bf3752d12c97cb0051c9540f5  2087 bytes
+core-tail.txt                                                     f17bc7096742c89dad58a9924bf6ade1fa4ebcf42204b698978b1b1218375f60  2097298 bytes
+events.jsonl                                                      a57bac65ad5ec6e26a9ba268f532735473f95a4e38d24471f64f99ac990c931f  424130 bytes
+metrics.json                                                      234a4af6fc43f09ca166fae1f782b0c393c575ed598045d07728f0b1c10a9fdc  2808 bytes
+network.txt                                                       149c462718cb030b66aea1522526a65d482235a2cc9b74fdfc032995325cc5da  3952 bytes
+         （以上来自包内 manifest.json；zip 本身由 incident-bundle.sh 报出）
+
+## 2) 入库的切片/文档（本目录内，可逐字节复核）
+manifest.json                                                     23f5221fa4162fe5348ce4257185b4b30e3166164de89cfe4fbb6d82af640ed8  3156 bytes
+incident.json                                                     756e88a94b720e8111d6315c6c7ea75727d8a3e780bf84ec72f71a7c8a0842c5  5403 bytes
+SUMMARY.md                                                        1d2630ff4aa62f61c3d25cd73438654ed77a149341324d5cf916f3ca76e9d749  3864 bytes
+README.md                                                         7f9e228a12fe1fe6bc2008eb1fe294f9eea5c12501d8d0f59a96077659d1ae69  3471 bytes
+evidence/loopback-route.txt                                       e8db4b84281f64422b77280b9fc205d2bafecfe8233ca04db6affe027ed04e0f  496 bytes
+evidence/tun-iface-einval-lines.txt                               eecd87d5379f7c695eda97a7c9368f87925079234e0e92b969000ec398d20fee  1078 bytes
+
+# INC-ID 的 <4hex> = manifest.json 的 sha256 前 4 位（23f5）⇒ ID 与内容绑定
