@@ -68,6 +68,37 @@ trap 'release_build_lock' EXIT INT TERM HUP
 # 拿不到锁 ⇒ **明确失败**（退出码 75），绝不「等超时后继续跑」。
 acquire_build_lock "scripts/check.sh $*" || exit $?
 
+# ---------------------------------------------------------------- worktree 产物身份守卫
+#
+# 与上面的锁**不是一回事**：锁管「并发时序」（谁先谁后），这里管「**产物身份**」（链到哪一份）。
+# 排队排完照样可能链错：同一个 `CARGO_TARGET_DIR` 里装着两个 checkout 的同名同版本 crate
+# （例如 `xt-core 0.8.34` vs `xt-core 0.8.34`、源码不同），谁最后写就链谁。
+# 2026-09-22 的真实症状：`error[E0425]: cannot find type … in module xt_core::store`（源码里明明有），
+# `touch` 一下源文件强制重编就好了 —— 因为那是**另一个 worktree 编出来的旧 rlib**。
+#
+# 所以：在 **linked worktree** 里跑门禁时，`CARGO_TARGET_DIR` 必须指向它自己的目录。
+# 正确做法：`./scripts/wt.sh run <name> -- ./scripts/check.sh …`（自动隔离 + 自动拿锁）。
+# `WT_STRICT=1` 时这里会**明确失败**（75），而不是只警告。
+_git_dir="$(git rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+_git_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+# ⚠️ 主工作区的 target dir 必须从 git common dir 推：在 worktree 里 `$ROOT/../.cargo-target`
+# 指的是**worktree 自己旁边**的目录，拿它比较会漏判（第一版就漏了）。
+_main_target="$(dirname "$_git_common")/../.cargo-target"
+if [ -n "$_git_common" ] && [ "$_git_dir" != "$_git_common" ] &&
+   [ "$(cd "$CARGO_TARGET_DIR" 2>/dev/null && pwd -P)" = "$(cd "$_main_target" 2>/dev/null && pwd -P)" ]; then
+  echo
+  echo "  ⚠️  正在 **linked worktree** 里跑门禁，且 CARGO_TARGET_DIR 指向**主工作区**的 target dir："
+  echo "      cwd              = $ROOT"
+  echo "      CARGO_TARGET_DIR = $CARGO_TARGET_DIR"
+  echo "      同一个 target dir 里会有两个 checkout 的同名同版本 crate ⇒ 可能链到**另一份**的 rlib，"
+  echo "      症状是「源码里明明有的类型却报 E0425」，或者更糟：敏感性实验静默链到对面那份。"
+  echo "      正确做法：./scripts/wt.sh run <name> -- ./scripts/check.sh $*"
+  if [ "${WT_STRICT:-0}" = "1" ]; then
+    echo "  ✗ WT_STRICT=1：共享 target dir ⇒ 明确失败（退出码 75）" >&2
+    exit 75
+  fi
+fi
+
 step() {
   echo
   echo "=============================================================="

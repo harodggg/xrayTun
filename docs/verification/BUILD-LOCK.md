@@ -160,3 +160,7 @@ BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build
 BUILD_LOCK_FOREIGN_WAIT=1800 ./scripts/check.sh --no-release-build   # 可视地等未持锁的 cargo 结束（最多 30 分钟）
 ./scripts/build-lock.sh run -- cargo test -p xt-core --lib           # 手写 cargo 也走同一把锁（根治办法）
 ```
+
+> **优先级**：`BUILD_LOCK_STRICT=1` **先判**（检测到就立刻失败 75）；两个都设时「等待」那一档不会生效。
+> 想**等一个干净窗口**就用 `BUILD_LOCK_FOREIGN_WAIT`（别带 STRICT）；发版前要**不冒险**就用 STRICT
+> （task-112 实测：带 STRICT 时立刻 75，去掉后等到 `pgrep` 为空再跑 = exit 0）。
