@@ -142,27 +142,101 @@ pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u3
 
 /// 接管默认路由之前必须通过的探测目标。
 ///
-/// **两个目标不是冗余，是分工**：
-/// * **境外**走代理链路 —— 拦「TCP 能连、代理协议握手被墙」；
-/// * **境内**命中 CN 分流规则、走 `direct` 出站 —— 拦「境内路径不通」。
+/// **三条目标不是冗余，是「两类职责 × 两条路径」**：
 ///
-/// 只探境外会让「国内断、国外正常」这种症状**恒通过**，门禁形同虚设
-/// （见 `docs/09-network-drop/SELF-HEAL-GAPS.md` 的读法 B）。
+/// | 目标 | 路径 | 职责 |
+/// |---|---|---|
+/// | `http://1.1.1.1/` | 境外（代理链路） | **传输**：经隧道能不能把包送到（IP 字面量，**不依赖解析**） |
+/// | `http://cp.cloudflare.com/generate_204` | 境外 | **解析**：域名经核心 dns 模块能不能解析出来 |
+/// | `http://223.5.5.5/` | 境内（`geoip:cn` → direct） | **传输**：CN 直连路径通不通（IP 字面量，**不依赖解析**） |
+///
+/// # 为什么要成对（task-92）
+///
+/// 原来两条全是域名，而 `socks_http_probe` 用 `--socks5-hostname` 把域名交给
+/// **核心**解析 ⇒ **解析一坏，就把整条其实活着的链路判死**，而且分不清
+/// 「传输坏」与「只是解析坏」。**实测活证**（task-91，同一时刻、同一台机器）：
+/// 境内 IP 字面量 `http://223.5.5.5/` 经 SOCKS 回 **404**，而
+/// `http://www.baidu.com/` 经 SOCKS 回 **000**（curl 52 empty reply）。
+/// 成对之后 `describe_dead_targets()` 的输出本身就能区分两类：
+/// **IP 目标活着、只有域名目标死 = 只是解析坏**。
+///
+/// # 为什么**去掉** `www.baidu.com`（多轮实测）
+///
+/// 它在真实链路上**不稳定**：经 SOCKS 10 轮测到 **4/10 失败**（另一轮 1/10），
+/// 而同期 `1.1.1.1` / `223.5.5.5` 各 **10/10**、`cp.cloudflare.com` **10/10**。
+/// 门禁要求**每个目标都答**（task-42/54），所以留一个 40% 失败率的目标 =
+/// 让 40% 的连接起不来 —— 那是「失败方向」错误的一侧，代价比少一个境内域名判据大。
+/// 境内那一路由 `223.5.5.5`（IP 字面量，走 `geoip:cn → direct`）覆盖 ✓。
+///
+/// # 判据不严也不松
+///
+/// `commands::core::tunnel_is_dead` 只把空串 / `000` 判死 ⇒ **301 / 404 / 204 / 200
+/// 都算活着**，所以 IP 字面量目标**不必**要求 204。
+///
+/// # 三条目标**并行**探测
+///
+/// 门禁里用 `JoinSet`（task-54 的做法）⇒ 最坏等待仍是**单次 6s**，不是 18s。
+///
+/// # 「只有解析坏、传输通」时判什么？（task-92 的结论：**判「链路不可用」**）
+///
+/// 1. 判据的终点是「**用户能不能上网**」，不是「包能不能送出去」。非中国域名在真实
+///    浏览里占大头；解析全挂时用户看到的就是「网坏了」—— 门禁若在这种状态下接管
+///    默认路由，就是把一个已经坏掉的体验升级成系统级接管；
+/// 2. **回退链已经试过了**：`disableFallback: false` 且没有任何 `skipFallback`
+///    （见 `config.rs` 的生成），所以一次「域名目标失败」= 境外 DoH **和**境内
+///    解析器都失败（task-91 的配置分析），不是「只问了一个服务器」；
+/// 3. 误判的代价由**连续失败策略**兜住：看门狗要连续 `FAILURES_BEFORE_REBUILD` 次
+///    才重建，一次解析抖动不会触发；
+/// 4. 反过来的代价更大：判「可用」= **明明解析不了却宣称一切正常**，正是本项目
+///    最忌讳的「界面比事实强」。
+///
+/// **但诊断必须说清是哪一类**：IP 目标活着、只有域名目标死时，日志里只会点名
+/// 域名目标 —— 用户/我们能看到「传输是通的，是解析坏了」，而不是笼统一句「隧道不通」。
 ///
 /// **看门狗共用这一份**（`commands/core.rs::watchdog_probe_all`）：同一个盲区在
 /// 门禁那边修过（task-42/54），在看门狗那边却漏了 —— 结果是「国内全断、
 /// 国外正常」时看门狗永远认为一切正常（task-82）。**别再分叉出第二份清单。**
 ///
-/// **境内为什么用域名而不是硬编码 IP**：一个写死的 IP 一旦失效，会把**所有**
-/// 用户误拦在门外（失败方向错了）。`www.baidu.com` 是必活的境内 HTTP 服务；
-/// 经 SOCKS 时由节点侧解析，**不依赖本机 DNS**，所以没有引入本机解析的干扰。
-/// 若将来要改成 IP 字面量，必须先在境内验证该 IP 确实提供 HTTP 响应。
+/// # 硬编码 IP 的风险与取舍
+///
+/// 一个写死的 IP 一旦失效，门禁会把**所有**用户拦在门外（失败方向错）。这里选的是
+/// **DNS 基础设施的 anycast IP**（1.1.1.1 / 223.5.5.5 —— 本身就是长期稳定的服务
+/// 地址），而不是某个网站的业务 IP（后者才是真会变的那类，也正是 `www.baidu.com`
+/// 被多轮实测筛掉的原因）。**实测**：`http://1.1.1.1/` → 301、`http://223.5.5.5/`
+/// → 404（直连与经 SOCKS 都稳定，各 10/10）。`http://8.8.8.8/` 实测 6s 超时 ⇒ **不用**。
 pub(crate) const REQUIRED_PROBE_TARGETS: &[&str] = &[
-    // 境外：项目现有的探测目标（`http://cp.cloudflare.com/generate_204`）。
+    // 境外 · 传输（IP 字面量，不依赖解析）
+    "http://1.1.1.1/",
+    // 境外 · 解析（域名，项目原有的探测目标）
     xt_core::xray::DEFAULT_PROBE_URL,
-    // 境内：命中 CN 分流、走 direct 出站的真实 HTTP 服务。
-    "http://www.baidu.com/",
+    // 境内 · 传输（IP 字面量，走 geoip:cn → direct）
+    "http://223.5.5.5/",
 ];
+
+/// URL 的主机部分是不是 **IP 字面量**（⇒ 这次探测**不需要解析**）。
+///
+/// 用途：目标清单里「不依赖解析」的那一半靠它认出来（task-92），
+/// 它同时也是「只有解析坏」这个诊断的基础。
+pub(crate) fn url_host_is_ip_literal(url: &str) -> bool {
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // 去端口（探测目标都是 v4，用不到 IPv6 的方括号形式）
+    let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority);
+    host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// 目标里**不依赖解析**的那些（IP 字面量）。
+///
+/// 「传输是否通」看它们；「解析是否通」看域名目标。两者都活才算链路可用
+/// （理由见 [`REQUIRED_PROBE_TARGETS`] 的文档）。
+#[cfg(test)]
+pub(crate) fn probe_targets_without_dns(targets: &'static [&'static str]) -> Vec<&'static str> {
+    targets
+        .iter()
+        .copied()
+        .filter(|t| url_host_is_ip_literal(t))
+        .collect()
+}
 
 /// 门槛探测的单次超时（秒）。
 ///
@@ -213,12 +287,24 @@ impl GateFailure {
         match self {
             GateFailure::Probe { failed } => {
                 let list = failed.iter().map(ProbeOutcome::describe).collect::<Vec<_>>().join("、");
+                // **说清是哪一类失败**（task-92）：探测目标成对配置 ——
+                // IP 字面量（不依赖解析）管「传输」，域名目标管「解析」。
+                // 失败清单里**只有域名目标** ⇒ 传输是通的，问题在解析链路上。
+                // 不这么说的话，用户/我们只能看到笼统一句「隧道不通」，然后去换节点。
+                let resolution_only = !failed.is_empty()
+                    && failed.iter().all(|f| !url_host_is_ip_literal(&f.target));
+                let diagnosis = if resolution_only {
+                    "**这次探测里失败的全是域名目标**（IP 字面量那条传输路径是通的）⇒ \
+                     隧道转发没问题，更像是**解析链路**的问题（本机网络/DNS 被干扰也可能导致）；\
+                     如果整台 Mac 都上不了网，先点「断开」恢复直连；也可以先试换一个节点。"
+                } else {
+                    "可能是这个节点不可用，也可能本机网络本身不通（或被链路干扰）；\
+                     先试换一个节点；如果整台 Mac 都上不了网，先点「断开」恢复直连。"
+                };
                 format!(
                     "节点通过了 TCP 检查，但经它发出的真实请求拿不到响应：{list}。\n\
                      国内网络下「TCP 能连到服务器、代理协议握手被墙」是常见情形。\n\
-                     **已在接管默认路由之前中止**，系统网络未被改动。\
-                     可能是这个节点不可用，也可能本机网络本身不通（或被链路干扰）；\
-                     先试换一个节点；如果整台 Mac 都上不了网，先点「断开」恢复直连。"
+                     **已在接管默认路由之前中止**，系统网络未被改动。{diagnosis}"
                 )
             }
             GateFailure::Commit(msg) => msg.clone(),
@@ -1055,6 +1141,10 @@ mod tests {
     use super::*;
     use xt_core::model::{AppSettings, ProxyMode};
 
+    /// 「拿到真实响应码」的判据只有一份实现，在 `commands::core` —— 这里**引用**
+    /// 而不是抄一份（task-92：IP 目标回 301/404 也算活着，就是靠它）。
+    use crate::commands::tunnel_is_dead;
+
     /// 临时数据目录 + 一个「从不连接」的 helper 客户端。
     ///
     /// `HelperClient::new(None)` 只是构造对象，不会去连 socket —— 所以下面这些
@@ -1789,16 +1879,123 @@ mod tests {
         assert!(log.seq().is_empty(), "没配置目标时不该探测、更不该提交");
     }
 
-    /// 门禁确实配了「境外 + 境内」两个目标 —— 少一个就等于把自己测盲。
+    /// 门禁确实配了「两类职责 × 两条路径」三个目标 —— 少一类就等于把自己测盲（task-92）。
     #[test]
-    fn required_probe_targets_cover_overseas_and_domestic() {
-        assert_eq!(REQUIRED_PROBE_TARGETS.len(), 2, "至少要两个目标：境外 + 境内");
-        assert_eq!(REQUIRED_PROBE_TARGETS[0], xt_core::xray::DEFAULT_PROBE_URL);
+    fn required_probe_targets_pair_ip_literals_with_domains() {
+        let targets = REQUIRED_PROBE_TARGETS;
+        assert!(targets.len() >= 3, "至少要 3 条（2 个 IP 字面量 + 1 个域名），实际 {targets:?}");
+        // 不依赖解析的那一半（IP 字面量）必须存在 —— 这是「传输通不通」的判据
+        let ip = probe_targets_without_dns(targets);
         assert!(
-            REQUIRED_PROBE_TARGETS[1].contains("baidu.com"),
-            "第二个目标必须是境内、经 CN 分流走 direct 的地址，实际 {}",
-            REQUIRED_PROBE_TARGETS[1]
+            ip.len() >= 2,
+            "至少要有两个**不依赖解析**的目标（境内外各一），实际 {ip:?}"
         );
+        assert!(ip.iter().any(|t| t.contains("1.1.1.1")), "缺境外 IP 字面量：{targets:?}");
+        assert!(ip.iter().any(|t| t.contains("223.5.5.5")), "缺境内 IP 字面量：{targets:?}");
+        // 域名目标必须**保留**：IP 字面量发现不了「只有解析坏」
+        assert!(targets.contains(&xt_core::xray::DEFAULT_PROBE_URL), "缺域名目标（解析判据）");
+        // `www.baidu.com` 被实测筛掉（经 SOCKS 10 轮 4 失败）—— 别悄悄加回来：
+        // 门禁要求每个目标都答，留一个 40% 失败率的目标 = 40% 的连接起不来。
+        assert!(
+            !targets.iter().any(|t| t.contains("baidu.com")),
+            "不要加回 baidu：多轮实测经 SOCKS 10 轮 4 失败（失败方向错的那一侧）",
+        );
+    }
+
+    /// URL 主机判 IP 字面量必须**严格**：把域名误判成 IP，「不依赖解析」就是假的。
+    #[test]
+    fn url_host_is_ip_literal_is_strict() {
+        assert!(url_host_is_ip_literal("http://1.1.1.1/"));
+        assert!(url_host_is_ip_literal("http://223.5.5.5/"));
+        assert!(url_host_is_ip_literal("http://1.1.1.1"));
+        assert!(!url_host_is_ip_literal("http://cp.cloudflare.com/generate_204"));
+        assert!(!url_host_is_ip_literal("http://www.baidu.com/"));
+    }
+
+    /// **task-92 真正要回答的问题**：「只有解析坏、传输通」时怎么判？
+    ///
+    /// 结论：**判「链路不可用」**（门禁不接管、看门狗计一次失败），理由写在
+    /// [`REQUIRED_PROBE_TARGETS`] 的文档里。这条同时钉住两件事：
+    /// * IP 字面量目标**活着**（301/404 都算活着 —— 判据只认空/`000`）；
+    /// * 失败清单里**只有域名目标** ⇒ 诊断能说清「传输是通的，是解析坏了」；
+    /// * 结论仍是**不接管**。
+    #[tokio::test]
+    async fn only_resolution_broken_is_not_mistaken_for_a_dead_transport() {
+        // ① 判据：301/404 都不是「死」，所以 IP 目标不必要求 204
+        assert!(!tunnel_is_dead("301"), "IP 字面量回 301 就是活着");
+        assert!(!tunnel_is_dead("404"), "IP 字面量回 404 也是活着");
+        // ①b 这个场景**只有存在不依赖解析的目标**才有意义 ——
+        // 把它们删掉，这条就必然红（敏感性就钉在这里，而不是靠人自觉）。
+        assert!(
+            probe_targets_without_dns(REQUIRED_PROBE_TARGETS).len() >= 2,
+            "「只有解析坏」的判据依赖 IP 字面量目标存在，实际清单：{REQUIRED_PROBE_TARGETS:?}",
+        );
+
+        // ② 实际目标清单跑一遍假探测：IP 全活、域名全死
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            REQUIRED_PROBE_TARGETS,
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                let code = if t.contains("1.1.1.1") {
+                    "301"
+                } else if t.contains("223.5.5.5") {
+                    "404"
+                } else {
+                    "000"
+                };
+                async move { code.to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        match &res {
+            Err(GateFailure::Probe { failed }) => {
+                let names: Vec<&str> = failed.iter().map(|f| f.target.as_str()).collect();
+                assert_eq!(failed.len(), 1, "只该有**域名**目标失败（IP 字面量是活的）：{names:?}");
+                assert!(
+                    names.iter().all(|t| t.contains("cloudflare.com")),
+                    "失败的必须只有域名目标 —— 这才是「传输通、只有解析坏」：{names:?}"
+                );
+            }
+            other => panic!("只有解析坏时**也不该**接管默认路由（判不可用），实际 {other:?}"),
+        }
+        assert!(
+            !log.seq().iter().any(|s| s == "commit"),
+            "**不得**调用 commit：解析全挂时接管默认路由 = 把一个已经坏掉的体验升级成系统级接管",
+        );
+    }
+
+    /// **反例（别变成惊弓之鸟）**：所有目标都真答了 ⇒ 必须能提交。
+    #[tokio::test]
+    async fn gate_still_commits_when_all_required_targets_answer() {
+        let log = GateLog::default();
+        let res = verify_paths_then_commit(
+            REQUIRED_PROBE_TARGETS,
+            |t: String| {
+                log.push(&format!("probe:{t}"));
+                let code = if t.contains("1.1.1.1") {
+                    "301"
+                } else if t.contains("223.5.5.5") {
+                    "404"
+                } else {
+                    "204"
+                };
+                async move { code.to_string() }
+            },
+            || {
+                log.push("commit");
+                async { Ok::<(), xt_proto::HelperError>(()) }
+            },
+        )
+        .await;
+
+        assert!(res.is_ok(), "四条都拿到真实响应就必须能提交，实际 {res:?}");
+        assert!(log.seq().iter().any(|s| s == "commit"), "实际序列 {:?}", log.seq());
     }
 
     // -----------------------------------------------------------------------
@@ -1826,6 +2023,44 @@ mod tests {
         assert!(msg.contains("本机网络"), "实际：{msg}");
         assert!(msg.contains("断开"), "实际：{msg}");
         assert!(!msg.contains("请换一个节点后重试"), "别把因果唯一归到节点：{msg}");
+    }
+
+    /// **task-92 的诊断**：失败的全是域名目标 ⇒ 文案要说清「传输通、问题在解析」。
+    ///
+    /// 这条同时守住 task-67 的要求：仍然给出「本机网络」这个可能性与「断开」这个动作，
+    /// 不把因果唯一归到某处。
+    #[test]
+    fn gate_failure_diagnoses_resolution_only_failures() {
+        let msg = GateFailure::Probe {
+            failed: vec![ProbeOutcome {
+                target: xt_core::xray::DEFAULT_PROBE_URL.into(),
+                http_code: "000".into(),
+            }],
+        }
+        .describe();
+        assert!(msg.contains("失败的全是域名目标"), "要说清是哪一类失败：{msg}");
+        assert!(msg.contains("解析链路"), "要指出方向是解析链路：{msg}");
+        assert!(msg.contains("本机网络"), "不给唯一结论：{msg}");
+        assert!(msg.contains("断开"), "自救动作保留：{msg}");
+    }
+
+    /// **反例**：IP 字面量目标也失败了 ⇒ **不许**说「传输通/只有解析坏」。
+    #[test]
+    fn gate_failure_does_not_claim_resolution_only_when_an_ip_target_failed() {
+        let msg = GateFailure::Probe {
+            failed: vec![ProbeOutcome {
+                target: "http://1.1.1.1/".into(),
+                http_code: "000".into(),
+            }],
+        }
+        .describe();
+        assert!(
+            !msg.contains("失败的全是域名目标"),
+            "IP 目标都失败了还说「只有解析坏」就是编造：{msg}",
+        );
+        assert!(!msg.contains("解析链路"), "同上：{msg}");
+        // 这种情况仍要给原本的多种可能与自救动作
+        assert!(msg.contains("本机网络") && msg.contains("断开"), "实际：{msg}");
     }
 
     // -----------------------------------------------------------------------

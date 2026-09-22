@@ -2545,18 +2545,30 @@ mod tests {
         );
     }
 
-    /// **(b)** 看门狗要探的目标必须**包含国内** —— 只探境外时「国内全断」永远发现不了。
+    /// **(b)** 看门狗要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
+    ///
+    /// task-92 之后境内那一半由 **IP 字面量 `223.5.5.5`** 覆盖：
+    /// `www.baidu.com` 经 SOCKS 多轮实测不稳定（10 轮 4 失败）被筛掉，
+    /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
         let targets = crate::supervisor::REQUIRED_PROBE_TARGETS;
-        assert!(targets.len() >= 2, "至少国内 + 境外两个目标");
+        let ips = crate::supervisor::probe_targets_without_dns(targets);
         assert!(
-            targets.iter().any(|t| t.contains("baidu.com")),
+            ips.len() >= 2,
+            "境内 + 境外各要有一个**不依赖解析**的目标：{targets:?}",
+        );
+        assert!(
+            ips.iter().any(|t| t.contains("223.5.5.5")),
             "必须有一个**境内**目标：只探境外时「国内全断、国外正常」会让看门狗永远认为正常（task-82）",
         );
         assert!(
-            targets.iter().any(|t| t.contains("cloudflare.com")),
+            ips.iter().any(|t| t.contains("1.1.1.1")),
             "也要保留境外目标（代理链路是否真能转发）",
+        );
+        assert!(
+            targets.contains(&xt_core::xray::DEFAULT_PROBE_URL),
+            "域名目标必须保留：IP 字面量发现不了「只有解析坏」（task-92）",
         );
     }
 
