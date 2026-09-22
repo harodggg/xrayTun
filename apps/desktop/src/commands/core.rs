@@ -676,6 +676,246 @@ pub(crate) async fn tunnel_probe(port: u16, timeout_secs: u32) -> String {
         .await
 }
 
+/// 单次探针的超时（秒）。
+///
+/// 定成 `10` 是**按实测取的**，不是猜的：task-99/100 量到探针成功连接的耗时
+/// 中位 166ms、p95 1090ms、**p99 7223ms**、max 16472ms；并且**有 6 条连接
+/// 在 >6s 之后才成功** —— 应用侧把那种直接记成失败，就是我们量到的假阴性。
+/// 10s 覆盖 p99。
+///
+/// **代价要记住**：真正挂住的连接要等满 10s（配合轮内重试最坏 ~20s/轮），
+/// 比 6s 慢 8s。放宽超时**救不了**那几条活过 16s/30s 仍无结果的悬挂连接 ——
+/// 那是重试要覆盖的另一种病。
+pub(crate) const PROBE_TIMEOUT_SECS: u32 = 10;
+
+/// 每个探针目标在一轮里探几次（**含首次**）：`2` = 失败后**再试一次**。
+///
+/// 这是本卡性价比最高的杠杆，依据是 task-100 的实测：
+/// 「失败之后下一次同目标」的成功率 **baidu 31/33 = 94%**、
+/// **cloudflare 5/9 = 56%**；粗算能挡掉 13:28 那次约 **99.6%**、
+/// 11:14 与 12:30 各约 **81%** 的误判。
+///
+/// 代价：真正不通的目标最坏 **+10s/轮**（典型 +0.2–1s）。
+/// **两种病都覆盖**：快失败（`failed` 行）和挂住（无后续行）都是「再试一次」。
+///
+/// ⚠️ 判据与次数是分开的：这行只影响「一轮里试几次」，
+/// `ProbeRound::is_dead` / `ProbeStreak` 那些判据不用动。
+pub(crate) const PROBE_ATTEMPTS_PER_ROUND: u32 = 2;
+
+/// 一轮里对同一个目标的这次失败**要不要再试一次**（纯判据，便于测试）。
+///
+/// 只在「已经失败」且「还没用完预算」时重试；成功就停，不多打一次请求。
+pub(crate) fn should_retry_probe(code: &str, attempts_done: u32) -> bool {
+    tunnel_is_dead(code) && attempts_done < PROBE_ATTEMPTS_PER_ROUND
+}
+
+/// 一轮探测算不算「失败」的门槛：**至少 2 个目标失败**。
+///
+/// * **不是**「任一条失败」：那样一条抖动就能凑够连续两轮并拆掉一条正在
+///   转发流量的隧道（task-95 定性的误判）。
+/// * **也不是**「境内、境外各死一个」：现在国内只有 1 个目标（`223.5.5.5`），
+///   那条会把「只有国内全灭」的形状变成**永不触发** —— 而「境外好好的、
+///   国内全灭」正是用户的症状，也是 task-82 加双目标要抓的东西。
+///   所以**不按侧计数**，只按目标数；也**没有**为了凑门槛去加新目标。
+/// * 目标数不足 2 时退化成「全部失败」：否则门槛永远够不到，等于把自愈关掉。
+pub(crate) fn probe_dead_threshold(total_targets: usize) -> usize {
+    total_targets.min(2)
+}
+
+/// 探针目标里的**境内侧**（其余必需目标算境外侧）。
+///
+/// 判据来自目标本身，不按返回码形状猜：`223.5.5.5` 是阿里 DNS，在境内、
+/// 也必须经物理网卡直连出去；`1.1.1.1` 与 `cp.cloudflare.com` 都要经节点。
+///
+/// **新增探针目标必须在这里表态**：`probe_side` 不认识的返回 `None`，
+/// 有测试（`every_required_probe_target_has_a_side`）盯着。
+pub(crate) const DOMESTIC_PROBE_TARGETS: &[&str] = &["http://223.5.5.5/"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeSide {
+    Domestic,
+    Overseas,
+}
+
+/// 目标属于哪一侧；不认识的返回 `None`（测试会拦住，别默默算成某一侧）。
+pub(crate) fn probe_side(target: &str) -> Option<ProbeSide> {
+    if DOMESTIC_PROBE_TARGETS.contains(&target) {
+        Some(ProbeSide::Domestic)
+    } else if crate::supervisor::REQUIRED_PROBE_TARGETS.contains(&target) {
+        Some(ProbeSide::Overseas)
+    } else {
+        None
+    }
+}
+
+/// 一轮探测的汇总。
+///
+/// # 为什么必须先汇总再判（task-95/98/99）
+///
+/// 旧判据是「所有目标都通才算通」（`probe_results_all_alive`），于是**任意一条
+/// 目标抖动**都能在 20 秒内凑够 `failures >= 2` 并**拆掉一条正在转发流量的隧道**。
+/// 现在的门槛是「**本轮至少 2 个目标失败**」（见 `probe_dead_threshold`）。
+///
+/// `total` / `dead` 是判据来源；分侧计数**只用于日志诊断**
+/// （「国内不通」与「国外不通」是两种病，见 `describe_dead_targets`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ProbeRound {
+    pub total: usize,
+    pub dead: usize,
+    pub domestic_total: usize,
+    pub domestic_dead: usize,
+    pub overseas_total: usize,
+    pub overseas_dead: usize,
+}
+
+impl ProbeRound {
+    pub(crate) fn domestic_is_dead(&self) -> bool {
+        self.domestic_total > 0 && self.domestic_dead == self.domestic_total
+    }
+
+    pub(crate) fn overseas_is_dead(&self) -> bool {
+        self.overseas_total > 0 && self.overseas_dead == self.overseas_total
+    }
+
+    /// **一轮算失败：至少 2 个目标失败。** 单条失败只记账、只留痕。
+    pub(crate) fn is_dead(&self) -> bool {
+        self.total > 0 && self.dead >= probe_dead_threshold(self.total)
+    }
+
+    /// 恰好一侧的目标全死、另一侧一个没死 —— 今天那些误判的形状，必须留痕。
+    pub(crate) fn one_side_only(&self) -> bool {
+        self.domestic_total > 0
+            && self.overseas_total > 0
+            && self.domestic_is_dead() != self.overseas_is_dead()
+    }
+}
+
+/// 把一轮探测结果按侧汇总。不认识的探针**不计入 `total`** ——
+/// 它因此不可能帮助凑够「2 个目标失败」的门槛。
+pub(crate) fn classify_probe_round(results: &[(String, String)]) -> ProbeRound {
+    let mut round = ProbeRound::default();
+    for (target, code) in results {
+        let dead = tunnel_is_dead(code);
+        match probe_side(target) {
+            Some(ProbeSide::Domestic) => {
+                round.total += 1;
+                round.domestic_total += 1;
+                if dead {
+                    round.dead += 1;
+                    round.domestic_dead += 1;
+                }
+            }
+            Some(ProbeSide::Overseas) => {
+                round.total += 1;
+                round.overseas_total += 1;
+                if dead {
+                    round.dead += 1;
+                    round.overseas_dead += 1;
+                }
+            }
+            None => {}
+        }
+    }
+    round
+}
+
+/// 连续失败**轮数**的记账器。
+///
+/// 口径只认一种轮：**两侧同时死**（`ProbeRound::is_dead`）。其余任何一轮
+/// —— 全好、或只有单侧失败 —— 都把连续计数**清零**。
+///
+/// 为什么单独抽出来：task-95 量到的四次误判里，**三次的前置两轮只有单侧失败**；
+/// 而 task-99 又给了反例：13:28:36 之后 baidu 仍零星失败 11 次，但彼此隔
+/// 30s–3 分钟，凑不齐「连续两轮」。**「差一轮就是两种命运」**，所以这行判据
+/// 必须有测试钉住，不能只活在循环体里。
+#[derive(Debug, Default)]
+pub(crate) struct ProbeStreak {
+    rounds: u32,
+}
+
+impl ProbeStreak {
+    pub(crate) fn new() -> Self {
+        Self { rounds: 0 }
+    }
+
+    /// 记一轮，返回**当前**连续失败轮数。
+    pub(crate) fn record(&mut self, round: &ProbeRound) -> u32 {
+        if round.is_dead() {
+            self.rounds = self.rounds.saturating_add(1);
+        } else {
+            self.rounds = 0;
+        }
+        self.rounds
+    }
+
+    pub(crate) fn rounds(&self) -> u32 {
+        self.rounds
+    }
+
+    /// 把等待提前到阈值（唤醒后用）：**只对已到门槛的轮有效**，判据不变 ——
+    /// 仍然要求这一轮「≥2 个目标失败」。
+    ///
+    /// 旧实现是唤醒后无条件 `failures = max(阈值)`，等于「唤醒后任意一条探针
+    /// 失败就重建」—— 那正是要消灭的行为。把条件**放进函数里**（而不是靠调用点
+    /// 自觉），是为了让这条约束可测。
+    pub(crate) fn bump_to_threshold_for(&mut self, round: &ProbeRound) -> u32 {
+        if round.is_dead() {
+            self.rounds = self.rounds.max(FAILURES_BEFORE_REBUILD);
+        }
+        self.rounds
+    }
+}
+
+/// 重建失败之后该做什么 —— **纯函数**，把「不许拆掉还活着的隧道」钉死。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailedRebuildAction {
+    /// 老隧道还活着（停止步骤失败 / 核心进程仍在）⇒ 保持原状，按退避重试。
+    KeepTunnel,
+    /// 老隧道确实没了 ⇒ 退回直连，别把用户留在断网状态。
+    FallBackToDirect,
+}
+
+/// 判据与 HTTP 探针**正交**：看的是停止步骤是否失败、以及**核心进程还在不在**
+/// （`libc::kill(pid, 0)`）。探针可以说谎（假阴性），进程不会。
+///
+/// 「保持原状」包含三件事，缺一不可（task-98 的硬要求）：
+/// 不拆隧道、不写「已退回直连」、**不作废自动重连意图**。
+pub(crate) fn after_failed_rebuild(stop_failed: bool, old_core_alive: bool) -> FailedRebuildAction {
+    if stop_failed || old_core_alive {
+        FailedRebuildAction::KeepTunnel
+    } else {
+        FailedRebuildAction::FallBackToDirect
+    }
+}
+
+/// 核心进程是否还在。`pid` 为 `None`（还没见过 pid）时**不算活着**。
+///
+/// `kill(pid, 0)` 只做存在性/权限检查，不发信号。`EPERM` 表示进程存在但我们
+/// 没权限（核心是我们自己起的，基本不可能）—— 也按「活着」处理。
+pub(crate) fn core_process_alive(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else {
+        return false;
+    };
+    // SAFETY: `kill` 只读 pid；signal=0 不发送任何信号。
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// 重建失败后下一次重试的等待秒数（按失败次数退避，最后一档封顶）。
+///
+/// 为什么不立刻重试：刚失败的那次多半撞在同一个原因上（节点还没回来、网关
+/// 还没恢复），立刻重试只是把日志刷满。也**不许**「一次失败就 return」——
+/// task-95 量到那会留下 **690 / 2620 / 2660 秒**的无隧道状态。
+pub(crate) const REBUILD_BACKOFF_SECS: &[u64] = &[30, 60, 120, 300];
+
+pub(crate) fn next_backoff_secs(failed_attempts: u32) -> u64 {
+    let idx = (failed_attempts as usize).min(REBUILD_BACKOFF_SECS.len() - 1);
+    REBUILD_BACKOFF_SECS[idx]
+}
+
 /// 看门狗一次探测：**门禁那份必需目标全部探一遍**（境外 + 境内）。
 ///
 /// 为什么两个都要探：只探境外时，「国内全断、国外正常」会让看门狗
@@ -688,9 +928,18 @@ pub(crate) async fn watchdog_probe_all(port: u16, timeout_secs: u32) -> Vec<(Str
     for target in crate::supervisor::REQUIRED_PROBE_TARGETS {
         let target = target.to_string();
         set.spawn(async move {
-            let code =
-                crate::supervisor::socks_http_probe(port, target.clone(), timeout_secs).await;
-            (target, code)
+            // **轮内重试**：失败后换个时间点再试一次（本卡最高性价比的杠杆，
+            // 数字见 `PROBE_ATTEMPTS_PER_ROUND`）。判据是纯函数，可测；
+            // 它同时覆盖两种病：快失败与挂住。
+            let mut attempts_done = 0u32;
+            loop {
+                let code =
+                    crate::supervisor::socks_http_probe(port, target.clone(), timeout_secs).await;
+                attempts_done += 1;
+                if !should_retry_probe(&code, attempts_done) {
+                    break (target, code);
+                }
+            }
         });
     }
     let mut out = Vec::new();
@@ -775,7 +1024,12 @@ pub(crate) fn spawn_monitors(app: &AppHandle, baseline: Option<Egress>, pid: Opt
 pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut failures = 0u32;
+        let mut streak = ProbeStreak::new();
+        // 重建失败后的退避状态（见 `next_backoff_secs`）。
+        let mut failed_attempts = 0u32;
+        let mut backoff_until = 0u64;
+        // 上一次「只有单侧失败」的留痕文本：只在**形状变化**时落盘，避免刷屏。
+        let mut last_partial: Option<String> = None;
         let mut last_mono = std::time::Instant::now();
         let mut last_wall = std::time::SystemTime::now();
         loop {
@@ -832,17 +1086,89 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             // **国内 + 境外都要探**（与门禁同一份目标清单，见 `watchdog_probe_all`）。
             // 只探境外时，「国内全断、国外正常」会让看门狗**永远认为一切正常** ——
             // 这正是用户报的形状，而旧实现永远发现不了（task-82）。
-            let results = watchdog_probe_all(port, 6).await;
-            if probe_results_all_alive(&results) {
-                failures = 0;
+            let results = watchdog_probe_all(port, PROBE_TIMEOUT_SECS).await;
+            let round = classify_probe_round(&results);
+            let dead_targets = describe_dead_targets(&results);
+            let all_alive = probe_results_all_alive(&results);
+            let prev_rounds = streak.rounds();
+            let failures = streak.record(&round);
+
+            // ---- 没到门槛（本轮 <2 个目标失败）：只记账、只留痕，**不拆隧道** ----
+            if !round.is_dead() {
+                if all_alive {
+                    if let Some(prev) = last_partial.take() {
+                        state.log("app", "info", format!("探针已恢复（之前：{prev}）"));
+                    }
+                } else {
+                    // 有目标失败、但没到「2 个」—— **这正是不该拆隧道的形状**。
+                    // 留痕（只在形状变化时落盘）：事后才说得清当时差在哪。
+                    // 「整侧不通」与「零散失败」分开写：前者是用户的症状形状
+                    // （境外好、国内全灭），后者多半是抖动。
+                    let shape = if round.one_side_only() {
+                        "整侧不通"
+                    } else {
+                        "零散失败"
+                    };
+                    let note = format!(
+                        "本轮只有 {}/{} 个探针目标失败（{shape}：境内 {}{}/{}、境外 {}{}/{} 死 —— {dead_targets}）⇒ 未到 2 个的门槛，只记账、不重建",
+                        round.dead,
+                        round.total,
+                        if round.domestic_is_dead() { "全灭" } else { "" },
+                        round.domestic_dead,
+                        round.domestic_total,
+                        if round.overseas_is_dead() { "全灭" } else { "" },
+                        round.overseas_dead,
+                        round.overseas_total
+                    );
+                    if last_partial.as_deref() != Some(note.as_str()) {
+                        state.log("app", "warn", note.clone());
+                        last_partial = Some(note);
+                    }
+                }
+                if prev_rounds > 0 {
+                    state.log(
+                        "app",
+                        "info",
+                        format!("连续失败计数清零（之前已连续 {prev_rounds} 轮失败，被这一轮打断）"),
+                    );
+                }
+                // 只有**全好**才算隧道回来了：退避状态这时才清零。
+                // （部分失败不算「回来了」—— 那可能只是抖动的另一面。）
+                if all_alive {
+                    backoff_until = 0;
+                    failed_attempts = 0;
+                }
                 sync_probe_failures(&handle, &state, 0);
                 continue;
             }
-            failures += 1;
-            if just_woke {
-                // 唤醒这一次失败几乎必然是"隧道真的死了"，不必再等第二次。
-                failures = failures.max(FAILURES_BEFORE_REBUILD);
+
+            // ---- 到门槛：记一轮连续失败 ----
+            let failures = if just_woke {
+                // 唤醒后把**等待**提前，但判据不变：这一轮仍须 ≥2 个目标失败
+                // （条件在 `bump_to_threshold_for` 里，不靠调用点自觉）。
+                streak.bump_to_threshold_for(&round)
+            } else {
+                failures
+            };
+            if let Some(prev) = last_partial.take() {
+                state.log("app", "info", format!("探针失败数达到门槛（之前：{prev}）"));
             }
+            // **留痕**：本轮几个目标失败、连续第几轮、哪几条目标死。
+            // task-99 的反例：13:28:36 之后 baidu 仍零星失败 11 次，但彼此隔
+            // 30s–3 分钟，凑不齐「连续两轮」—— 没有这行，事后说不出差在哪。
+            state.log(
+                "app",
+                "warn",
+                format!(
+                    "探针轮失败（{}/{} 个目标失败，连续第 {failures} 轮）：境内 {}/{} 死、境外 {}/{} 死 —— {dead_targets}",
+                    round.dead,
+                    round.total,
+                    round.domestic_dead,
+                    round.domestic_total,
+                    round.overseas_dead,
+                    round.overseas_total
+                ),
+            );
             // 让界面能看见「连续 N 次不通」——恢复可能在几步之后才开始。
             sync_probe_failures(&handle, &state, failures);
 
@@ -854,7 +1180,14 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                 state.log("app", "info", "用户已关闭，取消自动重建");
                 return;
             }
-            if !should_rebuild_tunnel(true, user_wants_it, failures) {
+            // 探测是异步的：等结果回来时用户可能已经重连（换 pid），那这条隧道
+            // 就不归我管了。**复核 pid**，不再传字面量 `true`。
+            let still_mine = state.with(|i| i.runtime.pid).unwrap_or(None) == pid;
+            if !should_rebuild_tunnel(still_mine, user_wants_it, failures) {
+                continue;
+            }
+            // 退避期内不拆隧道：继续每 10 秒探测并留痕，到点再试。
+            if xt_core::util::now_unix() < backoff_until {
                 continue;
             }
 
@@ -862,20 +1195,20 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             // 显示「正在自动恢复（第 N 次）」并改写连接按钮 —— 不再出现
             // 「未连接 + 可点的连接按钮」，用户也就不会去和看门狗抢。
             let started = xt_core::util::now_unix();
-            let attempt = state
-                .with(|i| {
-                    i.push_log(
-                        "app",
-                        "warn",
-                        format!(
-                            "隧道连续 {failures} 次不通（{}；熄屏/换网/节点抖动，当前节点「{node_name}」），正在自动重建…",
-                            describe_dead_targets(&results)
-                        ),
-                    );
-                    i.last_notice = Some(crate::state::RECOVERING_NOTICE.into());
-                    i.runtime.recovery.begin(started)
-                })
-                .unwrap_or(0);
+            let attempt = state.with(|i| i.runtime.recovery.begin(started)).unwrap_or(0);
+            state.with(|i| {
+                i.last_notice = Some(crate::state::RECOVERING_NOTICE.into());
+            });
+            // 重建的**原因/开始/结果都落盘**（`source=app`）：`push_log` 只进内存
+            // 环形缓冲、不写文件，于是全天 `source=app` 只有 10 行，探针逐轮结果
+            // 与重建走到哪一步事后全读不出来（tester 的 Q7）。
+            state.log(
+                "app",
+                "warn",
+                format!(
+                    "隧道连续 {failures} 轮两侧探针都不通（{dead_targets}；熄屏/换网/节点抖动，当前节点「{node_name}」），第 {attempt} 次自动重建开始"
+                ),
+            );
             events::runtime_changed(&handle, &state);
 
             // 重建：用**当前**的物理出口重新算路由与 DNS。熄屏唤醒后网关
@@ -886,13 +1219,35 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             // 逐个枚举 (stop, start) 的四种结果，断言「结果 == stop.is_ok() && start.is_ok()」
             // 且「stop 失败时不调用 start」—— 与原写法完全一致；`.is_ok()` 保持
             // 原来的「不看具体错误」。**不要**借这次统一改行为。
-            if rebuild_tunnel_in_order(
-                || stop_core(&handle, &state),
+            //
+            // 额外记一笔「停」是否失败：重建失败后要靠它判断老隧道还在不在
+            // （`after_failed_rebuild`）—— 这是与 HTTP 探针**正交**的证据。
+            //
+            // 用 `Arc<AtomicBool>` 而不是 `&mut bool`：`rebuild_tunnel_in_order`
+            // 的闭包要**返回** future，借用栈上的可变变量逃不出闭包体。
+            let stop_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop_failed_in = stop_failed.clone();
+            let rebuilt = rebuild_tunnel_in_order(
+                || {
+                    let flag = stop_failed_in.clone();
+                    // 闭包要**返回** future，所以它自己必须拥有搬进 future 的东西：
+                    // `AppHandle` 克隆一份（廉价，Arc），`AppState` 用引用（Copy）。
+                    let handle = handle.clone();
+                    let state_ref: &AppState = &state;
+                    async move {
+                        let r = stop_core(&handle, state_ref).await;
+                        if r.is_err() {
+                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        r
+                    }
+                },
                 || start_core(&handle, &state),
             )
-            .await
-            .is_ok()
-            {
+            .await;
+            let stop_failed = stop_failed.load(std::sync::atomic::Ordering::Relaxed);
+
+            if rebuilt.is_ok() {
                 state.with(|i| {
                     i.runtime.recovery.succeeded(xt_core::util::now_unix());
                     // **清掉恢复中的提示条**（逻辑在 state.rs，有单测：
@@ -909,26 +1264,60 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                 return;
             }
 
-            // 重建也失败：退回直连。用户至少能上网 —— 这比死守一条
-            // 走不通的隧道更符合「除非我关闭，网络不该断」。
-            // **回滚结果必须显式处理。** 以前这里是 `let _ = stop_core(...)`，
-            // 失败被丢掉，紧接着无条件写「网络可用」—— 那是在断言我们没验证过的事。
-            let stop_result = stop_core(&handle, &state).await;
-            let outcome = FallbackOutcome::from_stop(&stop_result);
-            let (level, log_line, notice) = outcome.messages();
-            state.with(|i| {
-                i.push_log("app", level, log_line);
-                i.runtime.recovery.fell_back_to_direct(xt_core::util::now_unix());
-                // 失败时 notice **保留**，并说清下一步能做什么（诚实版：不声称网络可用）。
-                i.last_notice = Some(notice);
-            });
-            // **已知失败退场：把「自动重连」意图落盘作废。**
-            // 不退的话，用户「退出应用」恢复的网络会在下次启动被同一个坏节点
-            // 再接管一次（见 `connect_intent_after_stop` 的说明）。
-            // 注意只碰意图：上面刚写的 recovery/notice 是界面显示失败原因的依据。
-            invalidate_after_failure(&state, FailureExit::WatchdogRebuild);
-            events::runtime_changed(&handle, &state);
-            return;
+            let rebuild_err = rebuilt.err().unwrap_or_default();
+            match after_failed_rebuild(stop_failed, core_process_alive(pid)) {
+                // **老隧道还活着 ⇒ 什么都不拆。**
+                //
+                // 这是 task-95 那次误判真正伤人的地方：探针假阴性 → 重建 → 停成功、
+                // 起失败 → 把**还活着**的隧道拆掉、写「已退回直连」、作废自动重连，
+                // 然后看门狗自己 `return`，空档 690–2660 秒。
+                FailedRebuildAction::KeepTunnel => {
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    let wait = next_backoff_secs(failed_attempts - 1);
+                    backoff_until = xt_core::util::now_unix() + wait;
+                    state.with(|i| {
+                        // 退出「恢复中」，但**不写任何结局**：既没成功、也没退直连
+                        // （`last_outcome` 保持原样），`probe_failures` 也留着 ——
+                        // 界面据此显示「探测失败 N 次」的 degraded 态。
+                        i.runtime.recovery.recovering = false;
+                        i.runtime.recovery.finished_unix = Some(xt_core::util::now_unix());
+                        i.last_notice =
+                            Some(format!("自动恢复未成功，隧道仍在运行，{wait} 秒后重试"));
+                    });
+                    state.log(
+                        "app",
+                        "error",
+                        format!(
+                            "自动重建失败（{rebuild_err}），但**原隧道仍在**（停止步骤失败={stop_failed}、核心进程 {pid:?} 仍存活）⇒ 保持原状：不退直连、不作废自动重连意图，{wait} 秒后重试"
+                        ),
+                    );
+                    events::runtime_changed(&handle, &state);
+                    continue;
+                }
+                // 老隧道**确实没了**：退回直连。用户至少能上网 —— 这比死守
+                // 一条走不通的隧道更符合「除非我关闭，网络不该断」。
+                FailedRebuildAction::FallBackToDirect => {
+                    // **回滚结果必须显式处理。** 以前这里是 `let _ = stop_core(...)`，
+                    // 失败被丢掉，紧接着无条件写「网络可用」—— 那是在断言我们没验证过的事。
+                    let stop_result = stop_core(&handle, &state).await;
+                    let outcome = FallbackOutcome::from_stop(&stop_result);
+                    let (level, log_line, notice) = outcome.messages();
+                    state.with(|i| {
+                        i.runtime.recovery.fell_back_to_direct(xt_core::util::now_unix());
+                        // 失败时 notice **保留**，并说清下一步能做什么（诚实版：不声称网络可用）。
+                        i.last_notice = Some(notice);
+                    });
+                    state.log("app", level, format!("{log_line}（自动重建失败：{rebuild_err}）"));
+                    // **已知失败退场：把「自动重连」意图落盘作废。**
+                    // 不退的话，用户「退出应用」恢复的网络会在下次启动被同一个坏节点
+                    // 再接管一次（见 `connect_intent_after_stop` 的说明）。
+                    // 注意只碰意图：上面刚写的 recovery/notice 是界面显示失败原因的依据。
+                    // **这一条只在「老隧道确实没了」时执行** —— 见上面的 KeepTunnel。
+                    invalidate_after_failure(&state, FailureExit::WatchdogRebuild);
+                    events::runtime_changed(&handle, &state);
+                    return;
+                }
+            }
         }
     });
 }
@@ -2593,6 +2982,226 @@ mod tests {
         assert!(!probe_results_all_alive(&[]), "没有证据不算好");
     }
 
+    // -----------------------------------------------------------------------
+    // task-98：看门狗判据 —— 单条失败不判死 / ≥2 个目标才算一轮失败 / 轮内重试 / 退避
+    // -----------------------------------------------------------------------
+
+    fn targets_of_side(side: ProbeSide) -> Vec<&'static str> {
+        crate::supervisor::REQUIRED_PROBE_TARGETS
+            .iter()
+            .copied()
+            .filter(|t| probe_side(t) == Some(side))
+            .collect()
+    }
+
+    /// 造一轮结果：前 `dead_count` 个目标给 `000`（死），其余 200。
+    fn round_with_dead(dead_count: usize) -> Vec<(String, String)> {
+        crate::supervisor::REQUIRED_PROBE_TARGETS
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                (
+                    t.to_string(),
+                    if i < dead_count { "000" } else { "200" }.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// 每个必需探针目标都必须在 `probe_side` 里有明确归属，**且两侧都有人**。
+    ///
+    /// 不认识的目标会被 `classify_probe_round` 忽略（凑不出「2 个目标失败」），
+    /// 所以新增探针时必须在这里表态，而不是被默默漏掉。
+    #[test]
+    fn every_required_probe_target_has_a_side_and_both_sides_exist() {
+        let mut domestic = 0;
+        let mut overseas = 0;
+        for target in crate::supervisor::REQUIRED_PROBE_TARGETS {
+            match probe_side(target) {
+                Some(ProbeSide::Domestic) => domestic += 1,
+                Some(ProbeSide::Overseas) => overseas += 1,
+                None => {
+                    panic!("新探针目标 {target} 必须在 probe_side / DOMESTIC_PROBE_TARGETS 里表态")
+                }
+            }
+        }
+        assert!(domestic >= 1, "境内侧至少一个目标，否则日志分不清两种病");
+        assert!(overseas >= 1, "境外侧至少一个目标");
+        assert_eq!(
+            domestic + overseas,
+            crate::supervisor::REQUIRED_PROBE_TARGETS.len(),
+            "不许有目标被漏掉"
+        );
+    }
+
+    /// **单条探针失败不判死**：哪怕连续 100 轮，也不许凑够阈值。
+    ///
+    /// 旧判据是「所有目标都通才算通」，于是任意一条抖动都能在 20 秒内凑够
+    /// 连续两轮并**拆掉一条正在转发流量的隧道**（task-95 定性为误判）。
+    #[test]
+    fn one_dead_target_is_not_a_failed_round_no_matter_how_many_rounds() {
+        let mut streak = ProbeStreak::new();
+        for _ in 0..100 {
+            let round = classify_probe_round(&round_with_dead(1));
+            assert!(!round.is_dead(), "1 个目标失败 = 没到 2 个的门槛");
+            assert_eq!(streak.record(&round), 0, "未达门槛的轮不许累计");
+        }
+        assert!(
+            !should_rebuild_tunnel(true, true, streak.rounds()),
+            "100 轮单条失败也不该重建"
+        );
+    }
+
+    /// **两个目标失败才算一轮失败；连续两轮才允许重建。**
+    #[test]
+    fn two_dead_targets_take_two_consecutive_rounds_to_rebuild() {
+        let mut streak = ProbeStreak::new();
+        let round = classify_probe_round(&round_with_dead(2));
+        assert!(round.is_dead(), "2 个目标失败 = 到达门槛");
+        assert_eq!(streak.record(&round), 1);
+        assert!(
+            !should_rebuild_tunnel(true, true, streak.rounds()),
+            "第一轮不许重建（要连续 2 轮）"
+        );
+        assert_eq!(streak.record(&round), 2);
+        assert!(
+            should_rebuild_tunnel(true, true, streak.rounds()),
+            "连续两轮到阈值才允许重建"
+        );
+    }
+
+    /// 连续计数只认**连续**：中间夹一轮「只有 1 个目标失败」，计数必须清零。
+    ///
+    /// task-99 的反例：13:28:36 之后 baidu 仍零星失败 11 次，但彼此隔 30s–3
+    /// 分钟 ⇒ 永远凑不齐连续两轮。**「差一轮就是两种命运」**，所以这行要有测试。
+    #[test]
+    fn a_round_below_the_threshold_resets_the_streak() {
+        let mut streak = ProbeStreak::new();
+        let dead_two = classify_probe_round(&round_with_dead(2));
+        let dead_one = classify_probe_round(&round_with_dead(1));
+        assert_eq!(streak.record(&dead_two), 1);
+        assert_eq!(streak.record(&dead_one), 0, "被打断就必须清零");
+        assert_eq!(streak.record(&dead_two), 1, "重新从 1 开始");
+        assert!(!should_rebuild_tunnel(true, true, streak.rounds()));
+    }
+
+    /// **境内只有 1 个目标** ⇒ 「只有国内全灭」永远到不了 2 个的门槛。
+    ///
+    /// 这是本卡**已知且接受**的取舍（Lead 决策：门槛按目标数，不按侧）：
+    /// 「境外好好的、国内全灭」会被**记录**（日志里有单侧失败的形状 + 分侧计数）
+    /// 但**不会**触发重建。写在这里是为了让这个边界**看得见**，
+    /// 而不是让后人以为它被覆盖了。
+    #[test]
+    fn domestic_only_total_failure_is_below_the_threshold() {
+        let domestic = targets_of_side(ProbeSide::Domestic);
+        let mut results: Vec<(String, String)> = domestic
+            .iter()
+            .map(|t| (t.to_string(), "000".to_string()))
+            .collect();
+        for t in targets_of_side(ProbeSide::Overseas) {
+            results.push((t.to_string(), "200".to_string()));
+        }
+        let round = classify_probe_round(&results);
+        assert!(round.domestic_is_dead(), "国内侧确实全灭");
+        assert!(!round.overseas_is_dead());
+        assert!(
+            !round.is_dead(),
+            "但只有 {} 个目标失败 ⇒ 不触发重建（门槛 2）",
+            round.dead
+        );
+        assert!(round.one_side_only(), "日志要能看出这是单侧失败");
+    }
+
+    /// **轮内重试**是本卡最高性价比的杠杆（task-100 实测：失败后同目标下一次
+    /// 成功 baidu 94%、cloudflare 56%）。这条测试同时是它的**敏感性守卫**：
+    /// 把 `PROBE_ATTEMPTS_PER_ROUND` 改回 1 ⇒ 这里红。
+    #[test]
+    fn a_failed_probe_is_retried_once_in_the_same_round() {
+        assert!(!should_retry_probe("204", 1), "成功不许再打一次请求");
+        assert!(
+            should_retry_probe("000", 1),
+            "第一次失败、还有预算 ⇒ 必须重试（快失败那种病）"
+        );
+        assert!(
+            should_retry_probe("", 1),
+            "无响应（挂住那种病）同样要重试"
+        );
+        assert!(
+            !should_retry_probe("000", PROBE_ATTEMPTS_PER_ROUND),
+            "预算用完就停，不许无限重试"
+        );
+    }
+
+    /// 重建失败之后：老隧道还活着（停止失败 / 进程仍在）⇒ 必须保持原状。
+    ///
+    /// 这正是 task-95 那次误判伤人的地方：重建失败后把**还活着**的隧道拆掉、
+    /// 写「已退回直连」、作废自动重连，然后看门狗自己 `return`，
+    /// 空档 690–2660 秒。
+    #[test]
+    fn failed_rebuild_keeps_a_still_alive_tunnel() {
+        assert_eq!(
+            after_failed_rebuild(true, false),
+            FailedRebuildAction::KeepTunnel,
+            "停都停不下来 ⇒ 老隧道很可能还在，不许退直连"
+        );
+        assert_eq!(
+            after_failed_rebuild(false, true),
+            FailedRebuildAction::KeepTunnel,
+            "核心进程仍在 ⇒ 不许拆"
+        );
+        assert_eq!(
+            after_failed_rebuild(false, false),
+            FailedRebuildAction::FallBackToDirect,
+            "老隧道确实没了 ⇒ 退直连，别把用户留在断网状态"
+        );
+    }
+
+    /// 进程存活判据（与 HTTP 探针**正交**）：自己一定活着，不存在的 pid 一定不是。
+    #[test]
+    fn core_process_alive_is_orthogonal_evidence() {
+        assert!(
+            core_process_alive(Some(std::process::id())),
+            "本进程必须判为活着"
+        );
+        assert!(!core_process_alive(None), "没见过 pid 不算活着");
+        let bogus = 4_000_000; // 远超 macOS 的 pid 上限（maxproc 量级），必然不存在
+        assert!(!core_process_alive(Some(bogus)), "不存在的 pid 必须是 false");
+    }
+
+    /// 重建失败的退避：逐档增长、最后一档封顶（既不许死循环重试，也不许放弃）。
+    #[test]
+    fn rebuild_backoff_grows_then_caps() {
+        assert_eq!(next_backoff_secs(0), 30);
+        assert_eq!(next_backoff_secs(1), 60);
+        assert_eq!(next_backoff_secs(2), 120);
+        assert_eq!(next_backoff_secs(3), 300);
+        assert_eq!(next_backoff_secs(99), 300, "封顶，不许涨到天上去");
+        assert!(
+            REBUILD_BACKOFF_SECS[0] >= 10,
+            "至少给网络一点恢复时间，别立刻重试"
+        );
+    }
+
+    /// 唤醒只把**等待**提前，判据不变：那一轮仍须 ≥2 个目标失败。
+    #[test]
+    fn wake_bumps_the_wait_but_not_the_proof() {
+        let dead_one = classify_probe_round(&round_with_dead(1));
+        let mut streak = ProbeStreak::new();
+        assert_eq!(streak.record(&dead_one), 0);
+        assert_eq!(
+            streak.bump_to_threshold_for(&dead_one),
+            0,
+            "没到门槛的轮，唤醒也不许把计数抬到阈值（旧实现正是这样误判的）"
+        );
+        let dead_two = classify_probe_round(&round_with_dead(2));
+        assert_eq!(streak.record(&dead_two), 1);
+        assert_eq!(
+            streak.bump_to_threshold_for(&dead_two),
+            FAILURES_BEFORE_REBUILD,
+            "到门槛的轮：唤醒可以把等待提前"
+        );
+    }
+
     /// 日志必须说出**是哪个目标**不通（否则又回到「只报一句」查不动）。
     #[test]
     fn dead_target_description_names_the_target() {
@@ -2632,8 +3241,13 @@ mod tests {
              删掉这个调用就是回到 task-82 的坏状态",
         );
         assert!(
-            prod.contains("watchdog_probe_all(port, 6)"),
-            "看门狗必须用**多目标探测**（国内 + 境外）—— 回到只探境外就又会漏掉「国内全断」",
+            prod.contains("watchdog_probe_all(port, PROBE_TIMEOUT_SECS)"),
+            "看门狗必须用**多目标探测**（国内 + 境外）—— 回到只探境外就又会漏掉「国内全断」；\
+             超时值必须走命名常量 `PROBE_TIMEOUT_SECS`（task-98：阈值要与判据分开）",
+        );
+        assert!(
+            prod.contains("for target in crate::supervisor::REQUIRED_PROBE_TARGETS"),
+            "`watchdog_probe_all` 必须遍历门禁那份必需目标清单（不能只探一个）",
         );
         assert!(
             prod.contains("!egress_rebuild_allowed(now_unix, last_started"),
