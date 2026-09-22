@@ -315,7 +315,6 @@ fn append_line_to(path: &Path, line: &str) -> Result<()> {
 }
 
 fn append_to(path: &Path, text: &str) -> Result<()> {
-    use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).append(true);
     #[cfg(unix)]
@@ -326,7 +325,41 @@ fn append_to(path: &Path, text: &str) -> Result<()> {
     let mut f = opts
         .open(path)
         .map_err(|e| Error::Store(format!("打开日志失败: {e}")))?;
-    writeln!(f, "{text}").map_err(|e| Error::Store(format!("写日志失败: {e}")))
+    write_record(&mut f, text).map_err(|e| Error::Store(format!("写日志失败: {e}")))
+}
+
+/// 写一条记录：**一次 `write_all` 写完 `<text>\n`**。
+///
+/// # 为什么必须一次 write（task-104 实测出来的缺陷）
+///
+/// 原来是 `writeln!(f, "{text}")` —— 它展开成**两次** `write`：
+/// `write_all(text)` + `write_all("\n")`。而日志是**两个写入者并发追加**
+/// （核心 stdout 转发 `state.log("core", …)` 与看门狗 `state.log("app", …)`，
+/// 见 `apps/desktop/src/commands/core.rs`），文件以 **O_APPEND** 打开。
+/// O_APPEND 只保证**单次** write 的「定位 + 写入」原子，**两次之间可以被插进来**：
+///
+/// ```text
+/// A: write("{app}")                 ← 还没写换行
+/// B: write("{core}") write("\n")
+/// A: write("\n")
+/// ⇒ 文件里：{app}{core}\n   外加一个空行
+/// ```
+///
+/// 本机 `app.jsonl` 实测到 4 行「一行两个 JSON 对象」（其中 2 行后面正好跟着
+/// 一个空行 —— 这个指纹只有两次 write 交错能解释），直接导致 **3 条
+/// 「隧道已自动恢复」在逐行解析的工具里静默消失**。
+///
+/// 一次 `write_all` 之后，O_APPEND 的原子性覆盖**整条记录** ⇒ 行不会交错；
+/// 并顺带关掉「两次 write 之间进程崩掉 ⇒ 留下半行」的窗口。
+///
+/// 抽成独立函数是为了可测：测试用「计数 writer」断言**恰好 1 次 write**
+/// （`a_log_record_is_written_with_exactly_one_write_call`）—— 那个属性是
+/// **确定的**，不依赖调度；并发跑只能给出概率性的证据。
+fn write_record<W: std::io::Write>(w: &mut W, text: &str) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(text.len() + 1);
+    buf.extend_from_slice(text.as_bytes());
+    buf.push(b'\n');
+    w.write_all(&buf)
 }
 
 /// 把活动文件修剪到 [`LOG_KEEP_BYTES`]：旧内容整体成为备份，新文件只留尾部。
@@ -538,5 +571,85 @@ mod tests {
         let root = Store::default_root();
         assert!(root.to_string_lossy().contains("Application Support"));
         assert!(root.to_string_lossy().ends_with(crate::APP_IDENTIFIER));
+    }
+
+    /// **主守卫（task-104）**：一条记录必须**只做一次 `write`**，且以 `\n` 结尾。
+    ///
+    /// 为什么用「计数 writer」而不是并发跑：并发能不能撞上交错窗口**依赖调度**，
+    /// 那种测试是概率性的；而「一条记录 = 一次 write」是**确定的**属性，
+    /// 也正是 O_APPEND 的原子性能够覆盖整条记录的前提。
+    ///
+    /// **敏感性**：把 `write_record` 退回 `writeln!(w, "{text}")` ⇒ 计数变 2 ⇒ 本测试红。
+    #[test]
+    fn a_log_record_is_written_with_exactly_one_write_call() {
+        #[derive(Default)]
+        struct CountingWriter {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl std::io::Write for CountingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut w = CountingWriter::default();
+        write_record(&mut w, r#"{"n":1}"#).unwrap();
+        assert_eq!(String::from_utf8(w.bytes.clone()).unwrap(), "{\"n\":1}\n");
+        assert_eq!(
+            w.writes, 1,
+            "一条记录必须**一次 write** 写完：两次 write 之间会被另一个写入者插进来，\
+             产生「一行两个 JSON 对象」（task-104 实测 4 行，吞掉 3 条自动恢复记录）"
+        );
+
+        // 多行文本（trim 之后整体追加）同样只写一次。
+        let mut w = CountingWriter::default();
+        write_record(&mut w, "a\nb").unwrap();
+        assert_eq!(w.writes, 1, "多行记录也必须是单次 write");
+        assert_eq!(String::from_utf8(w.bytes).unwrap(), "a\nb\n");
+    }
+
+    /// **产物级不变量（task-104，概率性）**：多线程并发追加之后，行数必须等于
+    /// 写出的条数，且**每一行都能独立解析**。
+    ///
+    /// ⚠️ 诚实说明：这条是**概率性**的 —— 旧实现（每条两次 `write`）只有在两个
+    /// 写入者刚好撞进中间那一步时才会红。它证明的是「修好之后产物是干净的」，
+    /// **不能替代**上面那条确定性守卫（那条才是主守卫）。
+    #[test]
+    fn concurrent_appends_keep_every_record_on_its_own_line() {
+        let store = temp_store("concurrent");
+        let threads = 8usize;
+        let per_thread = 200usize;
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let store = &store;
+                scope.spawn(move || {
+                    for i in 0..per_thread {
+                        store
+                            .append_log(&format!(r#"{{"t":{t},"i":{i}}}"#))
+                            .expect("追加日志不该失败");
+                    }
+                });
+            }
+        });
+
+        let text = std::fs::read_to_string(store.logs_dir().join("app.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            threads * per_thread,
+            "行数必须等于写出的条数：多了 = 交错（一行两个对象），少了 = 记录被并进上一行"
+        );
+        for (n, line) in lines.iter().enumerate() {
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(line) {
+                panic!("第 {} 行不是合法 JSON（并发写入把两条记录挤到一行了）: {e}\n{line}", n + 1);
+            }
+        }
+        let _ = std::fs::remove_dir_all(store.root());
     }
 }

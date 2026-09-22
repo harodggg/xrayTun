@@ -85,37 +85,90 @@ def msg_time(msg: str):
 
 
 # ---------------------------------------------------------------- 载入 + 去重
+_DEC = json.JSONDecoder()
+
+
+def parse_line(line):
+    """解析**一行**。返回 (objects, err)。
+
+    ⚠️ **一行可能含多个 JSON 对象** —— 实测 2026-09-22 有 **4 行**是这样：
+    一个 `source=app` 事件紧挨着一个 `source=core` 横幅（`…}{…`，中间没有换行）。
+    **一行一次 `json.loads` 会把这类行整行丢掉**（第一版就栽在这里：把「隧道已自动恢复」
+    漏成 0 行，实际是 3 次）。所以这里用 `raw_decode` 循环解析到行尾。
+
+    err=True 表示**中途解析失败**（尾部残缺/截断）—— 此时仍返回已成功解析的对象。
+    """
+    objs, i, n, err = [], 0, len(line), False
+    while i < n:
+        while i < n and line[i] in " \t\r\n":
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, end = _DEC.raw_decode(line, i)
+        except ValueError:
+            err = True
+            break
+        objs.append(obj)
+        i = end
+    return objs, err
+
+
 def load_records(paths, since=None, until=None):
     """读所有日志文件，按 (ts_unix, message) 去重；返回按时间排序的 record 列表。
 
     record = {"t": ts_unix, "src": source, "level": level, "msg": message}
     去重是**必须**的：app.jsonl 与 app.1.jsonl 有重叠。
+
+    「坏行」**分三类**统计（不再混成一个数）：**多对象行** / 截断·残缺行 / 非 JSON 行。
     """
-    seen, out, stats = set(), [], {"lines": 0, "bad": 0, "dup": 0, "kept": 0}
+    seen, out = set(), []
+    stats = {"lines": 0, "objects": 0, "multi_object_lines": 0, "blank_lines": 0,
+             "dup": 0, "kept": 0, "truncated_lines": 0, "non_json_lines": 0,
+             "src_app": 0, "src_core": 0, "src_other": 0}
     for p in paths:
         if not os.path.exists(p):
             continue
         with open(p, "rb") as f:
             for raw in f:
                 stats["lines"] += 1
-                try:
-                    d = json.loads(raw)
-                except Exception:
-                    stats["bad"] += 1
+                line = raw.decode("utf-8", "replace")
+                if not line.strip():               # 空行不是「坏行」——单列一类（实测 3 行）
+                    stats["blank_lines"] += 1
                     continue
-                key = (d.get("ts_unix"), d.get("message"))
-                if key in seen:
-                    stats["dup"] += 1
+                objs, err = parse_line(line)
+                stats["objects"] += len(objs)
+                if len(objs) > 1:
+                    stats["multi_object_lines"] += 1
+                if not objs:
+                    if line.lstrip().startswith("{"):
+                        stats["truncated_lines"] += 1
+                    else:
+                        stats["non_json_lines"] += 1
                     continue
-                seen.add(key)
-                t = d.get("ts_unix") or 0
-                if since is not None and t < since:
-                    continue
-                if until is not None and t > until:
-                    continue
-                out.append({"t": t, "src": d.get("source"), "level": d.get("level"),
-                            "msg": d.get("message") or ""})
-                stats["kept"] += 1
+                if err:
+                    stats["truncated_lines"] += 1      # 部分成功：对象照用，同时记一笔残缺
+                for d in objs:
+                    if not isinstance(d, dict):
+                        stats["non_json_lines"] += 1
+                        continue
+                    key = (d.get("ts_unix"), d.get("message"))
+                    if key in seen:
+                        stats["dup"] += 1
+                        continue
+                    seen.add(key)
+                    t = d.get("ts_unix") or 0
+                    if since is not None and t < since:
+                        continue
+                    if until is not None and t > until:
+                        continue
+                    src = d.get("source")
+                    stats["src_app" if src == "app" else ("src_core" if src == "core" else "src_other")] += 1
+                    out.append({"t": t, "src": src, "level": d.get("level"),
+                                "msg": d.get("message") or ""})
+                    stats["kept"] += 1
+    out.sort(key=lambda r: r["t"])
+    return out, stats
     out.sort(key=lambda r: r["t"])
     return out, stats
 
@@ -302,7 +355,11 @@ def print_report(recs, stats, m1, m2, m3, window):
     print("=" * 78)
     print("net-metrics：XrayTun 日志指标（只读）")
     print(f"  窗口：{window}")
-    print(f"  去重：读 {stats['lines']} 行 → 保留 {stats['kept']} 条；丢弃重复 {stats['dup']} 条；坏行 {stats['bad']} 条")
+    print(f"  解析：读 {stats['lines']} 行 → 解析出 {stats['objects']} 个对象；"
+          f"其中**多对象行 {stats['multi_object_lines']} 行**（一行含 >1 个 JSON 对象，已全部计入）")
+    print(f"  去重：保留 {stats['kept']} 条；丢弃重复 {stats['dup']} 条；"
+          f"截断·残缺行 {stats['truncated_lines']}；非 JSON 行 {stats['non_json_lines']}；空行 {stats['blank_lines']}")
+    print(f"  来源：source=app {stats['src_app']} 条 / source=core {stats['src_core']} 条 / 其它 {stats['src_other']} 条")
     print(f"  分轮口径：相邻探针间隔 > {m2['round_gap_secs']:.0f}s 分轮；探针超时={m2['timeout_secs']:.0f}s（用于「>超时才对」计数）")
     print("=" * 78)
 
@@ -382,6 +439,14 @@ def self_test():
     # --- 同一个「去重」样本：一条在旧文件里，一条在新文件里（完全相同的 ts+message）
     dup = rec(8, "[888888888] replace destination with tcp:9.9.9.9:80", base + 700)
     rows_old.append(dup); rows_new.append(dup)
+    # --- ⚠️ **一行两个 JSON 对象**（真实日志里出现过 4 次：一个 app 事件 + 一个 core 横幅）
+    #     这一行是 task-103 的回归用例：用「一行一次 json.loads」会整行丢掉 ⇒「自动恢复」被漏。
+    two_obj = ('{"ts_unix": %d, "source": "app", "level": "info", '
+               '"message": "隧道已自动恢复（第 1 次自动重建）"}' % (base + 800)) + \
+              ('{"ts_unix": %d, "source": "core", "level": "info", '
+               '"message": "%s [Warning] core: Xray 26.9.9 started"}'
+               % (base + 800, datetime.fromtimestamp(base + 800).strftime("%Y/%m/%d %H:%M:%S.%f")))
+    rows_new.append(two_obj)
 
     p_old = os.path.join(tmp, "app.1.jsonl"); p_new = os.path.join(tmp, "app.jsonl")
     open(p_old, "w").write("\n".join(rows_old) + "\n")
@@ -396,7 +461,7 @@ def self_test():
             fails.append(name)
 
     recs, stats = load_records([p_old, p_new])
-    check("去重后条数（17 行去重 → 16）", stats["kept"], 16)
+    check("去重后条数（18 行 → 18 个对象 → 去重后 18 条）", stats["kept"], 18)
     check("丢弃重复条数", stats["dup"], 1)
 
     m1 = analyze_task97(recs)
@@ -421,7 +486,43 @@ def self_test():
     check("已作废次数", len(m3["void_intents"]), 1)
     check("口径A：作废→下次 core 启动", m3["void_intents"][0]["gap_to_next_core_secs"], 60)
     check("口径B：流量空档（13:00:10→13:11:40）", m3["void_intents"][0]["traffic_gap_secs"], 690)
-    check("「隧道已自动恢复」行数", len(m3["auto_recovered"]), 0)
+    check("「隧道已自动恢复」行数（来自**一行两个对象**那一行）", len(m3["auto_recovered"]), 1)
+
+    # ---------- 用例：一行两个对象（task-103 回归） ----------
+    print("\n=== 用例：一行两个 JSON 对象（app 事件 + core 横幅）===")
+    check("多对象行计数", stats["multi_object_lines"], 1)
+    check("解析出的对象数 = 行数 + 1（多对象行多出 1 个）", stats["objects"], stats["lines"] + 1)
+    check("source=app 条数（作废 1 + 自动恢复 1）", stats["src_app"], 2)
+    print(f"  该行原文（截断显示）：{two_obj[:110]}…")
+
+    # ---------- 敏感性 0（本卡新增）：退回「一行一次 json.loads」⇒ 自动恢复必须丢 ----------
+    print("\n=== 敏感性 0：退回「一行一次 json.loads」⇒ 「隧道已自动恢复」必须丢（红）===")
+    def legacy_load(paths):
+        """只用于对照的**旧实现**：一行一次 json.loads（task-103 之前的行为）。"""
+        seen2, out2 = set(), []
+        for p in paths:
+            if not os.path.exists(p):
+                continue
+            for raw in open(p, "rb"):
+                try:
+                    d = json.loads(raw)
+                except Exception:
+                    continue                      # ← 多对象行在这里被整行丢弃
+                k = (d.get("ts_unix"), d.get("message"))
+                if k in seen2:
+                    continue
+                seen2.add(k)
+                out2.append({"t": d.get("ts_unix") or 0, "src": d.get("source"),
+                             "level": d.get("level"), "msg": d.get("message") or ""})
+        return out2
+    legacy_recs = legacy_load([p_old, p_new])
+    m3_legacy = analyze_selfheal(legacy_recs)
+    print(f"  旧实现（一行一次 json.loads）：记录 {len(legacy_recs)} 条，"
+          f"「隧道已自动恢复」= **{len(m3_legacy['auto_recovered'])} 行**   ← 丢事件")
+    print(f"  新实现（raw_decode 循环）：   记录 {len(recs)} 条，"
+          f"「隧道已自动恢复」= **{len(m3['auto_recovered'])} 行**")
+    check("敏感性 0：旧实现丢掉该事件（=0）", len(m3_legacy["auto_recovered"]), 0)
+    check("敏感性 0：新实现看见它（=1）", len(m3["auto_recovered"]), 1)
 
     # ---------- 敏感性：把探针 2 的「dialing」行删掉 ⇒ 它变成 n=1，但结局仍是 no_outcome；
     #            真正该变的是「把 v6 那行改成 v4」⇒ 分类必须从 v6_only 变 v4_only。
@@ -455,7 +556,7 @@ def self_test():
     if fails:
         print(f"self-test：**失败**（{len(fails)} 项）：{fails}")
         return 1
-    print("self-test：**全部通过**（去重 / v6-v4 分类 / 探针三种结局 / 分轮 / 空档 / 三项敏感性）")
+    print("self-test：**全部通过**（去重 / 多对象行 / v6-v4 分类 / 探针三种结局 / 分轮 / 空档 / 四项敏感性）")
     return 0
 
 
