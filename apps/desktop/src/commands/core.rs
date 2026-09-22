@@ -7,9 +7,74 @@
 
 use super::*;
 
+/// 核心**为什么**被启动（task-108）：由**调用点显式传入**，不在 `start_core`
+/// 内部靠猜（同一个函数被六个地方复用）。
+///
+/// # 为什么需要它
+///
+/// 以前日志里查不出「谁启动了核心」：`start_proxy`（用户点「连接」）**一行都不
+/// 落盘**，而 `stop_proxy`（用户点「断开」）会落一条「已作废…」。实测后果：
+/// `14:16:41` / `14:19:09` 两次作废之后，`14:17:31` / `14:19:32` 各起来一个新核心
+/// （间隔 50s / 23s），**日志里没有任何一行说明它是谁启动的** ⇒ task-95 的 Q7
+/// 只能写「无法判定」。启动来源同时也是 after 对照的锚点（配合 App 版本）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreStartTrigger {
+    /// 用户在界面上点了「连接」。
+    UserConnect,
+    /// 切换代理模式（`set_mode`：系统代理 / TUN / 直连）。
+    ModeSwitch,
+    /// 切换节点（`select_node`）。
+    NodeSwitch,
+    /// 切节点时的**回退**路径（新节点起不来，换一个）。
+    NodeSwitchFallback,
+    /// 物理出口变化（换网）触发的重建。
+    EgressChange,
+    /// 看门狗发现隧道不通触发的重建。
+    WatchdogRebuild,
+    /// 启动时按上次的连接意图自动重连。
+    AutoReconnect,
+}
+
+impl CoreStartTrigger {
+    /// 给用户/日志看的名字（报告与日志里都直接用它）。
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::UserConnect => "用户点击连接",
+            Self::ModeSwitch => "切换模式",
+            Self::NodeSwitch => "切换节点",
+            Self::NodeSwitchFallback => "切换节点（回退）",
+            Self::EgressChange => "物理出口变化（换网）",
+            Self::WatchdogRebuild => "看门狗重建",
+            Self::AutoReconnect => "启动时自动重连",
+        }
+    }
+
+    /// **全集**（有测试断言：每个调用点用的变体都在这里，且标签互不相同）。
+    ///
+    /// 只有测试用它，所以生产构建里允许 dead_code —— 与 `FailureExit::ALL`
+    /// 同一手法（那个也是被守卫测试用的全集）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::UserConnect,
+        Self::ModeSwitch,
+        Self::NodeSwitch,
+        Self::NodeSwitchFallback,
+        Self::EgressChange,
+        Self::WatchdogRebuild,
+        Self::AutoReconnect,
+    ];
+}
+
+/// 启动核心时落盘的那一行（**纯函数**，便于断言「版本 + 触发者」两件事都在）。
+///
+/// 格式照抄诊断报告首行的 `XrayTun {版本}`；一眼能看出「哪个版本、为什么启动」。
+pub(crate) fn core_start_log_line(app_version: &str, trigger: CoreStartTrigger) -> String {
+    format!("XrayTun {app_version} · 启动核心（触发者：{}）", trigger.label())
+}
+
 #[tauri::command]
 pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
-    start_core(&app, &state).await?;
+    start_core(&app, &state, CoreStartTrigger::UserConnect).await?;
     spawn_dns_reprobe(&app, &state);
     snapshot::build_snapshot(&app, &state).await
 }
@@ -29,7 +94,22 @@ pub async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
     snapshot::build_snapshot(&app, &state).await
 }
 
-pub(crate) async fn start_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
+pub(crate) async fn start_core(
+    app: &AppHandle,
+    state: &AppState,
+    trigger: CoreStartTrigger,
+) -> Result<(), String> {
+    // **先落盘「谁启动了核心」**（task-108）：这一行是 Q7「来源不明的 core 启动」
+    // 的唯一解药，也是 after 对照的锚点（带 App 版本 ⇒ 不用再猜「新版在跑吗」）。
+    //
+    // 放在最前面（而不是等启动成功）：失败的启动同样需要归因 ——
+    // 「用户点了连接但核心没起来」与「看门狗重建失败」是两回事。
+    state.log(
+        "app",
+        "info",
+        core_start_log_line(&app.package_info().version.to_string(), trigger),
+    );
+
     // 先在锁外把需要的数据克隆出来。
     let (settings, nodes) = state
         .with(|i| (i.settings.clone(), i.nodes.clone()))
@@ -1247,7 +1327,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                         r
                     }
                 },
-                || start_core(&handle, &state),
+                || start_core(&handle, &state, CoreStartTrigger::WatchdogRebuild),
             )
             .await;
             let stop_failed = stop_failed.load(std::sync::atomic::Ordering::Relaxed);
@@ -1642,7 +1722,7 @@ pub(crate) fn spawn_network_watch(
 
             match rebuild_tunnel_in_order(
                 || stop_core(&handle, &state),
-                || start_core(&handle, &state),
+                || start_core(&handle, &state, CoreStartTrigger::EgressChange),
             )
             .await
             {
@@ -1776,7 +1856,7 @@ pub async fn reconnect_if_needed(app: &AppHandle, state: &AppState) {
     // 调用方是 `spawn` 出来的（见 lib.rs），所以这里等几分钟也不会挡住窗口。
     let mut last_err = String::new();
     for attempt in 1..=RECONNECT_ATTEMPTS {
-        match start_core(app, state).await {
+        match start_core(app, state, CoreStartTrigger::AutoReconnect).await {
             Ok(()) => {
                 let msg = if attempt == 1 {
                     "已自动重连".to_string()
@@ -3475,5 +3555,89 @@ mod tests {
         assert!(msg.contains("137"), "要点出省略条数：{msg}");
         assert!(msg.contains("日志文件"), "要指出完整原文在哪：{msg}");
         assert!(msg.contains("刷新"), "要告诉用户怎么看全（刷新日志页）：{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-108：核心启动必须**自证**（App 版本 + 触发者）
+    // -----------------------------------------------------------------------
+
+    /// 七个触发者各有**互不相同**的名字（合成一个标签会让人没法归因）。
+    #[test]
+    fn every_start_trigger_has_its_own_label() {
+        let labels: Vec<&str> = CoreStartTrigger::ALL.iter().map(|t| t.label()).collect();
+        assert_eq!(
+            labels.len(),
+            7,
+            "全集是 7 类（`grep -rn 'start_core('` 核过所有调用点）：{labels:?}"
+        );
+        let uniq: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
+        assert_eq!(uniq.len(), labels.len(), "标签不许重复：{labels:?}");
+        assert!(labels.iter().all(|l| !l.is_empty()), "{labels:?}");
+    }
+
+    /// 落盘那一行必须**同时**带 App 版本与真实触发者。
+    #[test]
+    fn core_start_line_names_version_and_trigger() {
+        let line = core_start_log_line("0.8.34", CoreStartTrigger::WatchdogRebuild);
+        assert!(
+            line.contains("XrayTun 0.8.34"),
+            "必须带 **App** 版本：核心横幅是核心版本，不随 App 变，不能代替它：{line}"
+        );
+        assert!(line.contains("看门狗重建"), "必须带真实触发者：{line}");
+    }
+
+    /// **源码级守卫**：每个调用点必须**显式**传入它自己的触发者。
+    ///
+    /// 为什么需要：函数签名已经强制「必须传一个变体」（不传编译不过），但**传错**
+    /// 或写死某个变体，编译器不会知道 —— 那时「来源不明」会变成「来源错」，
+    /// 比不记更难查。逐点钉住（与 task-75 / task-98 的源码守卫同一手法）。
+    #[test]
+    fn each_start_core_call_site_names_its_own_trigger() {
+        let strip = |src: &str| src.split("#[cfg(test)]").next().unwrap_or("").to_string();
+        let core = strip(include_str!("core.rs"));
+        let nodes = strip(include_str!("nodes.rs"));
+        let settings = strip(include_str!("settings.rs"));
+        for (file, anchor, what) in [
+            (
+                &core,
+                "start_core(&app, &state, CoreStartTrigger::UserConnect)",
+                "用户点连接",
+            ),
+            (
+                &settings,
+                "start_core(&app, &state, CoreStartTrigger::ModeSwitch)",
+                "切模式",
+            ),
+            (
+                &nodes,
+                "start_core(&app, &state, CoreStartTrigger::NodeSwitch)",
+                "切节点",
+            ),
+            (
+                &nodes,
+                "start_core(&app, &state, CoreStartTrigger::NodeSwitchFallback)",
+                "切节点（回退）",
+            ),
+            (
+                &core,
+                "start_core(&handle, &state, CoreStartTrigger::EgressChange)",
+                "换网重建",
+            ),
+            (
+                &core,
+                "start_core(&handle, &state, CoreStartTrigger::WatchdogRebuild)",
+                "看门狗重建",
+            ),
+            (
+                &core,
+                "start_core(app, state, CoreStartTrigger::AutoReconnect)",
+                "启动时自动重连",
+            ),
+        ] {
+            assert!(
+                file.contains(anchor),
+                "「{what}」这个调用点不见了它自己的触发者（改成别的来源或写死都会让锚点消失）：{anchor}"
+            );
+        }
     }
 }

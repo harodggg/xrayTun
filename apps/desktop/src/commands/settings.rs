@@ -169,7 +169,7 @@ pub async fn set_mode(
         was_running,
         mode,
         || core::stop_core(&app, &state),
-        || core::start_core(&app, &state),
+        || core::start_core(&app, &state, CoreStartTrigger::ModeSwitch),
     )
     .await?;
 

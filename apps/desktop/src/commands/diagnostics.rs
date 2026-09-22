@@ -225,10 +225,57 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
     }
     if !recent.is_empty() {
         for entry in recent {
-            out.push_str(&format!("[{}] {} {}\n", entry.source, entry.level, redact_secrets(&entry.message)));
+            out.push_str(&report_log_line(&entry));
         }
     }
     Ok(out)
+}
+
+/// 诊断报告里**一条日志**的渲染（纯函数，可测）：`[UTC 时间] [source] level message`。
+///
+/// 以前没有时间 —— 报告因此是「有版本标签、**零时间锚点**」的产物：
+/// 用户贴到 issue 里，谁都说不清「这是什么时候的日志」。`entry.ts_unix` 本来就在手里。
+pub(crate) fn report_log_line(entry: &crate::state::LogEntry) -> String {
+    format!(
+        "[{}] [{}] {} {}\n",
+        utc_iso(entry.ts_unix),
+        entry.source,
+        entry.level,
+        redact_secrets(&entry.message)
+    )
+}
+
+/// 把 Unix 秒渲染成 **UTC ISO 8601**（例如 `2026-09-22T12:29:17Z`）。
+///
+/// 为什么用 UTC、而不是本地时间：本项目**没有时区库**（`access_log` 的注释写过
+/// 「日志是本地时间且不带时区，换算需要时区库」），而**猜时区**、或者为报告里
+/// 每一行去 spawn 一个 `date`，都是坏主意。前端日志页导出的文本用的就是
+/// `new Date(ts * 1000).toISOString()` ⇒ 这里与它**同口径**，两边贴出来能对上。
+///
+/// 算法是 Howard Hinnant 的 `civil_from_days`（只用到整除，无依赖、可单测）。
+pub(crate) fn utc_iso(ts_unix: u64) -> String {
+    let days = (ts_unix / 86_400) as i64;
+    let secs = ts_unix % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 #[tauri::command]
@@ -413,5 +460,38 @@ mod tests {
                 n.mark(loss_signature(&other)),
                 "出现**新的**坏行（签名变了）要再提醒一次"
             );
+        }
+
+        // -------------------------------------------------------------------
+        // task-108：报告必须**自锚定**（带时间），启动来源必须**自证**（版本+触发者）
+        // -------------------------------------------------------------------
+
+        /// UTC ISO 换算：含纪元、闰日、整百年（2100 不是闰年）三个边界。
+        #[test]
+        fn utc_iso_converts_known_timestamps() {
+            assert_eq!(utc_iso(0), "1970-01-01T00:00:00Z");
+            // 本机日志里那三次自愈（本地 12:29:17 / 13:22:14 / 13:27:38 = UTC+8）
+            assert_eq!(utc_iso(1790051357), "2026-09-22T04:29:17Z");
+            assert_eq!(utc_iso(1790054534), "2026-09-22T05:22:14Z");
+            assert_eq!(utc_iso(1790054858), "2026-09-22T05:27:38Z");
+            assert_eq!(utc_iso(951782400), "2000-02-29T00:00:00Z", "闰日");
+            assert_eq!(utc_iso(4102444800), "2100-01-01T00:00:00Z", "整百年");
+        }
+
+        /// 报告里那一行**必须带时间**（这是本卡「自锚定」的验收点）。
+        #[test]
+        fn report_log_line_carries_a_time() {
+            let entry = crate::state::LogEntry {
+                ts_unix: 1790051357,
+                source: "app".into(),
+                level: "info".into(),
+                message: "隧道已自动恢复（第 1 次自动重建）".into(),
+            };
+            let line = report_log_line(&entry);
+            assert!(
+                line.starts_with("[2026-09-22T04:29:17Z] [app] info "),
+                "报告里的日志行必须带时间（以前没有）：{line}"
+            );
+            assert!(line.contains("隧道已自动恢复"), "{line}");
         }
 }

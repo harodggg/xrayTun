@@ -49,7 +49,7 @@ pub async fn select_node(
         // **这里失败必须回退。** 旧的隧道已经拆了，如果新节点起不来就直接
         // 把用户丢在断网状态 —— 而「新节点是坏的」是常见情况（实测有节点
         // TCP 可达却转发不了流量）。没有这一段，一次误选就是一次连环爆炸。
-        if let Err(e) = core::start_core(&app, &state).await {
+        if let Err(e) = core::start_core(&app, &state, CoreStartTrigger::NodeSwitch).await {
             state.with(|i| {
                 i.push_log(
                     "app",
@@ -83,7 +83,9 @@ pub async fn select_node(
                         );
                         return Err(pe);
                     }
-                    if let Err(e2) = core::start_core(&app, &state).await {
+                    if let Err(e2) =
+                        core::start_core(&app, &state, CoreStartTrigger::NodeSwitchFallback).await
+                    {
                         settle_switch(
                             &state,
                             SwitchEnd::NoTunnel(FailureExit::NodeSwitchFallbackFailed),
