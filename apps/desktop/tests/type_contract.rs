@@ -171,9 +171,9 @@ const SETTINGS_FIELDS_NOT_IN_TS: &[(&str, &str)] = &[
          注意别和 task-22 的自动恢复混淆：恢复状态走 CoreRuntime.recovery，不是它",
     ),
     // `auto_reconnect` 曾经登记在这里（理由写的是「界面目前没有对应控件」）。
-    // task-71 给它加了界面控件、并在 `types.ts` 的 `AppSettings` 里声明了它，
-    // 于是它**不再是「Rust 独有」** —— 登记表必须与事实一致，否则这条契约测试会红
-    // （实测：该字段出现在 types.ts 之后，本测试报「登记了但已不存在」）。
+    // task-71 给它加了界面控件；**task-89**（`383cd3d`）把它声明进了 `types.ts` 的
+    // `AppSettings`（此前靠类型旁路读写未声明字段）。声明一落地，本登记表就必须
+    // 删掉这一条，否则契约测试会红（实测：报「登记了但已不存在」）。
 ];
 
 #[test]
