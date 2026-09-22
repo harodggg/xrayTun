@@ -10,6 +10,7 @@ import {
   type AppSettings,
   type AppSnapshot,
   type DnsHandling,
+  type HelperVersionCheck,
   type Ipv6Mode,
 } from "../types";
 
@@ -285,6 +286,16 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
   const patchTun = (p: Partial<AppSettings["tun"]>) => patch({ tun: { ...settings.tun, ...p } });
   // 有进度就说明在下载：拿它当「正在下载」的判据，不用再开一个状态。
   const downloading = snapshot.update.progress !== null;
+
+  /**
+   * 助手版本对照（后端三态：`match` / `mismatch` / `unreadable`）。
+   *
+   * 类型上后端**一定**会带它（`build_snapshot` 里无条件赋值），但**预览快照还没有这个字段**
+   * （`previewSnapshot.ts` 的 `helper` 块是 `as unknown as` 转的，属已知的保真度缺口）。
+   * 所以这里按「可能缺失」处理：缺字段时**什么都不显示** ——
+   * 缺字段既不等于「一致」也不等于「不一致」，猜任何一个都是编造。
+   */
+  const versionCheck: HelperVersionCheck | undefined = snapshot.helper.version_check;
 
   const patchDns = (p: Partial<AppSettings["dns"]>) => patch({ dns: { ...settings.dns, ...p } });
   const patchFake = (p: Partial<AppSettings["fakedns"]>) =>
@@ -754,6 +765,47 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           <dt>遗留会话</dt>
           <dd>{snapshot.helper.stale_session ?? "无"}</dd>
         </dl>
+
+        {/* ── 助手版本核对（task-84 的 Rust 半 + task-86 的 UI 半）────────────
+            **App 更新不会刷新特权助手**：`restart_helper` 只 kickstart 磁盘上那份旧二进制，
+            只有 `install_helper` 才把包内那份拷过去（`commands/helper.rs` 的注释）；
+            而**路由/DNS 的安装与回滚都在 helper 里** ⇒ 两者不一致时，用户以为「更新拿到了
+            全部修复」，**helper 侧那部分其实没生效**，而且这件事完全无声。
+
+            后端给**三态**，界面**不许把它们合并**：
+            · `mismatch`   → 说出来 + 一键重装（**复用既有 install 通路**）
+            · `match`      → **什么都不显示**（否则就是狼来了）
+            · `unreadable` → **如实说读不到**，不猜成一致、也不猜成不一致
+            ⚠️ **绝不静默自动重装**：那是特权操作（要管理员授权），必须由用户点。
+            ⚠️ 字段缺失时（预览快照还没带上它 —— 已知的保真度缺口，Lead 已记入清理清单）
+            **什么都不显示**：缺字段既不等于 match、也不等于 mismatch，不许猜。 */}
+        {versionCheck?.state === "mismatch" && (
+          <div className="banner banner--warn" role="status" style={{ marginBottom: 14 }}>
+            <span>⚠︎</span>
+            <div>
+              已安装的助手是 <span className="mono">{versionCheck.installed}</span>，
+              随 App 附带的是 <span className="mono">{versionCheck.bundled}</span> —— 两者不一致。
+              助手负责安装路由与 DNS，<strong>不重装的话，助手侧的这部分修复不会生效</strong>
+              （App 本身已经更新，其余修复不受影响）。
+              <div style={{ marginTop: 8 }}>
+                <button
+                  className="btn btn--primary"
+                  disabled={busy !== null}
+                  onClick={() => void run("install-helper", () => api.installHelper())}
+                >
+                  {busy === "install-helper" ? <span className="spin" /> : null}
+                  重新安装助手
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {versionCheck?.state === "unreadable" && (
+          <div className="field__hint" style={{ marginBottom: 12 }}>
+            无法核对助手版本：{versionCheck.reason}
+            —— 所以这里既不说「一致」，也不说「不一致」。
+          </div>
+        )}
 
         {snapshot.helper.state !== "ready" && snapshot.helper.error && (
           <div
