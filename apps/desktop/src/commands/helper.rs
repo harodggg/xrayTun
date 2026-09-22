@@ -8,15 +8,6 @@
 use super::*;
 
 #[tauri::command]
-pub async fn probe_helper(state: State<'_, AppState>) -> Result<HelperAvailability, String> {
-    let present = crate::helper_client::socket_present(std::path::Path::new(DEFAULT_SOCKET_PATH));
-    let mut helper = state.helper.lock().await;
-    // 强制重连，拿到最新状态。
-    helper.disconnect();
-    Ok(helper.availability(present))
-}
-
-#[tauri::command]
 pub async fn install_helper(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
     let script = crate::helper_install::install_script(&app)?;
     crate::helper_install::run_with_admin(&script, "安装 XrayTun 网络配置助手")?;

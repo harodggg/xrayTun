@@ -220,8 +220,11 @@ fn settings_fields_cover_what_the_frontend_declares() {
     );
 }
 
-/// 这两个结构是独立命令的返回值（`probe_helper` / 快照里的 `core`），
-/// 单独比对是因为它们不走 AppSnapshot 的字段集。
+/// 这两个是快照里的**嵌套结构**（`AppSnapshot.helper` / `AppSnapshot.core`），
+/// 各自的 TS 接口单独声明，单独比对是因为它们不走 AppSnapshot 的字段集。
+///
+/// `HelperAvailability` 早先还有一个独立命令（`probe_helper`）直接返回它，
+/// task-94 复跑证据确认前端 0 调用点后把那条命令删了；结构本身仍在快照里用。
 #[test]
 fn helper_and_core_shapes_match_the_frontend_types() {
     let src = types_ts();

@@ -36,9 +36,7 @@ use xt_core::xray;
 use xt_proto::{Request, DEFAULT_SOCKET_PATH};
 
 use crate::events;
-use crate::state::{
-    persist_settings, AppSnapshot, CoreAvailability, CoreRuntime, HelperAvailability,
-};
+use crate::state::{persist_settings, AppSnapshot, CoreAvailability, CoreRuntime};
 use crate::AppState;
 
 mod core;

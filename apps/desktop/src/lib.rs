@@ -96,7 +96,6 @@ pub fn run() {
             commands::remove_subscription,
             commands::refresh_subscriptions,
             commands::test_latency,
-            commands::probe_helper,
             commands::install_helper,
             commands::restart_helper,
             commands::uninstall_helper,
