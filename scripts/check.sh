@@ -53,6 +53,21 @@ export CARGO_HOME="${CARGO_HOME:-$ROOT/../.cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/../.cargo-target}"
 export npm_config_cache="${npm_config_cache:-$ROOT/../.npm-cache}"
 
+# ---------------------------------------------------------------- 构建锁
+#
+# 为什么：2026-09-22 在 `6aa3b5e` 上，另一个人**同时**在同一个 `CARGO_TARGET_DIR` 上跑
+# `cargo test`，于是本脚本最后一步 `Doc-tests` 报 `error[E0463]: can't find crate for …`
+# —— **逐项全绿、只在最后一步红**，看起来像产品缺陷，实际是并发把门禁弄红了。
+# 隔离 runner 上的同一套检查（CI 35696466193 / 35694470992 / 35693699077）**全绿**。
+#
+# 所以：这次不是「记住不要并行跑」，而是把它变成机制。实现与行为见
+# `scripts/build-lock.sh` 头部注释（原子 `mkdir` 锁目录、拿不到锁会打印持有者、
+# 超时退出码 75、pid 探活自救、stale 上限 4 小时）。
+source "$ROOT/scripts/build-lock.sh"
+trap 'release_build_lock' EXIT INT TERM HUP
+# 拿不到锁 ⇒ **明确失败**（退出码 75），绝不「等超时后继续跑」。
+acquire_build_lock "scripts/check.sh $*" || exit $?
+
 step() {
   echo
   echo "=============================================================="
