@@ -170,11 +170,10 @@ const SETTINGS_FIELDS_NOT_IN_TS: &[(&str, &str)] = &[
         "重连意图（上次退出时是否连着），由 Rust 侧读写；**界面仍不显示这个字段**。\
          注意别和 task-22 的自动恢复混淆：恢复状态走 CoreRuntime.recovery，不是它",
     ),
-    (
-        "auto_reconnect",
-        "开机自动重连的策略开关，界面目前没有对应控件；它**不控制**看门狗的自愈\
-         （看门狗只认 was_connected 这个意图）",
-    ),
+    // `auto_reconnect` 曾经登记在这里（理由写的是「界面目前没有对应控件」）。
+    // task-71 给它加了界面控件、并在 `types.ts` 的 `AppSettings` 里声明了它，
+    // 于是它**不再是「Rust 独有」** —— 登记表必须与事实一致，否则这条契约测试会红
+    // （实测：该字段出现在 types.ts 之后，本测试报「登记了但已不存在」）。
 ];
 
 #[test]
