@@ -14,7 +14,7 @@ import type { AppSnapshot, ProbeResult } from "./types";
 const now = Math.floor(Date.now() / 1000);
 
 /** 几个节点，覆盖「快 / 慢 / 连不上」三种呈现，方便检查状态色与文案。 */
-const NODES = [
+const NODES: AppSnapshot["nodes"] = [
   {
     id: "n-hk-1",
     name: "香港 · REALITY 01",
@@ -74,7 +74,7 @@ const NODES = [
     tags: [],
     raw_uri: null,
   },
-] as unknown as AppSnapshot["nodes"];
+];
 
 function probe(nodeId: string, rtt: number | null, ok: boolean, err: string | null): ProbeResult {
   return {
@@ -109,7 +109,7 @@ function fakeAppRelease(version: string): NonNullable<AppSnapshot["update"]["lat
     prerelease: false,
     download_url: `https://github.com/harodggg/xrayTun/releases/download/v${version}/XrayTun_${version}_x86_64_arm64.dmg`,
     digest_url: `https://github.com/harodggg/xrayTun/releases/download/v${version}/SHA256SUMS.txt`,
-  } as unknown as NonNullable<AppSnapshot["update"]["latest_app"]>;
+  };
 }
 
 export function scenarioSnapshot(): AppSnapshot {
@@ -122,24 +122,24 @@ export function scenarioSnapshot(): AppSnapshot {
       base.runtime.routes_committed = true;
       base.runtime.tun_interface = "utun3";
       base.notice = null;
-      base.helper = { ...base.helper, socket_present: true, reachable: true, version: "0.8.0", protocol: 1, tun_active: true, state: "ready" } as AppSnapshot["helper"];
+      base.helper = { ...base.helper, socket_present: true, reachable: true, version: "0.8.0", protocol: 1, tun_active: true, state: "ready" };
       break;
     case "disconnected":
       base.settings.mode = "tun";
-      base.runtime = { ...base.runtime, running: false, pid: null, started_at_unix: null, tun_interface: null, routes_committed: false, config_path: null, last_good_node: null } as AppSnapshot["runtime"];
+      base.runtime = { ...base.runtime, running: false, pid: null, started_at_unix: null, tun_interface: null, routes_committed: false, config_path: null, last_good_node: null };
       base.traffic = { rx_bytes: 8_412_774_400, tx_bytes: 1_204_887_552, rx_rate: 0, tx_rate: 0 };
       base.notice = null;
       break;
     case "no-core":
-      base.core = { ...base.core, path: null, version: null, supports_native_tun: false, error: "找不到 Xray 核心可执行文件" } as AppSnapshot["core"];
+      base.core = { ...base.core, path: null, version: null, supports_native_tun: false, error: "找不到 Xray 核心可执行文件" };
       base.notice = null;
       break;
     case "stale":
-      base.helper = { ...base.helper, stale_session: "sess-7f3a91", state: "not_running" } as AppSnapshot["helper"];
+      base.helper = { ...base.helper, stale_session: "sess-7f3a91", state: "not_running" };
       break;
     case "notice":
       // 故意堆多条，检查「只显示最急一条 + 还有 N 条」
-      base.core = { ...base.core, supports_native_tun: false } as AppSnapshot["core"];
+      base.core = { ...base.core, supports_native_tun: false };
       base.runtime.last_error = "上次启动失败：端口 10808 被占用";
       break;
     case "update-latest":
@@ -149,7 +149,7 @@ export function scenarioSnapshot(): AppSnapshot {
         ...base.update,
         latest_app: fakeAppRelease(base.app_version),
         app_update_available: false,
-      } as unknown as AppSnapshot["update"];
+      };
       break;
     case "update-available":
       // 确实有新版：必须出现「更新到 X 并重启」。
@@ -157,7 +157,7 @@ export function scenarioSnapshot(): AppSnapshot {
         ...base.update,
         latest_app: fakeAppRelease("0.8.30"),
         app_update_available: true,
-      } as unknown as AppSnapshot["update"];
+      };
       break;
     case "uncommitted":
     default:
@@ -175,37 +175,49 @@ const BASE_SNAPSHOT: AppSnapshot = {
     selected_node: "n-hk-1",
     routing_preset: "bypass_mainland",
     custom_rules: [],
+    // ⚠️ task-87：这里曾经是**另一套字段名** —— `capture_ipv6` / `ipv6_mode` /
+    // `bypass_hosts` / `install_default_routes` / `dns_handling` / `fake_dns`
+    // **全都不在 `TunSettings` 里**，而真字段 `network` / `sentinel_dns` / `ipv6` /
+    // `bypass_private` / `bind_outbound_to` 一个都没有 ⇒ 预览里那几个输入是**空的**，
+    // 而整块被 `as unknown as` 挡住，编译器一声不吭。现在逐字段与 `TunSettings` 对齐。
     tun: {
-      capture_ipv6: false,
       mtu: 1500,
-      bypass_hosts: [],
-      install_default_routes: true,
-      dns_handling: "split_by_rule",
-      ipv6_mode: "passthrough",
+      network: "198.18.0.1/15",
+      sentinel_dns: "198.18.0.2",
+      ipv6: "passthrough",
+      bypass_private: true,
       datapath: "xray_native_tun",
       fd_ownership: "helper_holds",
-      fake_dns: { enabled: true, cidr: "198.18.0.0/15", ttl: 60 },
-    } as unknown as AppSnapshot["settings"]["tun"],
+      bind_outbound_to: null,
+    },
+    // 同族的第二处：旧版是 `fake_dns` / `fallback_servers` 这套**不存在的字段**，
+    // 而 `auto_select` / `mode` / `disable_cache` / `sniffing` 都没给。
     dns: {
-      direct_servers: ["223.5.5.5", "119.29.29.29"],
+      auto_select: false,
+      mode: "split_by_rule",
       remote_servers: ["https://1.1.1.1/dns-query"],
+      direct_servers: ["223.5.5.5", "119.29.29.29"],
       hosts: [],
-      fake_dns: true,
       query_strategy: "use_ip",
-      fallback_servers: [],
-    } as unknown as AppSnapshot["settings"]["dns"],
-    fakedns: { enabled: true, cidr: "198.18.0.0/15", ttl: 60 },
+      disable_cache: false,
+      sniffing: true,
+    },
+    // `FakeDnsSettings` = { enabled, ip_pool, pool_size }；默认值取 Rust 的
+    // `default_fake_ip_pool()` = "198.18.0.0/16" 与 `default_fake_ip_pool_size()` = 65535
+    fakedns: { enabled: true, ip_pool: "198.18.0.0/16", pool_size: 65535 },
     core_path: null,
     launch_at_login: true,
     log_level: "info",
     restore_system_proxy_on_exit: true,
     show_speed_in_title: false,
-  } as unknown as AppSnapshot["settings"],
+  },
   subscriptions: [
     {
       id: "sub-1",
       name: "主订阅 · 机场 A",
       url: "https://sub.example.com/api/v1/client/subscribe?token=redacted",
+      enabled: true,
+      update_interval_hours: 24,
       node_count: 3,
       last_updated: now - 1800,
       last_error: null,
@@ -218,16 +230,18 @@ const BASE_SNAPSHOT: AppSnapshot = {
         total: 500_000_000_000,
         expire: now + 86_400 * 47,
       },
-    } as unknown as AppSnapshot["subscriptions"][number],
+    },
     {
       id: "sub-2",
       name: "备用 · 机场 B",
       url: "https://sub2.example.net/link/redacted",
+      enabled: true,
+      update_interval_hours: 24,
       node_count: 1,
       last_updated: now - 86_400 * 3,
       last_error: "HTTP 403：订阅 token 可能已过期",
       usage: null,
-    } as unknown as AppSnapshot["subscriptions"][number],
+    },
     {
       // 第三种形状：**不限量（total == 0）但有有效期**。
       // 后端把 total == 0 定义为「不限量」，这种订阅没有用量比例可画，
@@ -235,11 +249,13 @@ const BASE_SNAPSHOT: AppSnapshot = {
       id: "sub-3",
       name: "不限量 · 机场 C",
       url: "https://sub3.example.org/link/redacted",
+      enabled: true,
+      update_interval_hours: 24,
       node_count: 0,
       last_updated: now - 600,
       last_error: null,
       usage: { upload: 1_073_741_824, download: 5_368_709_120, total: 0, expire: now + 86_400 * 120 },
-    } as unknown as AppSnapshot["subscriptions"][number],
+    },
   ],
   nodes: NODES,
   runtime: {
@@ -252,7 +268,16 @@ const BASE_SNAPSHOT: AppSnapshot = {
     routes_committed: false,
     last_error: null,
     last_good_node: "n-hk-1",
-  } as unknown as AppSnapshot["runtime"],
+    // `CoreRuntime` 还有 `recovery`（task-87 补）：空闲态
+    recovery: {
+      recovering: false,
+      attempt: 0,
+      probe_failures: 0,
+      started_unix: null,
+      last_outcome: null,
+      finished_unix: null,
+    },
+  },
   latency: {
     "n-hk-1": probe("n-hk-1", 53, true, null),
     "n-jp-2": probe("n-jp-2", 88, true, null),
@@ -271,14 +296,23 @@ const BASE_SNAPSHOT: AppSnapshot = {
     needs_approval: false,
     error: null,
     state: "not_installed",
-  } as unknown as AppSnapshot["helper"],
+    // ⚠️ task-87：预览**不读磁盘上的助手二进制**（那是真机才做的探测），所以这里给一个
+    // **明确的预览态** —— 而不是假装成 `match`/`mismatch` 去伪造一个真实结论。
+    // 界面会按 `unreadable` 如实显示「无法核对助手版本：<这个 reason>」。
+    version_check: {
+      state: "unreadable",
+      installed: null,
+      bundled: null,
+      reason: "预览模式不读取磁盘上的助手版本",
+    },
+  },
   core: {
     path: "/Applications/XrayTun.app/Contents/Resources/xray",
     version: "26.9.9",
     error: null,
     supports_native_tun: true,
     min_native_tun_version: "26.1.31",
-  } as unknown as AppSnapshot["core"],
+  },
   login_item: { status: "enabled", detail: "已开启，登录时自动启动", needs_approval: false },
   update: {
     core_version: "26.9.9",
@@ -294,18 +328,21 @@ const BASE_SNAPSHOT: AppSnapshot = {
     checked_at: now - 300,
     check_error: null,
     progress: null,
-  } as unknown as AppSnapshot["update"],
+  },
   dns: {
+    // `DnsProbe` = { server, label, kind, transport, latency_ms, answered, suspect, note }；
+    // 旧版写的是 `kind: "direct"`（真实取值只有 domestic/foreign）与 `error`（应为 note）
+    // ⇒ 国内探测项在预览里**根本对不上类型**。
     probes: [
-      { server: "223.5.5.5", kind: "direct", latency_ms: 12, answered: true, error: null },
-      { server: "119.29.29.29", kind: "direct", latency_ms: 18, answered: true, error: null },
-      { server: "https://1.1.1.1/dns-query", kind: "foreign", latency_ms: 148, answered: true, error: null },
-    ] as unknown as AppSnapshot["dns"]["probes"],
+      { server: "223.5.5.5", label: "阿里 DNS", kind: "domestic", transport: "plain_udp", latency_ms: 12, answered: true, suspect: false, note: null },
+      { server: "119.29.29.29", label: "腾讯 DNS", kind: "domestic", transport: "plain_udp", latency_ms: 18, answered: true, suspect: false, note: null },
+      { server: "https://1.1.1.1/dns-query", label: "Cloudflare DoH", kind: "foreign", transport: "doh", latency_ms: 148, answered: true, suspect: false, note: null },
+    ],
     chosen: "223.5.5.5",
     chosen_foreign: "https://1.1.1.1/dns-query",
     probed_at: now - 600,
     error: null,
     foreign_error: null,
-  } as unknown as AppSnapshot["dns"],
+  },
   app_version: "0.8.0",
 };
