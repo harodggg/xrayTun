@@ -616,11 +616,17 @@ fn is_public_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_public_ip(IpAddr::V4(v4));
             }
+            let first = v6.segments()[0];
+            // `fc00::/7` ULA；`fe80::/10` 链路本地 —— 后者**手算位掩码**而不是用
+            // `is_unicast_link_local()`：那个方法稳定于 Rust 1.84，而本仓 MSRV 是 1.77
+            // （clippy::incompatible_msrv 会直接红）。
+            let is_ula = (first & 0xfe00) == 0xfc00;
+            let is_link_local = (first & 0xffc0) == 0xfe80;
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || v6.is_unicast_link_local()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00) // fc00::/7 ULA
+                || is_link_local
+                || is_ula)
         }
     }
 }
