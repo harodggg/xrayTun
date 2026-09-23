@@ -52,6 +52,8 @@ export default function Logs() {
    * 这次 App 会话里核心确实起来过。停过之后再说「还没启动过」是给错因。
    */
   const coreStarted = (snapshot?.runtime.started_at_unix ?? null) !== null;
+  /** 启动时刻本身（拿不到就**不写**时刻，说明「读不到」—— 不编一个时间出来）。 */
+  const startedUnix = snapshot?.runtime.started_at_unix ?? null;
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
   const [level, setLevel] = useState<Level>("all");
   const [query, setQuery] = useState("");
@@ -221,7 +223,21 @@ export default function Logs() {
                 点「重试」再取一次。
               </>
             ) : coreRunning ? (
-              <>核心已在运行，但还没有产生日志 —— 刚启动时这样是正常的，有输出会被实时转发到这里。</>
+              /*
+                task-128（B9）：原来写「**刚启动时**这样是正常的」——「刚启动」是从
+                `running === true` **猜**出来的，而核心可能已经跑了几小时（用户点了
+                「清空」把内存与文件都删了，`store.rs:213-224`），那时这句话把用户
+                引向错误的原因。这里改成用 `runtime.started_at_unix` 把**启动时刻**
+                如实摆出来，让用户自己判断，同时把两种真实可能都写上。
+              */
+              <>
+                核心已在运行
+                {startedUnix !== null
+                  ? `（本次启动于 ${formatTimestamp(startedUnix)}）`
+                  : "（读不到本次的启动时刻）"}
+                ，但当前还没有日志 —— 可能是刚启动还没输出，也可能是日志刚被清空；
+                有输出会被实时转发到这里。
+              </>
             ) : coreStarted ? (
               // task-120：原来这里只有「核心还没启动过」一句，判据却只是
               // `runtime.running === false`（现在时）。而「启动过、现在停了」

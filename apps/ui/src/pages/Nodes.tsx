@@ -278,7 +278,19 @@ function NodeRow({
       // （`commands/nodes.rs:239-241`），流量还在被删的那台。
       // 所以只说**确实由这个字段成立**的事：它被选中了。现在时的那半交给
       // 仪表盘（`Dashboard.tsx:148` 用的是 `connected && selected`）。
-      title={selected ? "已选中：核心运行时流量走这个节点" : "点击切换到该节点"}
+      /*
+        task-128（B2）：`onClick={busy ? undefined : onSelect}`（下面 20 行）——
+        **忙的时候点击不触发任何事**，而 `title` 原来还是「点击切换到该节点」：
+        测延迟/增删节点/切换正在进行时，行看起来可点、点下去毫无反应。
+        文案跟着**同一个判据**（`busy`）走，忙时就说清为什么点不动。
+      */
+      title={
+        busy
+          ? "操作进行中，暂时不能切换节点"
+          : selected
+            ? "已选中：核心运行时流量走这个节点"
+            : "点击切换到该节点"
+      }
     >
       <div className="list__main">
         <div className="node-row__head">

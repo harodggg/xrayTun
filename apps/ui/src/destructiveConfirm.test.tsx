@@ -200,7 +200,7 @@ describe("InlineConfirm：机制本身（task-23 B）", () => {
 describe("六处真实站点都先确认（task-23 B + task-65）", () => {
   it("日志「清空」：确认前不调用后端；确认后才调；问句写明会删文件", async () => {
     renderIn(<Logs />);
-    await screen.findByText(/核心还没启动过|还没有产生日志/);
+    await screen.findByText(/核心还没启动过|但当前还没有日志/);
 
     fireEvent.click(screen.getByRole("button", { name: "清空" }));
     expect(mocks.clearLogs).not.toHaveBeenCalled();

@@ -82,11 +82,14 @@ describe("日志页：读取失败不许说成「没有日志」（task-23 A）"
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("读取成功 + 空 + 核心在跑 → 说清「还没产出」，不赖核心没启动", async () => {
+  // task-128：这一格的文案从「还没有产生日志」改成如实摆出启动时刻 + 不猜原因
+  // （原来是「刚启动时这样是正常的」，而「刚启动」是从 running 猜的）。
+  // 断言强度不变：仍然要求它与另外两种「空」是**不同的说法**。
+  it("读取成功 + 空 + 核心在跑 → 说清「当前还没有日志」，不赖核心没启动", async () => {
     mocks.tailLogs.mockResolvedValue([]);
     renderLogs();
 
-    expect(await screen.findByText(/还没有产生日志/)).toBeTruthy();
+    expect(await screen.findByText(/但当前还没有日志/)).toBeTruthy();
     expect(screen.queryByText(/核心还没启动过/)).toBeNull();
   });
 
@@ -106,7 +109,7 @@ describe("日志页：读取失败不许说成「没有日志」（task-23 A）"
 
     mocks.snapshot.mockResolvedValue(snap(true));
     const c = renderLogs();
-    texts.push((await screen.findByText(/还没有产生日志/)).textContent ?? "");
+    texts.push((await screen.findByText(/但当前还没有日志/)).textContent ?? "");
     c.unmount();
 
     expect(new Set(texts).size).toBe(3);
@@ -121,7 +124,7 @@ describe("日志页：读取失败不许说成「没有日志」（task-23 A）"
     fireEvent.click(screen.getByRole("button", { name: "重试" }));
 
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect(await screen.findByText(/还没有产生日志/)).toBeTruthy();
+    expect(await screen.findByText(/但当前还没有日志/)).toBeTruthy();
     expect(mocks.tailLogs).toHaveBeenCalledTimes(2);
   });
 

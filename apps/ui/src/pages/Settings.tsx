@@ -861,11 +861,26 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               （`crates/xt-proto/src/lib.rs`）。之后没有 root 守护进程就**建不了 utun**，
               即 TUN 模式不可用；而重装要写 `/Library/LaunchDaemons` 与
               `/Library/PrivilegedHelperTools` → 本页自己的 hint 里写了「需要一次管理员授权」。 */}
+          {/*
+            task-128（B7）：上面那段注释写的是 `Request::Uninstall` 会「回滚会话」，
+            但**实际走的是 shell 脚本**（`commands/helper.rs:39` 的 `uninstall_script()`
+            → `helper_install.rs:142-161`），它只做 `launchctl bootout` + 删 plist/二进制/socket。
+            路由与 DNS 的回滚是 `bootout` 发出 SIGTERM 后 **helper 自己的信号处理器**
+            干的（`crates/xt-helper/src/main.rs:168-170` → `graceful_shutdown()` → `:197`）。
+            ⇒ **没有活着的 helper 进程时，那一步不会发生**：路由/DNS 会留在系统里。
+            而 helper「已安装但没在跑」正是本页明确支持的状态（`:834` 专门给它一颗重启按钮）。
+            判据用 `helper.reachable`（有没有进程在应答）—— 它是这一串因果关系的前置条件，
+            不是猜的。
+          */}
           <InlineConfirm
             label="卸载 helper"
             className="btn btn--danger"
             disabled={busy !== null}
-            question="卸载 helper 会停止数据面、回滚它装的路由与 DNS，并从 launchd 与磁盘上移除。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
+            question={
+              snapshot.helper.reachable
+                ? "卸载 helper 会停止数据面、回滚它装的路由与 DNS，并从 launchd 与磁盘上移除。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
+                : "卸载 helper 会从 launchd 与磁盘上移除它，并停止数据面。**但助手当前没有在应答（没在跑）**，而回滚路由与 DNS 是它收到停止信号后自己做的 —— 没有进程时这一步不会发生，**系统里可能残留它装过的路由与 DNS**。建议先用左边的「修复网络」清一遍，再卸载。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
+            }
             confirmLabel="确认卸载"
             onConfirm={() => void run("uninstall-helper", () => api.uninstallHelper())}
           />
@@ -986,10 +1001,32 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           <span className="mono">国内</span> 是明文 UDP，测的时候把 socket 绑到物理网卡
           绕过隧道 —— 不绑的话并发探测测到的是核心排队而不是解析器延迟。
           <br />
-          <span className="mono">国外</span> 只有经节点才连得上（直连
-          <span className="mono"> 1.1.1.1:443 </span>实测 8 秒超时），所以经本地 SOCKS
-          入站去测 —— 那也正是它在分流规则里被使用时的路径。没连接节点时这一组显示
-          「未探测」，而不是拿直连的超时冒充「都不通」。
+          <span className="mono">国外</span> 只有经节点才连得上，所以经本地 SOCKS
+          入站去测 —— 那也正是它在分流规则里被使用时的路径。
+          {/*
+            task-128（B17）：原来的写法是「直连 1.1.1.1:443 **实测 8 秒超时**…
+            **没连接节点时**这一组显示「未探测」」。两处都不对：
+            * 「8 秒」只出现在 `snapshot.rs:79` 的注释与 `docs/04-routing-and-dns.md`，
+              代码里的探测超时是 **2 秒**（`snapshot.rs:93`）—— 我核不到 8 秒这个数字，
+              所以不写它；
+            * 「未探测」的判据是 `spec.socks.is_none()`，而 `socks` 来自
+              **核心在跑**（`snapshot.rs:85-90`），不是「选了节点」：核心在跑但没选节点时
+              这一组照样被探测，必然超时被记成「不通」。
+            所以这里改成一个**可真可假**的判断，判据是 `runtime.running`。
+          */}
+          {snapshot.runtime.running ? (
+            <>
+              {" "}
+              现在<strong>核心在跑</strong>，所以这一组是**真的在探测**（经上面的本地 SOCKS
+              入站）；测不出来会如实写成「不通」或「答得出，量不到延迟」。
+            </>
+          ) : (
+            <>
+              {" "}
+              现在<strong>核心没在跑</strong>（没有本地 SOCKS 入站在监听），所以这一组
+              <strong>没有探测</strong> —— 显示「未探测」，而不是拿直连的超时冒充「都不通」。
+            </>
+          )}
           <br />
           两组各自还要判「答得对不对」：让同组所有解析器查同一个域名，答案跟组内多数派
           不一致的标为可疑（明文入墙会被抢答，抢答者延迟一定漂亮、答案却可能是错的）。
@@ -1091,7 +1128,20 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               <div className="kv__v mono">{snapshot.app_version}</div>
             </div>
             <div>
-              <div className="kv__k">GitHub 上的最新版</div>
+              {/*
+                task-128（B8）：后端在**检查失败**时只写 `check_error`、**不清**
+                `latest_app`（`commands/snapshot.rs:238-240`），而
+                `app_update_available` 每个快照都按残留的 `latest_app` 重算
+                （`snapshot.rs:583-586`）。所以「检查更新失败」与「有一个可装的版本」
+                会同时成立，而下面那颗按钮原来只看后两者 ⇒ 用户在一次**失败的**检查之后
+                看到「更新到 X 并重启」，以为 X 就是当前最新版。
+                标签跟着 `check_error` 走：失败时如实说这是**上次**查到的。
+              */}
+              <div className="kv__k">
+                {snapshot.update.check_error && snapshot.update.latest_app
+                  ? "上次查到的最新版（本次没查成）"
+                  : "GitHub 上的最新版"}
+              </div>
               <div className="kv__v mono">{snapshot.update.latest_app?.version ?? "—"}</div>
             </div>
           </div>
@@ -1105,7 +1155,14 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
                 `latest_app` 非空只说明「查到了 GitHub 上的最新版」—— 你装的就是它时
                 也非空，只按它判断会让按钮永远显示（用户报的「多余」就是这个）。
                 判据用后端算好的 `app_update_available`（它比过版本）。 */}
-            {snapshot.update.app_update_available && snapshot.update.latest_app && (
+            {/*
+              上面那条判断的补充（task-128 B8）：`check_error` 非空时**不给**安装按钮 ——
+              否则就是拿一次失败检查的残留值劝用户升级。版本号本身照旧显示在右上，
+              只是标明它是上次查到的。
+            */}
+            {snapshot.update.app_update_available &&
+              snapshot.update.latest_app &&
+              !snapshot.update.check_error && (
               <button className="btn btn--primary" disabled={busy !== null || downloading}
                       onClick={() => void run("install-app", () => api.installAppUpdate())}>
                 更新到 {snapshot.update.latest_app.version} 并重启
