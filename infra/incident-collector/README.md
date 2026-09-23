@@ -127,16 +127,47 @@ CLOUDFLARE_ACCOUNT_ID=<account-id> CLOUDFLARE_API_TOKEN="$(cat ~/.cf-incident-to
   npx wrangler deploy --config infra/incident-collector/wrangler.toml
 ```
 
-`wrangler.toml` 里的路由是：
+`wrangler.toml` 里的路由（**两条都要**，且必须写在**任何表头之前**）：
 
 ```toml
-routes = [{ pattern = "xraytun.top/api/incident/*", zone_name = "xraytun.top" }]
+# ⚠️ 位置：必须在 `[[r2_buckets]]` / `[vars]` 等**任何表头之前**。
+# 落在表里 ⇒ 被当成那张表的字段（wrangler 只报一句 `Unexpected fields …`）或 `vars.routes` 环境变量
+# ⇒ **一条路由都不会注册**，而部署输出看起来是成功的。
+routes = [
+  { pattern = "xraytun.top/api/incident",   zone_name = "xraytun.top" },   # ← 上传入口本身（少了它 ⇒ 405）
+  { pattern = "xraytun.top/api/incident/*", zone_name = "xraytun.top" }
+]
 ```
+
+2026-09-23 的两次真实事故都属于这一类（`env.routes` + 少注册裸路径那条 pattern），
+两次的表现都是 **`POST https://xraytun.top/api/incident` → 405**（请求落到了 Pages），
+**而部署日志是成功的** ⇒ 见下面的「部署后自检」。
 
 **为什么是路径而不是新子域**：用户的机器在中国大陆，`*.workers.dev` 经常不可达；
 `xraytun.top` 已实测可达。同 zone 上的 **Workers Route 优先于 Pages**，因此不需要新 DNS。
 若部署时报「路由需要 Zone 权限 / hostname 需要 DNS 记录」，**停手报 lead**，
 备选是 `incident.xraytun.top`（同 zone、走 CF 代理）。
+
+### 3.3.1 部署后自检（**必做**：部署日志说成功 ≠ 端点能用）
+
+```bash
+# 不落盘探活（默认）：脏包 ⇒ 期望 422（Pages 不会给 422）
+./infra/incident-collector/deploy-check.sh
+
+# 带部署日志一起查（日志里不得出现 env.routes / Unexpected fields）
+./infra/incident-collector/deploy-check.sh --deploy-log /tmp/wrangler-deploy.log
+
+# 读回路由注册（需要 CF API token；**不要**把它写进仓库）
+CLOUDFLARE_API_TOKEN="$(cat ~/.cf-incident-token)" ./infra/incident-collector/deploy-check.sh
+
+# 完整环回（会建一条记录；带 INCIDENT_TOKEN 会自动删掉）
+INCIDENT_TOKEN=<端点令牌> ./infra/incident-collector/deploy-check.sh --upload
+```
+
+三条判据（缺一不可）：
+1. 部署日志里**没有** `env.routes`、**没有** `Unexpected fields`；
+2. `GET /zones/<zone>/workers/routes` 能看到**两条** pattern（`…/api/incident` 与 `…/api/incident/*`）；
+3. `POST {BASE}` **不是 405/404**（脏包 ⇒ 422 就证明请求进了 Worker）。
 
 ### 3.4 部署后自测（原样可复制）
 
@@ -224,7 +255,8 @@ npx wrangler r2 bucket delete xraytun-incidents                          # 桶�
 
 * **限流是 best-effort**：状态在每个 isolate 的内存里（键 = 加盐哈希的 IP，**不落盘**），
   不同 colo/isolate 不共享、重启即清零。要强一致得上 Durable Objects 或 KV —— 本卡不做。
-  这也意味着**限流不能被当作安全边界**，真正的门是「公开端点 + 大小/类型白名单 + 30 天保留」。
+  **实测也印证了**：部署后连续 POST 未触发限流（每 isolate 各自计数）。
+  ⇒ **限流不能被当作安全边界**，真正的门是「公开端点 + 大小/类型白名单 + **服务端隐私拒收** + 30 天保留」。
 * **`--local` 的 `wrangler dev` 用不了真 R2 的 region/一致性语义**，只适合验路由与状态码。
 * 端点的**读/删**只有一把 token（没有多用户、没有审计日志、没有按 id 的授权）。
 * 未做 CORS：上传由 App（非浏览器）发起；若将来要从网页上传，需要单独加 CORS 白名单。

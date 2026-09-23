@@ -171,3 +171,46 @@ import（`./secret-scan.mjs`）⇒ 变体加载失败、整份测试报「1 条�
 * wrangler 的日志目录也可能 EPERM ⇒ `WRANGLER_LOG_PATH=/tmp/dsh-wrangler-logs`；
 * **wrangler 认 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`**，不是 `CF_API_TOKEN` / `CF_ACCOUNT_ID`；
 * 桶 `xraytun-incidents` **已经建好**：重复 `create` 会报错 ⇒ 先 `r2 bucket list` 确认。
+
+## 10. 部署后自检（「本地绿 ≠ 运行时绿」的第三次）
+
+`verify.sh`（23 个单测）与 `smoke.sh`（真 workerd）**都跑在本地，不经过 Workers Route** ⇒
+它们**抓不到**「路由没注册」这类部署期错误。2026-09-23 连撞两次，两次都是**部署日志成功 + 端点 405**：
+
+| 事故 | 根因 | 表现 |
+|---|---|---|
+| ①`env.routes` | `routes = [...]` 落在 `[vars]` 之后 ⇒ 被当成**环境变量** | 部署输出把它列进 Environment Variables；路由 0 条 ⇒ **405** |
+| ②落进 `[[r2_buckets]]` | 改成放前面、但仍在 array-of-table 里 ⇒ wrangler 报 `Unexpected fields found in r2_buckets[0] field: "routes"` | 同上 |
+| ③少了一条 pattern | 只注册 `…/api/incident/*`，**匹配不到 `/api/incident` 本身** | 上传入口落到 Pages ⇒ **405** |
+
+修法（lead 已推 `c39e2e5` / `863901a`）：`routes` 放**文件最前（任何表头之前）**，并注册**两条** pattern。
+**机制化 = `deploy-check.sh`**（跑在真实部署之后）：
+
+```
+$ ./infra/incident-collector/deploy-check.sh          # 不落盘，唯一必需的一步
+  [3] 真请求：POST 入口必须由 Worker 处理（脏包 ⇒ 期望 422，且**不落盘**）
+      POST https://xraytun.top/api/incident → HTTP 422
+        { "error": "secret_detected", "hits": [ { "type": "node_url", "file": "nodes.txt", "line": 1 } ], … }
+  ✓ HTTP 422 —— 请求确实进了 Worker（Pages 不会给 422），且脏包不会落盘
+  ✓ 响应体是 secret_detected（命中信息只有 type/file/line）
+  ✓ 响应体里没有密钥原文
+  [1] 部署日志：缺 --deploy-log ⇒ ⏭（手动查：不得出现 env.routes / Unexpected fields）
+  [2] 路由注册：缺 CLOUDFLARE_API_TOKEN ⇒ ⏭（脚本**不会**去读 ~/.cf-incident-token）
+  pass=3 fail=0 skip=3   ✓ 部署后自检通过
+```
+
+**判据三条（缺一不可）**：① 部署日志无 `env.routes` / `Unexpected fields`；
+② `GET /zones/<zone>/workers/routes` 能看到**两条** pattern；③ `POST {BASE}` 不是 405/404。
+**「部署日志说成功 ≠ 端点能用」** —— 今天就是被这条咬的；`--upload` 可跑完整环回（带 `INCIDENT_TOKEN` 会自动删）。
+
+## 11. 限流的真实行为（实测）
+
+lead 部署后连续 POST **未触发限流**（每 isolate 各自计数、跨 colo 不共享）⇒
+README 里「best-effort、**不是安全边界**」的口径被实测印证：
+真正的门是「公开端点 + 大小/类型白名单 + **服务端隐私拒收** + 30 天保留」。
+
+## 12. 我这边实测的一条残留
+
+`deploy-check.sh` 与手工探活期间，我 `POST` 过一个 180 B 的干净包
+（id `INC-20260923-031304-3c5b`）。它**不是**泄漏（内容是自造 fixture），30 天后自动过期；
+要立刻清就用端点令牌 `DELETE /api/incident/INC-20260923-031304-3c5b`（**我没有端点令牌**，故未删）。
