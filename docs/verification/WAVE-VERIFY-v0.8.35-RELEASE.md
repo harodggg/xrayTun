@@ -134,3 +134,66 @@ df -g /Users/xbtg-                       # 低于 8 GiB 停下报 Lead
 **诚实细节（这次多花了两个来回）**：探针从 `/tmp` 那份副本注入时，`kind != "version_like"` 与
 `.find(|(k,_,_)| *k == …)` 两处**类型比较要写成 `*kind` / `**k == *"version_like"`**，否则 **E0277 编译失败**
 （我第一次注入后直接跑，拿到的是编译错误 `EXIT=101`，不是测试结论 —— 与「突变没生效＝假绿」同族的一个坑）。
+
+## 8. （补）发布后复核 6–8 步（**我的下载与我的 curl**）
+
+### 8.1 资产：**三方逐字节一致**（`gh api` digest / 我下载后自算 / `SHA256SUMS.txt`）
+
+```
+$ gh release view v0.8.35 --json isDraft,isPrerelease,tagName,publishedAt,assets --jq '…'
+draft=false pre=false tag=v0.8.35 at=2026-09-23T07:17:15Z
+SHA256SUMS.txt                  200       uploaded  sha256:3c40bf4c259efd473f7e942258decf5ea1e8e99b54af39b820ec247626214fa5
+XrayTun_0.8.35_x86_64_arm64.dmg 47431435  uploaded  sha256:c17c9529805eacec124f6d953c7918e02a40554d323239b4a7e08f39c2b4004b
+XrayTun_0.8.35_x86_64_arm64.zip 42919784  uploaded  sha256:0f1000e76e566c57d2577e7cc9addbd92f31071bf899b3fc365833fc6d5e7fcb
+
+$ gh release download v0.8.35 --dir /tmp/v133rel && shasum -a 256 *.dmg *.zip SHA256SUMS.txt
+c17c9529…004b  XrayTun_0.8.35_x86_64_arm64.dmg      （47,431,435 bytes，我自己 wc -c）
+0f1000e7…7fcb  XrayTun_0.8.35_x86_64_arm64.zip      （42,919,784 bytes）
+3c40bf4c…4fa5  SHA256SUMS.txt                        （200 bytes）
+
+$ cat SHA256SUMS.txt
+c17c9529…004b  ./XrayTun_0.8.35_x86_64_arm64.dmg
+0f1000e7…7fcb  ./XrayTun_0.8.35_x86_64_arm64.zip
+```
+⇒ `isDraft=false` + **3 个资产**；**我下载后算的 sha256/字节 = `gh` 的 digest = `SHA256SUMS.txt` 里的两行** ✓。
+MiB 口径：47,431,435 B = **45.23 MiB**（应为 45.2）、42,919,784 B = **40.93 MiB**（应为 40.9）—— 提交 2 若写别的数即为不符（见 8.2）。
+
+### 8.2 站点：**时点 = 2026-09-23 15:54:15 +0800，仍在「正在发布」阶段（提交 2 未落地）**
+
+```
+$ curl -s https://xraytun.top/ | …
+0.8.35 命中 = 20        0.8.34 命中 = 0        「正在发布」= 2
+声明字节 47,431,435 = 0   42,919,784 = 0      45.2 MiB = 0   40.9 MiB = 0   旧值 47,243,124 = 0
+pinned releases/download/v0.8.35 直链 = 0 条
+```
+⇒ **如实记录**：站点此刻**仍是提交 1 的状态**（「正在发布」、**没有**字节声明、**没有** pinned 直链）。
+**这不是失败，也不是通过** —— **提交 2 落地后必须复验**：`PUBLISHED=True`、pinned 三条、字节与上表逐字节一致、
+`45.2 / 40.9 MiB`（用上面两个 B 值自己算）、以及「0.8.34 归零」。
+（`curl -sIL` 的 pinned 真实 content-length **现在无处可验**：直链还没出现 ⇒ 记「未到期」，不记通过。）
+
+### 8.3 OG 图（单独确认）：**200 + `image/png` + 与仓库同字节** ✅
+
+```
+og-image-0.8.35.png     HTTP/2 200  content-type: image/png  content-length: 59389
+  线上 sha256 = 2501310cd9d914b60305e0f88955a7cb66afc83b7b0e6dc66aa84005821304d7
+  仓库(3754374) sha256 = 2501310cd9d914b60305e0f88955a7cb66afc83b7b0e6dc66aa84005821304d7   ← 一致
+og-image-en-0.8.35.png  HTTP/2 200  content-type: image/png  content-length: 42634
+  线上 sha256 = 70951bd9e04d0c1d4ac273f3807fff50ec22760f96b7fbdd4a023eb9fcba245d
+  仓库(3754374) sha256 = 70951bd9e04d0c1d4ac273f3807fff50ec22760f96b7fbdd4a023eb9fcba245d   ← 一致
+```
+（这两张是 ops 提交流程里换版本号产出的新图；`d95b4ef` 之前那两张 0.8.34 的已被替换 —— 与 `task-133` §4② 的
+「相似域名被抹是取舍」无关，属另一条线。）
+
+### 8.4 `verify-live-site.sh --self-test`：**四例全部符合预期** ✅
+
+```
+self-test：四例全部符合预期（异常样例 ✗ / 缓存残留只 WARN / 真 404 正常）
+  ✓ 被检对象：真 404（不存在）→ 判定码 = 0（期望 0；0=已消失 2=观察项(不阻断) 1=异常）✓ 符合预期
+```
+⇒ 软 404 判据仍然有效。
+
+### 8.5 本节的诚实清单（新增）
+1. **站点状态的时点必须连在一起引**：上面的 8.2 是 **15:54:15**；ops 正在做提交 2，**落地后需复验**（我已写好判据）。
+2. **CF 传播延迟**我看不到：即使提交 2 落地，线上生效时间我无法从本机判定（只能重复 `curl` 看变化）。
+3. **真机安装 / Gatekeeper / 重装助手仍未验证**（同 §6.1）：本次只核到「资产完好、hash 自洽、OG 图字节一致」。
+4. 资产是我**真的下载后自算**的（dmg 47 MB + zip 43 MB），不是引用 `gh` 的 digest —— 但**没有**解包/挂载 dmg 做功能验证。
