@@ -87,6 +87,50 @@ $ git ls-remote --tags origin v0.8.35
 1. **真机安装 / Gatekeeper / 重装助手未在本环境验证** —— 本报告**没有**、也**不能**说「重装助手已验证有效」；能证明的只有「**helper 侧代码确实变了 ⇒ 必须重装**」。
 2. **云端 CI 的内部步骤、CF 传播延迟**我看不到；Release workflow 的结论我**没有**独立证据（只能等 `gh release view`）。
 3. **门禁用的是共享 target dir**（偏离卡面的 `wt.sh` 独立 target dir，理由见 §0）⇒ 若你要求严格隔离，我可以在磁盘宽松时用 worktree 重跑一遍（现 98% 满，我没做）。
-4. **delta-3 的修复我没有重跑探针验证**（§4② 的边界），只用 diff 确认了机制。
+4. **delta-3 的修复**：当时只读 diff 确认机制、没重跑探针 ⇒ **已在 §7 补做**（同一套探针在 `3754374` 上重跑，`synth_glued_domain` **已抹**）。
 5. **`type_contract`**：本卡未单跑；门禁里它属于 `cargo test --workspace` 的一部分，**本次全绿**。
 6. 报告里的「495 s / 28 文件 / 296 passed」都是**时点值**，绑定 `3754374` 与上面那次运行。
+
+## 7. （补验）delta-3：**域名紧贴字母**在冻结提交上是否堵住 → **是**
+
+**隔离要求这次按卡面做了**：`./scripts/wt.sh new v133p 3754374` ⇒ **独立 worktree + 独立 `CARGO_TARGET_DIR`**；
+开工前 `df -g /Users/xbtg-` = **13 GiB**（高于 8 GiB 线）；**跑完立刻 `wt.sh rm v133p`**（含它的 target dir）。
+
+### 7.1 明确回答
+**「`task-145` 报的第三形态（`Xray<域名>`，无 `-`/`_` 分隔）在冻结提交 `3754374` 上是否已堵住」→ 是，已堵住。**
+* 运行次数：**1 次**（探针在 `3754374` 上跑通，`test result: ok`）；
+* 修前（`task-145` 在 `d95b4ef` 上）：`synth_glued_domain=>**仍在**`；
+* 修后（本次，`3754374`）：
+```
+PROBE 行数=463378 节点=2 真值条目=2
+PROBE 真实日志：原始命中行=70638 ⇒ 脱敏后=0
+PROBE 形状：synth_hyphen_domain=>已抹 / synth_underscore_domain=>已抹 / **synth_glued_domain=>已抹**
+            hyphen_ip=>已抹 / underscore_ip=>已抹 / glued_ip=>已抹 / ip_port=>已抹 / version_like=>已抹
+PROBE 代价：与节点 IP 相同的版本号被抹=<addr>=true
+PROBE 用户名：HOME 前缀被折=true / 非 HOME 前缀仍保留=true
+PROBE 保留项：198.18.=95869 baidu=125 google=53360 127.0.0.=50660 192.168.=4285 <uuid>=1328
+test result: ok. 1 passed; 0 failed
+```
+* **真值仍只来自 `nodes.json`**（`address` + 名字里任何位置的 IP + 名字里按 `-`/`_` 切出的域名段）；
+  **没有**复用实现内部的地址集合（`task-137` 证明过那会假绿）；
+* 域名形状仍只能用**合成节点**测：真实两个节点都是 IP 形态（`节点=2 / 真值条目=2`），
+  所以「真实日志 0 命中」**只**覆盖 IP 那条线，域名那条线靠合成节点覆盖 —— 这条边界仍然成立。
+
+### 7.2 陈述核对（「覆盖不到的两类」是否仍逐字成立）→ **成立**
+* 域名紧贴形状现在**已抹** ⇒ 它**不再是**覆盖缺口；`redact_secrets` 的确按 delta-3 的注释**左边界完全不要求**
+  （相似域名 `xnode-example.xyz` 也会被抹 =**取舍**，不是缺口）；
+* 覆盖不到的仍是**两类**：**base64 载荷**、**不以 `HOME` 开头但带用户名的路径**（本次实测该路径里用户名**仍保留**=true）。
+  ⇒ `Logs.tsx` 的「两种」措辞**与实现一致**。
+
+### 7.3 复现命令（与 `TASK-124-PRIVACY-VERIFY.md` §6 同一套探针）
+```bash
+df -g /Users/xbtg-                       # 低于 8 GiB 停下报 Lead
+./scripts/wt.sh new v133p 3754374        # 独立 worktree + 独立 target dir
+# 把 TASK-124-PRIVACY-VERIFY.md §6 的探针 + §7 的合成域名块注入 worktree 的 diagnostics.rs
+#   （两处编译小坑：`*kind` / `**k == *"version_like"` —— 见下）
+./scripts/wt.sh run v133p -- cargo test -p xraytun-desktop --lib -- v145_real_log_and_name_shape_probe --nocapture
+./scripts/wt.sh rm v133p                 # **收工立刻删**（含它的 target）
+```
+**诚实细节（这次多花了两个来回）**：探针从 `/tmp` 那份副本注入时，`kind != "version_like"` 与
+`.find(|(k,_,_)| *k == …)` 两处**类型比较要写成 `*kind` / `**k == *"version_like"`**，否则 **E0277 编译失败**
+（我第一次注入后直接跑，拿到的是编译错误 `EXIT=101`，不是测试结论 —— 与「突变没生效＝假绿」同族的一个坑）。
