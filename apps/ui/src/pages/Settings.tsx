@@ -426,16 +426,55 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           />
           启动时如果上次是连接状态，自动连回来
         </label>
-        {/* 文案逐句对应 `commands/core.rs` 的 `should_auto_reconnect`
-            （四个条件缺一不可：`was_connected && auto_reconnect && mode != Direct && !already_running`）
-            与 `reconnect_if_needed` 的注释（三种场景）。**不写「开机自动连接」** —— 那不是它的语义：
-            它只在「上次确实连着」且非直连时把上次那条连接重建起来。 */}
-        <div className="field__hint">
-          只在三种情况下起作用：<strong>应用自更新</strong>（先退出、替换 App 后再启动）、
-          <strong>崩溃后</strong>被系统重启、<strong>开机自启</strong>。
-          前提是<strong>上次退出时确实是连着的</strong>，且当前不是「直连」模式 ——
-          你主动点过「停止」的话，这里不会把隧道拉起来。
-        </div>
+        {/*
+          task-138：这一段原来写「**只在三种情况下起作用**：应用自更新 / 崩溃后被系统重启 /
+          开机自启」。逐行核过 Rust 后（见下），它漏了一种**真实且常见**的情形，
+          并且把开关的适用范围说宽了：
+
+          * `reconnect_if_needed` **只有一个调用点**：`apps/desktop/src/lib.rs:301`
+            （setup 钩子里 spawn；重试 `RECONNECT_ATTEMPTS` 次）。判据
+            `should_auto_reconnect`（`commands/core.rs:503-516`）=
+            `was_connected && auto_reconnect && mode != Direct && !running`。
+            **开关只在这一条路径上生效。**
+          * 正常退出**不动作废**那个意图：`RunEvent::ExitRequested` → `tray::sync_cleanup`
+            （`lib.rs:126-128` / `tray.rs:165-205`）只做「回滚网络 + 杀核心进程 + 内存里
+            标记 running=false」，**从不写 `was_connected`**；它只在
+            `stop_proxy`（`core.rs:90`，UserStop）与已知失败退场（`core.rs:665`）被清零
+            （`invalidate_connect_intent`，`core.rs:577-584`）。这一点代码自己的注释也写着：
+            「『退出应用』因此只在本次进程内有效」（`core.rs:553-556`）。
+            ⇒ **「你自己退出 App 后再次打开」是第四种情形**，旧文案没列。
+          * 运行期间的自愈**不看这个开关**：看门狗重建（`core.rs:1330`，判据
+            `should_rebuild_tunnel`，`core.rs:716`）与换网/出口变化重建（`core.rs:1725`，
+            判据 `should_rebuild_after_egress_change`，`core.rs:1553`）都只读
+            `was_connected`（`core.rs:1263` / `:1656`），没有 `auto_reconnect` 这一项。
+            ⇒ 「关掉开关」≠「不会再自动连」，用户必须知道这一点（否则会以为关了它就绝对安全）。
+          所以下面按**开关的真实值**分两句写，不是一段静态说明。
+        */}
+        {settings.auto_reconnect ? (
+          <div className="field__hint">
+            它只管<strong>启动时那一次</strong>：上次退出时是连着的、且当前不是「直连」模式，
+            才会把上次那条连接拉回来。会走到它的有<strong>四种情形</strong>：
+            <strong>开机自启</strong>、<strong>应用自更新</strong>后重启、
+            <strong>崩溃后</strong>被系统重启，以及<strong>你自己退出 App 后再次打开</strong>
+            （正常退出不会作废这个意图 —— 只有你点过「断开」、或引擎判定为"已知失败"才会）。
+            <br />
+            ⚠︎ 它管不住<strong>运行期间的自愈</strong>：隧道已经连着时，
+            <strong>看门狗重建</strong>（连续多次不通）与<strong>换网重建</strong>只看
+            「你是否还想连着」，<strong>不看这个开关</strong>。
+          </div>
+        ) : (
+          <div className="field__hint">
+            现在<strong>关着</strong>：<strong>启动时</strong>不会自动连回 ——
+            上面那四种情形（开机自启 / 应用自更新后重启 / 崩溃后被系统重启 /
+            你自己退出后再次打开）都不会把隧道拉起来。
+            <br />
+            ⚠︎ 但「关掉它」<strong>不等于</strong>「不会再自动连」：隧道已经连着时，
+            运行期间的<strong>看门狗重建</strong>与<strong>换网重建</strong>
+            <strong>不看这个开关</strong>，只看「你是否还想连着」这个意图。
+            要真的让它停下来，请点顶栏的「<strong>断开</strong>」——
+            那会同时作废「下次自动连回」的意图。
+          </div>
+        )}
         <div className="field" style={{ marginTop: 14 }}>
           <label>日志级别</label>
           {/*

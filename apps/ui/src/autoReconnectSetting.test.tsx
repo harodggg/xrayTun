@@ -91,11 +91,17 @@ describe("auto_reconnect：可见、可关、关得住（task-71）", () => {
     const { box } = await renderSettings(snap(true));
     expect(box.checked, "后端默认 true，界面就该显示为开").toBe(true);
 
-    // 文案必须说清真实场景，而不是含糊的「自动连接」
-    expect(screen.getByText(/只在三种情况下起作用/)).toBeTruthy();
+    // 文案必须说清真实场景，而不是含糊的「自动连接」。
+    // task-138：原来钉的是「只在三种情况下起作用」，逐行核 Rust 后**那是错的** ——
+    // 正常退出不作废意图（`tray.rs:165-205` 不写 `was_connected`），
+    // 所以「你自己退出 App 后再次打开」是第四种；而且运行期间的看门狗/换网重建
+    // 根本不看这个开关。断言强度不变（四种都要点名 + 不许写「开机自动连接」）。
+    expect(screen.getByText(/四种情形/)).toBeTruthy();
     expect(screen.getByText(/应用自更新/)).toBeTruthy();
     expect(screen.getByText(/崩溃后/)).toBeTruthy();
     expect(screen.getByText(/开机自启/)).toBeTruthy();
+    expect(screen.getByText(/你自己退出 App 后再次打开/)).toBeTruthy();
+    expect(screen.getByText(/管不住/)).toBeTruthy();
     // 且不许夸大成「开机自动连接」
     expect(screen.queryByText(/开机自动连接/)).toBeNull();
   });
