@@ -214,3 +214,21 @@ README 里「best-effort、**不是安全边界**」的口径被实测印证：
 `deploy-check.sh` 与手工探活期间，我 `POST` 过一个 180 B 的干净包
 （id `INC-20260923-031304-3c5b`）。它**不是**泄漏（内容是自造 fixture），30 天后自动过期；
 要立刻清就用端点令牌 `DELETE /api/incident/INC-20260923-031304-3c5b`（**我没有端点令牌**，故未删）。
+
+## 13. `deploy-check.sh` 自己的安全行为（tester 实测失误 → 机制）
+
+tester 独立复跑时用 `curl -o /dev/null` 丢了 201 的响应体 ⇒ **拿不到 id ⇒ 删不掉那个测试包**，
+只能等 30 天过期（lead 最后用 R2 API 逐对象清）。⇒ 工具不再允许这种「留下一个删不掉的对象」：
+
+* **任何 POST 的响应体都会被解析 `id`**：取到 ⇒ 打印 `ID=…` + 追加到
+  `${ID_FILE:-$TMPDIR/xraytun-incident-uploaded-ids.txt}` + 打印可复制的 `DELETE` 命令；
+* `--upload` 且带 `INCIDENT_TOKEN` ⇒ 自动 DELETE 并复核 404；DELETE 失败 ⇒ 报「**残留**」并给出 id 与文件位置；
+* **2xx 却没有 id** ⇒ 明确报「**无法清理**」并以非 0 退出（不静默）；
+* `--self-test`（用**本地 mock 服务**，不碰 Cloudflare、不写 R2）覆盖两条分支：
+  ```
+  $ ./infra/incident-collector/deploy-check.sh --self-test
+    带 id 的 201：id 被打印 ✓ / id 已落盘 ✓ / 自动 DELETE 真的发出去了 ✓ / 退出码 0 ✓
+    缺 id 的 201：明确报「无法清理」✓ / 以非 0 退出（不静默）✓
+    pass=6 fail=0   ✓ deploy-check 自测通过
+  ```
+  （自测里 mock 也按真端点的行为区分脏包：含 `vless://` ⇒ 422。）

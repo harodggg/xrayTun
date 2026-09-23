@@ -24,10 +24,17 @@ ZONE_ID="${CLOUDFLARE_ZONE_ID:-d5c9855127ff057a8f2c640f51024663}"   # 非秘密�
 WORKER_NAME="xraytun-incident-collector"
 DEPLOY_LOG=""
 DO_UPLOAD=0
+DO_SELF_TEST=0
+# **强制把返回的 id 存下来**：2026-09-23 tester 用 `-o /dev/null` 丢了 201 的响应 ⇒
+# 拿不到 id、删不掉那个测试包，只能等 30 天过期（lead 只好用 R2 API 逐对象清）。
+ID_FILE="${ID_FILE:-${TMPDIR:-/tmp}/xraytun-incident-uploaded-ids.txt}"
+UPLOADED_IDS=""
+NOCLEAN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --deploy-log) DEPLOY_LOG="${2:-}"; shift 2 ;;
     --upload) DO_UPLOAD=1; shift ;;
+    --self-test) DO_SELF_TEST=1; shift ;;
     -h | --help) sed -n '3,20p' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
@@ -38,6 +45,30 @@ ok() { echo "  ✓ $*"; pass=$((pass + 1)); }
 no() { echo "  ✗ $*"; fail=$((fail + 1)); }
 sk() { echo "  ⏭ $*"; skip=$((skip + 1)); }
 hdr() { echo; echo "=============================================================="; echo "  $*"; echo "=============================================================="; }
+
+# 从响应体里取 id：**取到了就打印 + 落盘 + 给出 DELETE 命令**；
+# 若是 2xx 却没有 id ⇒ 明确报「无法清理」（绝不静默留一个删不掉的对象）。
+save_id_from_body() { # $1=body 文件  $2=HTTP 码
+  local body="$1" code="$2" id
+  id="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$body" | head -1)"
+  if [ -n "$id" ]; then
+    echo "      ID=$id"
+    printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S%z')" "$id" "$BASE" >>"$ID_FILE"
+    echo "      已记录到 ${ID_FILE}（删不掉的包凭它去 DELETE）"
+    echo "      手动删除：curl -X DELETE -H 'X-Auth-Token: <端点令牌>' $BASE/$id"
+    UPLOADED_IDS="$UPLOADED_IDS $id"
+    return 0
+  fi
+  case "$code" in
+    2*)
+      echo "  ✗ **无法清理**：服务端返回 ${code}，但响应里没有 id ⇒ 可能已落盘一个我们删不掉的对象" >&2
+      echo "      原始响应（前 200 字）：$(head -c 200 "$body")" >&2
+      NOCLEAN=1
+      return 75
+      ;;
+  esac
+  return 0
+}
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/deploy-check.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -52,6 +83,94 @@ with zipfile.ZipFile(d / 'clean.zip', 'w') as z:
     z.writestr('README.txt', 'XrayTun incident bundle (deploy-check fixture)\nversion=0.8.35\n')
 PYEOF
 SECRET_MARK='11111111-2222-3333-4444-555555555555'
+
+
+# ------------------------------------------------------------------ --self-test
+#
+# 用**本地 mock 服务**验证这个工具自己的安全行为（不碰 Cloudflare、不往 R2 写东西）：
+#   A) 服务端返回带 id 的 201 ⇒ id 必须被打印 + 落盘，并且**自动 DELETE**
+#   B) 服务端返回**不带 id** 的 201 ⇒ 必须明确报「无法清理」并以非 0 退出（绝不静默留下对象）
+if [ "$DO_SELF_TEST" = "1" ] && [ -z "${SELF_TEST_CHILD:-}" ]; then
+  hdr "自测：本地 mock 服务（验证 id 记录 / 无法清理）"
+  MOCK="$TMP/mock.py"
+  cat >"$MOCK" <<'PYEOF'
+import http.server, json, os, sys, threading
+PORT, MODE, DEL_LOG = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+state = {}
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):  # 静音
+        pass
+    def _send(self, code, body, ctype='application/json'):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(code); self.send_header('content-type', ctype)
+        self.send_header('content-length', str(len(raw))); self.end_headers(); self.wfile.write(raw)
+    def do_POST(self):
+        n = int(self.headers.get('content-length') or 0)
+        body = self.rfile.read(n)
+        # 像真端点一样：含 vless:// 的包 ⇒ 422（自测里的「脏包」就是这一份）
+        if b'vless://' in body:
+            return self._send(422, {'error': 'secret_detected', 'hits': [{'type': 'node_url', 'file': 'nodes.txt', 'line': 1}]})
+        if MODE == 'with-id':
+            state['id'] = 'INC-SELFTEST-0001'
+            self._send(201, {'id': state['id'], 'sha256': 'x' * 64, 'received_at': '2026-09-23T00:00:00Z', 'bytes': 123})
+        else:
+            self._send(201, {'ok': True, 'note': 'server gave no id'})
+    def do_GET(self):
+        if self.path.endswith('/blob'):
+            if self.headers.get('X-Auth-Token') == 'dummy-token':
+                self._send(200, b'PK\x03\x04fake', 'application/zip')
+            else:
+                self._send(401, {'error': 'unauthorized'})
+        elif state.get('id') and self.path.rstrip('/').endswith(state['id']):
+            if state.get('deleted'):
+                self._send(404, {'error': 'not_found'})
+            else:
+                self._send(200, {'id': state['id'], 'schema_version': 1})
+        else:
+            self._send(404, {'error': 'not_found'})
+    def do_DELETE(self):
+        if self.headers.get('X-Auth-Token') != 'dummy-token':
+            return self._send(401, {'error': 'unauthorized'})
+        state['deleted'] = True
+        with open(DEL_LOG, 'a') as f:
+            f.write(self.path + '\n')
+        self._send(200, {'deleted': True})
+srv = http.server.HTTPServer(('127.0.0.1', PORT), H)
+print('READY', flush=True)
+srv.serve_forever()
+PYEOF
+  self_case() { # $1=mode  $2=port  $3=期望(ok|noid)
+    # ⚠️ 必须分开赋值：bash 3.2 会把 `local` 里所有词**先展开再赋值**，
+    # 同一行里的 `$mode` 还是空的（`set -u` 下直接 unbound）。
+    local mode port want del_log ids out rc
+    mode="$1"; port="$2"; want="$3"
+    del_log="$TMP/del.$mode.log"; ids="$TMP/ids.$mode.txt"
+    : >"$del_log"; : >"$ids"
+    python3 "$MOCK" "$port" "$mode" "$del_log" >"$TMP/mock.$mode.log" 2>&1 &
+    local mpid=$!
+    for i in $(seq 1 40); do grep -q READY "$TMP/mock.$mode.log" 2>/dev/null && break; sleep 0.1; done
+    out="$(SELF_TEST_CHILD=1 BASE="http://127.0.0.1:$port/api/incident" INCIDENT_TOKEN=dummy-token \
+           ID_FILE="$ids" "$0" --upload 2>&1)"; rc=$?
+    kill -TERM "$mpid" 2>/dev/null; wait "$mpid" 2>/dev/null
+    echo "    —— case ${mode}（rc=${rc}）——"
+    printf '%s\n' "$out" | grep -E "ID=|已记录到|无法清理|已删除|上传 201" | sed 's/^/      /'
+    if [ "$want" = "ok" ]; then
+      printf '%s\n' "$out" | grep -q "ID=INC-SELFTEST-0001" && ok "带 id 的 201：id 被打印" || no "带 id 的 201：没打印 id"
+      grep -q "INC-SELFTEST-0001" "$ids" && ok "id 已落盘（${ids}）" || no "id 没落盘"
+      grep -q "INC-SELFTEST-0001" "$del_log" && ok "自动 DELETE 真的发出去了" || no "没有自动 DELETE"
+      [ "$rc" = "0" ] && ok "带 id 的 201：退出码 0" || no "带 id 的 201：退出码 ${rc}（期望 0）"
+    else
+      printf '%s\n' "$out" | grep -q "无法清理" && ok "缺 id 的 201：明确报「无法清理」" || no "缺 id 的 201：没报「无法清理」"
+      [ "$rc" != "0" ] && ok "缺 id 的 201：以非 0 退出（不静默）" || no "缺 id 的 201：竟然退出 0"
+    fi
+  }
+  self_case with-id 18971 ok
+  self_case no-id 18972 noid
+  echo
+  echo "  pass=$pass fail=$fail"
+  [ "$fail" = "0" ] && { echo "  ✓ deploy-check 自测通过"; exit 0; }
+  echo "  ✗ deploy-check 自测失败"; exit 1
+fi
 
 echo "部署后自检：BASE=$BASE  worker=$WORKER_NAME"
 
@@ -126,6 +245,8 @@ if printf '%s' "$(cat "$TMP/dirty.json")" | grep -q '"secret_detected"'; then
 else
   no "响应体不是 secret_detected"
 fi
+save_id_from_body "$TMP/dirty.json" "$CODE" || no "脏包响应异常（见上面的「无法清理」）"
+
 if grep -q "$SECRET_MARK" "$TMP/dirty.json"; then
   no "**响应体里出现了密钥原文**（泄漏面！）"
 else
@@ -138,6 +259,7 @@ if [ "$DO_UPLOAD" = "1" ]; then
   UP_CODE="$(curl -sS -o "$TMP/up.json" -w '%{http_code}' -X POST "$BASE" \
               -H 'content-type: application/zip' --data-binary @"$TMP/clean.zip")"
   echo "      POST → $UP_CODE"; sed -n '1,8p' "$TMP/up.json" | sed 's/^/       /'
+  save_id_from_body "$TMP/up.json" "$UP_CODE" || true
   ID="$(sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' "$TMP/up.json" | head -1)"
   if [ "$UP_CODE" = "201" ] && [ -n "$ID" ]; then
     ok "上传 201，id=$ID"
@@ -161,7 +283,9 @@ else
 fi
 
 hdr "结果"
+[ "$NOCLEAN" = "1" ] && fail=$((fail + 1))
 echo "  pass=$pass fail=$fail skip=$skip"
+[ -n "$UPLOADED_IDS" ] && echo "  本次创建过的 id：${UPLOADED_IDS}（记录在 ${ID_FILE}）"
 if [ "$fail" = "0" ]; then
   echo "  ✓ 部署后自检通过（部署日志说成功 ≠ 端点能用 —— 这三条才是判据）"
   exit 0

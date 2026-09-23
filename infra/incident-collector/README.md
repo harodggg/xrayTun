@@ -164,6 +164,14 @@ CLOUDFLARE_API_TOKEN="$(cat ~/.cf-incident-token)" ./infra/incident-collector/de
 INCIDENT_TOKEN=<端点令牌> ./infra/incident-collector/deploy-check.sh --upload
 ```
 
+**这个工具自己的安全行为**（`--self-test`，用本地 mock 服务，不碰 Cloudflare、不写 R2）：
+* 返回带 `id` 的 201 ⇒ **打印 + 落盘**（默认 `${TMPDIR:-/tmp}/xraytun-incident-uploaded-ids.txt`）+ `--upload` 时**自动 DELETE**；
+* 返回**不带 id** 的 2xx ⇒ 明确报「**无法清理**」并以非 0 退出（绝不静默留下一个删不掉的对象）。
+  （起因：tester 复跑时用 `-o /dev/null` 丢了 201 的响应 ⇒ 拿不到 id、删不掉，只能等 30 天 —— 现在由机制兜住。）
+```bash
+./infra/incident-collector/deploy-check.sh --self-test      # 6 项断言，含上面两条
+```
+
 三条判据（缺一不可）：
 1. 部署日志里**没有** `env.routes`、**没有** `Unexpected fields`；
 2. `GET /zones/<zone>/workers/routes` 能看到**两条** pattern（`…/api/incident` 与 `…/api/incident/*`）；
