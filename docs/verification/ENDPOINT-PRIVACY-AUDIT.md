@@ -150,6 +150,57 @@ curl -s -H "Authorization: Bearer $TOK" \
   「有一条按 Age 删除对象的规则，且天数 = 30」。
 * 若输出里**仍然只有** multipart 那条 ⇒ **规则没加上**，不要因为「控制台点了」就认为成功。
 
+### 4.2 ✅ 复核结果（2026-09-23 11:53:15 +0800）—— **已相符**
+
+> **这是独立复核**：ops 修（`22a9473`）、我用 §4.1 那条命令与**写死的判据**自己量。**下面的输出是我自己取的**，不是引用他的。
+
+```bash
+$ TOK="$(cat "$HOME/.cf-incident-token")"
+$ ACCT="$(curl -s -H "Authorization: Bearer $TOK" https://api.cloudflare.com/client/v4/accounts \
+          | python3 -c "import json,sys;print(json.load(sys.stdin)['result'][0]['id'])")"
+$ curl -s -H "Authorization: Bearer $TOK" \
+    "https://api.cloudflare.com/client/v4/accounts/$ACCT/r2/buckets/xraytun-incidents/lifecycle" | python3 -m json.tool
+{
+    "success": true,
+    "errors": [],
+    "messages": [],
+    "result": {
+        "rules": [
+            {
+                "id": "Default Multipart Abort Rule",
+                "enabled": true,
+                "conditions": {},
+                "abortMultipartUploadsTransition": { "condition": { "type": "Age", "maxAge": 604800 } }
+            },
+            {
+                "id": "expire-30-days",
+                "enabled": true,
+                "conditions": {},
+                "deleteObjectsTransition": { "condition": { "type": "Age", "maxAge": 2592000 } }
+            }
+        ]
+    }
+}
+```
+
+按 §4.1 的判据逐条核对（我自己的判定，不引用他人结论）：
+
+| 判据 | 结果 |
+|---|---|
+| ① **默认 multipart 规则仍在**（没有被顶掉） | ✅ `Default Multipart Abort Rule`，`enabled = true`，`maxAge = 604800`（7 天） |
+| ② 多出一条 **Age→Delete** 的对象过期规则 | ✅ `expire-30-days`，`enabled = true`，`deleteObjectsTransition.condition = {type: Age, maxAge: **2592000**}` |
+| ③ **`maxAge == 2592000`（= 30 天）且 `enabled`** | ✅ 2592000 / 30 = 86400 s = 恰好 30 天 |
+| **判定** | **相符** —— §4 那条不符项**已闭合** |
+
+**根因**（ops 查明，我记录但不作为我的验证依据）：`wrangler r2 bucket lifecycle add <bucket> [name] [prefix]` 是**位置参数**，
+旧 README 写的 `--prefix ""` 是**未知开关** ⇒ 命令必然失败 ⇒ 又被行尾的 `|| true` 抹平。
+⇒ 这正是**「吞掉错误」把隐私承诺吃掉**的完整链条，已由 `task-136` 处置（含把该断言做进 `deploy-check.sh`）。
+
+**这一条复核**能证明什么、不能证明什么（承接 §7.2）：
+* ✅ 能证明：**存储层规则现在存在且启用**；
+* ❌ 不能证明：30 天后对象**真的会被删**（lifecycle 是异步的，本环境无法观测）——
+  发布说明若引用「30 天自动删除」，措辞仍应按 §7.2 的边界写。
+
 ## 5. CORS / 方法 / 响应头 —— **我量到的**
 
 | 探测 | 结果 |
