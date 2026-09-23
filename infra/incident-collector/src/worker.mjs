@@ -12,6 +12,8 @@
  * 无任何第三方依赖：只用 Web 标准 API + R2 绑定，测试用 node --test（见 test/）。
  */
 
+import { scanZipForSecrets } from './secret-scan.mjs';
+
 const DEFAULTS = {
   BASE_PATH: '/api/incident',
   MAX_BYTES: 10 * 1024 * 1024, // 10 MiB
@@ -228,7 +230,35 @@ async function handleUpload(request, env) {
     return err(415, 'not_zip', '请求体不是 zip（魔数不符）');
   }
 
-  // 5) 落盘：manifest + zip；**不写 IP**，客户端自述信息只在显式提供且格式合法时保留
+  // 5) **隐私拒收（最后防线，fail closed）**：客户端脱敏可能漏（实测漏过三处），
+  //     而这里会把包原样存 30 天 ⇒ 命中疑似密钥就 422 拒收；扫描器自身出错也拒收。
+  //     响应只给「类型 + 文件 + 行号」，**绝不回显密钥原文**（否则响应体本身成了泄漏面）。
+  let scan;
+  try {
+    scan = await scanZipForSecrets(bytes, { maxHits: intEnv(env, 'SCAN_MAX_HITS', undefined) || undefined });
+  } catch (e) {
+    // 连扫描函数都抛了 ⇒ 按 fail closed 处理
+    return err(422, 'scan_failed', '无法确认包内容安全（扫描器异常）⇒ 按策略拒收，请在本机重新脱敏后重试', {
+      reason: e && e.message ? String(e.message).slice(0, 120) : 'unknown',
+    });
+  }
+  if (!scan.ok) {
+    const detail = {
+      hits: scan.hits,
+      hits_truncated: scan.truncated,
+      scanned_files: scan.scanned_files,
+      scanned_bytes: scan.scanned_bytes,
+    };
+    if (String(scan.reason || '').startsWith('unreadable_entry') || String(scan.reason || '').startsWith('scan_failed')) {
+      return err(422, 'scan_failed', '无法确认包内容安全（包内条目读不出来）⇒ 按策略拒收，请重新打包后重试', {
+        ...detail,
+        reason: String(scan.reason).slice(0, 120),
+      });
+    }
+    return err(422, 'secret_detected', '包内疑似含密钥/订阅信息，已拒收（命中只给类型与位置，不回显内容）。请在本机脱敏后重传。', detail);
+  }
+
+  // 6) 落盘：manifest + zip；**不写 IP**，客户端自述信息只在显式提供且格式合法时保留
   const nowMs = Date.now();
   const receivedAt = new Date(nowMs).toISOString();
   const id = makeId(nowMs);

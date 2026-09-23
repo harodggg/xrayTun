@@ -102,3 +102,72 @@ delete；每步期望码：`201 / 200 / 401 / 200 / 429 / 200 / 404`。
 
 上传只由 App 里用户的一次明确点击触发（`task-115`）；打包脚本（`task-113`）在发送前会生成
 `README.txt` 让用户看到包内清单。端点侧没有任何「自动上报」逻辑 —— 它只对请求作出响应。
+
+## 7. 首次部署被 CF 拒（真实事故）与它的机制化
+
+lead 用临时授权实际部署时，**Worker 被 Cloudflare 运行时拒绝**：
+
+```
+Uncaught Error: Disallowed operation called within global scope.
+Asynchronous I/O (ex: fetch() or connect()), setting a timeout, and generating random values
+are not allowed within global scope.
+at …/src/worker.mjs:125:10                                    [code: 10021]
+```
+根因：限流盐写成模块顶层 `const RATE_SALT = (() => { crypto.getRandomValues(...) })()`。
+**16 条 `node --test` 全绿也不可能抓到它** —— node 不执行 workerd 的全局作用域限制。
+⇒ 修法：惰性初始化（`let rateSalt = null` + `getRateSalt()`，首次用到时才生成；**设计意图不变**，
+盐仍只在本 isolate 内存里）。复核：账号里仍是 8 个脚本、zone 上 0 条路由 ⇒ **没有半成品状态**。
+
+**机制化 = `smoke.sh`（真 workerd）**：
+
+```
+$ ./infra/incident-collector/smoke.sh
+  （等 Ready：已就绪）
+  HTTP 响应码：404
+  响应体：{  "error": "not_found",  "message": "没有这个 id"}
+  ✓ 真运行时起来了，并且用我们的 JSON 回话（404 not_found）——说明模块能加载、handler 能跑
+
+$ ./infra/incident-collector/smoke.sh --sensitivity     # 把顶层取随机值的 bug 回退
+  （等 Ready：未就绪）
+  HTTP 响应码：000
+  ✓ 敏感性成立：把「顶层取随机值」回退后，真运行时**起不来 / 不回话** ⇒ 这条冒烟测试抓得住它
+（运行时日志里出现同一句 `Disallowed operation called within global scope` + `The Workers runtime failed to start`）
+```
+
+## 8. 服务端隐私拒收（最后防线，`POST` 落盘之前）
+
+客户端打包脚本（`task-113`）负责脱敏，但 tester **当场抓到它自己三处漏**（JSON 形键值、
+URI 的 `?query/#fragment`、`Authorization` 只吃掉 `Bearer`）。端点会把包**原样存 30 天**
+⇒ 客户端漏一次，密钥就在云上躺一个月。所以服务端加一层**拒收**（两层互不替代）：
+
+* 扫 zip 内文本（极简 zip 读取：EOCD + 中央目录 + 本地头；**store 与 deflate 都要**），命中即 **422 `secret_detected`**；
+* 模式：`uuid_literal`（**排除 `<uuid>` / 全 x / 全 0 这类占位**）、`uri_secret_param`
+  （`pbk=`/`sid=`/`spx=`/`token=`/`password=`/`uuid=`/`key=`/`secret=`…，值 ≥8 字符）、
+  `private_key_pem`、`node_url`（`vless://` `vmess://` `ss://` `trojan://` …）、`json_secret_key`；
+* **响应只给 `{type, file, line}`（最多 20 条，`hits_truncated` 标截断），绝不回显密钥原文**；
+* **fail closed**：zip 读不成 / 条目解不开 / 扫描器抛异常 ⇒ **422 `scan_failed`**（不是放行）。
+
+测试（`verify.sh` 现在 **23 条**）+ 敏感性变体 C：
+
+```
+$ ./infra/incident-collector/verify.sh
+  ℹ tests 23 ｜ pass 23 ｜ fail 0        ✓
+
+$ ./infra/incident-collector/verify.sh --sensitivity
+  ✓ 变体 A（拿掉鉴权）      fail=3/23  只红：blob 无 token / delete 无 token / 未配 token fail-closed
+  ✓ 变体 B（拿掉大小上限）  fail=1/23  只红：超出大小上限
+  ✓ 变体 C（拿掉隐私扫描）  fail=7/23  只红：vless / JSON 键值 / URI 参数 / PEM / deflate / 限长 / fail-closed
+  pass=3 fail=0
+```
+
+**又一次我自己的假绿（第三次，留档）**：变体一开始写在 `$TMP` 里，而 `worker.mjs` 现在有相对
+import（`./secret-scan.mjs`）⇒ 变体加载失败、整份测试报「1 条红」，脚本一度把它当「全红=整体崩」拦下，
+但换到 `src/` 旁边之前根本没有有效证据。**结论**：变体必须与源码同目录，且「全红」永远是可疑信号。
+
+## 9. 环境事实（lead 实测，写进 README）
+
+* `~/.npm` 被 root 污染 ⇒ `npx` EPERM：**不要 `sudo chown`**，用
+  `npm_config_cache=/tmp/dsh-npm-cache` 绕开（`smoke.sh` 会先验可写性再决定）；
+* wrangler 的日志目录也可能 EPERM ⇒ `WRANGLER_LOG_PATH=/tmp/dsh-wrangler-logs`；
+* **wrangler 认 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`**，不是 `CF_API_TOKEN` / `CF_ACCOUNT_ID`；
+* 桶 `xraytun-incidents` **已经建好**：重复 `create` 会报错 ⇒ 先 `r2 bucket list` 确认。

@@ -28,7 +28,12 @@
   **content-type 白名单 + zip 魔数**（不认自述，`PK\x03\x04` 之类）、
   **按 IP 限流**（`RATE_LIMIT_MAX`/窗口，默认 5 次/小时）；
 * 其它状态码：`400` id 格式错、`401` 缺/错 token、`404` 不存在/已过期/路径不对、
-  `405` 方法不对、`413` 太大、`415` 类型不对、`429` 限流（带 `Retry-After`）、`500` 内部错。
+  `405` 方法不对、`413` 太大、`415` 类型不对、**`422` 隐私拒收/扫描失败**、
+  `429` 限流（带 `Retry-After`）、`500` 内部错。
+* **`422`（最后防线）**：落盘前会扫包内文本，命中疑似密钥（UUID 字面量 / `pbk=` 等 URI 参数 /
+  `-----BEGIN … PRIVATE KEY-----` / `vless://` 等节点 URL / JSON 形键值）就**拒收**，
+  响应只给「类型 + 文件 + 行号」（`hits`，最多 20 条，`hits_truncated` 标截断），**绝不回显密钥原文**；
+  **扫描器自身出错也拒收（fail closed）**，对应 `error: "scan_failed"`。
 
 manifest 形状：
 
@@ -89,15 +94,16 @@ Token 的存放（**绝不写进仓库**）：
 ```bash
 # 用户侧（0600，只放这一个 token）：
 printf '%s' 'cf-xxxxxxxx' > ~/.cf-incident-token && chmod 600 ~/.cf-incident-token
-# 维护者侧（从文件读，不进 shell history、不打印）：
-CF_API_TOKEN="$(cat ~/.cf-incident-token)"
+# 维护者侧（从文件读，不进 shell history、不打印）；
+# ⚠️ 变量名必须是 wrangler 认的那个：CLOUDFLARE_API_TOKEN
+CLOUDFLARE_API_TOKEN="$(cat ~/.cf-incident-token)"
 ```
 
 ### 3.2 一次性准备
 
 ```bash
-# R2 桶（幂等；已存在会报 already exists，可忽略）
-npx wrangler r2 bucket create xraytun-incidents
+# R2 桶：**先 list 确认**（本项目已经建过 xraytun-incidents；重复 create 会报错）
+npx wrangler r2 bucket list | grep -F xraytun-incidents || npx wrangler r2 bucket create xraytun-incidents
 
 # 端点令牌（**secret**，不进 wrangler.toml）：
 npx wrangler secret put INCIDENT_TOKEN --config infra/incident-collector/wrangler.toml
@@ -116,7 +122,8 @@ npx wrangler r2 bucket lifecycle add xraytun-incidents --expire-days 30 --prefix
 ### 3.3 部署
 
 ```bash
-CF_ACCOUNT_ID=<account-id> CF_API_TOKEN="$(cat ~/.cf-incident-token)" \
+# ⚠️ wrangler 认的是 CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID（**不是 CF_API_TOKEN / CF_ACCOUNT_ID** —— 实测无效）
+CLOUDFLARE_ACCOUNT_ID=<account-id> CLOUDFLARE_API_TOKEN="$(cat ~/.cf-incident-token)" \
   npx wrangler deploy --config infra/incident-collector/wrangler.toml
 ```
 
@@ -162,6 +169,38 @@ done
 curl -sS -X DELETE -H "X-Auth-Token: $TOKEN" "$BASE/$ID"
 curl -sS -o /dev/null -w 'after-delete=%{http_code}\n' "$BASE/$ID"
 ```
+
+## 3.5 已知环境问题（本机实测）
+
+1. **`~/.npm` 里有 root 拥有的文件 ⇒ `npx` 报 EPERM**：
+   ```
+   npm error Your cache folder contains root-owned files …
+   npm error   sudo chown -R 501:20 "/Users/xbtg-/.npm"
+   ```
+   **不要照它去 `sudo chown`**（那是用户的机器）。绕开方式（`smoke.sh` 已内置）：
+   ```bash
+   npm_config_cache=/tmp/dsh-npm-cache npx --yes wrangler@3 --version
+   ```
+   `smoke.sh` 会**先验可写性**：环境里的 `npm_config_cache`（可能就是那个坏的）不可写时自动换到临时目录。
+2. **wrangler 的日志目录也可能 EPERM**（`~/Library/Preferences/.wrangler/…`）：
+   `WRANGLER_LOG_PATH=/tmp/dsh-wrangler-logs` 可绕开。
+3. **wrangler 认的环境变量名**：`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`
+   （`CF_API_TOKEN` / `CF_ACCOUNT_ID` **不会被采用** —— 实测两套都设了才跑通）。
+
+## 3.6 workerd 冒烟（本地，不需要账号）
+
+```bash
+./infra/incident-collector/verify.sh                 # 23 个用例（含隐私拒收）
+./infra/incident-collector/verify.sh --sensitivity    # 3 个变体（鉴权/大小上限/隐私扫描）都必须变红
+./infra/incident-collector/smoke.sh                  # 真 workerd 起一个请求（抓运行时限制）
+./infra/incident-collector/smoke.sh --sensitivity     # 把「顶层取随机值」的 bug 回退 ⇒ 必须红
+```
+
+**为什么必须有 `smoke.sh`**：2026-09-22 首次部署被 CF 拒 ——
+`Uncaught Error: Disallowed operation called within global scope … [code: 10021]`
+（模块顶层调 `crypto.getRandomValues` 生成限流盐）。
+**`node --test` 不执行 workerd 的这条限制**，所以 16 条本地用例全绿也抓不到它。
+⇒ **本地绿 ≠ 运行时绿**：涉及 Workers 运行时的改动，必须跑一次 `smoke.sh`。
 
 ## 4. 回滚 / 撤销
 

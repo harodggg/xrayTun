@@ -63,28 +63,37 @@ fi
 
 # ------------------------------------------------------------------ 敏感性
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/incident-endpoint-sens.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+trap 'rm -rf "$TMP" "$HERE/src/.mut-*.mjs"' EXIT INT TERM
 
 # 变体 A：把鉴权拿掉（两个 `if (!authorized(...)) return err(401, ...)` 的**条件**改成 false）
 # 变体 B：把大小上限拿掉（`const max = intEnv(env, 'MAX_BYTES', …)` ⇒ Number.MAX_SAFE_INTEGER）
 # 用 python3 做字符串替换（sed 的转义在第一次跑时就把模式弄坏了 —— 那次的「红」其实是模块加载失败，
 # 而不是断言红了；所以下面还会要求「其它用例仍然通过」，防止这种假红冒充敏感性成立）。
-MUT_A="$TMP/worker-no-auth.mjs"
-MUT_B="$TMP/worker-no-size-limit.mjs"
-python3 - "$SRC" "$MUT_A" "$MUT_B" <<'PYEOF'
+# ⚠️ 变体必须放在 **src/ 旁边**：worker.mjs 现在有相对 import（`./secret-scan.mjs`），
+# 放到 $TMP 里会让 import 解析失败 ⇒ 整份测试加载不起来，看起来「全红」——
+# 那是模块错误，不是断言在验东西（第一版就这么假红了一次）。
+MUT_A="$HERE/src/.mut-no-auth.mjs"
+MUT_B="$HERE/src/.mut-no-size-limit.mjs"
+MUT_C="$HERE/src/.mut-no-secret-scan.mjs"
+python3 - "$SRC" "$MUT_A" "$MUT_B" "$MUT_C" <<'PYEOF'
 import sys, pathlib
-src, out_a, out_b = sys.argv[1], sys.argv[2], sys.argv[3]
+src, out_a, out_b, out_c = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 s = pathlib.Path(src).read_text(encoding='utf-8')
 a = s.replace("if (!authorized(request, env)) return err(401, 'unauthorized', '需要 X-Auth-Token');",
               "if (false) return err(401, 'unauthorized', '需要 X-Auth-Token');")
 b = s.replace("const max = intEnv(env, 'MAX_BYTES', DEFAULTS.MAX_BYTES);",
               "const max = Number.MAX_SAFE_INTEGER;")
+# C：把隐私扫描换成「永远通过」的桩（模拟「这个防线没接上」）
+c = s.replace("scan = await scanZipForSecrets(bytes, { maxHits: intEnv(env, 'SCAN_MAX_HITS', undefined) || undefined });",
+              "scan = { ok: true, hits: [], truncated: false, scanned_files: 0, scanned_bytes: 0 };")
 assert a != s, 'auth 变体没改到源码'
 assert b != s, 'size 变体没改到源码'
+assert c != s, '隐私扫描变体没改到源码'
 pathlib.Path(out_a).write_text(a, encoding='utf-8')
 pathlib.Path(out_b).write_text(b, encoding='utf-8')
+pathlib.Path(out_c).write_text(c, encoding='utf-8')
 PYEOF
-[ -s "$MUT_A" ] && [ -s "$MUT_B" ] || { echo "  ✗ 变体文件为空（替换失败）"; exit 1; }
+[ -s "$MUT_A" ] && [ -s "$MUT_B" ] && [ -s "$MUT_C" ] || { echo "  ✗ 变体文件为空（替换失败）"; exit 1; }
 
 # 只允许这几条因「拿掉鉴权 / 拿掉大小上限」而红；**其它用例必须仍然通过** ——
 # 否则整个模块可能只是加载失败（那样 16 条全红，看起来也像“敏感性成立”）。
@@ -92,11 +101,16 @@ PYEOF
 # 变体 B 只红 1 条（大小上限）。其余用例**必须仍然通过**。
 # 格式：<tag>:<模块路径>:<必须红的用例，| 分隔>#<必须仍通过的用例，| 分隔>
 for pair in "A:$MUT_A:blob：不带 token|删除：不带 token|blob：没配置 INCIDENT_TOKEN#上传：合法 zip|上传：限流|上传：超出大小上限" \
-            "B:$MUT_B:超出大小上限#上传：合法 zip|上传：限流|blob：不带 token|删除：不带 token"; do
+            "B:$MUT_B:超出大小上限#上传：合法 zip|上传：限流|blob：不带 token|删除：不带 token" \
+            "C:$MUT_C:隐私：包内含 vless|隐私：JSON 形键值|隐私：URI 的|隐私：PEM 私钥块|隐私：deflate|隐私：命中列表|魔数对但结构坏#上传：合法 zip|上传：超出大小上限|上传：限流|blob：不带 token|删除：不带 token"; do
   tag="${pair%%:*}"; rest="${pair#*:}"; mod="${rest%%:*}"; rest2="${rest#*:}"
   want="${rest2%%#*}"; must_pass_all="${rest2#*#}"
   echo "=============================================================="
-  if [ "$tag" = "A" ]; then echo "  [A] 去掉「鉴权」⇒ 鉴权相关用例必须红，且**其它用例仍须通过**"; else echo "  [B] 去掉「大小上限」⇒ 该用例必须红，且**其它用例仍须通过**"; fi
+  case "$tag" in
+    A) echo "  [A] 去掉「鉴权」⇒ 鉴权相关用例必须红，且**其它用例仍须通过**" ;;
+    B) echo "  [B] 去掉「大小上限」⇒ 该用例必须红，且**其它用例仍须通过**" ;;
+    C) echo "  [C] 去掉「隐私扫描」⇒ 隐私相关用例必须红，且**其它用例仍须通过**" ;;
+  esac
   echo "=============================================================="
   OUT="$(run_suite "$mod")"
   printf '%s\n' "$OUT" | grep -E '^(✖|ℹ (tests|pass|fail))' | sed 's/^/    /'

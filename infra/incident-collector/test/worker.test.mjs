@@ -58,15 +58,85 @@ function env(extra = {}) {
   };
 }
 
-/** 最小合法 zip：魔数 PK\x03\x04 + 填充。 */
-function zipBytes(n = 64) {
-  const b = new Uint8Array(Math.max(4, n));
-  b[0] = 0x50; b[1] = 0x4b; b[2] = 0x03; b[3] = 0x04;
-  for (let i = 4; i < b.length; i++) b[i] = i % 251;
-  return b;
+// ------------------------------------------------------------------ 真 zip 构造器
+//
+// 端点现在会**解析 zip** 做隐私扫描（fail closed）⇒ 测试必须喂**真的 zip**，
+// 不能再用「魔数 + 填充」。这里用 store（不压缩）与 deflate-raw 两种方式各造几份。
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
 }
 
-function uploadRequest({ bytes = zipBytes(), ctype = 'application/zip', ip = IP, headers = {} } = {}) {
+async function deflateRaw(bytes) {
+  const cs = new CompressionStream('deflate-raw');
+  const stream = new Response(bytes).body.pipeThrough(cs);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/** 构造一个合法 zip。entries: [{name, text}]；method: 0=store, 8=deflate-raw。 */
+async function makeZip(entries, method = 0) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  const central = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = enc.encode(e.name);
+    const raw = enc.encode(e.text);
+    const data = method === 8 ? await deflateRaw(raw) : raw;
+    const crc = crc32(raw);
+    const lh = new Uint8Array(30 + name.length);
+    const dv = new DataView(lh.buffer);
+    dv.setUint32(0, 0x04034b50, true);
+    dv.setUint16(4, 20, true); dv.setUint16(6, 0, true); dv.setUint16(8, method, true);
+    dv.setUint16(10, 0, true); dv.setUint16(12, 0x21, true); // 固定时间戳：结果可复现
+    dv.setUint32(14, crc, true); dv.setUint32(18, data.length, true); dv.setUint32(22, raw.length, true);
+    dv.setUint16(26, name.length, true); dv.setUint16(28, 0, true);
+    lh.set(name, 30);
+    chunks.push(lh, data);
+    const cd = new Uint8Array(46 + name.length);
+    const cv = new DataView(cd.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0, true);
+    cv.setUint16(10, method, true); cv.setUint16(12, 0, true); cv.setUint16(14, 0x21, true);
+    cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, raw.length, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, offset, true);
+    cd.set(name, 46);
+    central.push(cd);
+    offset += lh.length + data.length;
+  }
+  const cdSize = central.reduce((n, c) => n + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, central.length, true); ev.setUint16(10, central.length, true);
+  ev.setUint32(12, cdSize, true); ev.setUint32(16, offset, true);
+  const all = [...chunks, ...central, eocd];
+  const total = all.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of all) { out.set(c, at); at += c.length; }
+  return out;
+}
+
+/** 默认包：一个干净的 zip（内容固定 ⇒ 字节可复现）。 */
+async function cleanZip(n = 64) {
+  return makeZip([{ name: 'README.txt', text: `XrayTun incident bundle (synthetic test fixture)\n${'x'.repeat(n)}` }]);
+}
+
+function uploadRequest({ bytes, ctype = 'application/zip', ip = IP, headers = {} } = {}) {
   return new Request(BASE, {
     method: 'POST',
     headers: { 'content-type': ctype, 'CF-Connecting-IP': ip, ...headers },
@@ -75,7 +145,8 @@ function uploadRequest({ bytes = zipBytes(), ctype = 'application/zip', ip = IP,
 }
 
 async function doUpload(e, opts = {}) {
-  const res = await worker.handle(uploadRequest(opts), e);
+  const bytes = opts.bytes || (await cleanZip());
+  const res = await worker.handle(uploadRequest({ ...opts, bytes }), e);
   const body = res.status === 201 ? await res.json() : await res.json().catch(() => null);
   return { res, body };
 }
@@ -89,7 +160,7 @@ test('上传：合法 zip ⇒ 201，返回 id/sha256/received_at/bytes', async (
   assert.match(body.id, worker.ID_RE);
   assert.match(body.sha256, /^[0-9a-f]{64}$/);
   assert.ok(body.received_at.endsWith('Z'));
-  assert.equal(body.bytes, zipBytes().length);
+  assert.equal(body.bytes, (await cleanZip()).length);
   // 真的落盘了：manifest + zip 两个键
   assert.ok(e.INCIDENT_BUCKET.map.has(`${body.id}/manifest.json`));
   assert.ok(e.INCIDENT_BUCKET.map.has(`${body.id}.zip`));
@@ -97,7 +168,7 @@ test('上传：合法 zip ⇒ 201，返回 id/sha256/received_at/bytes', async (
 
 test('上传：超出大小上限 ⇒ 413（size 上限被拿掉时本用例会红）', async () => {
   const e = env({ MAX_BYTES: '1024' });
-  const { res, body } = await doUpload(e, { bytes: zipBytes(4096) });
+  const { res, body } = await doUpload(e, { bytes: await cleanZip(4096) });
   assert.equal(res.status, 413);
   assert.equal(body.error, 'too_large');
   assert.equal(body.max_bytes, 1024);
@@ -187,7 +258,7 @@ test('blob：不带 token ⇒ 401；错 token ⇒ 401；对 token ⇒ 200 + 原�
   assert.equal(ok.headers.get('content-type'), 'application/zip');
   assert.equal(ok.headers.get('x-incident-sha256'), body.sha256);
   const got = new Uint8Array(await ok.arrayBuffer());
-  assert.deepEqual(got, zipBytes());
+  assert.deepEqual(got, await cleanZip());
 });
 
 test('blob：没配置 INCIDENT_TOKEN 时 ⇒ 一律 401（fail closed）', async () => {
@@ -240,12 +311,12 @@ test('保留期：超过 30 天的 manifest ⇒ 404 expired，且顺手清掉两
 
 test('路由：POST 子路径 ⇒ 404；GET 基路径 ⇒ 404；PUT ⇒ 405；尾斜杠 POST 可用', async () => {
   const e = env();
-  assert.equal((await worker.handle(new Request(`${BASE}/x`, { method: 'POST', headers: { 'content-type': 'application/zip' }, body: zipBytes() }), e)).status, 404);
+  assert.equal((await worker.handle(new Request(`${BASE}/x`, { method: 'POST', headers: { 'content-type': 'application/zip' }, body: await cleanZip() }), e)).status, 404);
   assert.equal((await worker.handle(new Request(BASE), e)).status, 404);
   assert.equal((await worker.handle(new Request(BASE, { method: 'PUT' }), e)).status, 405);
-  const trailing = await worker.handle(uploadRequest(), e);
+  const trailing = await worker.handle(uploadRequest({ bytes: await cleanZip() }), e);
   assert.equal(trailing.status, 201);
-  const withSlash = await worker.handle(new Request(`${BASE}/`, { method: 'POST', headers: { 'content-type': 'application/zip', 'CF-Connecting-IP': '198.51.100.77' }, body: zipBytes() }), e);
+  const withSlash = await worker.handle(new Request(`${BASE}/`, { method: 'POST', headers: { 'content-type': 'application/zip', 'CF-Connecting-IP': '198.51.100.77' }, body: await cleanZip() }), e);
   assert.equal(withSlash.status, 201);
 });
 
@@ -253,4 +324,79 @@ test('路由：不在本端点下的路径 ⇒ 404', async () => {
   const e = env();
   assert.equal((await worker.handle(new Request('https://xraytun.top/other'), e)).status, 404);
   assert.equal((await worker.handle(new Request('https://xraytun.top/api/incidentx'), e)).status, 404);
+});
+
+// ------------------------------------------------------------------ 隐私拒收（最后防线）
+
+test('隐私：包内含 vless 订阅 URL ⇒ 422，命中类型=node_url，且**不回显密钥原文**', async () => {
+  const e = env();
+  const secret = 'vless://11111111-2222-3333-4444-555555555555@example.com:443?security=reality#node';
+  const zip = await makeZip([{ name: 'nodes.txt', text: `节点\n${secret}\n` }]);
+  const { res, body } = await doUpload(e, { bytes: zip });
+  assert.equal(res.status, 422);
+  assert.equal(body.error, 'secret_detected');
+  assert.ok(body.hits.some((h) => h.type === 'node_url'), JSON.stringify(body.hits));
+  assert.equal(e.INCIDENT_BUCKET.map.size, 0, '被拒收的包绝不能落盘');
+  const raw = JSON.stringify(body);
+  assert.ok(!raw.includes(secret), '响应体里不许出现密钥原文');
+  assert.ok(!raw.includes('11111111-2222-3333-4444-555555555555'), '响应体里不许出现 UUID 原文');
+  assert.ok(body.hits.every((h) => h.file && h.line > 0), '命中要给出文件与行号');
+});
+
+test('隐私：JSON 形键值（客户端漏过的那种）⇒ 422', async () => {
+  const e = env();
+  const zip = await makeZip([{ name: 'runtime/config.json', text: '{"password":"hunter2secret","port":10808}' }]);
+  const { res, body } = await doUpload(e, { bytes: zip });
+  assert.equal(res.status, 422);
+  assert.ok(body.hits.some((h) => h.type === 'json_secret_key'), JSON.stringify(body.hits));
+  assert.ok(!JSON.stringify(body).includes('hunter2secret'));
+});
+
+test('隐私：URI 的 ?query/#fragment 里的 pbk=/sid= ⇒ 422', async () => {
+  const e = env();
+  const zip = await makeZip([{ name: 'sub.url', text: 'https://example.com/sub?pbk=SECRETPBKVALUE&sid=9f8e7d6c#frag' }]);
+  const { res, body } = await doUpload(e, { bytes: zip });
+  assert.equal(res.status, 422);
+  assert.ok(body.hits.some((h) => h.type === 'uri_secret_param'), JSON.stringify(body.hits));
+});
+
+test('隐私：PEM 私钥块 ⇒ 422；UUID 字面量 ⇒ 422；但 <uuid> 占位符 ⇒ 201', async () => {
+  const e = env();
+  const pem = await doUpload(e, { bytes: await makeZip([{ name: 'key.pem', text: '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n' }]), ip: '198.51.100.31' });
+  assert.equal(pem.res.status, 422);
+  assert.ok(pem.body.hits.some((h) => h.type === 'private_key_pem'));
+
+  const uuid = await doUpload(e, { bytes: await makeZip([{ name: 'cfg.json', text: '{"node_uuid":"7c9e6679-7425-40de-944b-e07fc1f90ae7"}' }]), ip: '198.51.100.32' });
+  assert.equal(uuid.res.status, 422);
+  assert.ok(uuid.body.hits.some((h) => h.type === 'uuid_literal' || h.type === 'json_secret_key'), JSON.stringify(uuid.body.hits));
+
+  const placeholder = await doUpload(e, { bytes: await makeZip([{ name: 'README.txt', text: '把你的 <uuid> 填到这里（示例：00000000-0000-0000-0000-000000000000）' }]), ip: '198.51.100.33' });
+  assert.equal(placeholder.res.status, 201, '占位符不该被当成密钥');
+});
+
+test('隐私：deflate 压缩的条目同样要扫到（不能只扫 store）', async () => {
+  const e = env();
+  const zip = await makeZip([{ name: 'logs/core.log', text: 'x\n'.repeat(50) + 'vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@h:443\n' }], 8);
+  const { res, body } = await doUpload(e, { bytes: zip });
+  assert.equal(res.status, 422);
+  assert.ok(body.hits.some((h) => h.type === 'node_url'), JSON.stringify(body.hits));
+});
+
+test('隐私：命中列表**限长**（最多 20 条，且标 truncated）', async () => {
+  const e = env();
+  const many = Array.from({ length: 40 }, (_, i) => `vless://node${i}@example.com:443`).join('\n');
+  const { res, body } = await doUpload(e, { bytes: await makeZip([{ name: 'nodes.txt', text: many }]) });
+  assert.equal(res.status, 422);
+  assert.ok(body.hits.length <= 20, `hits 应被截断，实际 ${body.hits.length}`);
+  assert.equal(body.hits_truncated, true);
+});
+
+test('隐私：**fail closed** —— 魔数对但结构坏的 zip ⇒ 422 scan_failed（不是放行）', async () => {
+  const e = env();
+  const broken = new Uint8Array(64);
+  broken[0] = 0x50; broken[1] = 0x4b; broken[2] = 0x03; broken[3] = 0x04; // 只有魔数像 zip
+  const { res, body } = await doUpload(e, { bytes: broken });
+  assert.equal(res.status, 422);
+  assert.equal(body.error, 'scan_failed');
+  assert.equal(e.INCIDENT_BUCKET.map.size, 0);
 });
