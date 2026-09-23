@@ -19,7 +19,7 @@
  * | `Logs.tsx` 空态 | `!running` ⇒ 「核心还没启动过」 | 看 `runtime.started_at_unix` |
  * | `Logs.tsx` 等级计数 | 「错误：1 条」（读成总数） | 说明是**已加载**窗口里的条数 |
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -65,6 +65,7 @@ import { TopBar } from "./App";
 import Dashboard from "./pages/Dashboard";
 import Globe from "./pages/Globe";
 import Nodes from "./pages/Nodes";
+import Settings from "./pages/Settings";
 import { DestChecker } from "./topology/DestChecker";
 import Logs from "./pages/Logs";
 import Subscriptions from "./pages/Subscriptions";
@@ -327,6 +328,187 @@ describe("task-120 · 判定器必须说清结论的适用范围", () => {
     expect(desc).not.toContain("确定性");
     expect(desc).not.toContain("对拍过");
     expect(desc).toContain("无法判定");
+  });
+});
+
+describe("task-120 · 节点「未测」不能把「测不到」并进去", () => {
+  const withProbe = (probe: Record<string, unknown>) => {
+    const base = scenarioSnapshot();
+    return {
+      ...base,
+      latency: { ...base.latency, [SELECTED]: probe },
+    } as never;
+  };
+
+  // 「未测」这三个字**两个徽章都会用**：距离徽章（本次修复的对象）与可用性徽章
+  // （`available === null` 时它也写「未测」，那是正确的）。所以按**数量**断言：
+  // 距离徽章不再贡献那个「未测」。
+  it("探测过 + RTT 采样失败（error=null）⇒ 距离徽章写「距离未知」，不再写「未测」", async () => {
+    await renderWith(
+      withProbe({ node_id: SELECTED, node_name: "x", server_rtt_ms: null, available: true, error: null }),
+      <Nodes />,
+    );
+    await screen.findByText("香港 · REALITY 01");
+    expect(screen.getByText("距离未知")).toBeTruthy();
+    // available=true ⇒ 可用性徽章写「可用」，于是「未测」一个都不该剩
+    expect(screen.queryAllByText("未测").length).toBe(0);
+  });
+
+  it("反例：完全没探测过（latency 里没有这一项）⇒ 距离与可用性徽章都是「未测」", async () => {
+    const base = scenarioSnapshot();
+    const latency: Record<string, unknown> = { ...base.latency };
+    delete latency[SELECTED];
+    await renderWith({ ...base, latency } as never, <Nodes />);
+    await screen.findByText("香港 · REALITY 01");
+    expect(screen.queryAllByText("未测").length).toBe(2);
+    expect(screen.queryByText("距离未知")).toBeNull();
+  });
+
+  it("反例：探测过且明确失败（有 error）⇒ 「测不到」，不是「未测」", async () => {
+    await renderWith(
+      withProbe({ node_id: SELECTED, node_name: "x", server_rtt_ms: null, available: false, error: "探针超时" }),
+      <Nodes />,
+    );
+    await screen.findByText("香港 · REALITY 01");
+    expect(screen.getByText("测不到")).toBeTruthy();
+    expect(screen.queryAllByText("未测").length).toBe(0);
+  });
+});
+
+describe("task-120 · 设置页 DNS 探测结果", () => {
+  function settingsSnap(over: {
+    autoSelect?: boolean;
+    chosen?: string | null;
+    direct?: string[];
+    probes?: unknown[];
+    logLevel?: string;
+  } = {}) {
+    const base = scenarioSnapshot();
+    return {
+      ...base,
+      settings: {
+        ...base.settings,
+        log_level: over.logLevel ?? base.settings.log_level,
+        dns: {
+          ...base.settings.dns,
+          auto_select: over.autoSelect ?? base.settings.dns.auto_select,
+          direct_servers: over.direct ?? base.settings.dns.direct_servers,
+        },
+      },
+      dns: {
+        ...base.dns,
+        chosen: over.chosen === undefined ? base.dns.chosen : over.chosen,
+        probes: over.probes ?? base.dns.probes,
+      },
+    } as never;
+  }
+
+  const probe = (over: Record<string, unknown>) => ({
+    server: "223.5.5.5",
+    label: "阿里 DNS",
+    kind: "domestic",
+    transport: "plain_udp",
+    latency_ms: null,
+    answered: true,
+    suspect: false,
+    note: null,
+    ...over,
+  });
+
+  it("answered=true + latency_ms=null ⇒ 不能写「不通」", async () => {
+    await renderWith(settingsSnap({ probes: [probe({})] }), <Settings focusSection="set-dns-probe" />);
+    // 国内/国外两组各渲染一份，所以用 findAll
+    expect((await screen.findAllByText("答得出，量不到延迟")).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("不通").length).toBe(0);
+  });
+
+  it("反例：answered=false ⇒ 这才是「不通」", async () => {
+    await renderWith(
+      settingsSnap({ probes: [probe({ answered: false })] }),
+      <Settings focusSection="set-dns-probe" />,
+    );
+    expect((await screen.findAllByText("不通")).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("答得出，量不到延迟").length).toBe(0);
+  });
+
+  it("反例：note 非空 ⇒ 「未探测」，不判成不通", async () => {
+    await renderWith(
+      settingsSnap({ probes: [probe({ answered: false, note: "节点未连接，未探测" })] }),
+      <Settings focusSection="set-dns-probe" />,
+    );
+    expect((await screen.findAllByText("未探测")).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("不通").length).toBe(0);
+  });
+
+  it("自动选优关闭 ⇒ 不能说「当前首选」，必须写出配置里真正生效的那个", async () => {
+    await renderWith(
+      settingsSnap({ autoSelect: false, chosen: "223.5.5.5", direct: ["119.29.29.29"] }),
+      <Settings focusSection="set-dns-probe" />,
+    );
+    expect((await screen.findAllByText(/自动选优已关闭/)).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("119.29.29.29").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/当前首选/).length).toBe(0);
+  });
+
+  it("反例：自动选优开启 ⇒ 才说「本次检测首选（会写回配置）」", async () => {
+    await renderWith(
+      settingsSnap({ autoSelect: true, chosen: "223.5.5.5", direct: ["119.29.29.29"] }),
+      <Settings focusSection="set-dns-probe" />,
+    );
+    expect((await screen.findAllByText(/自动选优已开启/)).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText(/当前首选/).length).toBe(0);
+  });
+
+  const optionValues = () =>
+    Array.from(document.querySelectorAll("option")).map((o) => o.getAttribute("value"));
+
+  it("日志级别下拉必须是 Xray 真认得的取值（有 none，没有 silent）", async () => {
+    await renderWith(settingsSnap({ logLevel: "warning" }), <Settings focusSection="set-entry" />);
+    await screen.findByText("日志级别");
+    expect(optionValues()).toContain("none");
+    expect(optionValues()).not.toContain("silent");
+  });
+
+  it("反例：配置里存着历史值 silent ⇒ 如实标出来，不让下拉显示成别的值", async () => {
+    await renderWith(settingsSnap({ logLevel: "silent" }), <Settings focusSection="set-entry" />);
+    await screen.findByText("日志级别");
+    const legacy = Array.from(document.querySelectorAll("option")).find(
+      (o) => o.getAttribute("value") === "silent",
+    );
+    expect(legacy, "历史值必须作为一项出现，否则下拉会显示成别的值").toBeTruthy();
+    expect(legacy!.textContent).toContain("Xray 不识别");
+  });
+});
+
+describe("task-120 ·「保存并重启核心」必须看保存结果", () => {
+  /** 让草稿变脏：改一个配置字段（内核路径输入框）。 */
+  async function makeDirtyAndRestart() {
+    const field = (await screen.findByText("Xray 可执行文件路径")).closest(".field") as HTMLElement;
+    const input = field.querySelector("input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "/tmp/xray" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并重启核心" }));
+  }
+
+  it("保存失败（后端拒绝）⇒ **不得**继续 stop/start，也不得把错误抹掉", async () => {
+    mocks.saveSettings.mockRejectedValue(new Error("端口 80 需要管理员权限"));
+    await renderWith(snap(), <Settings focusSection="set-core" />);
+    await makeDirtyAndRestart();
+    await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
+    // 关键：核心没被碰过 —— 用旧设置重启会让人以为改动已经生效
+    expect(mocks.stop).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
+    // 注：后端原文由 App 顶部的错误横幅渲染（Settings 自己不画那个横幅），
+    // 所以这里不重复断言它是否存在，只钉住「失败就不重启」这条不变量。
+  });
+
+  it("反例：保存成功 ⇒ 才真的重启核心", async () => {
+    mocks.saveSettings.mockResolvedValue(snap());
+    mocks.stop.mockResolvedValue(snap());
+    mocks.start.mockResolvedValue(snap());
+    await renderWith(snap(), <Settings focusSection="set-core" />);
+    await makeDirtyAndRestart();
+    await waitFor(() => expect(mocks.stop).toHaveBeenCalledTimes(1));
+    expect(mocks.start).toHaveBeenCalledTimes(1);
   });
 });
 

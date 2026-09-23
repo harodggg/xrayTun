@@ -132,6 +132,16 @@ function resolveInitialCategory(target: string | null | undefined): SettingsCate
   return SETTINGS_CATEGORIES[0].id;
 }
 
+/**
+ * Xray 真正认得的 `loglevel` 取值。
+ *
+ * 依据：Xray 的 `infra/conf/log.go` 只对 debug/info/warning/error/none 做映射，
+ * 其余取值走 `default` → **warning**；仓内 `config.rs:177` 是原样透传，
+ * `model.rs:768` 的 `log_level` 就是 `String`，所以前端是唯一的把关点。
+ * 上游文档：https://xtls.github.io/en/config/log.html
+ */
+const XRAY_LOG_LEVELS = ["none", "error", "warning", "info", "debug"];
+
 const HELPER_STATE_LABEL: Record<string, string> = {
   ready: "已就绪",
   not_installed: "未安装",
@@ -267,14 +277,27 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
   const patchFake = (p: Partial<AppSettings["fakedns"]>) =>
     patch({ fakedns: { ...settings.fakedns, ...p } });
 
-  const save = async () => {
-    if (!dirty) return;
+  /** 保存草稿。返回**是否真的存下去了** —— 调用方（`restart`）必须看这个返回值。 */
+  const save = async (): Promise<boolean> => {
+    if (!dirty) return true;
     const ok = await run("save", () => api.saveSettings(settings));
     if (ok) setDraft(null);
+    return ok;
   };
 
+  /**
+   * 「保存并重启核心」。
+   *
+   * task-120：这里原来写的是 `if (dirty) await save();` —— **不看返回值就重启**。
+   * 保存失败（例如端口填 80 被 `model.rs:854-859` 拒绝）时：
+   * 1. 界面不会停在这里，而是继续往下重启；
+   * 2. `run("restart", …)` 在 `store.tsx` 里先 `setError(null)`，把刚写上的
+   *    那条保存错误**抹掉**；核心于是用**旧设置**重启。
+   * 用户看到的是一次「成功」的重启，以为改动已经生效 —— 而它根本没进配置。
+   * 现在保存失败就停下，错误留在界面上。
+   */
   const restart = async () => {
-    if (dirty) await save();
+    if (!(await save())) return;
     await run("restart", async () => {
       await api.stop();
       return api.start();
@@ -414,8 +437,23 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
         </div>
         <div className="field" style={{ marginTop: 14 }}>
           <label>日志级别</label>
+          {/*
+            task-120：这里原来是 silent / error / warning / info / debug。
+            `config.rs:177` 把 `settings.log_level` **原样**写进 Xray 的 `"loglevel"`
+            （Rust 侧只是 `String`，无校验），而 Xray 只认
+            debug / info / warning / error / **none** —— `silent` 落到它的
+            `default` 分支，实际按 **warning** 处理。也就是选「silent」等于什么都没关掉，
+            而真正静音的 `none` 界面上根本没有。
+            现在给出 Xray 真正认得的五个值；如果配置里存着历史值（例如 `silent`），
+            就把它作为一项如实标出来，而不是让下拉框显示成别的值。
+          */}
           <select value={settings.log_level} onChange={(e) => patch({ log_level: e.target.value })}>
-            <option value="silent">silent</option>
+            {!XRAY_LOG_LEVELS.includes(settings.log_level) && (
+              <option value={settings.log_level}>
+                {settings.log_level}（当前保存值；Xray 不识别，实际按 warning 处理）
+              </option>
+            )}
+            <option value="none">none（不输出日志）</option>
             <option value="error">error</option>
             <option value="warning">warning</option>
             <option value="info">info</option>
@@ -868,6 +906,8 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           const isCn = kind === "domestic";
           const chosen = isCn ? snapshot.dns.chosen : snapshot.dns.chosen_foreign;
           const err = isCn ? snapshot.dns.error : snapshot.dns.foreign_error;
+          /** 自动选优关着时，探测结果不会写回配置 ⇒ 「首选」必须说清是谁。 */
+          const autoSelect = snapshot.settings.dns.auto_select;
           return (
             <div key={kind} className="probe-group">
               <div className="probe-group__title">
@@ -883,19 +923,53 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
                 </div>
               )}
 
-              {chosen && (
-                <div className="field__hint" style={{ margin: "6px 0 0" }}>
-                  当前首选 <span className="mono">{chosen}</span>
-                </div>
-              )}
+              {/*
+                task-120：`dns.chosen` 是**本次探测**算出的首选，它只有在
+                `settings.dns.auto_select` 为真时才会被写回 `direct_servers`
+                （`commands/snapshot.rs:136-160` 的 `if settings.dns.auto_select` 分支）。
+                自动选优关着的时候，旧文案「当前首选 X」是假的 —— 配置里生效的是
+                `direct_servers[0]`，与 X 无关。所以分成两句，并且把真正生效的那个写出来。
+              */}
+              {chosen &&
+                (autoSelect ? (
+                  <div className="field__hint" style={{ margin: "6px 0 0" }}>
+                    本次检测首选 <span className="mono">{chosen}</span>
+                    （自动选优已开启，会写回配置）
+                  </div>
+                ) : (
+                  <div className="field__hint" style={{ margin: "6px 0 0" }}>
+                    本次检测最快 <span className="mono">{chosen}</span> —— 自动选优已关闭，
+                    配置里生效的是{" "}
+                    <span className="mono">
+                      {(isCn
+                        ? snapshot.settings.dns.direct_servers
+                        : snapshot.settings.dns.remote_servers
+                      )[0] ?? "（空）"}
+                    </span>
+                  </div>
+                ))}
 
               <div className="probe-table">
                 {rows.map((p) => (
                   <div key={p.server} className="probe-table__row">
                     <span className="mono">{p.server}</span>
                     <span className="field__hint">{p.label}</span>
+                    {/*
+                      task-120：原来 `latency_ms === null` 就一律写「不通」，而
+                      `answered` 是**另一个**字段：`dns_probe.rs:445-447` 里
+                      `answered = 参照域名答出来了 || 有延迟采样`，所以完全存在
+                      「**答得出、但 3 次延迟采样都超时** ⇒ `answered: true, latency_ms: null`」，
+                      这时旧文案说「不通」，而同一行的颜色（按 `!p.answered` 算）却是绿色 ——
+                      一句话和它自己的颜色互相打脸。
+                    */}
                     <span className={`badge badge--${p.suspect || !p.answered ? "slow" : "fast"}`}>
-                      {p.latency_ms !== null ? `${p.latency_ms} ms` : p.note ? "未探测" : "不通"}
+                      {p.latency_ms !== null
+                        ? `${p.latency_ms} ms`
+                        : p.note
+                          ? "未探测"
+                          : p.answered
+                            ? "答得出，量不到延迟"
+                            : "不通"}
                     </span>
                     {p.suspect && <span className="field__hint">与同组多数派不一致</span>}
                     {p.note && <span className="field__hint">{p.note}</span>}

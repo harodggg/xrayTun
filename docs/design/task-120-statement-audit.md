@@ -9,7 +9,7 @@
 > 由并行的只读子审计产出（`/tmp/t120-settings.md`、`/tmp/t120-nodes.md`、`/tmp/t120-topology.md`），
 > 本文件只收**登记项**与复核状态。
 
-## 一、本次已修（9 条，已提交 `5d2e66e` + `31d1e6d`，均配「字段=X ⇒ 文案=Y」测试 + 反例 + 反向敏感性）
+## 一、本次已修（15 条，已提交 `5d2e66e` + `31d1e6d` + 第三批，均配「字段=X ⇒ 文案=Y」测试 + 反例 + 反向敏感性）
 
 | # | 位置 | 原文 | 判据（实现） | 反例 |
 |---|---|---|---|---|
@@ -20,7 +20,7 @@
 | 5 | `Logs.tsx:175` | 已抹掉订阅 URL、**节点地址**与 UUID —— 可以直接贴到公开的 issue 里 | 脱敏 = `redact_url` + `is_uuid_like`（36 字符 + 4 个 `-`）；IP/域名/IP:port 原样保留，报告收最近 ≤50 条日志 | 本机日志里含节点 IP 的行 **11421** 条（`dialing TCP to tcp:<IP>:443`）⇒ 照这句话贴出去就公开了服务器地址 |
 | 6 | `Logs.tsx:204` / `:111` | 核心还没启动过 / 「错误：1 条」 | 前者判据原来只是 `!running`（现在时）；`runtime.started_at_unix` 只在启动时写、停止时不清。后者是**已加载窗口**（`tailLogs(500)`，封顶 `MAX_UI_LOGS=1500`）里的条数 | 跑过再停 / 清空后 ⇒ 说「还没启动过」；文件 35 万行含 400 条 error、窗口里 1 条 ⇒ 徽章显示 1 |
 
-## 二、A 级登记表（22 条；已修 9 条，待修 13 条）
+## 二、A 级登记表（22 条；已修 15 条，待修 7 条 —— 全部需要后端字段/实现）
 
 **复核状态列**：`✓我复核` = 我本人读过给出依据的代码；`子审计` = 由并行只读子审计报告，**我未逐条复核**（采用前需复核）。
 
@@ -34,16 +34,16 @@
 | A6 | `Logs.tsx:204` | 核心还没启动过（判据 `!running`） | 见上 | ✓我复核 | **已修（文案）** |
 | A7 | `Logs.tsx:111` | 等级计数当作总数 | 见上 | ✓我复核 | **已修（title 口径）**；页面上仍没有「只统计已加载」的可见说明 |
 | A8 | `Nodes.tsx:270,275` | 「正在使用这个节点」/「当前」 | 见上 | ✓我复核 | **已修**（`31d1e6d`）：改为「已选中：核心运行时流量走这个节点」+ 徽章「已选中」 |
-| A9 | `Nodes.tsx:342-346` | 「未测」把「测不到」与「没测过」合并 | `available=true, server_rtt_ms=null, error=null`（`probe.rs:282-292`）时显示「未测」且标题为空 | 子审计 | UI 可改（需把「有没有 ProbeResult」传进 `distanceLabelFor`），本轮未做 |
-| A10 | `Settings.tsx:728,779,794` | 「状态未知」+「**重新**安装 helper」 | `HelperState::NotInstalled` 唯一构造点不可达（`helper_client.rs:225-228,265`，`state.rs:577` 默认 `Unknown`）⇒ 从没装过也显示「未知」 | 子审计 | **需要后端字段**（helper 状态机），超出本卡边界 |
+| A9 | `Nodes.tsx:342-346` | 「未测」把「测不到」与「没测过」合并 | 见上 | ✓我复核 | **已修**：加 `probed` 判据 ⇒ 探测过但量不到距离时写「距离未知」+ 标题说明 |
+| A10 | `Settings.tsx:728,779,794` | 「状态未知」+「**重新**安装 helper」 | `HelperState::NotInstalled` 唯一构造点不可达（`helper_client.rs:225-228,265`，`state.rs:577` 默认 `Unknown`）⇒ 从没装过也显示「未知」 | 子审计 | **需要后端字段**（helper 状态机） |
 | A11 | `Settings.tsx:526-535` | 选项「禁用 IPv6」 | `plan.rs:238` 把 `Disabled` 与 `Passthrough` 并在同一分支，全仓无第二处 ⇒ 与「不接管」逐字节相同，v6 仍泄漏 | 子审计 | **需要 Rust 实现**，超出本卡边界 |
 | A12 | `Settings.tsx:629-639` | 「关闭嗅探后就失效」 | `config.rs:346` `sniffing \|\| fakedns.enabled` ⇒ 开 Fake-IP 后取消勾选仍为 true | 子审计 | **需要后端语义** |
 | A13 | `Settings.tsx:731-732` | 「遗留会话：无」 | `tun_active=true`（已提交路由的孤儿会话，`lib.rs:242` 正把它当遗留物）时仍写「无」，与同结构体字段矛盾 | 子审计 | **需要后端字段** |
-| A14 | `Settings.tsx:897-898` | DNS 徽章「不通」 | 判据只是 `latency_ms===null`；`answered` 是独立字段（`dns_probe.rs:445-447`）⇒ 答出但采样超时被写成「不通」而颜色是绿 | 子审计 | UI 可改；本轮未做 |
-| A15 | `Settings.tsx:886-890` | 「当前首选 X」 | `chosen` 无条件写入，只有 `auto_select` 才写回配置（`snapshot.rs:122-160`）⇒ 显示的不是生效值 | 子审计 | UI 可改（需读 `auto_select`）；本轮未做 |
-| A16 | `Settings.tsx:711-714` | 「保存并重启核心」 | `restart()` 不看 `save()` 结果；`store.tsx:155` 的 `setError(null)` 把保存错误抹掉 ⇒ 保存失败也照重启，用户以为已生效 | 子审计 | UI 可改（顺序 + 错误保留）；本轮未做 |
-| A17 | `Settings.tsx:1051-1056` | 「下载中，请勿关闭…」 | `progress !== null` 即算下载中，geo 成功/失败都不清 `progress`（`snapshot.rs:377,413-422`）⇒ 永久「下载中」并永久禁用按钮 | 子审计 | UI+后端（快照字段） |
-| A18 | `Settings.tsx:418` | 日志级别选项 `silent` | 原样写进 `"loglevel"`（`config.rs:177`），Xray 只认 debug/info/warning/error/**none** ⇒ `silent` 落到 warning，真正静音的 `none` 没提供 | 子审计（判据来自上游 Xray 源码） | UI 可改（改选项名/值）；本轮未做 |
+| A14 | `Settings.tsx:897-898` | DNS 徽章「不通」 | 见上（我复核了 `dns_probe.rs:445-447`） | ✓我复核 | **已修**：`answered && latency_ms===null` ⇒ 「答得出，量不到延迟」 |
+| A15 | `Settings.tsx:886-890` | 「当前首选 X」 | 见上（我复核了 `snapshot.rs:136-160` 的 `if settings.dns.auto_select`） | ✓我复核 | **已修**：按 `auto_select` 分两句，关着时写出真正生效的 `direct_servers[0]` |
+| A16 | `Settings.tsx:711-714` | 「保存并重启核心」 | 见上（我复核了 `restart()` 的实现） | ✓我复核 | **已修**：`save()` 返回布尔值，保存失败即 return，不再 stop/start |
+| A17 | `Settings.tsx:1051-1056` | 「下载中，请勿关闭…」 | 见上（我复核了 `snapshot.rs:400-421`：geo 路径**没有** `i.update.progress = None`，而 app/core 路径有） | ✓我复核 | **改为后端**：`UpdateProgress` 只有 label/done_bytes/total_bytes，**没有终态标记**，前端无从判断已结束 ⇒ 需要后端在 geo 成功/失败时清 progress |
+| A18 | `Settings.tsx:418` | 日志级别选项 `silent` | 见上（我复核了 `model.rs:767` 是 `String`、`config.rs:177` 原样透传、默认值是 `warning`） | ✓我复核 | **已修**：选项改为 Xray 的 `none/error/warning/info/debug`；配置里存着历史值（如 `silent`）时如实标出「Xray 不识别」 |
 | A19 | `Globe.tsx:155-156` | 「出口累计流量（**实测**）」 | 见上（我复核了 `types.ts:664` 的注释与 `Globe.tsx` 对 `traffic_ok` 的引用为 0 处） | ✓我复核 | **已修**（`31d1e6d`）：`traffic_ok=false` ⇒ 「出口流量读不到（不是 0）」，并如实带出 `counter_resets` |
 | A20 | `Globe.tsx:155-156` | 同一个数字的**归属** | `read_exit_traffic` 取「所有 outbound 里 up+down 最大」（`globe.rs:239-245`）—— 是假设；`direct` 流量更大的用户会把直连流量显示在「出口 · 节点名」下 | 子审计 | UI 需后端给出「哪个出站是这个节点」；本轮未做 |
 | A21 | `Globe.tsx:151,645` | 「本机 · <IP>」 | 两端坐标都是 IP 归属**推算**；`physical_interface()` 返回 `None` 时 curl 不绑卡 ⇒ 隧道开着时查到的是**节点的位置**，仍标「本机」 | 子审计 | 需要校验/后端字段 |

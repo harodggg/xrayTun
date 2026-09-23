@@ -146,6 +146,7 @@ export default function Nodes() {
               selected={node.id === selectedId}
               latencyMs={latency[node.id]?.server_rtt_ms ?? null}
               available={latency[node.id]?.available ?? null}
+              probed={latency[node.id] !== undefined}
               latencyError={latency[node.id]?.error ?? null}
               busy={busy !== null}
               onSelect={() => void run("select", () => api.selectNode(node.id))}
@@ -229,6 +230,7 @@ function NodeRow({
   latencyMs,
   available,
   latencyError,
+  probed,
   busy,
   onSelect,
   onDelete,
@@ -241,6 +243,8 @@ function NodeRow({
   /** 经该节点能不能取到东西。`null` 表示还没测过。 */
   available: boolean | null;
   latencyError: string | null;
+  /** `latency[node.id]` 是否存在 —— 「探测过但量不到距离」与「没测过」的区别。 */
+  probed: boolean;
   busy: boolean;
   onSelect: () => void;
   onDelete: () => void;
@@ -257,8 +261,8 @@ function NodeRow({
   const tier = available === false ? "unknown" : latencyTier(latencyMs);
   const fromSubscription = node.source.kind === "subscription";
 
-  const distanceLabel = distanceLabelFor(latencyMs, latencyError);
-  const distanceTitle = distanceTitleFor(latencyMs, available, latencyError);
+  const distanceLabel = distanceLabelFor(latencyMs, latencyError, probed);
+  const distanceTitle = distanceTitleFor(latencyMs, available, latencyError, probed);
   const availabilityLabel = availabilityLabelFor(available);
   const availabilityTitle = availabilityTitleFor(available, latencyError);
   const availabilityTone = available === null ? "unknown" : available ? "fast" : "slow";
@@ -345,11 +349,32 @@ function NodeRow({
  * 分开之后每个判断都能单独读，也方便单测。
  */
 
-/** 距离徽章上的文字。测不到与没测过是两回事。 */
-function distanceLabelFor(latencyMs: number | null, latencyError: string | null): string {
+/**
+ * 距离徽章上的文字。
+ *
+ * task-120：这里原来只吃 `latencyMs` / `latencyError` **两个**值，而「有没有探测
+ * 结果」是第三个独立事实 —— 于是三种不同的情况被压成了两句，正好把注释里声称
+ * 「是两回事」的那两件事合并了：
+ *
+ * | 事实 | 旧文案 | 现在 |
+ * |---|---|---|
+ * | 没探测过 | 未测 | 未测 |
+ * | 探测过、RTT 采样失败（`server_rtt_ms = null, error = null`） | **未测**（错：读成"没测过"） | 距离未知 |
+ * | 探测过、明确失败（有 error） | 测不到 | 测不到 |
+ *
+ * 中间那一态是真实的：后端 `probe.rs` 的成功分支允许 `server_rtt_ms = None`
+ * 而 `error = None`（RTT 与可用性互不依赖，且测试
+ * `availability_does_not_depend_on_rtt` 明确钉住「RTT 测不到 ≠ 不可用」）。
+ * `probed` 就是「`latency[node.id]` 存不存在」，由调用方传入。
+ */
+function distanceLabelFor(
+  latencyMs: number | null,
+  latencyError: string | null,
+  probed: boolean,
+): string {
   if (latencyMs !== null) return `${latencyMs} ms`;
   if (latencyError) return "测不到";
-  return "未测";
+  return probed ? "距离未知" : "未测";
 }
 
 /** 距离徽章的悬停说明。不可用时必须讲清「这个数字不代表能用」。 */
@@ -357,6 +382,7 @@ function distanceTitleFor(
   latencyMs: number | null,
   available: boolean | null,
   latencyError: string | null,
+  probed: boolean,
 ): string {
   if (available === false) {
     return `到服务器的距离 ${latencyMs ?? "?"} ms —— 但这个节点转发不了流量，这个数字不代表能用`;
@@ -364,7 +390,10 @@ function distanceTitleFor(
   if (latencyMs !== null) {
     return "本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章";
   }
-  return latencyError ?? "";
+  if (latencyError) return latencyError;
+  // task-120：原来这里返回**空标题** —— 「测过但量不到距离」这一态在界面上
+  // 没有任何解释，用户只能反复重测。这一态与「没测过」必须说清区别。
+  return probed ? "这次探测里 3 次 TCP 握手都没成，量不到距离（不影响右边「可用」的判定）" : "";
 }
 
 /** 可用性徽章上的文字。`null` 是「还没测」，不能说成「不可用」。 */
