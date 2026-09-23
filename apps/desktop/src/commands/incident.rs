@@ -193,6 +193,38 @@ impl IncidentTools {
 }
 
 // ---------------------------------------------------------------------------
+// 出包的前置闸（**纯函数 ⇒ 可测**；命令层拿到资源目录后立刻调用）
+// ---------------------------------------------------------------------------
+
+/// **出包前**的脚本存在性闸：缺一个就明确报错 ——
+/// 「包已生成」这种结论不能靠猜（task-130 的「不许假装成功」）。
+pub(crate) fn preview_tools_gate(tools: &IncidentTools) -> Result<(), String> {
+    let missing = tools.missing();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "随包缺少脚本：{} —— 现场包无法生成（这不是「包已生成」）。",
+            missing.join("、")
+        ))
+    }
+}
+
+/// **上传前**的脚本存在性闸：同名同义，错误类型是上传契约里的那一种
+/// （`Server { code: 0 }` = **本地拒绝**，不是服务端返回的）。
+pub(crate) fn upload_tools_gate(tools: &IncidentTools) -> Result<(), IncidentUploadError> {
+    let missing = tools.missing();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(IncidentUploadError::Server {
+            code: 0,
+            message: format!("随包缺少脚本：{} ⇒ 无法做上传前复核。", missing.join("、")),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 出包（复用脚本；不在 Rust 里再解一遍 zip）
 // ---------------------------------------------------------------------------
 
@@ -546,13 +578,7 @@ pub async fn incident_preview(app: AppHandle) -> Result<IncidentPreview, String>
         .resource_dir()
         .map_err(|e| format!("取不到随包资源目录：{e}"))?;
     let tools = IncidentTools::from_resource_dir(&dir);
-    let missing = tools.missing();
-    if !missing.is_empty() {
-        return Err(format!(
-            "随包缺少脚本：{} —— 现场包无法生成（这不是「包已生成」）。",
-            missing.join("、")
-        ));
-    }
+    preview_tools_gate(&tools)?;
     let out_dir = std::env::temp_dir().join(TEMP_SUBDIR);
     std::fs::create_dir_all(&out_dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
     let stamp = xt_core::util::now_unix();
@@ -576,13 +602,7 @@ pub async fn incident_upload(
         message: format!("取不到随包资源目录：{e}"),
     })?;
     let tools = IncidentTools::from_resource_dir(&dir);
-    let missing = tools.missing();
-    if !missing.is_empty() {
-        return Err(IncidentUploadError::Server {
-            code: 0,
-            message: format!("随包缺少脚本：{} ⇒ 无法做上传前复核。", missing.join("、")),
-        });
-    }
+    upload_tools_gate(&tools)?;
     tauri::async_runtime::spawn_blocking(move || {
         upload_with(&RealRunner, &tools, INCIDENT_URL, Path::new(&bundle_path))
     })
@@ -953,6 +973,93 @@ mod tests {
         }
     }
 
+    /// **F-2（task-148）**：脚本缺失 / spawn 失败（127）必须是 **fail closed**，
+    /// 而且**不许发出任何 POST**（出包阶段本来就不联网，这条防的是「将来有人在
+    /// 失败路径上加一步上传」）。
+    #[test]
+    fn missing_scripts_and_spawn_failure_are_fail_closed() {
+        // ① 前置闸：三个脚本都不存在（拿一个不存在的资源目录）。
+        let missing_tools = IncidentTools::from_resource_dir(Path::new("/definitely/not/a/resource/dir"));
+        let gate = preview_tools_gate(&missing_tools).expect_err("缺脚本必须拦下");
+        assert!(gate.contains("缺少脚本"), "文案要指向「脚本缺失」：{gate}");
+        assert!(
+            gate.contains("incident-bundle.sh"),
+            "要点名缺的是哪个：{gate}"
+        );
+        assert!(!gate.contains("上传失败"), "不许笼统说成上传失败：{gate}");
+        assert!(
+            upload_tools_gate(&missing_tools).is_err(),
+            "上传前那道同样的闸也必须拦"
+        );
+
+        // ② `preview_with` 的 spawn 失败（runner 直接返回 Err，模拟 ENOENT/127 场景）。
+        let runner = FakeRunner::new(vec![Err("执行 /bin/bash 失败：No such file (os error 2)".into())]);
+        let root = tmp_root("preview-spawn");
+        let err = preview_with(&runner, &tools(), &root.join("x.zip"), &root.join("x.json"))
+            .expect_err("spawn 失败必须报错");
+        assert!(err.contains("执行 /bin/bash 失败"), "{err}");
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1, "只该尝试跑脚本，绝不许再发 POST：{calls:?}");
+        assert_eq!(calls[0].0, "/bin/bash", "不许出现 curl：{calls:?}");
+
+        // ③ 退出码 127（脚本不存在时 shell 的经典返回）同样 fail closed。
+        let runner = FakeRunner::new(vec![Ok(CmdOutput {
+            code: 127,
+            stdout: String::new(),
+            stderr: "bash: /res/scripts/incident-bundle.sh: No such file or directory".into(),
+        })]);
+        let err = preview_with(&runner, &tools(), &root.join("y.zip"), &root.join("y.json"))
+            .expect_err("退出码 127 必须报错");
+        assert!(err.contains("退出码 127"), "{err}");
+        assert_eq!(runner.calls().len(), 1, "绝不许发 POST");
+    }
+
+    /// **F-2 核心（task-148）**：脚本 **exit 0 但没写出摘要** ⇒ 必须 **fail closed**。
+    ///
+    /// 不许把「没有摘要」当成「空摘要」成功返回 —— 那正是「失败被当成成功」
+    /// 的经典形状：界面会显示一个空清单，用户以为包已经好了。
+    #[test]
+    fn exit_zero_without_summary_is_fail_closed() {
+        let runner = FakeRunner::new(vec![Ok(CmdOutput {
+            code: 0,
+            stdout: "（脚本说成功，但 --json-out 什么也没写）".into(),
+            stderr: String::new(),
+        })]);
+        let root = tmp_root("preview-no-summary");
+        let summary = root.join("nope.json");
+        let err = preview_with(&runner, &tools(), &root.join("x.zip"), &summary)
+            .expect_err("没有摘要必须报错（fail closed）");
+        assert!(err.contains("没有写出摘要"), "文案要指向「摘要缺失」：{err}");
+        assert!(
+            err.contains(&summary.display().to_string()),
+            "要点名缺的是哪个文件：{err}"
+        );
+        assert!(!err.contains("上传失败"), "不许笼统说成上传失败：{err}");
+        assert_eq!(runner.calls().len(), 1, "绝不许发 POST");
+    }
+
+    /// **F-2**：上传路径上「本地闸跑不起来」（python 缺失/ spawn 失败）也必须
+    /// **fail closed**（类型化错误 + **不发 POST**）。
+    #[test]
+    fn upload_gate_spawn_failure_is_fail_closed_and_never_posts() {
+        let runner = FakeRunner::new(vec![Err("执行 /usr/bin/python3 失败：No such file".into())]);
+        let bundle = our_bundle("gate-spawn");
+        match upload_with(&runner, &tools(), INCIDENT_URL, &bundle).expect_err("闸跑不起来必须拒") {
+            IncidentUploadError::Server { code, message } => {
+                assert_eq!(code, 0, "code 0 = 本地拒绝（不是服务端）");
+                assert!(message.contains("本地隐私闸跑不起来"), "{message}");
+                assert!(message.contains("fail closed"), "要说清为什么拒：{message}");
+            }
+            other => panic!("必须是本地的 Server{{code:0}}，实际 {other:?}"),
+        }
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1, "只在「跑闸」时动了一次子进程：{calls:?}");
+        assert!(
+            calls[0].0.contains("python3"),
+            "绝不许出现 curl：{calls:?}"
+        );
+    }
+
     // ------------------------------------------------------------- 哨兵
 
     /// 构造一条异常 ⇒ 文件多一条、计数 +1（且读回来字段一致）。
@@ -1059,7 +1166,12 @@ mod tests {
     /// 令牌 `DELETE` 清掉，并把「对象数回到 0」写进验收记录。
     ///
     /// ```text
-    /// XT_T130_BUNDLE=/tmp/xraytun-incident/xraytun-incident-<ts>.zip \
+    /// # ⚠️ 路径必须是**本机刚生成的**那个包：`bundle_path_is_ours()` 只接受
+    /// # `$TMPDIR/xraytun-incident/xraytun-incident-*.zip`（macOS 的 `temp_dir()`
+    /// # 是 `/var/folders/…/T`，**不是** `/tmp`）。用 `/tmp/...` 会当场被拒 ——
+    /// # 这条自证规则的存在意义：不许把这条命令当**任意文件外发通道**
+    /// # （前端只会传 `preview.bundle_path`，但命令本身必须自证）。
+    /// XT_T130_BUNDLE="$TMPDIR/xraytun-incident/xraytun-incident-<ts>.zip" \
     ///   cargo test -p xraytun-desktop --lib real_upload_acceptance -- --ignored --nocapture
     /// ```
     #[test]
