@@ -114,6 +114,9 @@ pub fn run() {
             commands::check_app_update,
             commands::install_app_update,
             commands::probe_dns,
+            commands::incident_preview,
+            commands::incident_upload,
+            commands::incident_anomaly_count,
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")

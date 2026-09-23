@@ -578,7 +578,7 @@ fn ipc_invoke_calls(src: &str) -> (BTreeSet<String>, Vec<String>) {
 
 /// 前端 `invoke()` 传**非字面量**的豁免清单（显式、且会被打印出来）。
 ///
-/// 目前为空：`ipc.ts` 的 34 个调用全是字符串字面量。留这个常量是为了将来真有
+/// 目前为空：`ipc.ts` 的 37 个调用全是字符串字面量。留这个常量是为了将来真有
 /// 动态命令名时有个**显式出口** —— 而不是让测试静默跳过（那种"跳过"就是假绿）。
 const NON_LITERAL_INVOKE_EXEMPT: &[&str] = &[];
 
@@ -619,17 +619,19 @@ fn registered_commands_match_the_frontend_invoke_literals() {
     );
 
     // 哨兵：数量写死，增删命令时必须同步改这里（否则解析退化会假绿）。
+    // 37 = 34（task-94 时的全集）+ task-130 的三个 `incident_*`（`incident_anomalies`
+    // **故意不注册**：前端没封装它、角标只用计数 —— Lead 在 task-130 里裁决）。
     assert_eq!(
         rust.len(),
-        34,
-        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 34。\
+        37,
+        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 37。\
          增删命令请同步更新这个数字与 ipc.ts。实际注册: {rust:?}",
         rust.len()
     );
     assert_eq!(
         ts.len(),
-        34,
-        "\nipc.ts 的 invoke 字面量有 {} 个，预期 34；实际: {ts:?}",
+        37,
+        "\nipc.ts 的 invoke 字面量有 {} 个，预期 37；实际: {ts:?}",
         ts.len()
     );
 

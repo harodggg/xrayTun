@@ -677,6 +677,8 @@ impl FailureExit {
 ///
 /// `exit` 是枚举而不是散文案，所以每个调用点都能被源码守卫测试逐个计数。
 pub(crate) fn invalidate_after_failure(state: &AppState, exit: FailureExit) {
+    // 被动哨兵（task-130）：「作废自动重连意图」是最该进现场的一类事件。
+    record(state, "watchdog_invalidated", "warn", exit.what_happened());
     invalidate_connect_intent(state, IntentDrop::KnownFailure, exit.what_happened());
 }
 
@@ -1192,6 +1194,23 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             let all_alive = probe_results_all_alive(&results);
             let prev_rounds = streak.rounds();
             let failures = streak.record(&round);
+            // 被动哨兵（task-130）：**每一轮失败都记一条会是噪声**（看门狗每 N 秒一轮，
+            // 隧道死着的时候会一直失败）⇒ 只在「这一轮**新起**了一次全灭」时记一条，
+            // 一次故障只留一条现场。
+            if round.is_dead() && failures == 1 {
+                record(
+                    &state,
+                    "probe_round_failed",
+                    "warn",
+                    format!(
+                        "探针轮失败：境内 {}/{}、境外 {}/{} 死 —— {dead_targets}",
+                        round.domestic_dead,
+                        round.domestic_total,
+                        round.overseas_dead,
+                        round.overseas_total
+                    ),
+                );
+            }
 
             // ---- 没到门槛（本轮 <2 个目标失败）：只记账、只留痕，**不拆隧道** ----
             if !round.is_dead() {
@@ -1357,6 +1376,14 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                     crate::state::clear_recovering_notice(&mut i.last_notice);
                 });
                 state.log("app", "info", format!("隧道已自动恢复（第 {attempt} 次自动重建）"));
+                // 被动哨兵（task-130）：自愈成功也要留一条 —— 现场包里「恢复过几次」
+                // 与「作废过几次」是同一件事的两面，只记失败会看不出自愈在起作用。
+                record(
+                    &state,
+                    "self_healed",
+                    "info",
+                    format!("隧道已自动恢复（第 {attempt} 次自动重建）"),
+                );
                 // 显式推一次：让界面收到 `recovering=false` + `last_outcome=recovered`，
                 // 这样「恢复成功」是**可感知的结束**，不是静默变回「已连接」。
                 events::runtime_changed(&handle, &state);
@@ -1365,6 +1392,14 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
             }
 
             let rebuild_err = rebuilt.err().unwrap_or_default();
+            // 被动哨兵（task-130）：重建失败要留一条（下面按 after_failed_rebuild
+            // 分流：保隧道 / 退直连；无论走哪条，**这一次重建失败**都是现场事实）。
+            record(
+                &state,
+                "rebuild_failed",
+                "warn",
+                format!("自动重建隧道失败：{rebuild_err}"),
+            );
             match after_failed_rebuild(stop_failed, core_process_alive(pid)) {
                 // **老隧道还活着 ⇒ 什么都不拆。**
                 //

@@ -46,7 +46,10 @@
     "resources": {
       "binaries/xray": "xray",
       "binaries/geoip.dat": "geoip.dat",
-      "binaries/geosite.dat": "geosite.dat"
+      "binaries/geosite.dat": "geosite.dat",
+      "../../scripts/incident-bundle.sh": "scripts/incident-bundle.sh",
+      "../../scripts/triage-incident.py": "scripts/triage-incident.py",
+      "../../scripts/net-metrics.py": "scripts/net-metrics.py"
     },
     "macOS": {
       "minimumSystemVersion": "13.0",

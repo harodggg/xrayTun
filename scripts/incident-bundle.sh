@@ -49,12 +49,17 @@ CORE_TAIL_BYTES=$((2 * 1024 * 1024)) # 核心日志尾部的字节上限（默�
 EVENTS_CAP=5000                     # events.jsonl 条数上限
 SELF_TEST=0
 KEEP_DIR=0
+# `--json-out <path>`：额外把**同一份口径**的摘要写成 JSON，给 App（task-130）读。
+# 存在的意义：App 里**不再解一遍 zip**（两处实现必然分叉）—— 清单/截断/README/manifest
+# 全部来自这里，而 zip 本身照常产出。不传这个参数时行为与以前**完全一致**。
+JSON_OUT=""
 
 usage() { sed -n '3,40p' "$0"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="${2:?--out 需要一个路径}"; shift 2 ;;
+    --json-out) JSON_OUT="${2:?--json-out 需要一个路径}"; shift 2 ;;
     --data-dir) DATA_DIR="${2:?}"; shift 2 ;;
     --app) APP_PATH="${2:?}"; shift 2 ;;
     --since) SINCE_RAW="${2:?}"; shift 2 ;;
@@ -715,5 +720,56 @@ echo
 echo "  zip: ${OUT}"
 echo "  zip sha256: $(sha256_of "$OUT")"
 echo "  总大小: $(wc -c <"$OUT" | tr -d ' ') 字节（上限 ${MAX_BYTES}）"
+
+# --- `--json-out`：给 App 的摘要（**必须**在 BUNDLE_DIR 被删之前写）
+if [ -n "$JSON_OUT" ]; then
+  python3 - "$OUT" "${BUNDLE_DIR}" "$JSON_OUT" "${SHRINK_NOTES}" <<'PY'
+import hashlib, json, os, sys
+
+out, bundle, json_out, shrink = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+manifest = json.load(open(os.path.join(bundle, "manifest.json"), encoding="utf-8"))
+readme = open(os.path.join(bundle, "README.txt"), encoding="utf-8").read()
+blob = open(out, "rb").read()
+
+# 被截断的文件名（判据全在这一个地方，App 不再自己推）：
+#   * core-tail.txt：窗口本身超了字节上限（manifest 已记），或总大小上限又砍了它；
+#   * events.jsonl：条数超上限（manifest 已记）；
+#   * network.txt：总大小上限导致 scutil --dns 段被省略。
+truncated = []
+tr = manifest.get("truncation", {})
+if tr.get("core_tail", {}).get("truncated"):
+    truncated.append("core-tail.txt")
+if tr.get("events", {}).get("truncated"):
+    truncated.append("events.jsonl")
+if "core-tail.txt 再次截断" in shrink and "core-tail.txt" not in truncated:
+    truncated.append("core-tail.txt")
+if "network.txt" in shrink:
+    truncated.append("network.txt")
+
+# 包内清单 = **zip 里的每一条**（给界面显示「包里到底有几个文件」）。
+# manifest 自己的 `files` 按惯例排除 manifest.json（它没法给自己算 sha256），
+# 但界面要的是「包内条目」⇒ 这里补上 manifest.json 自己，两处口径的差异写在此处。
+files = dict(manifest.get("files", {}))
+_mp = os.path.join(bundle, "manifest.json")
+if os.path.isfile(_mp):
+    _b = open(_mp, "rb").read()
+    files["manifest.json"] = {"bytes": len(_b), "sha256": hashlib.sha256(_b).hexdigest()}
+
+summary = {
+    "bundle_path": os.path.abspath(out),
+    "size_bytes": len(blob),
+    "sha256": hashlib.sha256(blob).hexdigest(),
+    "files": files,
+    "readme": readme,
+    "manifest": manifest,
+    "truncated": truncated,
+}
+with open(json_out, "w", encoding="utf-8") as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+print(f"  json-out: {json_out}（files={len(summary['files'])}，truncated={truncated}）")
+PY
+fi
+
 [ "$KEEP_DIR" -eq 1 ] && echo "  未打包目录保留在: ${BUNDLE_DIR}" || rm -rf "${BUNDLE_DIR}"
 echo "  提醒：**没有联网、没有上传**；把 zip 交给维护者，或先打开 README.txt 自己看。"

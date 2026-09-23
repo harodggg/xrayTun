@@ -45,6 +45,9 @@ pub async fn tail_logs(
                 guard.mark(loss_signature(&stats))
             };
             if first_time {
+                // 被动哨兵（task-130）：「读侧丢了行」也是一类现场异常，**只写本地**。
+                // 上面那个 `LossNotify` 去重保证不会每刷新一次就记一条。
+                record(&state, "log_read_loss", "warn", warning.clone());
                 state.log("app", "warn", warning);
                 // 让这一条**本次**就能被用户看到：重读一次（只在首次提醒时发生）。
                 let root = state.store.root().to_path_buf();
