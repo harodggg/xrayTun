@@ -10,7 +10,10 @@
 //! 敏感信息（订阅 URL 里的 token）**不进这里** —— 它们存在 Keychain，
 //! 落盘的是 `keychain:<service>/<account>` 形式的引用，见 `docs/07-roadmap-and-risks.md`。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::model::{AppSettings, Node, Subscription};
@@ -387,14 +390,63 @@ fn log_file_names() -> [&'static str; 2] {
 }
 
 /// 活动文件超过它就修剪一次。
-const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+///
+/// # 为什么是 128 MiB（task-144，实测定的）
+///
+/// 保证窗口 = `LOG_MAX_BYTES / 速率`（两代合起来 ≈ 一个 `MAX` 字节的流；
+/// 「活跃 3.6 h + 备份 3 h」那种算法把两代**重复计了一次**）。按本机**只读实测**
+/// 的速率（出处见 `docs/verification/NET-METRICS.md`）：
+///
+/// | 速率 | 旧值 10 MiB | **新值 128 MiB** |
+/// |---|---|---|
+/// | 63 MiB/天（task-121） | 3.8 h | 48.8 h |
+/// | 116 MiB/天（09-22 会话） | 2.1 h | 26.4 h |
+/// | 312 MiB/天（09-23 会话） | 0.8 h | 9.8 h |
+/// | 612 MiB/天（峰值小时外推） | 0.4 h | 5.0 h |
+///
+/// 磁盘上界从「**其实不存在**」（见 [`append_log_line_existing`] 的历史）变成
+/// `2×MAX − KEEP` ≈ 160 MiB —— 只比修复前实测的 155.65 MiB 略多，但**是界的**。
+const LOG_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 /// 修剪后保留的字节数（见 [`Store::append_log`] 的说明）。
 ///
 /// **判据是字节，不是行数。** 早先触发看字节、放弃看行数，于是「行很大、
 /// 行数不多」时会出现：每次跨过阈值都白做一遍破坏性重命名，然后什么都不修剪 ——
 /// 文件于是无界增长，而备份被反复churn。（这是审查指出的，测试也复现了。）
-const LOG_KEEP_BYTES: u64 = LOG_MAX_BYTES / 5 * 4;
+///
+/// 取 `MAX × 3/4`：`2×MAX − KEEP = 1.25×MAX` 就是磁盘上界，同时也是
+/// 「下次修剪前」能回溯的最大窗口。
+const LOG_KEEP_BYTES: u64 = LOG_MAX_BYTES / 4 * 3;
+
+/// 高频路径（[`append_log_line_existing`]）**每累计写入这么多字节才查一次**文件大小。
+///
+/// # 为什么不是每行都查
+///
+/// 那条路径存在的意义就是少做系统调用（见其注释）。改成「按字节预算查」之后，
+/// **超出上界仍然是可算的**：
+///
+/// ```text
+/// 文件大小 ≤ LOG_MAX_BYTES + LOG_CHECK_EVERY_BYTES + 单行最大字节
+/// ```
+///
+/// 依据：检查发生在**写入之前**；两次检查之间最多再写进一个预算周期，
+/// 而触发检查的那一行本身也可能是「一整个周期都装不下」的大行。
+/// 本机实测单行最大 **1294 B**（两代合计 819,256 行样本），所以超出量 ≈ 1 MiB + 1.3 KiB。
+/// ⚠️ 若将来出现远大于本预算的单行记录，这个上界会**随之变大** ——
+/// 对策见 `docs/verification/NET-METRICS.md`（只报不改）。
+const LOG_CHECK_EVERY_BYTES: u64 = 1024 * 1024;
+
+/// 距上次检查已写入的字节数（**进程内**）。日志写入者只有 App 一个进程，
+/// 两个线程（核心 stdout 转发与看门狗）共用这个计数器。
+static LOG_BYTES_SINCE_CHECK: AtomicU64 = AtomicU64::new(0);
+
+/// 修剪互斥：两个写入者可能同时判定「该修剪了」。
+///
+/// 旧实现事实上「每个 App 进程只在第一条日志时修剪一次」
+/// （见 [`append_log_line_existing`] 的说明），所以并发修剪从未暴露过；
+/// 让高频路径也参与触发之后必须显式串行化 —— 否则两次修剪会互相覆盖
+/// 对方写出的备份 / 收缩结果。
+static LOG_TRIM_LOCK: Mutex<()> = Mutex::new(());
 
 /// 追加一行日志到 `dir`（**唯一实现**）。
 ///
@@ -412,22 +464,128 @@ pub fn append_log_line(dir: &Path, line: &str) -> Result<()> {
     std::fs::create_dir_all(dir)
         .map_err(|e| Error::Store(format!("创建日志目录失败: {e}")))?;
     let path = dir.join(LOG_FILE);
-    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > LOG_MAX_BYTES {
-        trim_log_file(&path);
+    // 低频路径：**每行都查**（行为与旧版一致）。
+    trim_if_oversized(&path);
+    append_line_to(&path, line)
+}
+
+/// 与 [`append_log_line`] 相同，但**假定目录已存在**，跳过 `create_dir_all`；
+/// 并且按**字节预算**参与轮转触发（不是每行一次 `stat`）。
+///
+/// 给高频调用方用：核心日志多的时候每秒几十条，每条都做一次
+/// 「建目录」系统调用是白花的。
+///
+/// # 这里修的是一个真实缺陷（task-144）
+///
+/// 本函数**曾经只 `append_line_to`** —— 没有 [`append_log_line`] 里的超限检查。
+/// 而 `apps/desktop/src/state.rs` 在第一条日志之后**总是**走本函数
+/// （`logs_dir_ready` 一旦置位就不再复位），于是实测：
+///
+/// * 生产里 `Store::append_log`（带检查）**没有任何调用方**（只有本文件测试用）；
+/// * **每个 App 进程只在第一条日志时修剪一次**，会话内活动文件**无界增长**：
+///   本机活动文件 67.59 MiB ≫ 旧上限 10 MiB，备份里躺着 88.07 MiB 的被丢弃头部
+///   （⇒ 上次修剪时已涨到 ~96 MiB ≈ 9.6× 旧上限）；
+/// * 本文件里「总量上界 = `LOG_MAX_BYTES` + 修剪后的尾部，一眼能算清」那句话
+///   在那条路径上**不成立**（磁盘上界事实上不存在）。
+///
+/// 现在两条路径都参与触发；本路径用 [`LOG_CHECK_EVERY_BYTES`] 的字节预算控制
+/// `stat` 频率，上界公式见该常量的文档。
+pub fn append_log_line_existing(dir: &Path, line: &str) -> Result<()> {
+    let path = dir.join(LOG_FILE);
+    if log_check_due(line.len() as u64 + 1) {
+        trim_if_oversized(&path);
     }
     append_line_to(&path, line)
 }
 
-/// 与 [`append_log_line`] 相同，但**假定目录已存在**，跳过 `create_dir_all`。
+/// 轮转参数（生产取 [`LOG_LIMITS`]；测试可临时改小，见 [`with_log_limits`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogLimits {
+    max_bytes: u64,
+    keep_bytes: u64,
+}
+
+const LOG_LIMITS: LogLimits = LogLimits {
+    max_bytes: LOG_MAX_BYTES,
+    keep_bytes: LOG_KEEP_BYTES,
+};
+
+/// 距上次检查累计写入 ≥ `every` ⇒ 本次该查文件大小了（并清零计数）。
 ///
-/// 给高频调用方用：核心日志多的时候每秒几十条，每条都做一次
-/// 「建目录」系统调用是白花的。
-pub fn append_log_line_existing(dir: &Path, line: &str) -> Result<()> {
-    let _ = dir;
-    append_line_to(&dir.join(LOG_FILE), line)
+/// 抽成纯函数（计数器注入）是为了可测：见
+/// `the_bound_above_max_is_one_check_period_plus_one_line`。
+fn log_check_due_with(counter: &AtomicU64, written: u64, every: u64) -> bool {
+    let total = counter.fetch_add(written, Ordering::Relaxed) + written;
+    if total < every {
+        return false;
+    }
+    counter.store(0, Ordering::Relaxed);
+    true
+}
+
+fn log_check_due(written: u64) -> bool {
+    log_check_due_with(&LOG_BYTES_SINCE_CHECK, written, LOG_CHECK_EVERY_BYTES)
+}
+
+/// 活动文件超过上限就修剪。**两条写入路径共用这一处判据** ——
+/// 曾经的问题正是「一条路径有检查、另一条完全没有」。
+fn trim_if_oversized(path: &Path) {
+    trim_if_oversized_with(path, log_limits());
+}
+
+fn trim_if_oversized_with(path: &Path, limits: LogLimits) {
+    if log_file_len(path) <= limits.max_bytes {
+        return;
+    }
+    // 拿锁之后再查一次：另一个线程可能已经修剪过。
+    let _guard = LOG_TRIM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if log_file_len(path) > limits.max_bytes {
+        trim_log_file(path, limits.keep_bytes);
+    }
+}
+
+fn log_file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// 生产返回 [`LOG_LIMITS`]；测试里可被 [`with_log_limits`] 临时覆盖。
+///
+/// 覆盖的理由很实际：上限就是 128 MiB，而「跨过阈值 ⇒ 轮转」这类测试若真写
+/// 192 MiB，既慢又费盘。覆盖只在测试构建里存在（生产分支编译期就被消掉）。
+fn log_limits() -> LogLimits {
+    #[cfg(test)]
+    if let Some(override_limits) = TEST_LOG_LIMITS.with(|c| c.get()) {
+        return override_limits;
+    }
+    LOG_LIMITS
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LOG_LIMITS: std::cell::Cell<Option<LogLimits>> = const { std::cell::Cell::new(None) };
+}
+
+/// 在 `f()` 期间使用更小的轮转参数；**退出（含 panic）时自动还原**。
+///
+/// `#[cfg(test)]` —— 生产二进制里没有这个入口。
+#[cfg(test)]
+fn with_log_limits<R>(limits: LogLimits, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<LogLimits>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_LOG_LIMITS.with(|c| c.set(self.0.take()));
+        }
+    }
+    let prev = TEST_LOG_LIMITS.with(|c| c.replace(Some(limits)));
+    let _guard = Restore(prev);
+    f()
 }
 
 /// 以 **0600** 追加多行（`text` 内部可含换行）。
+///
+/// **task-144 起只在测试构建里**：它只被 [`replace_log_file`]（等价性对照用的
+/// 参考实现）用到；生产路径走 [`replace_log_file_with_lines`]（逐行、不 join）。
+#[cfg(test)]
 fn append_lines_to(path: &Path, text: &str) -> Result<()> {
     append_to(path, text)
 }
@@ -489,7 +647,7 @@ fn write_record<W: std::io::Write>(w: &mut W, text: &str) -> std::io::Result<()>
     w.write_all(&buf)
 }
 
-/// 把活动文件修剪到 [`LOG_KEEP_BYTES`]：**被丢弃的头部进备份，活动文件只留尾部**。
+/// 把活动文件修剪到 `keep_bytes`：**被丢弃的头部进备份，活动文件只留尾部**。
 ///
 /// 两代文件**不重叠**（task-105）：`app.1.jsonl` 恰好是这次丢掉的那段（更旧），
 /// `app.jsonl` 是保留的尾部（更新）；合起来正好是修剪前的全部内容，交集为空。
@@ -504,16 +662,16 @@ fn write_record<W: std::io::Write>(w: &mut W, text: &str) -> std::io::Result<()>
 ///
 /// ⚠️ **历史文件不会因此变干净**：旧版本留下的那两代文件里的重叠（本机实测
 /// 39,931 行）仍在原地，`scripts/net-metrics.py` 的跨代去重**必须保留**。
-fn trim_log_file(path: &Path) {
+fn trim_log_file(path: &Path, keep_bytes: u64) {
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let lines: Vec<&str> = line_contents(&text).filter(|l| !l.trim().is_empty()).collect();
     let mut acc: u64 = 0;
     let mut keep_from = lines.len();
     for (i, l) in lines.iter().enumerate().rev() {
         acc += l.len() as u64 + 1;
-        if acc > LOG_KEEP_BYTES {
+        if acc > keep_bytes {
             break;
         }
         keep_from = i;
@@ -521,16 +679,85 @@ fn trim_log_file(path: &Path) {
     if keep_from == 0 || keep_from >= lines.len() {
         return; // 没有可丢的头部、或没有可留的尾部：不该走到这里
     }
-    let discarded = lines[..keep_from].join("\n") + "\n";
-    let kept = lines[keep_from..].join("\n") + "\n";
     let Some(dir) = path.parent() else { return };
     // 顺序**不许颠倒**：
     // * 先备份：这步失败 ⇒ 活动文件一个字都没动 ⇒ **一条不丢**（只是仍重叠，可重试）；
     // * 若先收缩活动文件、而备份写失败 ⇒ 那段头部**永久消失**。
-    if replace_log_file(&dir.join(LOG_FILE_BAK), &discarded).is_err() {
+    //
+    // **逐行写、不 join**（task-144）：每行都是 `text` 的切片，输出与旧的
+    // 「两段 join」**逐字节相同**（`zero_copy_trim_is_byte_identical_to_the_reference_implementation`）。
+    if replace_log_file_with_lines(&dir.join(LOG_FILE_BAK), lines[..keep_from].iter().copied())
+        .is_err()
+    {
         return;
     }
-    let _ = replace_log_file(path, &kept);
+    let _ = replace_log_file_with_lines(path, lines[keep_from..].iter().copied());
+}
+
+/// 与 `str::lines()` **同语义**的行切分：在 `\n` 分割；行尾 `\r\n` 去掉 `\r`；
+/// 最后一行没有换行符也算一行；空串没有行。
+///
+/// 刻意用标准库的实现方式（`split_inclusive('\n')` + 去后缀），而不是自己写一遍扫描 ——
+/// CRLF / 无尾换行的差异会精确地差一个字节，而这类差异正是等价性测试要抓的。
+fn line_contents(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n').map(|line| match line.strip_suffix('\n') {
+        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+        None => line,
+    })
+}
+
+/// 把一个**行序列**写成 `final_path`：先写同目录临时文件（**0600 在写入前就已收紧**），
+/// 再 `rename` 覆盖 —— 同文件系统内的 `rename` 才是原子的。
+///
+/// # 为什么逐行写而不是 `join`（task-144）
+///
+/// 旧实现把丢弃段与保留段各自 `join("\n")` 成 `String`，再加上整份文本与
+/// `write_record` 的整块拷贝 ⇒ 修剪时峰值内存 ≈ **2.8×`LOG_MAX_BYTES`**
+/// （128 MiB 上限时约 360 MiB）。这里每行都是 `text` 的**切片**（不复制），
+/// 写入走 8 KiB 的 `BufWriter` ⇒ 峰值 ≈ **1.08×`LOG_MAX_BYTES`**（约 138 MiB）：
+/// 整份文本（128）+ 行索引（16 B/行 × ~64 万行 ≈ 10）+ 缓冲区（8 KiB）。
+/// 输出精确到字节不变（有专门的等价性测试对照旧实现）。
+fn replace_log_file_with_lines<'a>(
+    final_path: &Path,
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<()> {
+    let Some(dir) = final_path.parent() else {
+        return Err(Error::Store(format!("{} 没有父目录", final_path.display())));
+    };
+    let name = final_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("app.jsonl");
+    let tmp = dir.join(format!("{name}.tmp"));
+    let _ = std::fs::remove_file(&tmp);
+
+    if let Err(e) = write_lines(&tmp, lines) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Store(format!("写 {} 失败: {e}", tmp.display())));
+    }
+    std::fs::rename(&tmp, final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        Error::Store(format!("替换 {} 失败: {e}", final_path.display()))
+    })
+}
+
+/// 逐行写 `<line>\n`（每行都是调用方的切片）到 `path`，权限 **0600**。
+fn write_lines<'a>(path: &Path, lines: impl Iterator<Item = &'a str>) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // 权限在**写入内容之前**就已收紧（与 `atomic_write` 同一条要求）。
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    let mut w = std::io::BufWriter::with_capacity(8 * 1024, file);
+    for line in lines {
+        w.write_all(line.as_bytes())?;
+        w.write_all(b"\n")?;
+    }
+    w.flush()
 }
 
 /// 原子替换一个日志文件：先写同目录临时文件（**0600**，权限在写入前就已收紧），
@@ -538,6 +765,11 @@ fn trim_log_file(path: &Path) {
 ///
 /// 为什么不「先 remove 再写」：那会留下「文件不存在」的窗口，读的人正好撞上就
 /// 一条日志都读不到。
+///
+/// **task-144 起只在测试构建里**：它保留为 `task-105` 时代的**参考实现**，
+/// 供 `zero_copy_trim_is_byte_identical_to_the_reference_implementation` 逐字节对照；
+/// 生产路径改用 [`replace_log_file_with_lines`]（逐行写、不 join，峰值内存低得多）。
+#[cfg(test)]
 fn replace_log_file(final_path: &Path, text: &str) -> Result<()> {
     let Some(dir) = final_path.parent() else {
         return Err(Error::Store(format!("{} 没有父目录", final_path.display())));
@@ -637,11 +869,17 @@ mod tests {
     /// 修剪必须**按整行**，且不重复、不越界。
     ///
     /// 上一版这条测试是**假的**：它只写了 2050 行 ~50 字节的内容（约 100KB），
-    /// 根本没跨过 10MB 的触发线，于是「轮转」从未发生 —— 断言在有没有轮转时
-    /// 都通过。现在测试态下 `LOG_KEEP_LINES` 被调小（见该常量），
-    /// 用很少的数据就能真正走一遍修剪。
+    /// 根本没跨过当时的触发线（10 MB），于是「轮转」从未发生 —— 断言在有没有
+    /// 轮转时都通过。**task-144** 把上限抬到 128 MiB 之后，真写 192 MiB 太贵，
+    /// 所以测试用 [`with_log_limits`] 把参数改小（语义完全一样）。
     #[test]
     fn log_trimming_keeps_whole_lines_without_duplication() {
+        let limits = LogLimits { max_bytes: 32 * 1024, keep_bytes: 24 * 1024 };
+        with_log_limits(limits, || log_trimming_with(limits));
+    }
+
+    /// [`log_trimming_keeps_whole_lines_without_duplication`] 的主体。
+    fn log_trimming_with(limits: LogLimits) {
         let dir = std::env::temp_dir().join(format!("xt-logtrim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -659,7 +897,7 @@ mod tests {
         // 每条 ~256 字节，写够 1.5 倍阈值 —— 确保**确实**跨过触发线。
         // （上一版按 64 字节估算，实际写入量刚好卡在阈值下方，于是修剪从未发生。）
         let per_line = 256u64;
-        for _ in 0..(LOG_MAX_BYTES * 3 / 2 / per_line + 2) {
+        for _ in 0..(limits.max_bytes * 3 / 2 / per_line + 2) {
             store.append_log(&format!(r#"{{"pad":"{}"}}"#, "x".repeat(236))).unwrap();
         }
         // 文件在 `root/logs/` 下，不是 root 本身 —— 早先这里读错了路径，
@@ -950,6 +1188,14 @@ mod tests {
     /// **敏感性**：把轮转改回「rename 整份 + 写尾部」⇒ 本测试红（见 task-105 报告）。
     #[test]
     fn each_rotation_is_lossless_disjoint_and_leaves_no_duplicates() {
+        // task-144：上限抬到 128 MiB 之后，真堆 128 MiB 太贵 ⇒ 测试态用小参数
+        // （`with_log_limits`）；「跨过阈值 ⇒ 轮转」的语义完全一样。
+        let limits = LogLimits { max_bytes: 64 * 1024, keep_bytes: 48 * 1024 };
+        with_log_limits(limits, || each_rotation_lossless_with(limits));
+    }
+
+    /// [`each_rotation_is_lossless_disjoint_and_leaves_no_duplicates`] 的主体。
+    fn each_rotation_lossless_with(limits: LogLimits) {
         let store = temp_store("rotate");
         std::fs::create_dir_all(store.logs_dir()).unwrap();
         let mut next_id = 0u64;
@@ -957,7 +1203,7 @@ mod tests {
         for round in 1..=2u32 {
             // 把活动文件堆到触发线以上（直接写盘：比 append_log 快几百倍）
             let mut text = String::new();
-            while (text.len() as u64) <= LOG_MAX_BYTES {
+            while (text.len() as u64) <= limits.max_bytes {
                 text.push_str(&format!("{{\"n\":{next_id}}}\n"));
                 next_id += 1;
             }
@@ -1032,5 +1278,247 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    // -----------------------------------------------------------------------
+    // task-144：轮转触发（高频路径曾完全绕过）+ 窗口预算
+    // -----------------------------------------------------------------------
+
+    /// 实测速率，单位 **MiB/天**。出处：`docs/verification/NET-METRICS.md`
+    /// 「日志能回溯多久」一节（2026-09-23 20:13 只读扫描本机真实日志）。
+    const RATE_TASK121: u64 = 63; // 41.7 MB / 0.63 天（task-121）
+    const RATE_SESSION_1: u64 = 116; // 09-22 20:52 → 09-23 15:01（18.14 h，88.07 MiB）
+    const RATE_SESSION_2: u64 = 312; // 09-23 15:01 → 20:13（5.20 h，67.59 MiB）
+    const RATE_PEAK_HOUR: u64 = 612; // 峰值整点 25.5 MiB/h 外推
+    const MIB: f64 = 1024.0 * 1024.0;
+
+    /// 生产参数必须与文档里的表一致（**改参数就得重算窗口表**）。
+    #[test]
+    fn log_rotation_constants_match_the_documented_budget() {
+        assert_eq!(LOG_MAX_BYTES, 128 * MIB as u64, "上限改了 ⇒ 文档窗口表要重算");
+        assert_eq!(LOG_KEEP_BYTES, 96 * MIB as u64);
+        assert_eq!(LOG_CHECK_EVERY_BYTES, MIB as u64);
+        // 磁盘上界 = 2·MAX − KEEP（两代合计；它们不重叠，见 task-105）。
+        assert_eq!(2 * LOG_MAX_BYTES - LOG_KEEP_BYTES, 160 * 1024 * 1024);
+    }
+
+    /// **窗口预算**：保证窗口 = `LOG_MAX_BYTES / 速率`。
+    ///
+    /// 为什么是除法、而不是「活跃 + 备份」相加：两代合起来约等于**一个** `MAX`
+    /// 字节的流（`app.1.jsonl` 是被丢弃的头部、`app.jsonl` 是保留的尾部，两者不重叠）。
+    /// 旧卡面把「活跃 3.6 h + 备份 3 h」相加，**把两代重复计了一次**。
+    ///
+    /// 目标：典型速率 ≥ 24 h；最坏实测会话 ≥ 8 h；峰值小时外推 ≥ 4 h。
+    /// **反向敏感性**：`LOG_MAX_BYTES` 改回 10 MiB ⇒ 本测试红（第一档只剩 2.1 h）。
+    #[test]
+    fn log_budget_covers_the_target_window_at_the_measured_rates() {
+        let window_hours =
+            |rate_mib_per_day: u64| LOG_MAX_BYTES as f64 / (rate_mib_per_day as f64 * MIB / 24.0);
+        for (rate, need_hours, label) in [
+            (RATE_SESSION_1, 24.0, "典型速率（本机 09-22 会话）"),
+            (RATE_SESSION_2, 8.0, "最坏实测会话（本机 09-23）"),
+            (RATE_PEAK_HOUR, 4.0, "峰值小时外推"),
+        ] {
+            let got = window_hours(rate);
+            assert!(
+                got >= need_hours,
+                "{label} {rate} MiB/天：只有 {got:.1} h < 目标 {need_hours} h（MAX={} MiB）",
+                LOG_MAX_BYTES / 1024 / 1024
+            );
+        }
+        // task-121 那个速率只登记、不设目标：防它被无意删掉（它是最保守的一段实测）。
+        assert!(window_hours(RATE_TASK121) > 40.0);
+    }
+
+    /// **超出上界是可算的**：≤ 一个检查周期 + 单行最大字节；
+    /// 并把这个「超出量」钉成远小于上限本身（否则「有界」就没意义）。
+    ///
+    /// 实现见 [`log_check_due_with`] 与 [`LOG_CHECK_EVERY_BYTES`] 的文档。
+    #[test]
+    fn the_bound_above_max_is_one_check_period_plus_one_line() {
+        let counter = AtomicU64::new(0);
+        let every = 1000u64;
+        // 预算没满 ⇒ 不查
+        assert!(!log_check_due_with(&counter, 400, every));
+        assert!(!log_check_due_with(&counter, 400, every));
+        // 满一个周期 ⇒ 查，并清零
+        assert!(log_check_due_with(&counter, 400, every));
+        assert!(!log_check_due_with(&counter, 400, every));
+        // 单行就超过一个周期（大行）⇒ 也必须查，否则大行会让检查永远不触发
+        assert!(log_check_due_with(&counter, every * 5, every));
+
+        // 代入实测：单行最大 1294 B（两代 819,256 行样本），超出量 ≈ 1 MiB + 1.3 KiB。
+        const MEASURED_MAX_LINE: u64 = 1294;
+        let excess = LOG_CHECK_EVERY_BYTES + MEASURED_MAX_LINE;
+        assert!(
+            excess < LOG_MAX_BYTES / 100,
+            "超出上界（{excess} B）必须远小于上限（{LOG_MAX_BYTES} B），否则「有界」名不副实"
+        );
+    }
+
+    /// **新增覆盖（task-144）**：`append_log_line_existing`（高频路径，占实测日志行数的
+    /// 97.7%–99.6%）也必须触发轮转 —— 在这之前**全仓没有任何测试碰过这个函数**，
+    /// 而它正是「磁盘上界不存在」的那个入口。
+    ///
+    /// **敏感性**：把本函数里的 `if log_check_due(..) { trim_if_oversized(..) }` 删掉
+    /// ⇒ 本测试红（备份文件不会出现）。
+    #[test]
+    fn the_high_frequency_path_rotates_too() {
+        let dir = std::env::temp_dir().join(format!("xt-logfast-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 轮转参数改小（否则要真写 128 MiB），但**检查周期保持生产值** ——
+        // 这条测试要证明的正是「按预算触发」在生产周期下也生效。
+        let limits = LogLimits { max_bytes: 32 * 1024, keep_bytes: 24 * 1024 };
+        let line = format!(r#"{{"pad":"{}"}}"#, "x".repeat(120));
+        let per_line = line.len() as u64 + 1;
+        let total_lines = LOG_CHECK_EVERY_BYTES / per_line + 8; // 跨过至少一个检查周期
+        with_log_limits(limits, || {
+            LOG_BYTES_SINCE_CHECK.store(0, Ordering::Relaxed);
+            for _ in 0..total_lines {
+                append_log_line_existing(&dir, &line).unwrap();
+            }
+        });
+
+        let active = dir.join(LOG_FILE);
+        assert!(
+            dir.join(LOG_FILE_BAK).exists(),
+            "高频路径跨过检查周期后必须产生备份（说明轮转真的发生了）"
+        );
+        let len = std::fs::metadata(&active).unwrap().len();
+        let written = per_line * total_lines;
+        assert!(
+            len < written / 2,
+            "活动文件没有被修剪：{len} B（一共写了 {written} B）"
+        );
+        assert!(
+            len <= limits.max_bytes + LOG_CHECK_EVERY_BYTES + per_line,
+            "超出上界应 ≤ 一个检查周期 + 单行：{len} B"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // task-144：零拷贝修剪的**等价性**证明（动的是 task-105/107 验证过的代码）
+    // -----------------------------------------------------------------------
+
+    /// `task-105` 时代的两段 `join` **参考实现** —— 逐字复制当时的生产逻辑，
+    /// 只用于与新的零拷贝实现做逐字节对照（它用 [`replace_log_file`]，
+    /// 那个函数同样只在测试构建里保留）。
+    fn trim_log_file_reference(path: &Path, keep_bytes: u64) {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let mut acc: u64 = 0;
+        let mut keep_from = lines.len();
+        for (i, l) in lines.iter().enumerate().rev() {
+            acc += l.len() as u64 + 1;
+            if acc > keep_bytes {
+                break;
+            }
+            keep_from = i;
+        }
+        if keep_from == 0 || keep_from >= lines.len() {
+            return;
+        }
+        let discarded = lines[..keep_from].join("\n") + "\n";
+        let kept = lines[keep_from..].join("\n") + "\n";
+        let Some(dir) = path.parent() else { return };
+        if replace_log_file(&dir.join(LOG_FILE_BAK), &discarded).is_err() {
+            return;
+        }
+        let _ = replace_log_file(path, &kept);
+    }
+
+    /// 每次对照用一个独立临时目录（同一个测试里要跑很多次）。
+    fn trim_equivalence_dir() -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("xt-trimeq-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 把 `input` 写进活动文件、跑一次修剪，返回 `(备份字节, 活动文件字节)`。
+    fn run_trim(f: fn(&Path, u64), input: &str, keep_bytes: u64) -> (Option<Vec<u8>>, Vec<u8>) {
+        let dir = trim_equivalence_dir();
+        let active = dir.join(LOG_FILE);
+        std::fs::write(&active, input).unwrap();
+        f(&active, keep_bytes);
+        let got_active = std::fs::read(&active).unwrap();
+        let got_backup = std::fs::read(dir.join(LOG_FILE_BAK)).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+        (got_backup, got_active)
+    }
+
+    /// **task-144 硬要求**：零拷贝修剪与旧「两段 join」参考实现**逐字节相同**。
+    ///
+    /// 输入覆盖点名的边界：空文件 / 恰好等于上限 / 整行边界 / CRLF / 无尾换行 /
+    /// 超长单行 / 一行多个对象 / 空行 / 纯空白行；外加一段**确定性伪随机**输入
+    /// （含随机长度、随机行尾、整行空白）。
+    #[test]
+    fn zero_copy_trim_is_byte_identical_to_the_reference_implementation() {
+        // 确定性伪随机（LCG，不用外部 crate）：200 行，长度/行尾/空白都随机会。
+        let mut seed = 0x5DEE_CE66u64;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        let mut random_input = String::new();
+        for _ in 0..200 {
+            let len = (rnd() % 40) as usize;
+            if len == 0 {
+                random_input.push('\n');
+                continue;
+            }
+            if rnd() % 7 == 0 {
+                // 整行空白（实现里会被过滤掉）
+                random_input.push_str("   ".repeat(1 + (rnd() % 3) as usize).as_str());
+            } else {
+                for _ in 0..len {
+                    random_input.push((b'a' + (rnd() % 26) as u8) as char);
+                }
+            }
+            random_input.push_str(if rnd() % 3 == 0 { "\r\n" } else { "\n" });
+        }
+
+        let cases: Vec<(String, String, u64)> = vec![
+            ("空文件".into(), String::new(), 64),
+            ("只有换行".into(), "\n\n\n".into(), 64),
+            ("一行无尾换行".into(), "a".into(), 64),
+            ("恰好等于上限".into(), "0123456789\n".into(), 11),
+            ("整行边界".into(), "aaaa\nbbbb\n".into(), 5),
+            ("CRLF".into(), "a\r\nb\r\nc\r\n".into(), 4),
+            ("无尾换行的多行".into(), "a\nb\nc".into(), 3),
+            ("空行夹在中间".into(), "a\n\n\nb\n".into(), 2),
+            (
+                "超长单行".into(),
+                format!("{}\n{}\n", "x".repeat(5000), "y".repeat(10)),
+                8,
+            ),
+            ("多对象行".into(), "{\"n\":1}{\"n\":2}\n{\"n\":3}\n".into(), 17),
+            ("只有空白行".into(), "   \n\t\n".into(), 4),
+            ("伪随机 200 行（keep=64）".into(), random_input.clone(), 64),
+            ("伪随机 200 行（keep=257）".into(), random_input, 257),
+        ];
+
+        for (label, input, keep_bytes) in cases {
+            let got = run_trim(trim_log_file, &input, keep_bytes);
+            let want = run_trim(trim_log_file_reference, &input, keep_bytes);
+            assert_eq!(
+                got, want,
+                "输入「{label}」(keep={keep_bytes}) 下零拷贝实现与参考实现输出不同"
+            );
+            assert_eq!(
+                got,
+                run_trim(trim_log_file, &input, keep_bytes),
+                "输入「{label}」下同一实现两次结果不同（不确定）"
+            );
+        }
     }
 }
