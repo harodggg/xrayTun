@@ -110,14 +110,28 @@ npx wrangler secret put INCIDENT_TOKEN --config infra/incident-collector/wrangle
 # ↑ 交互式粘贴一个随机字符串，例如：openssl rand -hex 24
 ```
 
-**R2 lifecycle：保留 30 天后自动删除**（与代码里的惰性过期互为兜底）：
+**R2 lifecycle：保留 30 天后自动删除**（与代码里的惰性过期互为兜底）。
+
+⚠️ **这条命令原来写错了，而且错误被 `|| true` 吞掉** —— 结果桶上**从来没有** 30 天删除规则，
+`PRIVACY.md` 的「30 天自动删除」**当时不是真的**（2026-09-23 task-135/task-136 实测）。
+错在：`r2 bucket lifecycle add <bucket> [name] [prefix]` 里 **name 与 prefix 是位置参数**，
+**没有 `--prefix` 这个开关** ⇒ wrangler 报未知参数、失败；`|| true` 又把它抹平了。
 
 ```bash
-# wrangler 版本不同，子命令名可能是 r2 bucket lifecycle；亦可在控制台
-# R2 → 桶 → Settings → Object lifecycle rules 里加一条：
-#   prefix: ""  expire after: 30 days
-npx wrangler r2 bucket lifecycle add xraytun-incidents --expire-days 30 --prefix "" || true
+# 正确形态（name 与 prefix 是位置参数；prefix 留空 = 整桶）
+npx wrangler r2 bucket lifecycle add xraytun-incidents expire-30-days "" --expire-days 30 --force
+
+# ⚠️ **加完必须读回复核**（这条是教训）：部署日志说成功 ≠ 规则真的在
+npx wrangler r2 bucket lifecycle list xraytun-incidents      # 应看到 expire-30-days
+# 或直接读 API：
+#   GET /accounts/<acct>/r2/buckets/xraytun-incidents/lifecycle
+#   期望 rules 里有一条 deleteObjectsTransition.condition = {type: Age, maxAge: 2592000}，且 enabled=true
+./infra/incident-collector/deploy-check.sh                   # 这条断言已内置（缺规则 ⇒ 非 0 + 「隐私承诺未生效」）
 ```
+
+**失败时怎么办**：wrangler 会打印 `✗` 与原因（权限不足 / 桶名错 / 参数错）。
+**不要加 `|| true`**，也不要「先跳过」—— 规则缺失意味着**没人读过的对象会一直留在 R2**，
+与 `PRIVACY.md` 的承诺不符。修好参数后重跑，并用上面的 `list` 或 API 读回复核。
 
 ### 3.3 部署
 

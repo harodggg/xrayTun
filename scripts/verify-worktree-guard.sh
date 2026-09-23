@@ -62,7 +62,9 @@ SHARED_PHRASE='指向**主工作区**的 target dir'
 UNKNOWN_PHRASE='无法判定'
 # ⚠️ 短语里有 `**`（grep 的 BRE 元字符）⇒ 一律用 `grep -qF`，否则 grep 自己报
 #    `repetition-operator operand invalid` 而**静默判成「没命中」**（第一版就踩了：T1 假红）。
-has() { printf '%s\n' "$1" | grep -qF "$2"; }
+# ⚠️ 不用 `printf | grep -q`：grep -q 命中即退出会让上游吃 SIGPIPE，
+# 在 `set -o pipefail` 下**正向断言会假阴性**（同一天在 deploy-check 里踩到过）。
+has() { printf '%s\n' "$1" >"$TMP/.has"; grep -qF -- "$2" "$TMP/.has"; }
 
 # run_case <名字> <CARGO_TARGET_DIR> <WT_STRICT> ; 输出写到 $TMP/out.<名字>
 run_case() {

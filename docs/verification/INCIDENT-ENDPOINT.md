@@ -232,3 +232,70 @@ tester 独立复跑时用 `curl -o /dev/null` 丢了 201 的响应体 ⇒ **拿�
     pass=6 fail=0   ✓ deploy-check 自测通过
   ```
   （自测里 mock 也按真端点的行为区分脏包：含 `vless://` ⇒ 422。）
+
+## 14. R2 30 天 lifecycle **实际没有配置**（隐私承诺落空）—— 根因是 `|| true`
+
+**tester 的独立隐私审计（task-135）实测**：桶 `xraytun-incidents` 上只有一条默认规则
+「未完成分片上传 7 天中止」，**没有任何 `deleteObjectsTransition`（Age→Delete）规则**。
+
+```
+[改前] GET /accounts/<acct>/r2/buckets/xraytun-incidents/lifecycle
+{"result":{"rules":[{"id":"Default Multipart Abort Rule","enabled":true,"conditions":{},
+  "abortMultipartUploadsTransition":{"condition":{"type":"Age","maxAge":604800}}}]}}
+```
+⇒ `PRIVACY.md` §3 承诺的**第一道保证（R2 lifecycle 30 天过期）当时不存在**；
+只剩端点里那把「**被读到**才顺手删」的惰性过期 ⇒ **没人读过的对象会一直留着**。
+
+### 根因（两个，都是「吞错」族的）
+
+1. **命令写错了**：README 里是
+   `wrangler r2 bucket lifecycle add xraytun-incidents --expire-days 30 --prefix ""`
+   —— 而真实用法是 `r2 bucket lifecycle add <bucket> [name] [prefix]`：**name / prefix 是位置参数，
+   没有 `--prefix` 这个开关** ⇒ wrangler 报未知参数、**必然失败**（所以这条命令从来没成功过）。
+2. **`|| true` 把失败吞了** —— 吞掉的正好是一条**隐私承诺**。
+
+### 改了什么
+
+```bash
+# 正确形态（name 与 prefix 是位置参数；prefix 留空 = 整桶）
+npx wrangler r2 bucket lifecycle add xraytun-incidents expire-30-days "" --expire-days 30 --force
+# → ✨ Added lifecycle rule 'expire-30-days' to bucket 'xraytun-incidents'.
+```
+```
+[改后] GET .../lifecycle（原始输出）
+{"result":{"rules":[
+  {"id":"Default Multipart Abort Rule","enabled":true,"conditions":{},
+   "abortMultipartUploadsTransition":{"condition":{"type":"Age","maxAge":604800}}},
+  {"id":"expire-30-days","enabled":true,"conditions":{},
+   "deleteObjectsTransition":{"condition":{"type":"Age","maxAge":2592000}}}]}}
+```
+⇒ **30 天删除规则真的在了**，且**默认分片规则未被动过**（只加了一条）。
+
+* README：**删掉 `|| true`**、改成正确命令、并写清「**加完必须读回复核**」（`lifecycle list` 或 API）+
+  「失败时怎么办」（不要跳过：缺规则 = 没人读过的对象永久留存）；
+* `deploy-check.sh` 新增判据 **[3] R2 lifecycle**：读回 `GET .../lifecycle`，要求存在
+  `enabled` 的 `deleteObjectsTransition(Age ≤ 30 天)`；缺 ⇒ **非 0 退出 + 「隐私承诺未生效」**（附修法命令）；
+* `--self-test` 扩到 **13 项**，其中三条专门覆盖这次的两个事故形态：
+  `with-id + lifecycle=ok ⇒ 退出 0`、`no-id ⇒ 「无法清理」非 0`、`lifecycle=missing ⇒ 「隐私承诺未生效」非 0`
+  （mock 与真 API 同形：`/workers/routes`、`/r2/buckets/<b>/lifecycle`、脏包 422、DELETE 记日志）。
+
+### 又一次「工具自己假信号」：`grep -q` + `pipefail`
+
+修完判据后**实测** `deploy-check.sh` 在线上报「响应体不是 secret_detected」，而响应体里**明明有**：
+
+```
+./infra/incident-collector/deploy-check.sh: line 309: printf: write error: Broken pipe
+  ✗ 响应体不是 secret_detected
+```
+根因：`printf '%s' "$(cat body)" | grep -qF '"secret_detected"'` —— **`grep -q` 命中即退出 ⇒ 上游 printf 吃
+SIGPIPE ⇒ 在 `set -o pipefail` 下整条管道非 0 ⇒ 正向断言假阴性**。
+已把断言改成**读文件**（`has_in_file()` / guard 里的 `has()` 也一并改），线上重跑转绿。
+（这一族在上面的 BUILD-LOCK / worktree 守卫里是「空串相等」，这次是「管道吞退出码」——**同一个形状**：把
+「没看到」当成「没有」。）
+
+### 诚实清单（照实写）
+
+* **lifecycle 的实际删除时刻由 CF 侧异步执行**：我们能证明的只有「规则已配置且 enabled」，
+  **无法在本环境证明某个对象真的在第 30 天消失**；也没有做「等待 30 天」的实验。
+* 端点的**惰性过期**只对**被读到**的对象生效（这条是设计，不是缺陷，但必须写清）。
+* 本次只做了**一次配置写入**（新增一条规则）；未删除任何对象、未改动其它规则、未打印任何令牌。
