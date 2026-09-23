@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isObject } from "./eventGuards";
+import type { IncidentPreview, IncidentUpload } from "./incident";
 import type {
   GlobeData,
   RecoveryState,
@@ -32,6 +33,17 @@ export const api = {
 
   saveSettings: (settings: AppSettings) =>
     invoke<AppSnapshot>("save_settings", { settings }),
+
+  // ---- 「报告问题」（task-131，契约由 Lead 冻结，后端实现是 task-130）---------
+  //
+  // ⚠️ `incident_anomalies(limit)` **故意没有封装**：卡里只给了 `Anomaly[]`，
+  // 没给字段。猜一个形状就是编接口（已报 Lead）。角标只用下面这个计数。
+  /** 只在本地打包并返回清单，**不上传**。 */
+  incidentPreview: () => invoke<IncidentPreview>("incident_preview"),
+  incidentUpload: (bundlePath: string) =>
+    invoke<IncidentUpload>("incident_upload", { bundlePath }),
+  /** 本地待上报的异常条数（被动哨兵）。 */
+  incidentAnomalyCount: () => invoke<number>("incident_anomaly_count"),
 
   setMode: (mode: ProxyMode) => invoke<AppSnapshot>("set_mode", { mode }),
 

@@ -24,6 +24,7 @@ import { api } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
 import { useFollowScroll, usePreserveReadingPosition } from "../useFollowScroll";
 import { useStore } from "../store";
+import IncidentReport from "../IncidentReport";
 import { formatTimestamp } from "../types";
 
 const LEVELS = ["all", "info", "warn", "error", "debug"] as const;
@@ -272,6 +273,12 @@ export default function Logs() {
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* 「报告问题」（task-131）。挂在这里的理由写在 `IncidentReport.tsx` 顶部：
+          要报的问题，证据就是这一页的日志；而「报告问题」的第一步产出的正是
+          「日志 + 运行状态」的本地包。**刻意挂在诊断块之外** —— 那块（含脱敏说明）
+          归 task-124，本卡一行都不碰。 */}
+      <IncidentReport />
     </div>
   );
 }

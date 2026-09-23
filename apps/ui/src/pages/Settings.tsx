@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../ipc";
+import { CopyButton } from "../IncidentReport";
 import { InlineConfirm } from "../InlineConfirm";
 import { useStore } from "../store";
 import {
@@ -1236,16 +1237,18 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           <button className="btn" onClick={() => void runVoid("open-dir", () => api.openDataDir())}>
             打开数据目录
           </button>
-          <button
-            className="btn"
+          {/*
+            task-131（顺带修 task-128 点名的行为级缺陷）：原来是
+            `navigator.clipboard.writeText(text).catch(() => console.log(text))`
+            —— 剪贴板被拒时界面**毫无反应**，用户以为复制成功、贴出去是空的。
+            现在走共用的 `CopyButton`：成功有 `role="status"` 提示，
+            失败给 `role="alert"` + 一个可手动选中的文本区。
+          */}
+          <CopyButton
+            label="复制诊断报告"
             disabled={busy !== null}
-            onClick={async () => {
-              const text = await api.diagnostics();
-              await navigator.clipboard.writeText(text).catch(() => console.log(text));
-            }}
-          >
-            复制诊断报告
-          </button>
+            load={() => api.diagnostics()}
+          />
         </div>
         <div className="field__hint" style={{ marginTop: 10 }}>
           数据目录：<span className="mono">{snapshot.runtime.config_path?.replace(/\/runtime\/.*$/, "") ?? "~/Library/Application Support/com.xraytun.desktop"}</span>
