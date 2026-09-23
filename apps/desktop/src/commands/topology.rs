@@ -107,8 +107,95 @@ pub struct Topology {
     pub geo_available: bool,
 }
 
+/// **不是条件**的键：规则自身的元数据 / 出口指向。
+const NON_CONDITION_KEYS: [&str; 4] = ["type", "ruleTag", "outboundTag", "balancerTag"];
+
+/// 本版**翻译得了**的条件键（不在这里、也不是元数据的键 ⇒ 如实报「未识别」）。
+///
+/// 前 5 个走 [`RuleConds`]（`crates/xt-core/src/routing/explain.rs`）反序列化后的字段；
+/// 后 8 个 `RuleConds` **没有**对应字段，只能从**原始规则 JSON** 里读
+/// （serde 的 `flatten` 会把它们静默丢掉）。这正是 task-156 的原缺口：
+/// 带 `processName` / `protocol` / `sourceIP` 的规则以前显示成「（无显式条件）」。
+const TRANSLATED_CONDITION_KEYS: [&str; 13] = [
+    "inboundTag",
+    "domain",
+    "ip",
+    "port",
+    "network",
+    "sourceIP",
+    "user",
+    "protocol",
+    "processName",
+    "attrs",
+    "sourcePort",
+    "localIP",
+    "localPort",
+];
+
+/// 把 JSON 值渲染成配置里那样的一串（数组用「、」连；标量原样）。
+fn json_list(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|x| match x {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("、"),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// **从原始规则 JSON** 读出本版翻译得了、但 `RuleConds` 没建模的那几个条件。
+///
+/// 顺序固定（`sourceIP` → `user` → `protocol` → `processName` → `attrs` →
+/// `sourcePort` → `localIP` → `localPort`），保证呈现稳定、可测。
+fn describe_raw_conditions(raw: serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for (key, label) in [
+        ("sourceIP", "来源 IP"),
+        ("user", "用户"),
+        ("protocol", "协议"),
+        ("processName", "进程"),
+        ("attrs", "属性"),
+        ("sourcePort", "来源端口"),
+        ("localIP", "本机 IP"),
+        ("localPort", "本机端口"),
+    ] {
+        if let Some(v) = raw.get(key) {
+            out.push(format!("{label} {}", json_list(v)));
+        }
+    }
+    out
+}
+
+/// 原始规则里**出现了、但本版翻译不了**的条件键（元数据键与已翻译键不算）。
+fn unrecognized_condition_keys(raw: serde_json::Value) -> Vec<String> {
+    let Some(obj) = raw.as_object() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = obj
+        .keys()
+        .filter(|k| {
+            !NON_CONDITION_KEYS.contains(&k.as_str())
+                && !TRANSLATED_CONDITION_KEYS.contains(&k.as_str())
+        })
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
 /// 把规则的条件字段翻成一句人话。
-fn describe_conditions(rule: &Rule) -> Vec<String> {
+///
+/// # 两种「空」必须分开（task-156）
+///
+/// * **规则真的没有条件** ⇒ 返回空列表（界面显示「（无显式条件）」是对的）；
+/// * **有条件、只是本版不认识** ⇒ 返回「未识别的条件：<键名>」——
+///   「我们没翻译」不等于「规则没有条件」，后者会让用户以为这条规则可以随便动。
+fn describe_conditions(rule: &Rule, raw: Option<serde_json::Value>) -> Vec<String> {
     let mut out = Vec::new();
     if !rule.conds.inbound_tag.is_empty() {
         out.push(format!("入站 {}", rule.conds.inbound_tag.join("、")));
@@ -126,13 +213,33 @@ fn describe_conditions(rule: &Rule) -> Vec<String> {
     if let Some(n) = &rule.conds.network {
         out.push(format!("网络 {n}"));
     }
+    if let Some(raw) = raw {
+        let unrecognized = unrecognized_condition_keys(raw.clone());
+        out.extend(describe_raw_conditions(raw));
+        if !unrecognized.is_empty() {
+            // 放在最后、且**一定**说出来：有未知条件时绝不允许看起来像「没有条件」。
+            out.push(format!("未识别的条件：{}", unrecognized.join("、")));
+        }
+    }
     out
 }
 
-/// 从运行中的配置里读规则链。
-fn load_rules(store: &xt_core::store::Store) -> Result<Vec<Rule>, String> {
+/// 从运行中的配置里读规则链 + **原始规则数组**。
+///
+/// 为什么要一起返回：`RuleConds`（xt-core）只反序列化 5 个条件字段，其余会被
+/// serde 静默丢掉；要判断「这条规则有没有我们**没翻译**的条件」，只能看原始 JSON。
+/// 同一次读取 ⇒ 两边顺序严格对应（按 index 配对）。
+fn load_rules(
+    store: &xt_core::store::Store,
+) -> Result<(Vec<Rule>, Vec<serde_json::Value>), String> {
     let cfg = read_runtime_config(store)?;
-    rules_from_config(&cfg)
+    let raw = cfg
+        .get("routing")
+        .and_then(|r| r.get("rules"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok((rules_from_config(&cfg)?, raw))
 }
 
 /// 读运行中的配置。读不到时给出**能读懂的原因**（最常见就是核心没在跑）。
@@ -276,6 +383,7 @@ fn assemble_topology(
     inbounds: Vec<InboundInfo>,
     outbounds: Vec<OutboundInfo>,
     rules: &[Rule],
+    raw_rules: &[serde_json::Value],
     traffic: &TrafficRead,
     geo_available: bool,
     connections: &HashMap<String, u64>,
@@ -317,7 +425,7 @@ fn assemble_topology(
             index,
             tag: r.tag.clone().unwrap_or_else(|| format!("规则 #{index}")),
             outbound: r.outbound.clone(),
-            conditions: describe_conditions(r),
+            conditions: describe_conditions(r, raw_rules.get(index).cloned()),
         })
         .collect();
 
@@ -338,7 +446,7 @@ pub async fn routing_topology(
     state: State<'_, AppState>,
 ) -> Result<Topology, String> {
     let store = &state.store;
-    let rules = load_rules(store)?;
+    let (rules, raw_rules) = load_rules(store)?;
     let (inbounds, outbounds) = load_endpoints(store);
 
     // 流量：核心没在跑时拿不到，如实记录原因而不是画 0。
@@ -366,6 +474,7 @@ pub async fn routing_topology(
         inbounds,
         outbounds,
         &rules,
+        &raw_rules,
         &traffic,
         crate::supervisor::geo_dir(state.store.root()).is_some(),
         &connections,
@@ -420,7 +529,7 @@ pub async fn explain_dest(
     if dest.is_empty() {
         return Err("请输入域名或 IP".into());
     }
-    let rules = load_rules(&state.store)?;
+    let (rules, _) = load_rules(&state.store)?;
 
     // geo 数据的加载成本不低（解析 28MB 的 protobuf），缓存起来。
     let geo: Arc<GeoData> = {
@@ -530,7 +639,7 @@ mod tests {
             }
         ]));
         let rules = rules_from_config(&cfg).unwrap();
-        let got = describe_conditions(&rules[0]);
+        let got = describe_conditions(&rules[0], None);
         assert_eq!(got, vec!["域名 geosite:cn", "IP geoip:cn", "端口 443"]);
     }
 
@@ -550,7 +659,7 @@ mod tests {
         let cfg = cfg_with(serde_json::json!([]));
         let (inbounds, outbounds) = endpoints_from_config(&cfg);
         let rules = rules_from_config(&cfg).unwrap();
-        assemble_topology(inbounds, outbounds, &rules, read, true, &Default::default())
+        assemble_topology(inbounds, outbounds, &rules, &[], read, true, &Default::default())
     }
 
     /// 某个出口的 (上行, 下行)。
@@ -588,7 +697,7 @@ mod tests {
         });
         let (inbounds, outbounds) = endpoints_from_config(&cfg);
         let rules = rules_from_config(&cfg).unwrap();
-        assemble_topology(inbounds, outbounds, &rules, read, true, conns)
+        assemble_topology(inbounds, outbounds, &rules, &[], read, true, conns)
     }
 
     /// **本次修复的核心语义**：`dns-out` / `api` 的字节计数器恒为 0
@@ -732,5 +841,109 @@ mod tests {
         let third = topo_from(&read_traffic(Ok(after), &mut counters));
         assert_eq!(out_bytes(&third, "node-abc"), (0, 9_007), "基准仍是 9000");
         assert_eq!(third.counter_resets, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // task-156：条件翻译要「如实」——「我们没翻译」≠「规则没有条件」
+    // -----------------------------------------------------------------------
+
+    fn rules_of(cfg: &serde_json::Value) -> (Vec<Rule>, Vec<serde_json::Value>) {
+        let raw = cfg["routing"]["rules"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        (rules_from_config(cfg).expect("解析规则"), raw)
+    }
+
+    /// 走**真实** `assemble_topology`（不是镜像一份配对逻辑）：原始规则按 index 与
+    /// 解析出的规则配对，条件字符串才有位置正确性可言。
+    fn conditions_of(cfg: &serde_json::Value) -> Vec<Vec<String>> {
+        let (rules, raw) = rules_of(cfg);
+        assemble_topology(
+            vec![],
+            vec![],
+            &rules,
+            &raw,
+            &TrafficRead::default(),
+            false,
+            &HashMap::new(),
+        )
+        .rule
+        .into_iter()
+        .map(|r| r.conditions)
+        .collect()
+    }
+
+    /// 每种新翻译字段一条「字段=X ⇒ 呈现=Y」。
+    #[test]
+    fn describes_the_fields_that_used_to_fall_through() {
+        let cfg = cfg_with(serde_json::json!([
+            {
+                "type": "field", "outboundTag": "direct",
+                "sourceIP": ["192.168.1.7"], "user": ["alice"],
+                "protocol": ["http", "tls"], "processName": ["curl"],
+                "attrs": "header:X-A=1", "sourcePort": "5000-6000",
+                "localIP": ["127.0.0.1"], "localPort": "1080"
+            }
+        ]));
+        assert_eq!(
+            conditions_of(&cfg)[0],
+            vec![
+                "来源 IP 192.168.1.7",
+                "用户 alice",
+                "协议 http、tls",
+                "进程 curl",
+                "属性 header:X-A=1",
+                "来源端口 5000-6000",
+                "本机 IP 127.0.0.1",
+                "本机端口 1080",
+            ],
+            "`RuleConds` 没建模的 8 个字段必须从原始 JSON 翻出来"
+        );
+    }
+
+    /// **反例（本卡的核心）**：有未知字段时**绝不许**显示成「没有条件」。
+    #[test]
+    fn unknown_conditions_are_never_reported_as_no_conditions() {
+        let cfg = cfg_with(serde_json::json!([
+            { "type": "field", "outboundTag": "direct", "futureField": ["x"] }
+        ]));
+        let got = conditions_of(&cfg)[0].clone();
+        assert!(
+            !got.is_empty(),
+            "规则里明明有 futureField，不许当成「无显式条件」：{got:?}"
+        );
+        assert!(
+            got.iter()
+                .any(|c| c.contains("未识别的条件") && c.contains("futureField")),
+            "要如实说「未识别的条件」并点名键：{got:?}"
+        );
+    }
+
+    /// 已翻译与未翻译**并存**时：已知的照样翻，未知的**一定**在后面说出来。
+    #[test]
+    fn known_and_unknown_conditions_are_both_shown() {
+        let cfg = cfg_with(serde_json::json!([
+            {
+                "type": "field", "outboundTag": "direct",
+                "domain": ["geosite:cn"], "futureField": ["x"], "another": 1
+            }
+        ]));
+        assert_eq!(
+            conditions_of(&cfg)[0],
+            vec!["域名 geosite:cn", "未识别的条件：another、futureField"],
+            "未知键要按名字排序、一个不漏"
+        );
+    }
+
+    /// 反例的另一半：**真的没有条件**时才是空列表（界面显示「（无显式条件）」才成立）。
+    /// `type: "field"` 是规则种类、**不是**条件 ⇒ 不许被当成「未识别」。
+    #[test]
+    fn a_rule_with_no_conditions_is_still_empty() {
+        let cfg = cfg_with(serde_json::json!([
+            { "type": "field", "outboundTag": "direct" },
+            { "type": "field", "ruleTag": "只有名字", "outboundTag": "block" }
+        ]));
+        assert_eq!(conditions_of(&cfg), vec![Vec::<String>::new(); 2]);
     }
 }
