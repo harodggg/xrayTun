@@ -200,14 +200,16 @@ export default function Logs() {
                   · 公开目标域名（`www.baidu.com`）保留，否则报告没法看；
                   · 订阅 URL **只抹凭据、主机名（机场域名）保留** —— 这是 `task-113`
                     现场包 README 的同一套口径，**必须点名写清**，不许让用户以为整条都没了。
-                  只有一种形态覆盖不到，所以直接点名写出来：base64 载荷。 */}
+                  覆盖不到的形态有**两种**，都直接点名写出来（不许笼统地让用户自查）：
+                  base64 载荷；以及**不以主目录开头、但带用户名的路径**（如 `/var/folders/…`）。 */}
               已抹掉：<strong>节点地址/域名</strong>与 IP:port（换成 <code>&lt;addr&gt;</code>）、
               UUID 形状的 token、以及订阅 URL 里的<strong>凭据</strong>。
               注意订阅 URL 是<strong>只抹凭据、主机名（机场域名）会保留</strong>；
               用户主目录折成 <code>/Users/&lt;user&gt;/…</code>。App/核心/助手版本、时间，
               以及 <code>www.baidu.com</code> 这类公开目标域名与本机地址（<code>127.0.0.1</code>、
-              fake-IP 段）保留 —— 排查要用。唯一覆盖不到的形态是 <strong>base64 载荷</strong>
-              （如 vmess 分享链接里那段），日志里出现时请手动删掉再贴。
+              fake-IP 段）保留 —— 排查要用。仍覆盖不到的形态有<strong>两种</strong>，都点名写出：
+              <strong>base64 载荷</strong>（如 vmess 分享链接里那段）与<strong>不以主目录开头、
+              但带用户名的路径</strong>（如 <code>/var/folders/…</code>）。日志里出现时请手动删掉再贴。
             </span>
             <span className="spacer" />
             {/* task-124：这里原来是**裸** `navigator.clipboard.writeText(diagnostics)`

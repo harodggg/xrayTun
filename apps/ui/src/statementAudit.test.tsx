@@ -247,7 +247,12 @@ describe("task-120 · 日志页的三种「空」与诊断说明", () => {
       "只抹凭据、主机名（机场域名）会保留",
     );
     expect(flat, "用户主目录折成 /Users/<user>/… 也要写出来").toContain("/Users/<user>/…");
-    expect(text, "覆盖不到的形态要**点名**（base64），不能笼统地让用户自查").toContain("base64");
+    expect(
+      text,
+      "覆盖不到的形态要**逐个点名**（base64 与非 HOME 的用户名路径），不能笼统地让用户自查",
+    ).toContain("base64");
+    expect(flat, "第二种覆盖不到的形态也要点名（/var/folders/…）").toContain("/var/folders/…");
+    expect(text, "不许再声称「只有一种」覆盖不到").not.toContain("唯一覆盖不到");
     expect(text, "不能再说「可以直接贴到公开的 issue 里」").not.toContain("可以直接贴到公开的 issue");
   });
 

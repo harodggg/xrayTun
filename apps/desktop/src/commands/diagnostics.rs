@@ -392,7 +392,10 @@ pub(crate) fn home_dir() -> Option<String> {
 /// * 传输层的 `host`（WebSocket / HttpUpgrade / XHTTP 的 Host 头 —— 那通常
 ///   就是用户服务器的域名）；
 /// * **节点名里形如域名/IP 的段**：订阅常把节点名起成 `jp1.example.com`，
-///   名字里的国旗/「香港 01」这类标签不含地址，不动。
+///   名字里的国旗/「香港 01」这类标签不含地址，不动；
+///   ⚠️ 名字也可能是 `Xray-<地址>` / `Xray<地址>` 这种「前缀 + 地址」——
+///   所以这里**按 `-`/`_` 再切一次**，并额外扫一遍名字里**任何位置**的 IP 字面量
+///   （tester 的独立验证证明只靠形状启发式会漏，见 `hostname_runs`）。
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ReportRedaction {
     /// 去重后按**长度降序**（见 `from_nodes` 里的理由）。
@@ -478,11 +481,23 @@ impl ReportRedaction {
 
     /// 在 `i` 处匹配一个节点地址/域名（忽略大小写），连同紧跟的 `:port`。
     ///
-    /// 边界只挡 `[A-Za-z0-9_-]`，**不挡 `.`**：这样
-    /// `www.<节点域名>` 与 `<节点域名>.cn` 里的节点域名都会被吃掉，
-    /// 不会因为多了个前缀/后缀就把节点域名漏在报告里。
+    /// # 边界规则（task-124 delta 后）
+    ///
+    /// * **不挡 `.`**：这样 `www.<节点域名>` 与 `<节点域名>.cn` 里的节点域名都会被
+    ///   吃掉，不会因为多了个前缀/后缀就把节点域名漏在报告里；
+    /// * **不挡 `-`/`_`**：节点显示名就是 `Xray-<地址>` 这种形状；
+    /// * **当条目本身是 IP 字面量时，连左边界也不要求**：名字里会出现
+    ///   `Xray45.207.197.185`（地址**紧贴字母**，没有分隔符）。
+    ///   代价是**可能多抹** —— 例如 `v1.2.3.4` 这种四段版本号若恰好等于节点 IP
+    ///   也会被抹。隐私优先：宁可多抹一个字符串，也不漏一个真实的服务器地址。
+    ///   域名条目**保持**左边界严格，否则 `xnode-example.xyz` 会被误伤成节点域名。
     fn match_at(&self, line: &str, i: usize) -> Option<usize> {
-        if !boundary_before(line, i) {
+        if !boundary_before(line, i)
+            && !self
+                .entries
+                .iter()
+                .any(|c| c.parse::<IpAddr>().is_ok() && line.get(i..i + c.len()).is_some_and(|s| s.eq_ignore_ascii_case(c)))
+        {
             return None;
         }
         for cand in &self.entries {
@@ -497,15 +512,46 @@ impl ReportRedaction {
     }
 }
 
-/// 一段文本里**形如地址**的那些段（用于节点名）：按 `[A-Za-z0-9._-]` 切段，
-/// 再要求每段**整体**是 IP 字面量或域名形状 —— 这一步只在**节点列表内部**做，
-/// 不拿它去扫日志内容。
+/// 一段文本里**形如地址**的那些段（用于节点名）。
+///
+/// # 为什么要切两轮（task-124 delta，tester 的独立验证抓到的真泄漏）
+///
+/// 节点显示名常常是 `Xray-<IP>` / `Xray-<域名>` 这种「前缀 + 地址」的形状：
+/// * 只按 `[A-Za-z0-9._-]` 切 => 整段是 `Xray-45.207.197.185`，既不像 IP 也不像域名
+///   ⇒ **地址根本没进判据集合**（tester 实测：2 个节点只产出 3 个条目）；
+/// * 所以这里**再按 `-`/`_` 切一次**，逐段判；
+/// * 再补一条：名字里**任何位置**出现的 IP 字面量（`Xray45.207.197.185` 这种连在一起、
+///   没有分隔符的也收）—— 不靠形状启发式，直接扫。
+///
+/// 这一步**只在节点列表内部**做，不拿它去扫日志内容。
 fn hostname_runs(name: &str) -> Vec<String> {
-    name.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'))
-        .map(|t| t.trim_matches(|c: char| c == '.' || c == '-' || c == '_'))
-        .filter(|t| address_shaped(t))
-        .map(str::to_string)
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    for token in
+        name.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'))
+    {
+        let t = token.trim_matches(|c: char| c == '.' || c == '-' || c == '_');
+        if address_shaped(t) {
+            out.push(t.to_string());
+        }
+        // 再按 `-`/`_` 切一次：`Xray-jp1.example.com` ⇒ `jp1.example.com`
+        for piece in t.split(['-', '_']) {
+            if address_shaped(piece) {
+                out.push(piece.to_string());
+            }
+        }
+    }
+    // 名字里**任何位置**的 IP 字面量（含紧贴字母的 `Xray45.207.197.185`）。
+    let mut i = 0usize;
+    while i < name.len() {
+        if let Some((ip, len)) = parse_ip_at(name, i) {
+            out.push(ip.to_string());
+            i += len;
+            continue;
+        }
+        let Some(c) = name[i..].chars().next() else { break };
+        i += c.len_utf8();
+    }
+    out
 }
 
 fn address_shaped(s: &str) -> bool {
@@ -627,17 +673,21 @@ fn redact_with(line: &str, addresses: &ReportRedaction, allow_url: bool) -> Stri
 
 /// 边界：**匹配串之前**那个字符不能是 `[A-Za-z0-9_-]`（`.` 允许 —— 见
 /// `ReportRedaction::match_at`：这样才能吃掉 `www.<节点域名>` 的前缀）。
+/// 边界：**匹配串之前**那个字符不能是字母/数字（`.` 与 `-`/`_` 都**允许** ——
+/// `.` 是为了吃掉 `www.<节点域名>` 的前缀；`-`/`_` 是因为节点显示名里就是
+/// `Xray-<地址>` 这种形状，挡掉它们等于把地址原样留在报告里。放宽的代价是**可能多抹**，
+/// 在隐私方向上是安全的（诚实清单里写明）。
 fn boundary_before(line: &str, at: usize) -> bool {
     !is_word_char(line[..at].chars().next_back())
 }
 
-/// 边界：**匹配串之后**那个字符不能是 `[A-Za-z0-9_-]`。
+/// 边界：**匹配串之后**那个字符不能是字母/数字（同上，`-`/`_` 也允许）。
 fn boundary_after(line: &str, at: usize) -> bool {
     !is_word_char(line[at..].chars().next())
 }
 
 fn is_word_char(c: Option<char>) -> bool {
-    c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    c.is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
 fn match_uuid(line: &str, i: usize) -> Option<usize> {
@@ -652,18 +702,24 @@ fn match_uuid(line: &str, i: usize) -> Option<usize> {
     Some(36)
 }
 
-/// `IP:port` / 裸 `IP` / `[v6]:port` / 裸 `[v6]`。返回 (地址, 匹配的字节数)。
+/// `IP:port` / 裸 `IP` / `[v6]:port` / 裸 `[v6]`（**带词边界**；日志用这条）。
 fn match_ip_literal(line: &str, i: usize) -> Option<(IpAddr, usize)> {
     if !boundary_before(line, i) {
         return None;
     }
-    let rest = &line[i..];
+    let (ip, len) = parse_ip_at(line, i)?;
+    boundary_after(line, i + len).then_some((ip, len))
+}
+
+/// 同上但**不看边界**：给「节点名里任何位置的 IP 字面量」用（`Xray45.207.197.185`）。
+fn parse_ip_at(line: &str, i: usize) -> Option<(IpAddr, usize)> {
+    let rest = line.get(i..)?;
     // 带方括号的 IPv6（Xray 日志里的形式：`tcp:[240e:…]:443`）。
     if let Some(inner) = rest.strip_prefix('[') {
         let close = inner.find(']')?;
         let ip: Ipv6Addr = inner.get(..close)?.parse().ok()?;
         let len = 1 + close + 1 + optional_port_len(&inner[close + 1..]);
-        return boundary_after(line, i + len).then_some((IpAddr::V6(ip), len));
+        return Some((IpAddr::V6(ip), len));
     }
     // 取一段地址字符，够长就行（v6 最长 39 + 端口 6）。
     let run_len = rest
@@ -676,11 +732,11 @@ fn match_ip_literal(line: &str, i: usize) -> Option<(IpAddr, usize)> {
     let head = run.split(':').next().unwrap_or(run);
     if let Ok(v4) = head.parse::<Ipv4Addr>() {
         let len = head.len() + optional_port_len(&run[head.len()..]);
-        return boundary_after(line, i + len).then_some((IpAddr::V4(v4), len));
+        return Some((IpAddr::V4(v4), len));
     }
     // 裸 IPv6（`12:34:56` 这类三段不是合法 v6，因此时间戳不会被误抹）。
     if let Ok(v6) = run.parse::<Ipv6Addr>() {
-        return boundary_after(line, i + run.len()).then_some((IpAddr::V6(v6), run.len()));
+        return Some((IpAddr::V6(v6), run.len()));
     }
     None
 }
@@ -973,6 +1029,56 @@ mod tests {
             let none = ReportRedaction::from_nodes_and_home(&[], None);
             let line = "内核路径 /Users/alice/bin/xray";
             assert_eq!(redact_secrets(line, &none), line);
+        }
+
+        /// **task-124 delta（tester 独立验证抓到的真泄漏）**：节点**显示名**里的地址。
+        ///
+        /// 真实形状（tester 在本机日志上实测 **2 行**）：
+        /// `已作废「自动重连」意图 … 当前节点「Xray-<节点IP>」` —— 这属于**自愈事件**族，
+        /// 正是用户最可能贴出去的内容。两条漏因都必须被这条钉住：
+        /// ① 名字里的 IP 没进判据集合；② `-` 被当成词字符挡住边界。
+        ///
+        /// 这里**只给节点名**（address/SNI/host 都空）⇒ 判据必须真的从名字里取出来。
+        #[test]
+        fn node_address_inside_the_display_name_is_redacted() {
+            let nodes = vec![fixture_node("", "Xray-45.207.197.185", "", "")];
+            let addresses = ReportRedaction::from_nodes(&nodes);
+            let line =
+                "已作废「自动重连」意图（自动重连多次仍未成功（门禁未过））当前节点「Xray-45.207.197.185」";
+            let out = redact_secrets(line, &addresses);
+            assert!(!out.contains("45.207.197.185"), "节点名里的 IP 仍然泄漏：{out}");
+            assert!(!out.contains("Xray-45.2"), "名字里的地址没有被整体吃掉：{out}");
+            // 反例（不许为了省事把整行抹掉）：事件文案与「当前节点」都还要在。
+            assert!(out.contains("已作废"), "{out}");
+            assert!(out.contains("当前节点"), "{out}");
+        }
+
+        /// 名字里地址的两种变体：**紧贴字母**（`Xray45.207…`）与**域名形式**
+        /// （`Xray-jp1.example.xyz`，节点的 address 是别的 IP ⇒ 域名只能从名字里来）。
+        #[test]
+        fn glued_ip_and_domain_inside_the_name_are_also_redacted() {
+            let nodes = vec![
+                fixture_node("", "Xray45.207.197.185", "", ""),
+                fixture_node("1.0.0.1", "Xray-jp1.node-example.xyz", "", ""),
+            ];
+            let addresses = ReportRedaction::from_nodes(&nodes);
+            let out = redact_secrets(
+                "节点 Xray45.207.197.185 与 Xray-jp1.node-example.xyz 都该被抹",
+                &addresses,
+            );
+            assert!(!out.contains("45.207.197.185"), "{out}");
+            assert!(!out.contains("jp1.node-example.xyz"), "{out}");
+        }
+
+        /// 边界放宽：地址紧跟 `-`/`_` 之后也要命中（节点显示名就是这种形状）。
+        ///
+        /// **代价（诚实清单里有）**：可能多抹 —— `pre-1.0.0.1` 这种纯文案也会被抹。
+        /// 隐私方向上这是安全的取舍：宁可多抹一个字符串，也不漏一个真实的服务器地址。
+        #[test]
+        fn addresses_after_hyphen_or_underscore_are_redacted() {
+            let empty = ReportRedaction::default();
+            let out = redact_secrets("前缀-1.0.0.1 与 前缀_1.0.0.1", &empty);
+            assert!(!out.contains("1.0.0.1"), "紧跟在 -/_ 之后也要抹：{out}");
         }
 
         /// 规则 1 优先于规则 3：**命中节点列表的私网地址也要抹**（自建节点常在 LAN 里）。
