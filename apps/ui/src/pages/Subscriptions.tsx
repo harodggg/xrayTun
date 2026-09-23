@@ -156,7 +156,9 @@ function SubscriptionRow({
   const total = usage?.total ?? 0;
   const ratio = usage && total > 0 ? Math.min(1, used / total) : null;
   const tone = usageTone(ratio);
-  const low = lowQuotaLabel(ratio);
+  // task-155：`ratio` 被 `Math.min(1, …)` 压到 1 ⇒ 单看它**分不出**「刚好用完」与「超额」，
+  // 所以余量结论必须拿到**原始**的 used/total（下面 `quotaLabel`）。
+  const low = quotaLabel(ratio, used, total);
 
   return (
     <div className={`list__row sub-row${sub.last_error ? " sub-row--error" : ""}`} style={{ cursor: "default" }}>
@@ -255,9 +257,19 @@ function usageTone(ratio: number | null): "" | "warn" | "danger" {
   return "";
 }
 
-/** 余量偏低时的结论文字；不低就没有。阈值与 [`usageTone`] 共用同一组常量。 */
-function lowQuotaLabel(ratio: number | null): string | null {
-  if (ratio === null) return null;
+/**
+ * 余量结论。阈值与 [`usageTone`] 共用同一组常量。
+ *
+ * task-155：原来只吃**被压到 1** 的 `ratio` ⇒ `used >= total` 时写「即将用尽」，
+ * 而 `ratio` 上限是 1、永远到不了「已用尽」以上 ⇒ **已经超额**的订阅也会被告知「即将用尽」。
+ * 那会让用户以为还有余量、继续用（或者不急着续费）。现在据**原始** used/total 分开说：
+ * 「已用尽」与「已超额（超出 X）」是两件不同的事，都不许再用「即将」。
+ */
+function quotaLabel(ratio: number | null, used: number, total: number): string | null {
+  if (ratio === null || total <= 0) return null;
+  if (used >= total) {
+    return used > total ? `已超额（超出 ${formatBytes(used - total)}）` : "已用尽";
+  }
   if (ratio >= DANGER_RATIO) return "即将用尽";
   if (ratio >= WARN_RATIO) return "余量偏低";
   return null;

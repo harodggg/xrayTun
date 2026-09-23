@@ -34,12 +34,28 @@ export function DestChecker({ geoAvailable }: { geoAvailable: boolean }) {
     }
   };
 
+  /**
+   * 判定结论（task-155）。
+   *
+   * 原来用 `result.rule_tag` 判「有没有命中」—— 而「命中」的**权威判据是 `rule_index`**
+   * （`crates/xt-core/src/routing/explain.rs:274`：命中时 `rule_index: Some(idx)`）。
+   * `rule_tag` 来自 `rule.tag`（`Option<String>`），**可以为空**：那时旧代码会把
+   * 「命中了第 N 条规则」说成「**未命中任何规则 → 使用第一条出站**」——
+   * 而屏幕上那个 `outbound` 其实是**那条命中规则**的出站，不是兜底，
+   * 用户会据此得出错误结论（`explain.rs:283-287` 的未命中分支里 `outbound` 是空串）。
+   * 所以两种情形**分开呈现**。
+   */
   const verdict = useMemo(() => {
     if (!result) return null;
+    if (result.rule_index === null) {
+      return "未命中任何规则 → 使用第一条出站";
+    }
     if (result.rule_tag) {
       return `命中规则「${result.rule_tag}」→ 出站 ${result.outbound || "（默认）"}`;
     }
-    return "未命中任何规则 → 使用第一条出站";
+    return `命中第 ${result.rule_index + 1} 条规则（后端没有给出规则名）→ 出站 ${
+      result.outbound || "（默认）"
+    }`;
   }, [result]);
 
   return (
