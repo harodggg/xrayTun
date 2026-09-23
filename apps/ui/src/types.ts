@@ -263,13 +263,18 @@ export interface HelperAvailability {
 }
 
 /**
- * 已安装助手 vs App 包内助手的版本对照（task-84）。
+ * 已安装助手 vs App 包内助手的**兼容性判定**（task-84 / task-111）。
  *
  * App 更新**不会**刷新特权 helper（只有「重新安装助手」才会把包内那份拷过去），
- * 而路由/DNS 的安装与回滚都在 helper 里 —— 所以「装的」与「包里带的」不一致时，
+ * 而路由/DNS 的安装与回滚都在 helper 里 —— 所以「装的」与「包里带的」不兼容时，
  * helper 侧那一部分修复就没生效。
  *
- * 三态**必须分开**：`unreadable` 不等于 `mismatch`（读不到时不许提示重装，
+ * **判据是协议号相等，不是包版本相等**（`commands/helper.rs`）：
+ * 包版本不同**不算**不一致 —— App 0.8.34 + 已装 helper 0.8.33、协议同为 1 ⇒ `match`；
+ * 协议号**读不到**时保守**退回**「包版本相等」。因此 `mismatch` 包含两种情形：
+ * 两边协议号都读到但不相等（此时包版本可以相同），或协议号读不到且包版本也不同。
+ *
+ * 三态**必须分开**：`unreadable` 不等于 `mismatch`（连版本都读不出来时不许提示重装，
  * 否则是狼来了）；`match` 时界面不该提示任何东西。
  */
 export type HelperVersionCheck =

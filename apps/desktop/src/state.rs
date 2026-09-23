@@ -529,9 +529,18 @@ pub struct HelperAvailability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum HelperVersionCheck {
-    /// 两边都读到了，且版本一致 → **界面不该提示**。
+    /// 两边都读到了，且**协议号相等** → **界面不该提示**。
+    ///
+    /// 判据是**协议号**（`commands/helper.rs::helper_versions_are_compatible`），
+    /// **包版本不同不算不一致**：App 0.8.34 + 已装 helper 0.8.33、协议同为 1 ⇒ 就是这里。
+    /// `version` 报的是**已安装**（实际在跑）那份的**包版本**。
     Match { version: String },
-    /// 两边都读到了、版本不同 → 提示 + 「重新安装助手」入口。
+    /// 兼容性判据不满足 → 提示 + 「重新安装助手」入口。
+    ///
+    /// 两种情形都落到这里，**都不能再由包版本推出**：
+    /// * 两边**协议号都读到了、但不相等**（此时包版本可以相同）；
+    /// * **至少一边协议号读不到**（老二进制没有 `(protocol N)`）**且**包版本也不同
+    ///   —— 读不到时保守退回「包版本相等」，只有包版本也不同才判不一致。
     Mismatch {
         /// 磁盘上安装的那份（`/Library/PrivilegedHelperTools/…`）自报的版本。
         installed: String,
