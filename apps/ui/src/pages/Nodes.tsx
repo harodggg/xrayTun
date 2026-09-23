@@ -21,7 +21,14 @@ import { useMemo, useState } from "react";
 import { api, errorText } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
 import { useStore } from "../store";
-import { latencyTier, nodeSummary, type Node, type NodeExport } from "../types";
+import {
+  formatTimestamp,
+  latencyTier,
+  nodeSummary,
+  type Node,
+  type NodeExport,
+  type ProbeResult,
+} from "../types";
 
 export default function Nodes() {
   const { snapshot, busy, run, probing } = useStore();
@@ -155,10 +162,7 @@ export default function Nodes() {
               key={node.id}
               node={node}
               selected={node.id === selectedId}
-              latencyMs={latency[node.id]?.server_rtt_ms ?? null}
-              available={latency[node.id]?.available ?? null}
-              probed={latency[node.id] !== undefined}
-              latencyError={latency[node.id]?.error ?? null}
+              probe={latency[node.id]}
               busy={busy !== null}
               onSelect={() => void run("select", () => api.selectNode(node.id))}
               onDelete={() => void run("delete", () => api.deleteNode(node.id))}
@@ -238,10 +242,7 @@ export default function Nodes() {
 function NodeRow({
   node,
   selected,
-  latencyMs,
-  available,
-  latencyError,
-  probed,
+  probe,
   busy,
   onSelect,
   onDelete,
@@ -250,12 +251,8 @@ function NodeRow({
   node: Node;
   selected: boolean;
   /** 本地 → 服务器的 TCP 握手 RTT（中位数）。这是「延迟」。 */
-  latencyMs: number | null;
-  /** 经该节点能不能取到东西。`null` 表示还没测过。 */
-  available: boolean | null;
-  latencyError: string | null;
-  /** `latency[node.id]` 是否存在 —— 「探测过但量不到距离」与「没测过」的区别。 */
-  probed: boolean;
+  /** 这个节点的最近一次探测结果（`snapshot.latency[node.id]`）；`undefined` = 没测过。 */
+  probe: ProbeResult | undefined;
   busy: boolean;
   onSelect: () => void;
   onDelete: () => void;
@@ -269,13 +266,18 @@ function NodeRow({
   // 所以：不可用时降级成中性色，**并且两个徽章都带上文字标签**
   // （下面 `distanceLabel` / `availabilityLabel`），把语义从悬停提示里
   // 搬到界面上。
+  // 四个值**都来自同一个 `probe`**（task-154：原来它们是四个独立 props，容易各自漂移）
+  const latencyMs = probe?.server_rtt_ms ?? null;
+  const available = probe?.available ?? null;
+  const latencyError = probe?.error ?? null;
+  const probed = probe !== undefined;
   const tier = available === false ? "unknown" : latencyTier(latencyMs);
   const fromSubscription = node.source.kind === "subscription";
 
   const distanceLabel = distanceLabelFor(latencyMs, latencyError, probed);
   const distanceTitle = distanceTitleFor(latencyMs, available, latencyError, probed);
   const availabilityLabel = availabilityLabelFor(available);
-  const availabilityTitle = availabilityTitleFor(available, latencyError);
+  const availabilityTitle = availabilityTitleFor(probe);
   const availabilityTone = available === null ? "unknown" : available ? "fast" : "slow";
 
   return (
@@ -425,8 +427,25 @@ function availabilityLabelFor(available: boolean | null): string {
   return available ? "可用" : "不可用";
 }
 
-function availabilityTitleFor(available: boolean | null, latencyError: string | null): string {
-  if (available === null) return "尚未测试";
-  if (available) return "经该节点可以正常取到数据";
-  return latencyError ?? "经该节点取不到数据";
+/**
+ * 可用性徽章的悬停说明。
+ *
+ * task-154（B3）：原来 `available === true` 时只写「经该节点**可以正常**取到数据」——
+ * 「正常」没有依据，而且**没有时间限定**：`available` 的判据只是 `probe_one` 拿到了
+ * ≥1 字节（`crates/xt-core/src/xray/probe.rs:282-292`），它不看 `http_status`，
+ * 而探测结果会一直留在界面上（换网 / 节点被封后徽章不会自己变）。
+ * 现在只陈述**这次探测真正测到的东西**：HTTP 状态（有就写）、经节点耗时、以及**测于何时**。
+ */
+export function availabilityTitleFor(probe: ProbeResult | undefined): string {
+  if (!probe) return "尚未测试";
+  if (!probe.available) return probe.error ?? "经该节点取不到数据";
+  const bits = ["经该节点取到了数据"];
+  if (typeof probe.http_status === "number" && probe.http_status > 0) {
+    bits.push(`（HTTP ${probe.http_status}）`);
+  }
+  if (typeof probe.through_node_ms === "number") {
+    bits.push(`，经节点耗时 ${probe.through_node_ms} ms`);
+  }
+  bits.push(` · 测于 ${formatTimestamp(probe.tested_at)}`);
+  return bits.join("");
 }

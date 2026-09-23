@@ -6,7 +6,8 @@
  * 一条从本机公网出口到出口节点的**大圆弧**（球面上两点间的最短路径，也正是
  * 真实网络包大致会走的方向），飞机沿弧线飞；弧线两端各有一个位置点。
  *
- * 飞机的**数量**由这条航线的**累计流量**决定（`vehicleCount(route.bytes)`）——
+ * 飞机的**数量**由这条航线的**累计流量**决定（`vehicleCount(bytes, trafficOk)`；
+ * **0 字节或取不到流量时不画飞机** —— 见该函数的注释）——
  * v0.8.22 起 `route.bytes` 是「跨核心重启单调的累计值」，**不是当前速率**；
  * 飞的**快慢**根本不是数据驱动的，而是固定的视觉节奏（见下面的「哪些是真的」）。
  *
@@ -646,8 +647,10 @@ function drawScene(
     ctx.lineWidth = 1.6;
     ctx.stroke();
 
-    // 飞机：数量由实测字节决定
-    const planes = vehicleCount(route.bytes);
+    // 飞机：数量由实测字节决定（task-154 B2：`traffic_ok === false` 时 `bytes` 是**占位 0**，
+    // 而 `vehicleCount` 原来在 0 字节时也返回 1 ⇒ 会画出「一架飞机在飞」的假流量。
+    // 读不到时不画；真的是 0 字节也不画 —— 见 `vehicleCount` 的注释。）
+    const planes = vehicleCount(route.bytes, route.traffic_ok);
     for (let i = 0; i < planes; i++) {
       const u = (t / 7 + i / planes) % 1;
       const [sx, sy, pz] = arcPoint(u);
@@ -663,9 +666,20 @@ function drawScene(
   }
 }
 
-/** 飞机数量：按实测字节，每 512KB 一架，最多 6 架。 */
-function vehicleCount(bytes: number): number {
-  if (bytes <= 0) return 1;
+/**
+ * 飞机数量：按**实测**字节，每 512KB 一架，最多 6 架。
+ *
+ * task-154（B2）：两个边界都要堵住 ——
+ * * `trafficOk === false` ⇒ `bytes` 是 `GlobeRoute` 里的**占位 0**（不是读数）⇒ **不画飞机**；
+ * * `bytes === 0` ⇒ 这条航线**真的**没有累计流量（或刚建好）⇒ 也**不画**。
+ *
+ * 原来 `bytes <= 0` 时返回 **1**：那会在「核心没跑 / 取流量失败」时凭空画出一架在飞的飞机，
+ * 与同页那条「读不到就不写 0 B」的口径相反（本项目最忌的「把没有画成有」）。
+ * 导出是为了让这两条边界可以被直接断言（canvas 上的飞机没法从 DOM 断）。
+ */
+export function vehicleCount(bytes: number, trafficOk: boolean): number {
+  if (!trafficOk) return 0;
+  if (bytes <= 0) return 0;
   return Math.max(1, Math.min(6, Math.floor(bytes / (512 * 1024)) || 1));
 }
 

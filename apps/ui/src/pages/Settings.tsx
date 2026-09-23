@@ -936,8 +936,16 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           <div className="banner banner--warn" role="status" style={{ marginBottom: 14 }}>
             <span>⚠︎</span>
             <div>
-              已安装的助手是 <span className="mono">{versionCheck.installed}</span>，
-              随 App 附带的是 <span className="mono">{versionCheck.bundled}</span> —— 两者不一致。
+              {/* task-154 B5：原来写「已安装的助手是 X，随 App 附带的是 Y —— **两者不一致**」，
+                  而判据是**协议号相等**（`commands/helper.rs`），`mismatch` 里
+                  **包含「两边包版本相同、协议号不同」**这一情形 ⇒ 那句话会出现
+                  「0.8.33 与 0.8.33 两者不一致」的自相矛盾，用户会怀疑产品在胡说、
+                  或者白重装一次特权助手。现在只说**判据**与**该做什么**，
+                  不对两个版本号的关系下结论（协议号本身没有暴露在快照里，不编）。 */}
+              助手与 App 的<strong>兼容性检查没通过</strong>（判据是<strong>协议号</strong>，
+              不是包版本）。已安装的助手是 <span className="mono">{versionCheck.installed}</span>，
+              随 App 附带的是 <span className="mono">{versionCheck.bundled}</span>
+              —— <strong>版本号相同也可能不兼容</strong>（两边协议号不同就会走到这里）。
               助手负责安装路由与 DNS，<strong>不重装的话，助手侧的这部分修复不会生效</strong>
               （App 本身已经更新，其余修复不受影响）。
               <div style={{ marginTop: 8 }}>
@@ -1195,7 +1203,15 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           <div>
             <div className="kv__k">核心</div>
             <div className="kv__v mono">
-              {snapshot.update.core_version ?? "未找到"}
+              {/* task-154 B9：原来 `?? "未找到"`。而 `core_version` 来自
+                  `core.version`（`snapshot.rs:587`），= `xray version` 的第一行；
+                  核心**找得到但这条命令没给出可解析输出**时它也是 null ⇒
+                  界面上「内核」一节显示着路径、这里却说「未找到」，用户会以为核心没装。
+                  现在按 `core.path` 区分两种 null（不编版本号）。 */}
+              {snapshot.update.core_version ??
+                (snapshot.core.path
+                  ? "读不到版本（核心在，但 `xray version` 没有给出可解析的输出）"
+                  : "未找到核心")}
               {snapshot.update.core_managed && (
                 <span className="field__hint" style={{ marginLeft: 6 }}>（更新版）</span>
               )}

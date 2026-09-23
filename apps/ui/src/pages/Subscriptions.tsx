@@ -202,8 +202,12 @@ function SubscriptionRow({
           <div className="sub-row__err">
             上次更新失败：{sub.last_error}
             <span className="sub-row__err-hint">
+              {/* task-154 B7：原来写「已有节点**仍然可用**」—— 后端在刷新失败时只保证
+                  「节点还在列表里」（`commands/nodes.rs` 不动 `i.nodes`），
+                  没有任何可用性探测参与 ⇒ 那是**没根据的断言**（节点可能已失效）。
+                  只陈述后端真正保证的那件事。 */}
               {nodeCount > 0
-                ? "（已有节点仍然可用，可以稍后重试）"
+                ? "（已有节点仍保留在列表里，可以稍后重试；这次失败不影响它们的可用性判断）"
                 : "（拉取失败时不会移除既有节点，直接重试即可）"}
             </span>
           </div>
