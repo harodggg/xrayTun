@@ -56,8 +56,11 @@
 1. **随时**：`DELETE /api/incident/<id>`（带 `X-Auth-Token`）会同时删掉 zip 与 manifest ——
    用于「用户要求删除」；
 2. **到期自动**：30 天后 lifecycle 删除（见上）；
-3. **彻底停止**：维护者 `npx wrangler delete`（摘掉端点）+ `npx wrangler r2 bucket delete xraytun-incident`
+3. **彻底停止**：维护者 `npx wrangler delete`（摘掉端点）+ `npx wrangler r2 bucket delete xraytun-incidents`
    （清空数据），用户再吊销 Cloudflare API Token。步骤见 README「回滚 / 撤销」。
+   （桶名带 **s**：真实名是 `xraytun-incidents`，见 `wrangler.toml` 的 `bucket_name`。
+   写错一个字母这条命令只会返回 `bucket not found` —— 而这一步正是「用户要求彻底删除数据」，
+   最不该失效的一步。）
 
 ## 6. 上传是「你点的那一下」
 
