@@ -27,7 +27,12 @@ compatibility_date = "2026-09-22"
 # 2026-09-23 的真实事故：先被当成 `vars.routes` 环境变量，改成放前面后又落进 `[[r2_buckets]]`
 # （wrangler 只给一句 `Unexpected fields found in r2_buckets[0] field: "routes"`）。
 # 部署后**必须**用 `GET /zones/<zone>/workers/routes` 或直接 `curl -X POST` 复核，别看部署日志说成功。
+#
+# ⚠️ 两条 pattern 都要：`/api/incident/*` **不匹配** `/api/incident` 本身（少了尾部斜杠就是另一种路径），
+#    而 worker 的上传入口恰好是「`POST <base>` 且 rest 为空」⇒ 只写带 `/*` 的那条，
+#    `POST https://xraytun.top/api/incident` 会落到 Pages，返回 **405**（2026-09-23 的第二次事故）。
 routes = [
+  { pattern = "xraytun.top/api/incident", zone_name = "xraytun.top" },
   { pattern = "xraytun.top/api/incident/*", zone_name = "xraytun.top" }
 ]
 
