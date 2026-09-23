@@ -120,14 +120,24 @@ function authorized(request, env) {
  * **诚实边界**：这是 best-effort（每个 isolate 一份内存），不是全局精确限流；
  * 需要强一致就得用 Durable Objects / KV，那超出本卡范围（写进 README）。
  */
-const RATE_SALT = (() => {
-  const b = new Uint8Array(16);
-  crypto.getRandomValues(b);
-  return Array.from(b).map((x) => x.toString(16).padStart(2, '0')).join('');
-})();
+// ⚠️ 盐**不能在模块顶层生成**：workerd 禁止在 global scope 里做「异步 I/O / 设超时 / 取随机值」。
+// 2026-09-22 的真实部署事故就是这么被拒的：
+//   Uncaught Error: Disallowed operation called within global scope.  … [code: 10021]
+// （`node --test` 不执行这条运行时限制 ⇒ 本地 16 条全绿也抓不到它；所以另有 `smoke.sh` 用真 workerd 冒烟。）
+// 设计意图不变：盐只在**本 isolate 的内存**里、首次用到时惰性生成、isolate 重启即失效。
+let rateSalt = null;
+
+function getRateSalt() {
+  if (rateSalt === null) {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    rateSalt = Array.from(b).map((x) => x.toString(16).padStart(2, '0')).join('');
+  }
+  return rateSalt;
+}
 
 export async function rateKey(ip) {
-  return (await sha256Hex(new TextEncoder().encode(`${RATE_SALT}:${ip}`))).slice(0, 16);
+  return (await sha256Hex(new TextEncoder().encode(`${getRateSalt()}:${ip}`))).slice(0, 16);
 }
 
 export function clientIp(request) {
