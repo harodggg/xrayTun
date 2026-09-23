@@ -1,0 +1,165 @@
+{
+  "caliber": {
+    "tool": "triage-incident/1（2026-09-22）",
+    "bundle": "bundle.zip",
+    "bundle_files": {
+      "manifest.json": {
+        "bytes": 3186,
+        "sha256": "a89fe7e9353feba3ecb4296850b315492c65a656be5a64c67b886786ae6cd6a3"
+      },
+      "metrics.json": {
+        "bytes": 2810,
+        "sha256": "375ff24a884e4fd6f9588ebc26134fad1ffbf9f1a3dbac28abca74f63efaeb2c"
+      },
+      "events.jsonl": {
+        "bytes": 5491,
+        "sha256": "58c94aae62c432ccee37c47dbee0988e9d1096a26cefefc61228e3f2ef1f3165"
+      },
+      "core-tail.txt": {
+        "bytes": 2097388,
+        "sha256": "79a111c2a21da671f108405fbe446394852ae1705e6a8c1ccd16824478779192"
+      },
+      "network.txt": {
+        "bytes": 5356,
+        "sha256": "d56a9652cb1b99140c31dbd8aefafdad3a0777fbe8b6ffc2075d90e147644e0d"
+      },
+      "README.txt": {
+        "bytes": 2086,
+        "sha256": "ec84e05e7833228058072caf844abb545994e1568a26e99af5bfdc71bcc01082"
+      }
+    },
+    "manifest_sha256": "a89fe7e9353feba3ecb4296850b315492c65a656be5a64c67b886786ae6cd6a3",
+    "window": {
+      "since_epoch": 1790166472,
+      "until_epoch": 1790166989,
+      "since_local": "2026-09-23 20:27:52",
+      "until_local": "2026-09-23 20:36:29",
+      "source": "**退让口径**：最近一次核心启动（ps 取不到 App 启动时刻 ⇒ 窗口不是 App 启动至今）",
+      "degraded": true,
+      "note": "窗口**不是**「本次 App 启动至今」：取不到进程启动时刻，已退让并在此标注"
+    },
+    "app_version": "0.8.36",
+    "core_version": "26.9.9",
+    "helper_check": {
+      "state": "Mismatch",
+      "installed": "0.8.35",
+      "bundled": "0.8.36"
+    },
+    "thresholds": {
+      "tun_einval_per_min": 1.0,
+      "watchdog_window_secs": 60,
+      "write_interleave_fixed_version": "0.8.34"
+    },
+    "notes": [],
+    "boundary": "命中是**症状**不是根因；只看包里有的东西"
+  },
+  "signature": "multiple",
+  "hits": [
+    "probe-false-negative",
+    "helper-mismatch",
+    "loopback-hole",
+    "tun-iface-einval"
+  ],
+  "closest": [
+    "log-read-loss",
+    "v6-rewrite",
+    "watchdog-false-positive"
+  ],
+  "signatures": {
+    "v6-rewrite": {
+      "hit": false,
+      "evidence": {
+        "replace_v6_lines": 0,
+        "v6_only_failed": 0,
+        "mixed_failed": 0,
+        "predicate": "v6 改写行数 > 0 且（v6-only 失败 + 混合失败）> 0"
+      },
+      "near_miss": 0.0
+    },
+    "watchdog-false-positive": {
+      "hit": false,
+      "near_miss": 0.0,
+      "evidence": {
+        "已作废": 0,
+        "predicate": "有「已作废」且其 ±60s 内仍有转发证据"
+      }
+    },
+    "probe-false-negative": {
+      "hit": true,
+      "evidence": {
+        "探针连接": 46,
+        "成功": 45,
+        "失败·有 failed 行": 1,
+        "失败·无结局行": 0,
+        "轮数": 44,
+        "predicate": "探针「有 failed 行」或「无结局行」> 0"
+      },
+      "near_miss": 0.9
+    },
+    "log-read-loss": {
+      "hit": false,
+      "evidence": {
+        "截断·残缺行": 0,
+        "非 JSON 行": 0,
+        "空行": 0,
+        "predicate": "读统计里「截断·残缺」或「非 JSON」> 0（脚本侧损失；App 内部读侧统计不在包里）"
+      },
+      "near_miss": 0.2
+    },
+    "log-write-interleave": {
+      "hit": false,
+      "evidence": {
+        "多对象行": 0,
+        "App 版本": "0.8.36",
+        "修复版本": "0.8.34",
+        "predicate": "多对象行 > 0 **且** App 版本 ≥ 0.8.34（修复前出现属历史数据，不算回归）"
+      },
+      "near_miss": 0.0
+    },
+    "helper-mismatch": {
+      "hit": true,
+      "evidence": {
+        "版本检查三态": "Mismatch",
+        "version": null,
+        "installed": "0.8.35",
+        "bundled": "0.8.36",
+        "predicate": "manifest 的 helper 版本三态 == Mismatch（读不到时是 Unreadable，**不算命中**）"
+      },
+      "near_miss": 1.0
+    },
+    "loopback-hole": {
+      "hit": true,
+      "evidence": {
+        "interface": "utun6",
+        "shape": "interface=utun6",
+        "predicate": "`route -n get 127.0.0.2` 的 interface ≠ lo0（或路由不存在）"
+      },
+      "near_miss": 1.0
+    },
+    "tun-iface-einval": {
+      "hit": true,
+      "evidence": {
+        "次数": 437,
+        "跨度分钟": 0.87,
+        "每分钟": 504.231,
+        "每分钟阈值": 1.0,
+        "predicate": "`falied to set interface` 每分钟计数 ≥ 阈值（阈值来源见脚本常量注释）"
+      },
+      "near_miss": 0.5
+    }
+  },
+  "samples": {
+    "loopback-hole": [
+      "route -n get 127.0.0.2      （判据：interface 必须是 lo0；不是 ⇒ loopback 空洞）",
+      "   route to: 127.0.0.2",
+      "destination: default",
+      "       mask: 128.0.0.0",
+      "  interface: utun6"
+    ],
+    "tun-iface-einval": [
+      "{\"ts_unix\":1790166939,\"source\":\"core\",\"level\":\"info\",\"message\":\"2026/09/23 20:35:39.368605 [Info] proxy/tun: [tun] falied to set interface > invalid argument\"}",
+      "{\"ts_unix\":1790166939,\"source\":\"core\",\"level\":\"info\",\"message\":\"2026/09/23 20:35:39.517363 [Info] proxy/tun: [tun] falied to set interface > invalid argument\"}",
+      "{\"ts_unix\":1790166939,\"source\":\"core\",\"level\":\"info\",\"message\":\"2026/09/23 20:35:39.548770 [Info] proxy/tun: [tun] falied to set interface > invalid argument\"}"
+    ]
+  }
+}

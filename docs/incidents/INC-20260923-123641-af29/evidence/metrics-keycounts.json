@@ -1,0 +1,85 @@
+{
+  "window": "2026-09-23 20:27:52 → 2026-09-23 20:36:29；共 40386 条记录",
+  "stats": {
+    "lines": 431170,
+    "objects": 431170,
+    "multi_object_lines": 0,
+    "blank_lines": 0,
+    "dup": 2,
+    "kept": 40386,
+    "truncated_lines": 0,
+    "non_json_lines": 0,
+    "src_app": 9,
+    "src_core": 40377,
+    "src_other": 0,
+    "lf_in_message": 0,
+    "dup_in_window": 0
+  },
+  "task97": {
+    "v6_rewrite_lines": 0,
+    "failed_open_lines": 112,
+    "classes": {
+      "v6_only": {
+        "connections": 0,
+        "failed": 0,
+        "pct": 0.0
+      },
+      "v4_only": {
+        "connections": 169,
+        "failed": 79,
+        "pct": 46.74556213017752
+      },
+      "mixed": {
+        "connections": 0,
+        "failed": 0,
+        "pct": 0.0
+      }
+    },
+    "connections_with_rewrite": 169
+  },
+  "snapshot": "app.1.jsonl=68778150B/mtime20:27:41；app.jsonl=17296032B/mtime20:36:33",
+  "probes": {
+    "targets": {
+      "cp.cloudflare.com:80": {
+        "connections": 46,
+        "success": 45,
+        "failed_line": 1,
+        "no_outcome_line": 0,
+        "latency_ms": {
+          "median": 133.69107246398926,
+          "p90": 176.79691314697266,
+          "p95": 201.82180404663086,
+          "p99": 1351.1219024658203,
+          "max": 1351.1219024658203,
+          "n": 45
+        },
+        "success_over_timeout": 0
+      },
+      "www.baidu.com:80": {
+        "connections": 0,
+        "success": 0,
+        "failed_line": 0,
+        "no_outcome_line": 0,
+        "latency_ms": null,
+        "success_over_timeout": 0
+      }
+    },
+    "total_connections": 46,
+    "success": 45,
+    "failed_line": 1,
+    "no_outcome_line": 0,
+    "rounds": 44,
+    "rounds_with_failure": 1,
+    "round_gap_secs": 5.0,
+    "timeout_secs": 6.0
+  },
+  "selfheal": {
+    "void_intents": [],
+    "egress_changed": [],
+    "auto_recovered": [],
+    "core_starts": [
+      1790166472
+    ],
+    "traffic_evidence_lines": 2026
+  }
+}

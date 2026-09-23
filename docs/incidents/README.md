@@ -124,6 +124,15 @@ docs/incidents/<INC-ID>/            INC-ID = INC-YYYYMMDD-HHMMSS-<4hex>（不含
 * ⚠️ **完整 bundle 不入库**（可能含隐私）。入库的是**脱敏后的最小切片 + 原件 sha256**，
   让后来人能核对「原件长什么样」，而不是把 100 MB 日志塞进仓库。
 * `INC-ID` 里的 `<4hex>` 用 **manifest 的 sha256 前 4 位** ⇒ ID 与内容绑定（同一份包只会有一个 ID）。
+  ⚠️ **实测反例（2026-09-23）**：`INC-20260923-123641-af29` 的后缀 `af29` ≠ 其 manifest sha256 前 4 位 `a89f`
+  （上一份 `…-23f5` 是相符的）⇒ 要么生成方式变了、要么这条约定已过时；事实记在该目录 `README.md` §4，**结论待定**。
+
+### 已入库的现场
+
+| INC-ID | 怎么来的 | 窗口 | 命中 signature | 备注 |
+|---|---|---|---|---|
+| `INC-20260922-190335-23f5` | 本机手动跑 `incident-bundle.sh`（流程首条真实记录） | 2026-09-22 18:46:04 → 19:08:50（degraded） | 见该目录 `SUMMARY.md` | App 0.8.34 / helper **Match** |
+| `INC-20260923-123641-af29` | **App「报告问题」真实上传（第一份）** | 2026-09-23 20:27:52 → 20:36:29（degraded） | `probe-false-negative`、`helper-mismatch`、`loopback-hole`、`tun-iface-einval` | App 0.8.36；其中 `helper-mismatch` 是**口径误判**（协议号相同应为 Match，见该目录 §4） |
 
 ## 6. 本流程**不能**证明什么（诚实清单）
 

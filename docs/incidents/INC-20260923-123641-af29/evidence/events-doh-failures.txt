@@ -1,0 +1,2 @@
+{"ts_unix": 1790166532, "source": "app", "level": "warn", "message": "核心日志限流汇总（60 秒窗口）：本窗口有 2952 条未实时显示（原文已完整写入日志文件）。示例格式：<ts> <ts> [Info] app/dns: DNS: created DOH client for https://1.1.1.1/dns-query, with h2c false"}
+{"ts_unix": 1790166857, "source": "core", "level": "error", "message": "2026/09/23 20:34:17.325779 [Error] app/dns: failed to retrieve response for api.martianwallet.xyz. > Post \"https://1.0.0.1/dns-query\": io: read/write on closed pipe"}
