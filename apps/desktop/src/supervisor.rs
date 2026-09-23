@@ -2200,6 +2200,41 @@ mod tests {
             "本站点吞掉、靠邻近 `return Err(` 充数 —— 块级判据必须红（task-157 的窗口绕过）"
         );
 
+        // 负例 4（tester 的 s3）：把留痕塞进**不可达**分支 —— 朴素判据「块内出现 warn」
+        // 会绿，而 `if false` 在 release 下等于静默。handler 必须在块的**顶层**才算数。
+        let s3 = prod.replace(
+            "tracing::warn!(error = %e, \"数据面进程未干净退出（网络配置仍会单独回滚）\");",
+            "if false {\n                    tracing::warn!(error = %e, \"数据面进程未干净退出（网络配置仍会单独回滚）\");\n                }",
+        );
+        assert_ne!(s3, prod, "s3 fixture 必须真的改到生产源码");
+        assert!(
+            !every_shutdown_failure_is_warned(&s3),
+            "不可达留痕（`if false {{ tracing::warn! }}`）必须红 —— tester 的 s3"
+        );
+
+        // 负例 5：顶层 warn，但**不引用**被绑定的错误名（空泛留痕不该算 handled，
+        // 否则 `tracing::warn!("出错了")` 就能给任何站点充数）。
+        let m5 = prod.replace(
+            "tracing::warn!(error = %e, \"数据面进程未干净退出（网络配置仍会单独回滚）\");",
+            "tracing::warn!(\"核心没退干净\");",
+        );
+        assert_ne!(m5, prod, "m5 fixture 必须真的改到生产源码");
+        assert!(
+            !every_shutdown_failure_is_warned(&m5),
+            "顶层但不打印错误的 warn 不算留痕"
+        );
+
+        // 正向：**改绑定名**是无害重构（判据从 `if let Err(<name>) = ` 动态取名）⇒ 不许假红。
+        let p1 = prod.replace(
+            "if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {\n                tracing::warn!(error = %e, \"数据面进程未干净退出（网络配置仍会单独回滚）\");",
+            "if let Err(shutdown_err) = process.shutdown(CORE_SHUTDOWN_GRACE).await {\n                tracing::warn!(error = %shutdown_err, \"数据面进程未干净退出（网络配置仍会单独回滚）\");",
+        );
+        assert_ne!(p1, prod, "p1 fixture 必须真的改到生产源码");
+        assert!(
+            every_shutdown_failure_is_warned(&p1),
+            "改绑定名是无害重构，守卫不许假红"
+        );
+
         assert!(
             prod.contains("数据面进程未干净退出"),
             "要留下可搜的痕迹，说明「核心没干净退出、但网络仍会单独回滚」"
@@ -2224,7 +2259,10 @@ mod tests {
             let idx = from + rel;
             sites += 1;
             let before = window_before(src, idx, 60);
-            if !before.contains("if let Err(e) = ") {
+            // 只要求「是 `if let Err(<名>) = ` 这种绑定」，**不锚具体名字** ——
+            // 锚 `e` 会挡住无害的重命名重构（与 tester 的 `n5` 同族：守卫对形状过敏 ⇒ 假红；
+            // 这条是被 `p1` fixture 实测出来的）。
+            if !before.contains("if let Err(") {
                 return false;
             }
             // **本站点自己的块**：从它后面第一个 `{` 到配对 `}`，不看邻近文本。
@@ -2243,7 +2281,8 @@ mod tests {
                     let rest = &before[p + "if let Err(".len()..];
                     rest.split(')').next().unwrap_or("").trim().to_string()
                 })
-                .filter(|n| !n.is_empty());
+                // `_` 等于没绑定错误 ⇒ 不算取了名字。
+                .filter(|n| !n.is_empty() && n != "_");
             // **handler 必须在块的顶层**（task-163 的 s3：`if false { warn! }` 的 handler
             // 在深度 1，属于「不可达留痕」，不许算 handled），并且要**引用那个错误名**。
             if !handler_at_top_level(block, bound.as_deref()) {
