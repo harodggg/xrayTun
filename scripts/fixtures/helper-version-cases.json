@@ -1,0 +1,58 @@
+[
+  {
+    "name": "real-shape: 包版本不同但协议号相同 ⇒ Match（引发 task-171 的真实形态）",
+    "installed_out": "xraytun-helper 0.8.35 (protocol 1)",
+    "bundled_out": "xraytun-helper 0.8.36 (protocol 1)",
+    "expect_state": "Match",
+    "expect_reason": "protocol_equal"
+  },
+  {
+    "name": "协议号不同（版本也不同）⇒ Mismatch",
+    "installed_out": "xraytun-helper 0.8.35 (protocol 1)",
+    "bundled_out": "xraytun-helper 0.8.36 (protocol 2)",
+    "expect_state": "Mismatch",
+    "expect_reason": "protocol_differ"
+  },
+  {
+    "name": "协议号不同但**包版本相同** ⇒ Mismatch（协议号优先的对抗用例）",
+    "installed_out": "xraytun-helper 0.8.36 (protocol 1)",
+    "bundled_out": "xraytun-helper 0.8.36 (protocol 2)",
+    "expect_state": "Mismatch",
+    "expect_reason": "protocol_differ"
+  },
+  {
+    "name": "协议号读不到 + 包版本相同 ⇒ 退回包版本 ⇒ Match",
+    "installed_out": "xraytun-helper 0.8.35",
+    "bundled_out": "xraytun-helper 0.8.35",
+    "expect_state": "Match",
+    "expect_reason": "fallback_equal"
+  },
+  {
+    "name": "协议号读不到 + 包版本不同 ⇒ 退回包版本 ⇒ Mismatch",
+    "installed_out": "xraytun-helper 0.8.35",
+    "bundled_out": "xraytun-helper 0.8.36",
+    "expect_state": "Mismatch",
+    "expect_reason": "fallback_differ"
+  },
+  {
+    "name": "两边都读不到 ⇒ Unreadable（不许猜成不一致）",
+    "installed_out": "",
+    "bundled_out": "",
+    "expect_state": "Unreadable",
+    "expect_reason": "unreadable"
+  },
+  {
+    "name": "一边读不到 ⇒ Unreadable",
+    "installed_out": "xraytun-helper 0.8.35 (protocol 1)",
+    "bundled_out": "",
+    "expect_state": "Unreadable",
+    "expect_reason": "unreadable"
+  },
+  {
+    "name": "输出不是我们的形状（别的二进制名）⇒ Unreadable",
+    "installed_out": "some-other-helper 1.2.3 (protocol 1)",
+    "bundled_out": "xraytun-helper 0.8.36 (protocol 1)",
+    "expect_state": "Unreadable",
+    "expect_reason": "unreadable"
+  }
+]

@@ -172,6 +172,15 @@ step "CSS token 定义性（被 var() 引用但未定义的 token）"
 # 这条正是第 3 个 bug 逃过所有人眼睛的原因（「全仓库搜一下，官网那边有啊」）。
 python3 scripts/check-css-tokens.py
 
+step "现场包脚本自测（helper 三态 / 脱敏 / 分诊；不依赖 cargo）"
+# 为什么（task-173）：这三条自测原来**不在任何门禁里** —— 判据存在但没人执行 = 明天改坏了没人知道。
+# 任一非 0 ⇒ 门禁红（**禁止** `|| true` 之类的吞错）。
+# Python 与 Rust 的 helper 三态判据共用夹具 scripts/fixtures/helper-version-cases.json
+# （Rust 是权威；Python 自测与 Rust 测试都读它）—— 见 docs/verification/HELPER-TRISTATE-CALIBER.md。
+python3 scripts/helper_tristate.py --self-test
+bash scripts/incident-bundle.sh --self-test
+python3 scripts/triage-incident.py --self-test
+
 step "前端构建"
 # 注意这条是对的：`npm run` 会把 cwd 切到包目录，脚本里的 `tsc --noEmit`
 # 因此能找到 tsconfig.json。上一行那个 `npm exec` 不会。

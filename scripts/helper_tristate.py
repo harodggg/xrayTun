@@ -19,6 +19,7 @@
 细节与敏感性证据：`docs/verification/HELPER-TRISTATE-CALIBER.md`。
 """
 
+import pathlib
 import re
 import sys
 
@@ -95,24 +96,58 @@ def _ck(fails, name, got, want):
         fails.append(name)
 
 
+FIXTURE_ENV = "HELPER_TRISTATE_FIXTURE"
+
+
+def fixture_path():
+    """共享夹具：Python 与 Rust（权威）读**同一份**。可用环境变量覆盖（测试/敏感性用）。"""
+    import os
+
+    override = os.environ.get(FIXTURE_ENV)
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path(__file__).resolve().parent / "fixtures" / "helper-version-cases.json"
+
+
+def _expected_reason(state, ip, bp):
+    """夹具里的 `expect_reason` 口径（Rust 侧测试用同一套映射，见 helper.rs 的 task-173 用例）。"""
+    if state == "Unreadable":
+        return "unreadable"
+    if ip is not None and bp is not None:
+        return "protocol_equal" if state == "Match" else "protocol_differ"
+    return "fallback_equal" if state == "Match" else "fallback_differ"
+
+
+def _run_fixture_cases(fails):
+    import json
+
+    path = fixture_path()
+    if not path.is_file():
+        print(f"  ✗ 读不到共享夹具 {path} ⇒ 夹具是共同真源，缺了必须红")
+        fails.append("fixture-missing")
+        return 0
+    cases = json.loads(path.read_text(encoding="utf-8"))
+    print(f"=== 共享夹具：{path.name}（{len(cases)} 条；Rust 侧读同一份）===")
+    for c in cases:
+        name = c["name"]
+        inst, bund = parse_probe(c.get("installed_out", "")), parse_probe(c.get("bundled_out", ""))
+        verdict = classify(inst, bund)
+        got = verdict["state"]
+        reason = _expected_reason(got, (inst or {}).get("protocol"), (bund or {}).get("protocol"))
+        _ck(fails, f"[夹具] {name} ⇒ state", got, c["expect_state"])
+        _ck(fails, f"[夹具] {name} ⇒ reason", reason, c["expect_reason"])
+    return len(cases)
+
+
 def self_test():
     fails = []
-    p1 = "xraytun-helper 0.8.35 (protocol 1)"
-    p2 = "xraytun-helper 0.8.36 (protocol 1)"
-    p3 = "xraytun-helper 0.8.36 (protocol 2)"
-    print("=== helper 三态：四类用例（与 helper.rs 同构）===")
-    _ck(fails, "包版本不同 + 协议号相同 ⇒ Match", classify_from_outputs(p1, p2)["state"], "Match")
-    _ck(fails, "协议号不同 ⇒ Mismatch", classify_from_outputs(p1, p3)["state"], "Mismatch")
-    _ck(fails, "协议号读不到 + 包版本相同 ⇒ Match",
-        classify_from_outputs("xraytun-helper 0.8.35", "xraytun-helper 0.8.35")["state"], "Match")
-    _ck(fails, "协议号读不到 + 包版本不同 ⇒ Mismatch",
-        classify_from_outputs("xraytun-helper 0.8.35", "xraytun-helper 0.8.36")["state"], "Mismatch")
-    _ck(fails, "两边都读不到 ⇒ Unreadable", classify_from_outputs("", "")["state"], "Unreadable")
-    _ck(fails, "一边读不到 ⇒ Unreadable", classify_from_outputs(p1, "")["state"], "Unreadable")
-    _ck(fails, "判据字段：协议号可用时标 protocol",
-        classify_from_outputs(p1, p2)["criterion"], "protocol")
+    n = _run_fixture_cases(fails)
+    print(f"（以上 {n} 条来自共享夹具；本文件不再内联一份）")
 
     print("=== 双向敏感性（改坏判据/解析 ⇒ 上面必须红）===")
+    p1 = "xraytun-helper 0.8.35 (protocol 1)"
+    p2 = "xraytun-helper 0.8.36 (protocol 1)"
+
     # (a) 把判据改回「包版本相等」（旧脚本的写法）
     def old_rule(i_text, b_text):
         i, b = parse_probe(i_text), parse_probe(b_text)
@@ -120,17 +155,16 @@ def self_test():
             return "Match"
         return "Mismatch"
 
-    _ck(fails, "改回包版本判据 ⇒ 用例1 变成 Mismatch（原断言会红）", old_rule(p1, p2), "Mismatch")
-    # (b) 把协议号解析改坏（永远读不到）⇒ 用例1 退化成包版本比较 ⇒ 同样红
+    _ck(fails, "改回包版本判据 ⇒ 夹具第 1 条会变 Mismatch（原断言会红）", old_rule(p1, p2), "Mismatch")
+    # (b) 把协议号解析改坏（永远读不到）⇒ 第 1 条退化成包版本比较 ⇒ 同样红
     def broken_parse(text):
         p = parse_probe(text)
         if p:
             p["protocol"] = None
         return p
 
-    _ck(fails, "协议号解析改坏 ⇒ 用例1 变成 Mismatch（原断言会红）",
+    _ck(fails, "协议号解析改坏 ⇒ 夹具第 1 条会变 Mismatch（原断言会红）",
         classify(broken_parse(p1), broken_parse(p2))["state"], "Mismatch")
-    # (c) 反向：解析改坏后，本就走退化路径的用例（版本相同/不同）行为不变 ⇒ 说明断言区分得开
     _ck(fails, "（对照）解析改坏后 版本相同 仍 Match",
         classify(broken_parse("xraytun-helper 0.8.35"), broken_parse("xraytun-helper 0.8.35"))["state"], "Match")
 
@@ -138,7 +172,7 @@ def self_test():
     if fails:
         print(f"helper_tristate self-test：**失败**（{len(fails)} 项）：{fails}")
         return 1
-    print("helper_tristate self-test：**全部通过**（四类用例 + 双向敏感性）")
+    print("helper_tristate self-test：**全部通过**（读共享夹具 + 双向敏感性）")
     return 0
 
 

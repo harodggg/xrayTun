@@ -322,6 +322,52 @@ mod tests {
         })
     }
 
+    /// **task-173 跨语言契约**：Python（`scripts/helper_tristate.py`）与本文件**读同一份夹具**
+    /// `scripts/fixtures/helper-version-cases.json`。**Rust 是权威**，夹具是双方共同的真源；
+    /// 夹具里任一 `expect_state` 被改坏 ⇒ 本用例与 Python 自测**都必须红**。
+    ///
+    /// 用 `read_to_string`（不是 `include_str!`）：改夹具不必重编译就能被发现；
+    /// **文件缺失即失败**（夹具是共同真源，缺了不许静默跳过）。
+    #[test]
+    fn helper_version_cases_fixture_matches_authoritative_rule() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/fixtures/helper-version-cases.json");
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("读不到共享夹具 {}（共同真源，缺了必须红）：{e}", path.display())
+        });
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).expect("共享夹具必须是 JSON 数组");
+        assert!(!cases.is_empty(), "共享夹具不许为空");
+        for c in &cases {
+            let name = c["name"].as_str().expect("夹具每条都要有 name");
+            let inst = parse_helper_probe(c["installed_out"].as_str().unwrap_or(""));
+            let bund = parse_helper_probe(c["bundled_out"].as_str().unwrap_or(""));
+            let ip = inst.as_ref().and_then(|p| p.protocol);
+            let bp = bund.as_ref().and_then(|p| p.protocol);
+            let state = match classify_helper_versions(inst, bund) {
+                HelperVersionCheck::Match { .. } => "Match",
+                HelperVersionCheck::Mismatch { .. } => "Mismatch",
+                HelperVersionCheck::Unreadable { .. } => "Unreadable",
+            };
+            let reason = if state == "Unreadable" {
+                "unreadable"
+            } else if ip.is_some() && bp.is_some() {
+                if state == "Match" {
+                    "protocol_equal"
+                } else {
+                    "protocol_differ"
+                }
+            } else if state == "Match" {
+                "fallback_equal"
+            } else {
+                "fallback_differ"
+            };
+            assert_eq!(state, c["expect_state"].as_str().unwrap(), "夹具用例 state 不符：{name}");
+            assert_eq!(reason, c["expect_reason"].as_str().unwrap(), "夹具用例 reason 不符：{name}");
+        }
+        println!("共享夹具 {} 条：Rust（权威）判定全部符合预期", cases.len());
+    }
+
     /// **task-111 主回归**：包版本不同但**协议相同** ⇒ **不许**报不一致。
     ///
     /// 实测情形：v0.8.34 只改 App（helper 一行未改），包内 0.8.34 / 已装 0.8.33 ⇒
