@@ -289,6 +289,23 @@ pub struct UpdateProgress {
     pub total_bytes: Option<u64>,
 }
 
+impl UpdateStatus {
+    /// **下载终态**：清掉进度。
+    ///
+    /// # 为什么必须由每条更新路径的**每个出口**调用（A17，task-153）
+    ///
+    /// 界面判断「正在下载」的判据就是 **`progress !== null`**
+    /// （`Settings.tsx:307` 的 `downloading`）—— 它同时驱动
+    /// 「下载中，请勿关闭…」那条提示与**升级按钮的禁用**。
+    /// 所以只要有**一个出口**忘了收尾，用户就会永久看到那句假指令、并且
+    /// **再也点不到升级**（只有重启 App 才恢复）。
+    ///
+    /// geo 路径原来一个出口都没收尾，正是那条死路。
+    pub(crate) fn finish_download(&mut self) {
+        self.progress = None;
+    }
+}
+
 impl Inner {
     fn new(store: &Store) -> Self {
         Self {

@@ -405,21 +405,37 @@ pub async fn install_geo_update(
     let dir = xt_core::update::managed_core_dir(state.store.root());
 
     let reporter = core::progress_reporter(app.clone(), "geo 数据", available.size);
-    let meta = tauri::async_runtime::spawn_blocking(move || {
+    // ⚠️ **不要在收尾之前用 `?` 提早返回**：这条路径的**每个出口**都必须经过下面
+    // 那个唯一收尾点。A17（task-153）就是这里漏的 —— geo 成功路径压根没有收尾点，
+    // 于是界面永久显示「下载中，请勿关闭…」并且**升级按钮永久禁用**（只有重启才恢复）。
+    let result = match tauri::async_runtime::spawn_blocking(move || {
         xt_core::update::install_geo(&available, &dir, Some(proxy), reporter)
     })
     .await
-    .map_err(|e| format!("安装任务失败：{e}"))?
-    .map_err(util::user_msg)?;
+    {
+        Ok(r) => r.map_err(util::user_msg),
+        Err(e) => Err(format!("安装任务失败：{e}")),
+    };
 
     state.with(|i| {
-        i.push_log(
-            "app",
-            "info",
-            format!("geo 数据已更新到 {}（下次连接生效）", meta.geo_tag.clone().unwrap_or_default()),
-        );
-        i.update.latest_geo = None;
+        // **唯一收尾点：无论成败都清进度**（界面据此恢复升级按钮）。
+        i.update.finish_download();
+        match &result {
+            Ok(meta) => i.push_log(
+                "app",
+                "info",
+                format!(
+                    "geo 数据已更新到 {}（下次连接生效）",
+                    meta.geo_tag.clone().unwrap_or_default()
+                ),
+            ),
+            Err(e) => i.push_log("app", "error", format!("geo 数据更新失败：{e}")),
+        }
+        if result.is_ok() {
+            i.update.latest_geo = None;
+        }
     });
+    result?;
     build_snapshot(&app, &state).await
 }
 
@@ -795,5 +811,94 @@ mod tests {
             &xt_core::update::InstalledMeta::default(),
         );
         assert!(!u.app_update_available);
+    }
+
+    // -----------------------------------------------------------------------
+    // task-153（A17）：geo 更新后进度不收尾 ⇒ 永久「下载中」+ 升级按钮永久禁用
+    // -----------------------------------------------------------------------
+
+    /// **A17 行为级**：`finish_download()` 清掉进度 ⇒ 界面「正在下载」判据翻假、
+    /// 升级按钮恢复可用。
+    ///
+    /// 界面判据就是 **`snapshot.update.progress !== null`**（`Settings.tsx:307` 的
+    /// `downloading`）：它同时驱动「下载中，请勿关闭…」那条提示与按钮禁用。
+    #[test]
+    fn finish_download_clears_progress_so_the_update_button_comes_back() {
+        let mut update = crate::state::UpdateStatus {
+            progress: Some(crate::state::UpdateProgress {
+                label: "geo 数据".into(),
+                done_bytes: 8,
+                total_bytes: Some(8),
+            }),
+            ..Default::default()
+        };
+        // 前置：正在下载 ⇒ 界面此刻显示「下载中，请勿关闭」并**禁用升级按钮**。
+        assert!(update.progress.is_some(), "前置：进度在，界面才是「下载中」");
+        update.finish_download();
+        assert!(
+            update.progress.is_none(),
+            "清掉进度后界面才认为「没在下载」⇒ 升级按钮恢复可用（A17 的死路就在这里）"
+        );
+    }
+
+    /// **A17 源码守卫（按站点 + 正向）**：geo 路径必须经过**唯一收尾点**清进度，
+    /// 而且收尾必须发生在把错误往上抛**之前**、收尾前不许有 `?` 提早返回。
+    ///
+    /// 自带负例：把收尾点删掉（= A17 的原始实现）⇒ 判据必须翻假。
+    #[test]
+    fn geo_update_path_always_finishes_download_in_production_source() {
+        let src = include_str!("snapshot.rs");
+        let prod = src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src);
+        assert!(
+            geo_update_finishes_download(prod),
+            "geo 更新路径必须在唯一收尾点清进度（否则永久「下载中」+ 按钮永久禁用）"
+        );
+
+        let broken = prod.replace("        i.update.finish_download();", "");
+        assert_ne!(broken, prod, "负例 fixture 必须真的改到生产源码");
+        assert!(
+            !geo_update_finishes_download(&broken),
+            "去掉收尾点必须被判据抓住（这正是 A17 的形状）"
+        );
+
+        // 负例 2：**收尾之前提早返回**（在 `let result = …` 里 `return Err(…)`）——
+        // 这是「有人把 `?` 加回来」的等价形状，同样必须判假。
+        let early = prod.replace(
+            "        Ok(r) => r.map_err(util::user_msg),",
+            "        Ok(r) => match r { Ok(m) => m, Err(e) => return Err(util::user_msg(e)) },",
+        );
+        assert_ne!(early, prod, "负例 2 fixture 必须真的改到");
+        assert!(
+            !geo_update_finishes_download(&early),
+            "收尾前提早返回也必须被判据抓住"
+        );
+    }
+
+    /// 判据：`install_geo_update` 体内 ①有收尾调用；②收尾在 `result?;` **之前**；
+    /// ③**从开始报到收尾之间不许有任何 `?` / `return`**（那会跳过收尾 = A17 的形状）。
+    fn geo_update_finishes_download(src: &str) -> bool {
+        let Some(start) = src.find("pub async fn install_geo_update(") else {
+            return false;
+        };
+        let rest = &src[start..];
+        let end = rest.find("\n/// 回退到包内自带的版本").unwrap_or(rest.len());
+        let body = &rest[..end];
+        // 去行注释：判据不认注释里写的旧写法（task-75 的教训）。
+        let code = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (Some(reporting), Some(clear), Some(propagate)) = (
+            code.find("progress_reporter("),
+            code.find("i.update.finish_download()"),
+            code.find("result?;"),
+        ) else {
+            return false;
+        };
+        let before_finish = &code[reporting..clear];
+        clear < propagate
+            && !before_finish.contains('?')
+            && !before_finish.contains("return ")
     }
 }
