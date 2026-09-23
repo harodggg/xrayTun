@@ -7,8 +7,9 @@ pub mod access_log;
 pub mod stats;
 
 pub use config::{
-    build, build_pretty, lint_node, merge_rules, node_to_outbound, tun_inbound_spec,
-    CoreConfigInput, InboundProfile, TunInboundSpec, API_PORT, MIN_CORE_VERSION_NATIVE_TUN,
+    build, build_pretty, config_self_check_message, duplicate_rule_tags, lint_node, merge_rules,
+    node_to_outbound, tun_inbound_spec, CoreConfigInput, InboundProfile, RuleTagConflict,
+    TunInboundSpec, API_PORT, MIN_CORE_VERSION_NATIVE_TUN,
 };
 pub use probe::{probe_nodes, ProbeOptions, ProbeResult, DEFAULT_PROBE_URL};
 pub use stats::{

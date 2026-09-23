@@ -529,9 +529,13 @@ impl Supervisor {
             .map_err(|e| e.to_string())?;
 
         // 静态校验：把明显非法的配置挡在进程启动之前，错误信息也更可读。
+        //
+        // 失败文案由 `config_self_check_message` 组装：**先结论 + 下一步**，再附
+        // **截断后**的核心输出。核心失败时 stderr 常为空、stdout 却是 35 行机器话
+        // （可操作的那句在最后一行），原样透传等于没给用户任何线索（task-165）。
         xray::validate_config(&core_path, &config_path)
             .await
-            .map_err(|e| format!("生成的配置未通过核心自检：{e}"))?;
+            .map_err(|e| xray::config_self_check_message(settings, &config, &e.to_string()))?;
 
         // ---- 3) TUN：建卡 → 取 fd → 拉起核心 → 提交路由 ----
         let mut deferred_commit = false;

@@ -25,6 +25,8 @@
 //! 4. **Xray 也有原生 Fake-IP**（`fakedns` + `destOverride: ["fakedns+others"]`），
 //!    并非 sing-box 独有。默认关闭，因为它会污染本机 DNS 缓存。
 
+use std::collections::{BTreeMap, HashSet};
+
 use serde_json::{json, Map, Value};
 
 use crate::model::{AppSettings, DnsHandling, Node, Protocol, RoutingPreset, Transport};
@@ -559,6 +561,25 @@ fn sentinel_dns_of<'a>(s: &'a AppSettings, profile: &InboundProfile) -> Option<&
     (!sentinel.is_empty()).then_some(sentinel)
 }
 
+/// App 在 `routing.rules` 里**自己追加**的三条内部规则 tag（不来自用户设置）。
+///
+/// 它们是**保留名**：用户的自定义规则若取了同名 id，最终配置里就会出现重复
+/// `ruleTag`，而 Xray 在 `app/router` 阶段**直接拒绝启动** —— 与「预设 × 自定义」
+/// 撞名是同一类故障（tester 实测：三个值各让真实核心输出
+/// `duplicate ruleTag internal-*` 并且 exit 23）。
+/// 兜底见 [`uniquify_rule_tag_values`]（它在**最终 rules 数组**上做唯一化）。
+const RULE_TAG_DNS_HIJACK: &str = "internal-dns-hijack";
+const RULE_TAG_API: &str = "internal-api";
+const RULE_TAG_FALLBACK: &str = "internal-fallback";
+const INTERNAL_RULE_TAGS: [&str; 3] = [RULE_TAG_DNS_HIJACK, RULE_TAG_API, RULE_TAG_FALLBACK];
+
+/// 自检失败时附给用户看的核心原始输出**末尾行数**。
+///
+/// 实测（本次 P0）：核心失败时 stderr = 0 字节、stdout = 3445 字节 / 35 行
+/// （首行是版本横幅、10 行 `[Debug]`，**可操作的那句在最后一行**）。
+/// 原样透传等于给用户一屏机器话，所以只留尾部。
+const SELF_CHECK_TAIL_LINES: usize = 8;
+
 fn build_routing(
     rules: &[RoutingRule],
     selected_tag: &str,
@@ -594,7 +615,7 @@ fn build_routing(
         "type": "field",
         "port": "53",
         "outboundTag": "dns-out",
-        "ruleTag": "internal-dns-hijack"
+        "ruleTag": RULE_TAG_DNS_HIJACK
     });
     if let Some(sentinel) = sentinel_dns {
         hijack["ip"] = json!([sentinel]);
@@ -606,7 +627,7 @@ fn build_routing(
         "type": "field",
         "inboundTag": ["api"],
         "outboundTag": "api",
-        "ruleTag": "internal-api"
+        "ruleTag": RULE_TAG_API
     }));
 
     // 3) 用户规则（预设 + 自定义，已按优先级排好）。
@@ -617,8 +638,18 @@ fn build_routing(
         "type": "field",
         "network": "tcp,udp",
         "outboundTag": selected_tag,
-        "ruleTag": "internal-fallback"
+        "ruleTag": RULE_TAG_FALLBACK
     }));
+
+    // 5) **最终不变量：整份 `rules` 的 `ruleTag` 必须唯一**，否则 Xray 在
+    //    `app/router` 阶段拒绝启动（用户报的原文：
+    //    `failed to create server > app/router: duplicate ruleTag preset-private`）。
+    //
+    //    这一层才看得见**全部三处来源**：预设规则、自定义规则、以及上面 1) 2) 4)
+    //    追加的内部规则。用户自定义规则的 id 撞上内部 tag 时 `merge_rules` 看不到它们
+    //    （真实核心实测 `internal-api` / `internal-fallback` / `internal-dns-hijack`
+    //    三个都 exit 23），所以唯一化必须落在最终数组上。
+    uniquify_rule_tag_values(&mut compiled);
 
     json!({
         // IPIfNonMatch：先按域名规则匹配，未命中再解析成 IP 匹配。
@@ -652,13 +683,200 @@ fn build_policy() -> Value {
 
 /// 把预设与自定义规则合并成最终顺序：
 /// 预设在前（它们包含“私有地址直连”这类必须优先的规则），自定义在后。
+///
+/// **并保证 `RoutingRule::id` 唯一**（`id` 会原样写进配置的 `ruleTag`）——
+/// 重复的 `ruleTag` 会让 Xray 在 `app/router` 阶段拒绝启动：用户报的原文就是
+/// `failed to create server > app/router: duplicate ruleTag preset-private`。
+/// 用户的 `custom_rules` 里带着 `preset-private` 这种**与预设同名**的 id 时必撞
+/// （本机用户真实数据：`[preset-private, preset-ads, google-to-us,
+/// preset-cn-domain, preset-cn-ip]` × `bypass_mainland` ⇒ 4 个 id 各两次）。
+///
+/// 这一层只看得见「预设 + 自定义」；App 自己追加的内部规则 tag（`internal-*`）
+/// 由 [`uniquify_rule_tag_values`] 在**最终 rules 数组**上兜底。
 pub fn merge_rules(s: &AppSettings) -> Vec<RoutingRule> {
-    if s.routing_preset == RoutingPreset::Custom {
-        return s.custom_rules.clone();
+    let mut rules = if s.routing_preset == RoutingPreset::Custom {
+        s.custom_rules.clone()
+    } else {
+        let mut rules = routing::preset_rules(s.routing_preset);
+        rules.extend(s.custom_rules.iter().cloned());
+        rules
+    };
+    let mut ids: Vec<String> = rules.iter().map(|r| r.id.clone()).collect();
+    if uniquify_tags(&mut ids) > 0 {
+        for (rule, id) in rules.iter_mut().zip(ids) {
+            rule.id = id;
+        }
     }
-    let mut rules = routing::preset_rules(s.routing_preset);
-    rules.extend(s.custom_rules.iter().cloned());
     rules
+}
+
+/// 就地把重复的 tag 改成确定性的唯一形式：**首次出现保持原样**，之后依次加 `#2`、`#3`…
+///
+/// # 为什么不是「同名即同规则、合并/丢弃一条」
+///
+/// 那会**改变路由语义**：两条规则可能只是 tag 相同、条件完全不同（用户常把预设规则
+/// 复制出来改条件）；丢任何一条都会让流量走错出口。而 `ruleTag` **只出现在 Xray
+/// 日志里**（`Hit route rule: [tag]`）用于排障，**不参与规则匹配** —— 所以加后缀
+/// **不改变路由行为**，只让「是哪一条命中」在日志里可区分。同理：这里既不删规则，
+/// 也不回写用户的 `settings.json`。
+///
+/// 返回被改名的条数（0 = 本来就没有重复）。
+fn uniquify_tags(tags: &mut [String]) -> usize {
+    let mut used: HashSet<String> = HashSet::with_capacity(tags.len());
+    let mut renamed = 0usize;
+    for tag in tags.iter_mut() {
+        if used.insert(tag.clone()) {
+            continue;
+        }
+        let base = tag.clone();
+        let mut n = 2usize;
+        let unique = loop {
+            let candidate = format!("{base}#{n}");
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+            n += 1;
+        };
+        *tag = unique;
+        renamed += 1;
+    }
+    renamed
+}
+
+/// 对**最终** `routing.rules` 数组做唯一化（就地改 `ruleTag`）。
+///
+/// 这一层是硬保证：它同时覆盖预设规则、自定义规则与内部规则。
+fn uniquify_rule_tag_values(rules: &mut [Value]) {
+    let mut tags: Vec<String> = rules
+        .iter()
+        .filter_map(|r| r.get("ruleTag").and_then(Value::as_str).map(str::to_string))
+        .collect();
+    if uniquify_tags(&mut tags) == 0 {
+        return;
+    }
+    let mut renamed = tags.into_iter();
+    for rule in rules.iter_mut() {
+        // 只回填**本来就有 `ruleTag`** 的规则，别给没有 tag 的规则凭空造一个。
+        if rule.get("ruleTag").and_then(Value::as_str).is_some() {
+            if let Some(tag) = renamed.next() {
+                rule["ruleTag"] = Value::String(tag);
+            }
+        }
+    }
+}
+
+/// 一处重复的 `ruleTag`（诊断用；见 [`duplicate_rule_tags`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleTagConflict {
+    /// 重复的 tag。
+    pub tag: String,
+    /// 它在最终 `rules` 里出现的次数。
+    pub count: usize,
+    /// 该 tag 来自哪些输入：`内置` / `预设` / `自定义`（按此顺序去重）。
+    pub sources: Vec<&'static str>,
+}
+
+impl RuleTagConflict {
+    /// 人话描述：「`preset-private` 出现 2 次（预设 + 自定义）」。文案与测试共用。
+    pub fn describe(&self) -> String {
+        let sources = if self.sources.is_empty() {
+            "来源未识别".to_string()
+        } else {
+            self.sources.join(" + ")
+        };
+        format!("`{}` 出现 {} 次（{}）", self.tag, self.count, sources)
+    }
+}
+
+/// 已生成的配置里**重复的 `ruleTag`**。
+///
+/// 正常情况下**恒为空**：`build_routing` 在写盘前已唯一化。非空只可能意味着某条
+/// 生成路径绕过了那道唯一化 —— 与其把核心日志整段丢给用户（实测 stderr 为空、
+/// stdout 3445 字节 / 35 行，可操作的那句在最后一行），不如指名「哪个 tag / 来自
+/// 哪里 / 几次」，见 [`config_self_check_message`]。
+pub fn duplicate_rule_tags(settings: &AppSettings, config: &Value) -> Vec<RuleTagConflict> {
+    let Some(rules) = config
+        .get("routing")
+        .and_then(|r| r.get("rules"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for rule in rules {
+        if let Some(tag) = rule.get("ruleTag").and_then(Value::as_str) {
+            *counts.entry(tag.to_string()).or_insert(0) += 1;
+        }
+    }
+    let preset_ids: Vec<String> = if settings.routing_preset == RoutingPreset::Custom {
+        Vec::new()
+    } else {
+        routing::preset_rules(settings.routing_preset)
+            .iter()
+            .map(|r| r.id.clone())
+            .collect()
+    };
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n > 1)
+        .map(|(tag, count)| {
+            let mut sources = Vec::new();
+            if INTERNAL_RULE_TAGS.contains(&tag.as_str()) {
+                sources.push("内置");
+            }
+            if preset_ids.iter().any(|id| id == &tag) {
+                sources.push("预设");
+            }
+            if settings.custom_rules.iter().any(|r| r.id == tag) {
+                sources.push("自定义");
+            }
+            RuleTagConflict { tag, count, sources }
+        })
+        .collect()
+}
+
+/// 「配置未通过核心自检」时给用户看的文案：**先结论 + 下一步**，再附**截断后**的核心输出。
+///
+/// 用户原来的观感是一屏机器话（`生成的配置未通过核心自检：<3445 字节原始日志>`），
+/// 里面没有「哪个 tag / 来自预设还是自定义 / 共几条」，也没有「怎么办」。
+/// `config_json` 是**已生成、待写盘**的配置文本（`build_pretty` 的输出）。
+pub fn config_self_check_message(settings: &AppSettings, config_json: &str, raw: &str) -> String {
+    let conflicts = serde_json::from_str::<Value>(config_json)
+        .ok()
+        .map(|config| duplicate_rule_tags(settings, &config))
+        .unwrap_or_default();
+
+    let mut out = String::new();
+    if conflicts.is_empty() {
+        out.push_str(
+            "核心拒绝了这份配置（自检未通过）。可先到「设置 → 内核与更新」换一个核心，\
+             或到「路由」页把最近改动的规则恢复默认，再试一次。",
+        );
+    } else {
+        out.push_str("规则标识（ruleTag）重复 —— 核心会因此拒绝启动：");
+        for conflict in &conflicts {
+            out.push_str("\n  · ");
+            out.push_str(&conflict.describe());
+        }
+        out.push_str(
+            "\nApp 已自动为**后出现**的那条加后缀（`#2`、`#3`…）保证唯一 —— \
+             这**不改变路由行为**（`ruleTag` 只用于日志排障）；\
+             若你不想让两条都生效，请在「路由」页删掉其中一条。",
+        );
+    }
+
+    let lines: Vec<&str> = raw.lines().collect();
+    let tail = lines.len().min(SELF_CHECK_TAIL_LINES);
+    out.push_str(&format!(
+        "\n\n核心原始输出（共 {} 行，只保留末尾 {} 行）：",
+        lines.len(),
+        tail
+    ));
+    for line in &lines[lines.len() - tail..] {
+        out.push('\n');
+        out.push_str(line);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +1085,7 @@ pub fn lint_node(node: &Node) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::model::{NodeSource, ProxyMode, TlsSettings};
+    use crate::routing::{MatchCondition, RuleAction};
 
     fn node() -> Node {
         let mut n = Node {
@@ -1434,5 +1653,345 @@ mod tests {
         n.transport = Transport::Quic { key: String::new(), security: String::new() };
         n.tls = TlsSettings::default();
         assert!(!lint_node(&n).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // task-165（P0 启动阻断）：`ruleTag` 必须唯一
+    //
+    // 用户报的原文：`Failed to start: main: failed to create server > app/router:
+    // duplicate ruleTag preset-private` —— 核心直接起不来。根因是 `merge_rules`
+    // 把「预设 + 自定义」原样拼接，而用户 `custom_rules` 里带着与预设同名的 id。
+    // -----------------------------------------------------------------------
+
+    /// 用户真实 `settings.json` 里 `custom_rules` 的 **id 形态**（只取 id，无隐私）。
+    const USER_RULE_IDS: [&str; 5] = [
+        "preset-private",
+        "preset-ads",
+        "google-to-us",
+        "preset-cn-domain",
+        "preset-cn-ip",
+    ];
+
+    /// 造一条「有真实条件」的规则：改名不许把条件和出站一起改掉。
+    fn rule(id: &str) -> RoutingRule {
+        RoutingRule::new(
+            id,
+            id,
+            MatchCondition {
+                domains: vec!["example.com".into()],
+                ..Default::default()
+            },
+            RuleAction::Direct,
+        )
+    }
+
+    fn user_shape(preset: RoutingPreset) -> AppSettings {
+        let mut s = settings();
+        s.routing_preset = preset;
+        s.custom_rules = USER_RULE_IDS.iter().map(|id| rule(id)).collect();
+        s
+    }
+
+    /// 走 App 自己的生成路径（`merge_rules` → `build_pretty`），拿到最终写盘的配置。
+    fn config_of(s: &AppSettings) -> Value {
+        let rules = merge_rules(s);
+        serde_json::from_str(&build_pretty(&CoreConfigInput {
+            settings: s,
+            nodes: &[],
+            selected: None,
+            rules: &rules,
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        }))
+        .expect("生成的配置是 JSON")
+    }
+
+    fn tags_of(config: &Value) -> Vec<String> {
+        config["routing"]["rules"]
+            .as_array()
+            .expect("routing.rules")
+            .iter()
+            .map(|r| {
+                r["ruleTag"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("每条规则都要有 ruleTag：{r}"))
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn duplicated_tags(tags: &[String]) -> Vec<String> {
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for tag in tags {
+            *counts.entry(tag.as_str()).or_insert(0) += 1;
+        }
+        counts
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(tag, _)| tag.to_string())
+            .collect()
+    }
+
+    /// 仿真实核心的失败输出：35 行、末尾是可操作的那一句（实测 stdout 3445 字节）。
+    fn fake_core_log_tail(last: &str) -> String {
+        (1..=34)
+            .map(|i| {
+                format!(
+                    "[Debug] loading geo data segment {i} from /opt/xray/binaries/geosite.dat (asset #{i})"
+                )
+            })
+            .chain(std::iter::once(last.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// **P0 复现形态**：用户那份 `custom_rules` + `bypass_mainland`。
+    ///
+    /// 先用**修前的合并写法**证明用例忠实复现现场（4 个 id 各 ×2），再断言修后：
+    /// 条数不减、顺序不变、id 全唯一。
+    #[test]
+    fn user_rule_shape_with_bypass_mainland_is_uniquified_without_losing_rules() {
+        let s = user_shape(RoutingPreset::BypassMainland);
+
+        // 修前的合并写法（预设 extend 自定义）—— 复现用户现场，证明本用例不是空壳。
+        let mut before = routing::preset_rules(RoutingPreset::BypassMainland);
+        before.extend(s.custom_rules.iter().cloned());
+        let before_ids: Vec<String> = before.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(
+            duplicated_tags(&before_ids),
+            vec!["preset-ads", "preset-cn-domain", "preset-cn-ip", "preset-private"],
+            "修前必须复现 4 个重复 id（与用户日志 `duplicate ruleTag preset-private` 同形）"
+        );
+
+        let merged = merge_rules(&s);
+        assert_eq!(
+            merged.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            vec![
+                "preset-private",
+                "preset-ads",
+                "preset-proxy-google",
+                "preset-cn-domain",
+                "preset-cn-ip",
+                "preset-private#2",
+                "preset-ads#2",
+                "google-to-us",
+                "preset-cn-domain#2",
+                "preset-cn-ip#2",
+            ],
+            "顺序必须是「预设在前、自定义在后」，冲突的**自定义**那条加后缀"
+        );
+        assert_eq!(merged.len(), 10, "一条都不能少（预设 5 + 自定义 5）");
+    }
+
+    /// 最终 `rules` 数组的 `ruleTag` 必须唯一 —— 5 个预设 × 5 种撞法，
+    /// 含**与 App 内部 tag 撞名**（`internal-*`）与**自定义规则内部重复**。
+    #[test]
+    fn generated_config_rule_tags_are_unique_for_every_preset_and_collision_shape() {
+        let shapes: [(&str, &[&str]); 5] = [
+            ("无同 id", &[]),
+            ("部分同 id", &["preset-private"]),
+            ("全部同 id", &USER_RULE_IDS),
+            ("撞内部 tag", &["internal-api", "internal-fallback", "internal-dns-hijack"]),
+            ("自定义内部重复", &["dup", "dup"]),
+        ];
+        let presets = [
+            RoutingPreset::GlobalProxy,
+            RoutingPreset::BypassMainland,
+            RoutingPreset::WhitelistProxy,
+            RoutingPreset::DirectAll,
+            RoutingPreset::Custom,
+        ];
+        for preset in presets {
+            for (label, ids) in shapes {
+                let mut s = settings();
+                s.routing_preset = preset;
+                s.custom_rules = ids.iter().map(|id| rule(id)).collect();
+                let expected = 3
+                    + if preset == RoutingPreset::Custom {
+                        0
+                    } else {
+                        routing::preset_rules(preset).len()
+                    }
+                    + ids.len();
+                let tags = tags_of(&config_of(&s));
+                assert_eq!(tags.len(), expected, "条数不能变（{label} / {preset:?}）");
+                assert!(
+                    duplicated_tags(&tags).is_empty(),
+                    "ruleTag 必须全唯一（{label} / {preset:?}）：{tags:?}"
+                );
+            }
+        }
+    }
+
+    /// 撞上**内部规则** tag 的自定义规则：内部规则保住原名，用户那条加后缀；
+    /// 而且**只有 tag 变了** —— 出站与条件一字未动（这正是「改名不影响路由语义」）。
+    #[test]
+    fn custom_rule_colliding_with_an_internal_tag_keeps_its_routing_semantics() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::GlobalProxy;
+        s.custom_rules = vec![rule("internal-api")];
+        let config = config_of(&s);
+        let rules = config["routing"]["rules"].as_array().unwrap();
+        let api: Vec<&Value> = rules
+            .iter()
+            .filter(|r| r["ruleTag"].as_str().unwrap_or("").starts_with("internal-api"))
+            .collect();
+        assert_eq!(api.len(), 2, "{rules:?}");
+        assert_eq!(api[0]["ruleTag"], "internal-api");
+        assert_eq!(
+            api[0]["outboundTag"], "api",
+            "内部 API 规则必须保住原名，否则 API 入站会指向错地方"
+        );
+        assert_eq!(api[1]["ruleTag"], "internal-api#2");
+        assert_eq!(api[1]["outboundTag"], "direct", "改名不许动出站");
+        assert_eq!(api[1]["domain"], json!(["example.com"]), "改名不许动条件");
+    }
+
+    /// 确定性：同样输入两次必须给出同样的 tag（用户按界面来回切预设也要能复现）。
+    #[test]
+    fn rule_tag_uniquification_is_deterministic() {
+        let s = user_shape(RoutingPreset::BypassMainland);
+        assert_eq!(
+            tags_of(&config_of(&s)),
+            tags_of(&config_of(&s)),
+            "同样的输入必须给出同样的 tag"
+        );
+    }
+
+    /// 自检失败文案：**先结论 + 下一步**（指名 tag / 来源 / 次数），再附**截断后**的日志。
+    /// 用人造配置 + 人造 35 行日志，**不依赖真实核心**。
+    #[test]
+    fn self_check_message_names_the_duplicate_tag_and_truncates_the_core_log() {
+        let s = user_shape(RoutingPreset::BypassMainland);
+        let mut config = config_of(&s);
+        // 造出「唯一化被绕过」的形态：把第一条预设规则再塞一份（与自定义那条同名）。
+        let extra = config["routing"]["rules"][2].clone();
+        config["routing"]["rules"].as_array_mut().unwrap().push(extra);
+
+        let conflicts = duplicate_rule_tags(&s, &config);
+        assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+        assert_eq!(conflicts[0].tag, "preset-private");
+        assert_eq!(conflicts[0].count, 2);
+        assert_eq!(conflicts[0].sources, vec!["预设", "自定义"]);
+        assert_eq!(
+            conflicts[0].describe(),
+            "`preset-private` 出现 2 次（预设 + 自定义）"
+        );
+
+        let raw = fake_core_log_tail(
+            "Failed to start: main: failed to create server > app/router: duplicate ruleTag preset-private",
+        );
+        let msg = config_self_check_message(&s, &serde_json::to_string(&config).unwrap(), &raw);
+
+        assert!(msg.starts_with("规则标识（ruleTag）重复"), "第一句必须是结论：{msg}");
+        assert!(msg.contains("`preset-private` 出现 2 次（预设 + 自定义）"), "{msg}");
+        assert!(msg.contains("路由"), "必须给出下一步：{msg}");
+        assert!(msg.contains("Failed to start"), "原始日志的最后一行要留下：{msg}");
+        assert!(!msg.contains("asset #1)"), "日志必须截断，别整段刷屏：{msg}");
+        assert!(msg.contains("共 35 行，只保留末尾 8 行"), "{msg}");
+        assert!(msg.len() < raw.len(), "文案要比原始日志短：{} vs {}", msg.len(), raw.len());
+    }
+
+    /// 没有重复 tag 时：仍然截断日志，并给出可操作的下一步。
+    #[test]
+    fn self_check_message_without_conflicts_still_truncates_and_suggests_a_next_step() {
+        let s = settings();
+        let config = config_of(&s);
+        assert!(duplicate_rule_tags(&s, &config).is_empty());
+
+        let raw = fake_core_log_tail("this rule has no effective fields");
+        let msg = config_self_check_message(&s, &serde_json::to_string(&config).unwrap(), &raw);
+
+        assert!(msg.starts_with("核心拒绝了这份配置"), "{msg}");
+        assert!(msg.contains("设置 → 内核与更新"), "要给出下一步：{msg}");
+        assert!(msg.contains("共 35 行，只保留末尾 8 行"), "{msg}");
+        assert!(msg.ends_with("this rule has no effective fields"), "{msg}");
+        assert!(msg.len() < raw.len(), "{} vs {}", msg.len(), raw.len());
+    }
+
+    /// **真实核心验收**（`#[ignore]`：需要仓库里的 `apps/desktop/binaries/xray`）。
+    ///
+    /// ```bash
+    /// cargo test -p xt-core --lib real_core -- --ignored --nocapture
+    /// ```
+    ///
+    /// 判据：① 修后形态（`ruleTag` 全唯一）核心自检**通过**；② 人为造出重复 tag，
+    /// 核心必须**拒绝**且原始报错里出现 `duplicate ruleTag preset-private`；
+    /// ③ 把原始输出喂给 `config_self_check_message` 后，用户看到的文案**指名**
+    /// 那个 tag、来源与次数，且比原始日志短。
+    #[test]
+    #[ignore = "需要真实核心二进制（apps/desktop/binaries/xray）"]
+    fn real_core_rejects_duplicate_rule_tags_and_the_message_names_them() {
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/desktop/binaries/xray");
+        if !core.exists() {
+            eprintln!("跳过：仓库里没有 {}", core.display());
+            return;
+        }
+        let assets = core.parent().expect("binaries 目录");
+        let dir = std::env::temp_dir().join("xraytun-task165-real-core");
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+
+        let s = user_shape(RoutingPreset::BypassMainland);
+        let config = config_of(&s);
+
+        // ① 修后形态：核心自检必须通过。
+        let good = dir.join("good.json");
+        std::fs::write(&good, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        let out = std::process::Command::new(&core)
+            .env("XRAY_LOCATION_ASSET", assets)
+            .args(["run", "-test", "-c"])
+            .arg(&good)
+            .output()
+            .expect("跑核心 -test");
+        assert!(
+            out.status.success(),
+            "修后形态必须通过核心自检：stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // ② 造出「唯一化被绕过」的重复 tag：核心必须拒绝，并指名 duplicate ruleTag。
+        let mut broken = config.clone();
+        let extra = broken["routing"]["rules"][2].clone();
+        broken["routing"]["rules"].as_array_mut().unwrap().push(extra);
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+        let out = std::process::Command::new(&core)
+            .env("XRAY_LOCATION_ASSET", assets)
+            .args(["run", "-test", "-c"])
+            .arg(&bad)
+            .output()
+            .expect("跑核心 -test");
+        assert!(!out.status.success(), "重复 `ruleTag` 必须被核心拒绝");
+        // 与 `validate_config` 同口径：stderr 为空时回退 stdout。
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let raw = if stderr.is_empty() {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        } else {
+            stderr
+        };
+        assert!(
+            raw.contains("duplicate ruleTag preset-private"),
+            "核心原始报错必须指名重复项：{raw}"
+        );
+
+        // ③ 用户最终看到的文案：指名冲突 + 下一步，且日志按「末尾 8 行」截断。
+        let msg = config_self_check_message(&s, &serde_json::to_string(&broken).unwrap(), &raw);
+        assert!(msg.contains("`preset-private` 出现 2 次（预设 + 自定义）"), "{msg}");
+        assert!(msg.contains("路由"), "要给下一步：{msg}");
+        let raw_lines = raw.lines().count();
+        let tail = raw_lines.min(8);
+        assert!(
+            msg.contains(&format!("共 {raw_lines} 行，只保留末尾 {tail} 行")),
+            "要说明截断了：{msg}"
+        );
+        // 截断是**有界**的：只在原始输出真的超过 8 行时才断言首行被丢掉
+        // （不跟具体核心版本吐多少行较劲）。
+        if raw_lines > 8 {
+            if let Some(first) = raw.lines().next().filter(|l| !l.trim().is_empty()) {
+                assert!(!msg.contains(first), "首行必须被截掉：{msg}");
+            }
+        }
     }
 }
