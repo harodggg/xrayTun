@@ -18,6 +18,19 @@ name = "xraytun-incident-collector"
 main = "src/worker.mjs"
 compatibility_date = "2026-09-22"
 
+# 同 zone 路由（Workers Route 优先于 Pages）
+#
+# ⚠️ **这个块必须放在文件最前面（任何 `[table]` / `[[array-of-table]]` 之前）。**
+# TOML 的表一直生效到下一个表头：`routes` 只要落在任何表头之后，就会被当成那张表里的
+# **未知字段**或普通变量 —— 两种表现都是同一个后果：**一条路由都不会注册**，
+# 部署看起来成功，而 `POST https://xraytun.top/api/incident` 返回 **405**（请求落到了 Pages）。
+# 2026-09-23 的真实事故：先被当成 `vars.routes` 环境变量，改成放前面后又落进 `[[r2_buckets]]`
+# （wrangler 只给一句 `Unexpected fields found in r2_buckets[0] field: "routes"`）。
+# 部署后**必须**用 `GET /zones/<zone>/workers/routes` 或直接 `curl -X POST` 复核，别看部署日志说成功。
+routes = [
+  { pattern = "xraytun.top/api/incident/*", zone_name = "xraytun.top" }
+]
+
 # R2：**只存 zip 与 manifest**（不含 IP、不含账号/订阅信息 —— 见 PRIVACY.md）
 [[r2_buckets]]
 binding = "INCIDENT_BUCKET"
@@ -36,10 +49,5 @@ ALLOWED_TYPES = "application/zip,application/octet-stream,application/x-zip-comp
 # ⚠️ INCIDENT_TOKEN 是**秘密**，不放 [vars]：
 #     npx wrangler secret put INCIDENT_TOKEN --config infra/incident-collector/wrangler.toml
 #
-# 同 zone 路由（Workers Route 优先于 Pages）
-routes = [
-  { pattern = "xraytun.top/api/incident/*", zone_name = "xraytun.top" }
-]
-
 [observability]
 enabled = false   # 不采集请求日志（日志里可能有客户端信息）；排查用 curl 即可
