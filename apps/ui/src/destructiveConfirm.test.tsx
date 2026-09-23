@@ -223,27 +223,26 @@ describe("六处真实站点都先确认（task-23 B + task-65）", () => {
   it("节点「删除」：确认前不调用后端；问句点名是哪个节点且说明会落盘", async () => {
     mocks.snapshot.mockResolvedValue(
       snapWith({
+        // task-146：这里原来是**手写的部分节点**（`protocol: "vless"` 是字符串、
+        // `transport: "tcp"` 也是字符串），而真实类型是
+        // `protocol: {kind:"vless", uuid, flow, encryption}`、`transport: {kind:"tcp"}`。
+        // 后果：`nodeSummary()` 读到 `p.kind === undefined`，界面上渲染出
+        // 「undefined + tcp」——**夹具在说谎**，而断言只查了确认问句，所以它绿着过去了。
+        // 现在直接借一份**真实形状**的节点（预览快照里的第一个），只改要断言的三个字段。
         nodes: [
-          {
-            id: "n1",
-            name: "香港 · REALITY 01",
-            address: "1.2.3.4",
-            port: 443,
-            protocol: "vless",
-            transport: "tcp",
-            tls: { server_name: "example.com" },
-            mux: null,
-            source: { kind: "manual" },
-            tags: [],
-            raw_uri: null,
-          },
+          { ...scenarioSnapshot().nodes[0]!, id: "n1", name: "香港 · REALITY 01", address: "1.2.3.4" },
         ],
-        latency: {},
         settings: { selected_node: null },
       }),
     );
     renderIn(<Nodes />);
     await screen.findByText("香港 · REALITY 01");
+
+    // task-146：夹具形状必须真实到**渲染出来是对的** —— 原来那个手写节点让摘要行
+    // 渲染成「undefined + tcp」。这一条就是防它退化回去的（不是放宽断言，是加一条）。
+    const row = screen.getByText("香港 · REALITY 01").closest(".node-row") as HTMLElement;
+    expect(row.textContent).toContain("vless");
+    expect(row.textContent, "节点摘要里不该出现 undefined").not.toContain("undefined");
 
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     expect(mocks.deleteNode).not.toHaveBeenCalled();

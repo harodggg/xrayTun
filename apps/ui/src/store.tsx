@@ -91,8 +91,20 @@ interface StoreValue {
 
 const StoreContext = createContext<StoreValue | null>(null);
 
+/**
+ * 命令返回值形状异常时给用户看的那句话（task-146）。
+ *
+ * 措辞刻意说清三件事：**哪里出问题**（后端返回的快照形状异常）、
+ * **界面现在显示什么**（上一份数据，可能是旧的）、**不会怎样**（界面不会崩/不会静默）。
+ */
+const SNAPSHOT_SHAPE_NOTICE =
+  "后端返回的快照形状异常（缺 settings / runtime）—— 界面已保留上一份数据，不会崩；" +
+  "但你现在看到的可能是过期值。这通常意味着 App 与后端版本不匹配，请重试或反馈这个问题。";
+
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
+  /** 「这一条 streak 里已经用可见横幅说过一次坏形状了」——恢复后重置。 */
+  const shapeBadRef = useRef(false);
   const [logs, setLogs] = useState<UiLogEntry[]>([]);
 
   /**
@@ -139,14 +151,67 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current);
   }, []);
 
+  /**
+   * 命令返回值的**形状守卫**（task-146）。
+   *
+   * # 为什么必须有
+   *
+   * 同一份「来自后端的数据」，本文件有**两条口径**：
+   * * **事件载荷**是校验的 —— `:193`/`:232`/`:257`/`:291` 都先过 `eventGuards.ts`
+   *   的谓词，注释写着「事件是运行时数据，必须校验而不是信任类型」；
+   * * **命令返回值**原来**零校验** —— `setSnapshot(await api.snapshot())` /
+   *   `setSnapshot(await action())` 直接当快照用（`AppSnapshot` 只是类型断言，
+   *   运行时不保证任何东西）。
+   *
+   * 后果不是「测试红一下」那么轻：坏形状会在**各个页面**里炸 ——
+   * 全仓 `snapshot.settings.` / `snapshot.runtime.` 这类**硬解引用共 78 处**
+   * （`Settings.tsx` 67、`Routing.tsx` 5、`App.tsx` 4），而 `snapshot?.settings.x`
+   * 的 `?.` 只挡 `snapshot` 为 null，**挡不住 `settings` 缺失**。
+   * v0.8.35 的冻结门禁就是这样红的：`{}` 被当成快照 ⇒
+   * `TypeError: Cannot read properties of undefined (reading 'selected_node')`
+   * ⇒ 它以 **unhandled error** 的形式出现，**绕过通过数**（`296 passed` + `Errors 1 error`）。
+   *
+   * # 口径（与事件路径一致）
+   *
+   * * 形状不对 ⇒ **保留上一份快照**（不设坏值）+ 可见告知 + 控制台留痕；
+   * * 用 `eventGuards.ts` 的 `isObject`（已经是「非数组的普通对象」那条判据）；
+   * * **不许静默**：可见告知走既有的 `error` 横幅（App 顶部渲染），
+   *   控制台走 `rejectPayload`（同一 key 只记一次，避免高频刷新刷屏）。
+   *   `rejectPayload` 的「只报一次」是**进程级**的，所以可见横幅另用 `shapeBadRef`
+   *   做**每条 streak 一次**的去重：恢复成好形状后重置，下一次再坏还会再说一遍。
+   *
+   * # 为什么 `run()` 在坏形状时返回 `false`
+   *
+   * 返回值表示「这次操作的结果**可用**」。坏形状下调用方（例如设置页的 `save()`、
+   * 节点页的 `submitManual()`）不该当成成功继续往下走 —— 宁可让它报失败，
+   * 因为横幅里已经写清了**真实**原因。（代价见卡片的诚实清单。）
+   */
+  const acceptSnapshot = useCallback((v: unknown, source: string): boolean => {
+    if (isObject(v) && isObject(v.settings) && isObject(v.runtime)) {
+      shapeBadRef.current = false;
+      setSnapshot(v as unknown as AppSnapshot);
+      return true;
+    }
+    rejectPayload(
+      `快照(${source})`,
+      v,
+      "形状异常：缺 settings / runtime —— 已保留上一份快照（界面不崩，但可能是旧值）",
+    );
+    if (!shapeBadRef.current) {
+      shapeBadRef.current = true;
+      setError(SNAPSHOT_SHAPE_NOTICE);
+    }
+    return false;
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
-      setSnapshot(await api.snapshot());
-      setError(null);
+      const next = await api.snapshot();
+      if (acceptSnapshot(next, "snapshot")) setError(null);
     } catch (e) {
       setError(errorText(e));
     }
-  }, []);
+  }, [acceptSnapshot]);
 
   const run = useCallback(
     async (name: string, action: () => Promise<AppSnapshot>): Promise<boolean> => {
@@ -154,8 +219,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setBusy(name);
       setError(null);
       try {
-        setSnapshot(await action());
-        return true;
+        const next = await action();
+        return acceptSnapshot(next, "command");
       } catch (e) {
         setError(errorText(e));
         return false;
@@ -163,7 +228,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         setBusy(null);
       }
     },
-    [],
+    [acceptSnapshot],
   );
 
   const runVoid = useCallback(
