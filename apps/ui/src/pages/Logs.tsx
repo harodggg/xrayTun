@@ -190,18 +190,23 @@ export default function Logs() {
                   **会原样保留** —— 贴到公开 issue 前请自己核对一遍」。那句话**如实**，
                   而如实描述的恰恰是一个缺陷：报告会把用户自己的服务器地址留在里面。
                   现在后端把脱敏做够了（`commands/diagnostics.rs::redact_secrets`）：
-                  · 判据来自**当前节点列表**（`Node::address` / SNI / 传输层 host /
+                  · 地址判据来自**当前节点列表**（`Node::address` / SNI / 传输层 host /
                     节点名里的域名段）—— 命中即换成 `<addr>`；
                   · **没命中列表的公网 IP** 也换：域名节点在日志里出现的是**解析后的 IP**，
                     已经被切走的旧节点 IP 更不在列表里；
-                  · **本机管道地址保留**（`127/8`、RFC1918、`::1`、ULA）—— 它们不带身份，
-                    却是排查「回环洞」这类问题的命门；
-                  · 公开目标域名（`www.baidu.com`）保留，否则报告没法看。
+                  · **本机管道地址保留**（`127/8`、RFC1918、`::1`、ULA、`198.18/15`
+                    fake-IP 网关段）—— 它们不带身份，却是排查「回环洞」「fake-IP」的命门；
+                  · **用户主目录**折成 `/Users/<user>/…`（用户名是可识别信息）；
+                  · 公开目标域名（`www.baidu.com`）保留，否则报告没法看；
+                  · 订阅 URL **只抹凭据、主机名（机场域名）保留** —— 这是 `task-113`
+                    现场包 README 的同一套口径，**必须点名写清**，不许让用户以为整条都没了。
                   只有一种形态覆盖不到，所以直接点名写出来：base64 载荷。 */}
-              已抹掉：订阅 URL 的凭据、UUID 形状的 token、<strong>节点地址/域名</strong>与
-              IP:port（替换成 <code>&lt;addr&gt;</code>）。App/核心/助手版本、时间，以及
-              <code>www.baidu.com</code> 这类公开目标域名与本机地址（<code>127.0.0.1</code>）
-              保留 —— 排查要用。唯一覆盖不到的形态是 <strong>base64 载荷</strong>
+              已抹掉：<strong>节点地址/域名</strong>与 IP:port（换成 <code>&lt;addr&gt;</code>）、
+              UUID 形状的 token、以及订阅 URL 里的<strong>凭据</strong>。
+              注意订阅 URL 是<strong>只抹凭据、主机名（机场域名）会保留</strong>；
+              用户主目录折成 <code>/Users/&lt;user&gt;/…</code>。App/核心/助手版本、时间，
+              以及 <code>www.baidu.com</code> 这类公开目标域名与本机地址（<code>127.0.0.1</code>、
+              fake-IP 段）保留 —— 排查要用。唯一覆盖不到的形态是 <strong>base64 载荷</strong>
               （如 vmess 分享链接里那段），日志里出现时请手动删掉再贴。
             </span>
             <span className="spacer" />

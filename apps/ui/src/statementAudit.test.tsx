@@ -240,6 +240,13 @@ describe("task-120 · 日志页的三种「空」与诊断说明", () => {
     expect(text, "不许再说节点地址会原样保留").not.toContain("节点地址、域名与 IP:port 会原样保留");
     expect(text, "不许再把「自己核对」当兜底").not.toContain("请自己核对");
     expect(text, "必须说清公开目标域名与本机地址保留").toContain("www.baidu.com");
+    // 裁决 3：订阅 URL **只抹凭据、保留主机名**，必须点名写清（别让人以为整条都没了）；
+    // 句子会跨 JSX 行 ⇒ 抹掉空白再比。
+    const flat = text.replace(/\s+/g, "");
+    expect(flat, "订阅 URL 必须点名说清「只抹凭据、主机名保留」").toContain(
+      "只抹凭据、主机名（机场域名）会保留",
+    );
+    expect(flat, "用户主目录折成 /Users/<user>/… 也要写出来").toContain("/Users/<user>/…");
     expect(text, "覆盖不到的形态要**点名**（base64），不能笼统地让用户自查").toContain("base64");
     expect(text, "不能再说「可以直接贴到公开的 issue 里」").not.toContain("可以直接贴到公开的 issue");
   });

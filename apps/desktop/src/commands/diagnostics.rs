@@ -177,16 +177,24 @@ pub async fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let snap = snapshot::build_snapshot(&app, &state).await?;
-    // 地址判据来自**当前节点列表**（不是猜日志里哪种形状像域名）。
-    let addresses = NodeAddresses::from_nodes(&snap.nodes);
+    // 判据：① 地址来自**当前节点列表**（不是猜日志里哪种形状像域名）；
+    // ② 路径/日志里的**用户主目录**折成 `/Users/<user>/…`（用户名是可识别信息）。
+    let home = home_dir();
+    let redaction = ReportRedaction::from_nodes_and_home(&snap.nodes, home.as_deref());
     let mut out = String::new();
     out.push_str(&format!("XrayTun {}\n", snap.app_version));
     out.push_str(&format!("macOS: {}\n", util::macos_version()));
     out.push_str(&format!("架构: {}\n", std::env::consts::ARCH));
     out.push_str(&format!("模式: {}\n", snap.settings.mode.as_str()));
+    // 核心路径也带用户名（受管更新会放在数据目录下）⇒ 与「数据目录」同一口径。
+    let core_path = snap
+        .core
+        .path
+        .as_ref()
+        .map(|p| redact_home_in_path(&p.display().to_string(), home.as_deref()));
     out.push_str(&format!(
         "内核: {:?} / {:?}（原生 TUN 支持: {}，需要 >= {}）\n",
-        snap.core.path, snap.core.version, snap.core.supports_native_tun, snap.core.min_native_tun_version
+        core_path, snap.core.version, snap.core.supports_native_tun, snap.core.min_native_tun_version
     ));
     out.push_str(&format!(
         "helper: 已安装={} 可连接={} 版本={:?} 隧道活跃={}\n",
@@ -197,7 +205,7 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
     }
     out.push_str(&format!(
         "数据目录: {}\n",
-        state.store.root().display()
+        redact_home_in_path(&state.store.root().display().to_string(), home.as_deref())
     ));
     out.push_str(&format!(
         "配置: socks={} http={} 允许局域网={} TUN 网段={} MTU={}\n",
@@ -232,7 +240,7 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
     }
     if !recent.is_empty() {
         for entry in recent {
-            out.push_str(&report_log_line(&entry, &addresses));
+            out.push_str(&report_log_line(&entry, &redaction));
         }
     }
     Ok(out)
@@ -248,7 +256,7 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
 /// **都是自锚定信息，一律不动** —— 那是排查必需，且不含隐私。
 pub(crate) fn report_log_line(
     entry: &crate::state::LogEntry,
-    addresses: &NodeAddresses,
+    addresses: &ReportRedaction,
 ) -> String {
     format!(
         "[{}] [{}] {} {}\n",
@@ -305,6 +313,11 @@ pub async fn open_data_dir(state: State<'_, AppState>) -> Result<(), String> {
 /// 抹掉 URL 里的凭据部分，只保留 host。
 ///
 /// 机场订阅的 URL 里带 token，用户把日志贴出来就等于把订阅泄漏了。
+///
+/// ⚠️ **这是「只抹凭据」的口径，不是「整条 URL 抹掉」**：`scheme://host/…` 里的
+/// `host`（机场域名）**会留在报告里**。这与 `task-113` 的现场包 README 是同一套
+/// 已文档化口径；界面文案必须**点名说清**，不许写成「已抹掉订阅 URL」那种会被
+/// 读成「整条都没了」的说法（task-124 裁决 3）。
 pub(crate) fn redact_url(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(u) => format!("{}://{}/…", u.scheme(), u.host_str().unwrap_or("<unknown>")),
@@ -312,17 +325,64 @@ pub(crate) fn redact_url(url: &str) -> String {
     }
 }
 
+/// `home` 折掉用户名后的样子：`/Users/alice` → `/Users/<user>`；`/root` → `<home>`。
+fn masked_home(home: &str) -> String {
+    match home.rsplit_once('/') {
+        Some((parent, _user)) if !parent.is_empty() => format!("{parent}/<user>"),
+        _ => "<home>".to_string(),
+    }
+}
+
+/// 把路径/文本里的**用户主目录**折成 `/Users/<user>/…`（只折用户名那一层，
+/// 后面的目录结构保留 —— 排查时要看它落在哪个目录）。
+///
+/// 判据是「出现在报告里的 `HOME` 字面量」，因此**不猜形状**；`/Users/alice-2`
+/// 这种只是长得像的不会被动（要求 home 之后紧跟 `/` 或行尾）。
+pub(crate) fn redact_home_in_path(text: &str, home: Option<&str>) -> String {
+    let Some(home) = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty())
+    else {
+        return text.to_string();
+    };
+    let mask = masked_home(home);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(home) {
+        let after = &rest[pos + home.len()..];
+        if !(after.is_empty() || after.starts_with('/')) {
+            // 只是长得像（`/Users/alice-2`）⇒ 这一段原样带过。
+            out.push_str(&rest[..pos + home.len()]);
+            rest = after;
+            continue;
+        }
+        out.push_str(&rest[..pos]);
+        out.push_str(&mask);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `HOME` 环境变量（报告脱敏的判据之一）。读不到就返回 `None`（那时路径原样）。
+pub(crate) fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok()
+}
+
 // ---------------------------------------------------------------------------
-// task-124：报告的地址脱敏
+// task-124：报告的脱敏判据
 //
-// **判据是「出现在当前节点列表里」，不是「长得像域名」。** 按形状抹会把
+// **地址的判据是「出现在当前节点列表里」，不是「长得像域名」。** 按形状抹会把
 // `www.baidu.com` 这类**公开、且排查必需**的目标域名一起抹掉，报告就没用了；
 // 而节点域名/地址必须抹 —— 那是用户自己的服务器。
+//
+// **另一条判据是「用户主目录」**（含用户名）：`/Users/<用户名>/…` → `/Users/<user>/…`，
+// 后面的目录结构保留（排查要用）。用户名是可识别信息，公开 issue 上没必要给。
 // ---------------------------------------------------------------------------
 
-/// 报告里会被替换成 `<addr>` 的地址集合 —— 由**当前节点列表**派生。
+/// 报告脱敏的**判据集合**：地址（来自当前节点列表）+ 用户主目录。
 ///
-/// # 收什么（都来自节点条目本身）
+/// # 收哪些地址（都来自节点条目本身）
 ///
 /// * `Node::address`（域名或 IP，不含方括号）；
 /// * `tls.server_name`（SNI；留空时核心会回退到 `address`，见 `xt_core::model`）；
@@ -331,15 +391,34 @@ pub(crate) fn redact_url(url: &str) -> String {
 /// * **节点名里形如域名/IP 的段**：订阅常把节点名起成 `jp1.example.com`，
 ///   名字里的国旗/「香港 01」这类标签不含地址，不动。
 #[derive(Debug, Default, Clone)]
-pub(crate) struct NodeAddresses {
+pub(crate) struct ReportRedaction {
     /// 去重后按**长度降序**（见 `from_nodes` 里的理由）。
     entries: Vec<String>,
     /// `entries` 里本身是 IP 字面量的那些 —— 命中即替换，**私网/自建的也算**。
     ips: Vec<IpAddr>,
+    /// 真实主目录（来自 `HOME`，已去掉尾部 `/`）。
+    home: Option<String>,
+    /// `home` 折掉用户名后的样子（预先算好；`home` 为空时是空串）。
+    home_mask: String,
 }
 
-impl NodeAddresses {
+impl ReportRedaction {
+    /// 只要地址判据（**单测用**）：主目录判据为空 ⇒ 路径原样保留。
+    ///
+    /// 标成 `#[cfg(test)]` 不是为了省一个函数，而是**不让生产路径有退路**：
+    /// 生产只能走 `from_nodes_and_home`，必须**显式**把 `HOME` 传进来；
+    /// 否则「忘了传主目录」会静默退化成「路径不脱敏」，而那正是本卡要修的缺陷形态。
+    #[cfg(test)]
     pub(crate) fn from_nodes(nodes: &[Node]) -> Self {
+        Self::build(nodes, None)
+    }
+
+    /// 地址判据 + 主目录判据（生产用）。
+    pub(crate) fn from_nodes_and_home(nodes: &[Node], home: Option<&str>) -> Self {
+        Self::build(nodes, home)
+    }
+
+    fn build(nodes: &[Node], home: Option<&str>) -> Self {
         let mut raw: Vec<String> = Vec::new();
         for node in nodes {
             push_address(&mut raw, &node.address);
@@ -364,12 +443,34 @@ impl NodeAddresses {
             .iter()
             .filter_map(|e| e.parse::<IpAddr>().ok())
             .collect();
-        Self { entries, ips }
+        let home = home
+            .map(|h| h.trim_end_matches('/'))
+            .filter(|h| !h.is_empty())
+            .map(str::to_string);
+        let home_mask = home.as_deref().map(masked_home).unwrap_or_default();
+        Self {
+            entries,
+            ips,
+            home,
+            home_mask,
+        }
     }
 
     /// 这个 IP 是否**就是**节点列表里的某个地址。
     pub(crate) fn contains(&self, ip: &IpAddr) -> bool {
         self.ips.iter().any(|x| x == ip)
+    }
+
+    /// 在 `i` 处匹配**用户主目录**（要连上后面的 `/` 才算：`/Users/alice-2` 不是）。
+    fn match_home(&self, line: &str, i: usize) -> Option<usize> {
+        let home = self.home.as_deref()?;
+        if line.get(i..i + home.len())? != home {
+            return None;
+        }
+        match line[i + home.len()..].chars().next() {
+            None | Some('/') => Some(home.len()),
+            _ => None,
+        }
     }
 
     /// 在 `i` 处匹配一个节点地址/域名（忽略大小写），连同紧跟的 `:port`。
@@ -450,29 +551,42 @@ fn transport_host(t: &Transport) -> Option<&str> {
 ///
 /// # 地址三条规则（判据里没有「猜形状的域名正则」）
 ///
-/// 1. **命中节点列表**（[`NodeAddresses`]，含私网/自建节点）⇒ `<addr>`；
+/// 1. **命中节点列表**（[`ReportRedaction`]，含私网/自建节点）⇒ `<addr>`；
 /// 2. **未命中节点列表的公网 IP 字面量** ⇒ `<addr>`。这条堵的是节点列表
 ///    **盖不住**的两类真实泄漏：① 域名形式的节点，日志里出现的是**解析后的 IP**；
 ///    ② **已经被切走的旧节点**的 IP（本机那条 `45.207.197.185 → 192.168.0.1 en0`
 ///    的 host 路由就是例子）；
 /// 3. **未命中节点列表的本机管道地址 ⇒ 原样保留**：`127.0.0.0/8`、`::1`、RFC1918
 ///    （`10/8`、`172.16/12`、`192.168/16`）、链路本地 `169.254/16`、ULA `fc00::/7`、
-///    `0.0.0.0`/`::`、组播与广播。它们描述的是**本机自己的拓扑**，不带身份信息，
-///    却是排查的命门 —— 「回环洞」的判据正是 `route -n get 127.0.0.2` 的 interface
-///    不是 `lo0`；把这些全抹掉等于把它变成永久不可诊断。
+///    `0.0.0.0`/`::`、组播与广播、以及 **`198.18.0.0/15`（fake-IP 网关段）**。
+///    它们描述的是**本机自己的拓扑**，不带身份信息，却是排查的命门 ——
+///    「回环洞」的判据正是 `route -n get 127.0.0.2` 的 interface 不是 `lo0`；
+///    `198.18.0.0/15` 更是 `sniff` / Fake-IP 一类问题**唯一的现场证据**
+///    （它是核心自己造的虚拟段、非公网，抹掉等于自断一条排查路径）。
 ///    公网判据是**保守**的：除上面这些，一律按公网处理（CGNAT、文档网段也抹）。
 ///
+/// # 另外两类
+///
+/// * **用户主目录**（含用户名）⇒ `/Users/<user>/…`，目录结构保留；
+/// * http(s) URL 带 query/userinfo ⇒ 只留 `scheme://host/…`（见 [`redact_url`]）；
+/// * 自锚定信息（App/核心/helper 版本、时间、模式、日志级别）**一个字不动**。
+///
 /// `IP:port` / `[v6]:port` 连端口一起替换（端口本身不含身份，但留着没有意义）。
-pub(crate) fn redact_secrets(line: &str, addresses: &NodeAddresses) -> String {
+pub(crate) fn redact_secrets(line: &str, addresses: &ReportRedaction) -> String {
     redact_with(line, addresses, true)
 }
 
-fn redact_with(line: &str, addresses: &NodeAddresses, allow_url: bool) -> String {
+fn redact_with(line: &str, addresses: &ReportRedaction, allow_url: bool) -> String {
     let mut out = String::with_capacity(line.len());
     let mut i = 0usize;
     while i < line.len() {
         if let Some(len) = match_uuid(line, i) {
             out.push_str("<uuid>");
+            i += len;
+            continue;
+        }
+        if let Some(len) = addresses.match_home(line, i) {
+            out.push_str(&addresses.home_mask);
             i += len;
             continue;
         }
@@ -509,7 +623,7 @@ fn redact_with(line: &str, addresses: &NodeAddresses, allow_url: bool) -> String
 }
 
 /// 边界：**匹配串之前**那个字符不能是 `[A-Za-z0-9_-]`（`.` 允许 —— 见
-/// `NodeAddresses::match_at`：这样才能吃掉 `www.<节点域名>` 的前缀）。
+/// `ReportRedaction::match_at`：这样才能吃掉 `www.<节点域名>` 的前缀）。
 fn boundary_before(line: &str, at: usize) -> bool {
     !is_word_char(line[..at].chars().next_back())
 }
@@ -605,12 +719,18 @@ fn match_credentialed_url(line: &str, i: usize) -> Option<usize> {
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // `198.18.0.0/15`：RFC 2544 的基准测试保留段 —— 核心把它当 **fake-IP
+            // 网关段**用（App 自己造的虚拟段、非公网、不带身份），而且是
+            // `sniff` / Fake-IP 一类问题**唯一的现场证据** ⇒ 保留（task-124 裁决 1）。
+            let is_fake_ip_gateway = o[0] == 198 && (o[1] & 0xfe) == 18;
             !(v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_broadcast()
-                || v4.is_multicast())
+                || v4.is_multicast()
+                || is_fake_ip_gateway)
         }
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
@@ -652,7 +772,7 @@ mod tests {
         #[test]
         fn uuid_is_redacted_from_logs() {
             let line = "user b831381d-6324-4d53-ad4f-8cda48b30811 connected";
-            let out = redact_secrets(line, &NodeAddresses::default());
+            let out = redact_secrets(line, &ReportRedaction::default());
             assert!(!out.contains("b831381d"), "{out}");
             assert!(out.contains("<uuid>"));
         }
@@ -664,7 +784,7 @@ mod tests {
         #[test]
         fn redaction_preserves_layout_of_multiline_logs() {
             let line = "启动失败:\n    \"port\": 10808\n    uuid b831381d-6324-4d53-ad4f-8cda48b30811\n";
-            let out = redact_secrets(line, &NodeAddresses::default());
+            let out = redact_secrets(line, &ReportRedaction::default());
             assert!(!out.contains("b831381d"), "凭据没被脱敏: {out}");
             assert!(out.contains('\n'), "换行被吃掉了，多行日志被压成一行: {out:?}");
             assert!(out.contains("    \"port\""), "缩进被吃掉了: {out:?}");
@@ -676,14 +796,14 @@ mod tests {
         /// 现在换成真正没有东西可抹的一行，公网 IP 的两种情形另见下面两条测试。
         #[test]
         fn redaction_is_identity_when_nothing_to_hide() {
-            let empty = NodeAddresses::default();
+            let empty = ReportRedaction::default();
             let line = "已连接 用时 54ms";
             assert_eq!(redact_secrets(line, &empty), line);
         }
         /// 边界：整行为空白、行首/行尾都是空白时也必须原样返回。
         #[test]
         fn redaction_handles_pure_whitespace_and_edges() {
-            let empty = NodeAddresses::default();
+            let empty = ReportRedaction::default();
             assert_eq!(redact_secrets("", &empty), "");
             assert_eq!(redact_secrets("   \n\t ", &empty), "   \n\t ");
             assert_eq!(
@@ -738,7 +858,7 @@ mod tests {
                 "jp1.node-example.xyz",
                 "cdn.node-example.net",
             )];
-            let addresses = NodeAddresses::from_nodes(&nodes);
+            let addresses = ReportRedaction::from_nodes(&nodes);
             let line = concat!(
                 "proxy/vless/outbound: tunneling request to tcp:www.baidu.com:443 via ",
                 "45.207.197.185:443\n",
@@ -782,7 +902,7 @@ mod tests {
         /// （域名节点解析后的 IP、已经被切走的旧节点 IP）。
         #[test]
         fn local_pipe_addresses_are_kept_while_unknown_public_ips_are_redacted() {
-            let empty = NodeAddresses::default();
+            let empty = ReportRedaction::default();
             let kept = concat!(
                 "route -n get 127.0.0.2 -> 127.0.0.2; ::1; 10.1.2.3:1080; 172.16.9.9; ",
                 "192.168.1.1; 169.254.1.1; fe80::1%en0; fc00::1; 0.0.0.0:10808; [fe80::1]:1080"
@@ -802,11 +922,60 @@ mod tests {
             assert_eq!(mixed.matches("<addr>").count(), 3, "{mixed}");
         }
 
+        /// **裁决 1（task-124）**：`198.18.0.0/15`（RFC 2544 保留段）是核心的
+        /// **fake-IP 网关段** —— App 自己造的虚拟段、不带身份，而且是
+        /// `sniff` / Fake-IP 一类问题**唯一的现场证据** ⇒ 必须保留；
+        /// 但**不在该段**的公网 IP 仍然要抹（不是「198 打头就免死」）。
+        #[test]
+        fn fake_ip_gateway_range_survives_but_public_ips_do_not() {
+            let empty = ReportRedaction::default();
+            let kept = "dns: fakeip 198.18.0.1 -> 198.18.1.7:443 and 198.19.255.254";
+            assert_eq!(
+                redact_secrets(kept, &empty),
+                kept,
+                "fake-IP 网关段不许被抹（否则 fake-ip 类问题永久不可诊断）"
+            );
+            let out = redact_secrets("peer 198.20.0.1 and 1.0.0.1", &empty);
+            assert!(!out.contains("198.20.0.1"), "198.20 不在保留段里，必须抹：{out}");
+            assert!(!out.contains("1.0.0.1"), "{out}");
+            assert_eq!(out.matches("<addr>").count(), 2, "{out}");
+        }
+
+        /// **裁决 2（task-124）**：用户主目录（含用户名）折成 `/Users/<user>/…`，
+        /// **目录结构保留**（排查要看落在哪）；`/Users/alice-2` 这种只是长得像的不动；
+        /// `HOME` 读不到时一个字都不改（不猜）。
+        #[test]
+        fn home_directory_is_redacted_in_header_paths_and_log_lines() {
+            let home = Some("/Users/alice");
+            assert_eq!(
+                redact_home_in_path(
+                    "/Users/alice/Library/Application Support/com.xraytun.desktop",
+                    home
+                ),
+                "/Users/<user>/Library/Application Support/com.xraytun.desktop",
+                "只折用户名那一层，后面的目录结构要保留"
+            );
+            assert_eq!(
+                redact_home_in_path("/Users/alice-2/x", home),
+                "/Users/alice-2/x",
+                "只是长得像的主目录不许被动"
+            );
+
+            let r = ReportRedaction::from_nodes_and_home(&[], home);
+            let out = redact_secrets("open /Users/alice/Library/Logs/app.jsonl 失败", &r);
+            assert!(!out.contains("/Users/alice"), "日志行里的用户名也要抹：{out}");
+            assert!(out.contains("/Users/<user>/Library/Logs/app.jsonl"), "{out}");
+
+            // `HOME` 读不到 ⇒ 路径原样（不猜、不改成空）。
+            let none = ReportRedaction::from_nodes_and_home(&[], None);
+            let line = "内核路径 /Users/alice/bin/xray";
+            assert_eq!(redact_secrets(line, &none), line);
+        }
+
         /// 规则 1 优先于规则 3：**命中节点列表的私网地址也要抹**（自建节点常在 LAN 里）。
         #[test]
-        fn node_address_in_the_list_wins_even_when_it_is_a_private_ip() {
-            let addresses =
-                NodeAddresses::from_nodes(&[fixture_node("192.168.1.50", "", "", "")]);
+        fn node_address_in_the_list_wins_even_when_it_is_a_private_ip() {            let addresses =
+                ReportRedaction::from_nodes(&[fixture_node("192.168.1.50", "", "", "")]);
             let out = redact_secrets("via 192.168.1.50:443 and 127.0.0.2", &addresses);
             assert!(!out.contains("192.168.1.50"), "{out}");
             assert!(out.contains("127.0.0.2"), "没在列表里的本机地址仍要保留：{out}");
@@ -817,7 +986,7 @@ mod tests {
         #[test]
         fn node_domain_is_redacted_inside_longer_hostnames_too() {
             let addresses =
-                NodeAddresses::from_nodes(&[fixture_node("1.0.0.1", "", "node-example.xyz", "")]);
+                ReportRedaction::from_nodes(&[fixture_node("1.0.0.1", "", "node-example.xyz", "")]);
             let out = redact_secrets(
                 "a www.node-example.xyz and node-example.xyz.cn and xnode-example.xyz",
                 &addresses,
@@ -833,7 +1002,7 @@ mod tests {
         /// **不许把报告抹成没法看**：公开目标域名、版本号、时间戳都要原样保留。
         #[test]
         fn redaction_does_not_touch_public_domains_versions_or_timestamps() {
-            let addresses = NodeAddresses::from_nodes(&[fixture_node(
+            let addresses = ReportRedaction::from_nodes(&[fixture_node(
                 "45.207.197.185",
                 "🇯🇵 jp1.node-example.xyz",
                 "jp1.node-example.xyz",
@@ -858,7 +1027,7 @@ mod tests {
         #[test]
         fn subscription_url_credentials_are_redacted_and_the_kept_host_too() {
             let addresses =
-                NodeAddresses::from_nodes(&[fixture_node("1.0.0.1", "", "node-example.xyz", "")]);
+                ReportRedaction::from_nodes(&[fixture_node("1.0.0.1", "", "node-example.xyz", "")]);
             let out = redact_secrets(
                 concat!(
                     "更新失败: https://sub.example.com/sub?token=SECRET123 与 ",
@@ -878,7 +1047,7 @@ mod tests {
         /// 收了就会到处误伤日志。
         #[test]
         fn node_addresses_collects_addresses_from_the_node_list_only() {
-            let addresses = NodeAddresses::from_nodes(&[fixture_node(
+            let addresses = ReportRedaction::from_nodes(&[fixture_node(
                 "45.207.197.185",
                 "🇭🇰 HK-01 香港",
                 "sni.example.net",
@@ -1000,7 +1169,7 @@ mod tests {
                 level: "info".into(),
                 message: "隧道已自动恢复（第 1 次自动重建）".into(),
             };
-            let line = report_log_line(&entry, &NodeAddresses::default());
+            let line = report_log_line(&entry, &ReportRedaction::default());
             assert!(
                 line.starts_with("[2026-09-22T04:29:17Z] [app] info "),
                 "报告里的日志行必须带时间（以前没有）：{line}"
@@ -1013,7 +1182,7 @@ mod tests {
         #[test]
         fn report_log_line_redacts_node_addresses_and_keeps_the_envelope() {
             let addresses =
-                NodeAddresses::from_nodes(&[fixture_node("45.207.197.185", "", "", "")]);
+                ReportRedaction::from_nodes(&[fixture_node("45.207.197.185", "", "", "")]);
             let entry = crate::state::LogEntry {
                 ts_unix: 1790051357,
                 source: "core".into(),
@@ -1027,6 +1196,32 @@ mod tests {
             assert!(
                 line.starts_with("[2026-09-22T04:29:17Z] [core] info "),
                 "封套是自锚定信息，不许动：{line}"
+            );
+        }
+
+        /// **手动证据工具**（同 `redacts_the_real_report_tail`，`#[ignore]`，不进 CI）：
+        /// 用**真实的** `HOME` 与 `Store::default_root()` 渲染头部那两行路径的
+        /// 「关 / 开」对照，用来证明 delta 2（用户名折成 `/Users/<user>/…`）。
+        ///
+        /// ```text
+        /// cargo test -p xraytun-desktop --lib redacts_the_real_home_in_header_paths -- --ignored --nocapture
+        /// ```
+        #[test]
+        #[ignore = "手动证据工具：读真实 HOME 与默认数据目录"]
+        fn redacts_the_real_home_in_header_paths() {
+            let home = home_dir();
+            let data_dir = xt_core::store::Store::default_root().display().to_string();
+            // 核心路径与数据目录同源（受管更新就放在数据目录下）。
+            let core_path = format!("{data_dir}/core/xray");
+            println!("[改前] 数据目录: {data_dir}");
+            println!(
+                "[改后] 数据目录: {}",
+                redact_home_in_path(&data_dir, home.as_deref())
+            );
+            println!("[改前] 内核: {:?}", Some(core_path.clone()));
+            println!(
+                "[改后] 内核: {:?}",
+                Some(redact_home_in_path(&core_path, home.as_deref()))
             );
         }
 
@@ -1056,8 +1251,13 @@ mod tests {
                 &std::fs::read_to_string(&nodes_path).expect("读 nodes.json"),
             )
             .expect("解析 nodes.json");
-            let addresses = NodeAddresses::from_nodes(&nodes);
-            println!("节点 {} 个，地址候选 {} 条", nodes.len(), addresses.entries.len());
+            let redaction = ReportRedaction::from_nodes_and_home(&nodes, home_dir().as_deref());
+            println!(
+                "节点 {} 个，地址候选 {} 条，主目录判据={}",
+                nodes.len(),
+                redaction.entries.len(),
+                redaction.home_mask
+            );
             for chunk in fields.chunks(4) {
                 if chunk.len() < 4 {
                     break;
@@ -1068,7 +1268,7 @@ mod tests {
                     level: String::from_utf8_lossy(chunk[2]).to_string(),
                     message: String::from_utf8_lossy(chunk[3]).to_string(),
                 };
-                print!("{}", report_log_line(&entry, &addresses));
+                print!("{}", report_log_line(&entry, &redaction));
             }
         }
 }
