@@ -523,6 +523,59 @@ mod tests {
         assert_eq!(v6.via, RouteVia::Interface { name: "en0".into() });
     }
 
+    // -----------------------------------------------------------------------
+    // task-143 A0：把「v6 节点的旁路退化成无网关 on-link」从 [推断] 变成可断言事实
+    // （机制见 `docs/verification/V6-DATAPATH-AUDIT.md` §2；这里只钉住代码现状）
+    // -----------------------------------------------------------------------
+
+    /// **A0**：v6 服务器地址在当前实现下拿到什么 `via`。
+    ///
+    /// 机制：`PhysicalUplink.gateway` 只可能来自 IPv4 `default_route()`
+    /// （App `supervisor.rs:507`、helper `controller.rs:48` 都只探 v4），
+    /// 而 [`bypass_via`] 只认「同族网关」⇒ v6 主机落进 `_ => Interface{ en0 }`
+    /// ⇒ `route -n add -inet6 -host <v6> -interface en0`（**没有网关**）。
+    /// 本项目自己写过这种形状「包根本出不去」（`route.rs:196-197`、`plan.rs:212-213`），
+    /// v4 侧还有回归测试 `scoped_interface_route_carries_gateway_and_ifscope`。
+    ///
+    /// ⚠️ 这条是**现状**的固化（修法是让 `physical` 拿得到 v6 网关，不是改这个 match）。
+    #[test]
+    fn v6_bypass_host_degrades_to_an_on_link_route_when_only_a_v4_gateway_exists() {
+        let mut req = request(DefaultRouteMode::SplitDefault, Ipv6Mode::Passthrough);
+        req.routes.bypass_hosts = vec!["2001:db8::1".parse().unwrap()];
+
+        let plan = build_plan(&req, physical()).unwrap();
+        let host = route_for(&plan, "2001:db8::1/128").expect("v6 host 旁路必须在计划里");
+        assert_eq!(host.kind, RouteKind::Bypass);
+        assert!(
+            host.critical,
+            "服务器 host 路由是防路由环的核心，必须 critical（装不上就该让建立失败）"
+        );
+        assert_eq!(
+            host.via,
+            RouteVia::Interface { name: "en0".into() },
+            "v6 主机 + 只有 v4 网关 ⇒ 退化成**无网关**的 on-link /128（task-143 的 [推断]）"
+        );
+    }
+
+    /// **A0 反向**：同族 v6 网关在场时 [`bypass_via`] 会给出 `Gateway{ v6 }`
+    /// ⇒ 缺的不是 match 逻辑，而是「生产路径根本拿不到 v6 网关」
+    /// （`default_route_v6()` 从初始提交起无人调用）。
+    #[test]
+    fn v6_bypass_host_uses_a_v6_gateway_when_one_is_supplied() {
+        let mut req = request(DefaultRouteMode::SplitDefault, Ipv6Mode::Passthrough);
+        req.routes.bypass_hosts = vec!["2001:db8::1".parse().unwrap()];
+        let mut phys = physical();
+        phys.gateway = Some("fe80::1".parse().unwrap());
+
+        let plan = build_plan(&req, phys).unwrap();
+        let host = route_for(&plan, "2001:db8::1/128").expect("v6 host 旁路必须在计划里");
+        assert_eq!(
+            host.via,
+            RouteVia::Gateway { addr: "fe80::1".parse().unwrap() },
+            "同族网关在场时必须给出带网关的路由（修法方向：让 physical 拿得到 v6 网关）"
+        );
+    }
+
     /// **不变量**：捕获路由不受回环跳过逻辑影响。
     #[test]
     fn default_capture_routes_are_unaffected_by_the_loopback_skip() {
