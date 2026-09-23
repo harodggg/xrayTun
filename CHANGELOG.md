@@ -33,6 +33,17 @@
 ① **base64 载荷**；② **不以 `HOME` 开头、但带用户名的路径**（如 `/var/folders/…`）。
 界面原先写「**唯一**覆盖不到的形态是 base64 载荷」——修完**仍不严格成立**，已改成逐个点名两种。
 
+**第三种形态是 tester 独立验证发现的，已修（`0a5f996`）**：**域名紧贴字母**（`Xray<域名>`，
+没有 `-`/`_` 分隔）原先仍会泄漏 —— 原实现只对 **IP** 条目放宽了左边界，域名条目刻意保持严格。
+现在 `match_at` 的**左边界要求整个去掉**（右边仍挡字母/数字）：节点显示名里的地址可以紧贴任意字符
+（`Xray-<地址>` / `Xray_<地址>` / `Xray<地址>` / `www.<节点域名>` / `<节点域名>.cn` 一律命中），
+新增回归测试 `domain_glued_to_letters_is_redacted`（两种来源）与
+`node_domain_is_redacted_inside_longer_hostnames_too`。
+**代价（明确接受的过抹）**：`xnode-example.xyz` 这种**只是包含**节点域名的另一个域名，
+现在也会被抹成 `x<addr>` —— 原来那条「别误伤相似域名」的断言**主动反过来了**，
+理由写在测试与注释里：**宁可多抹一个相似域名，也不漏一个真实的服务器地址**。
+⇒ 修完「覆盖不到的形态」**仍是两类**（第三类已被堵住），界面那句话**一个字符未动**。
+
 ### 新增：App 内「报告问题」（task-130 / task-131）——出包 → 看清单 → 你点确认 → 上传
 
 * 流程结构上**做不到跳过「先看」**：`预览` 是渲染 `确认上传` 的**前置条件**（不是靠文案约束）；
@@ -159,12 +170,14 @@ XrayTun 0.8.35 · 启动核心（触发者：看门狗重建）
 `BUILD_LOCK_STRICT=1` 跑过：**`GATE_EXIT=0`**（13:55:38–14:03:43，构建锁持有 485s，
 末尾 `✓ 与 CI 相同的全部检查通过`）。**提交 1 之后**在真实发版状态上重跑一次的结果记录在
 `docs/verification/RELEASE-v0.8.35.md`（本篇的测试计数取自各卡实测、**不是同一时点**：
-desktop 216 passed / 5 ignored、xt-core 227、xt_tun 72、xt_proto 22、helper 14、type_contract 6
-出自 `d95b4ef` 那次；前端 `vitest` 26 files / 286 passed + 1 todo 出自 `ca6a381` 那次。
-整树口径以门禁那一次的原始输出为准）。
+desktop **217** / xt-core 227 / xt_tun 72 / xt_proto 22 / helper 14 / type_contract 6
+与前端 `vitest` **28 files / 296 passed + 1 todo，退出码 0、无 `Errors` 行**出自 `0a5f996` 那次
+（`cargo test --workspace` `TEST_EXIT=0`、`clippy --workspace --all-targets -D warnings` exit 0、
+`npx tsc --noEmit` exit 0）。整树口径以门禁那一次的原始输出为准）。
 
-⚠️ **一条门禁教训**：`Test Files 28 passed / Tests 296 passed` **不等于绿** —— 那次同时打了
-`Errors 1 error`（unhandled error），`GATE_EXIT=1`。看前端那一步必须**同时看 `Errors` 行与退出码**。
+⚠️ **一条门禁教训**：`Test Files 28 passed / Tests 296 passed` **不等于绿** —— 之前**同样的计数**
+那一次同时打了 `Errors 1 error`（unhandled error），`GATE_EXIT=1`。
+**计数相同、结论相反** ⇒ 看前端那一步必须**同时看 `Errors` 行与退出码**，不能只看通过数。
 
 ### ✅ 给用户的动作：**本版需要重新安装特权助手**
 

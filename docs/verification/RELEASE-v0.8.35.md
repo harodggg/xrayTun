@@ -18,13 +18,31 @@
 |---|---|
 | 冻结候选（**Lead 跑门禁那一版**） | `3c9896a3a91005264c1eeaae2a0e92c38bc7a0d4`（门禁 13:55–14:03，见 §5） |
 | **提交 1 的父提交**（HEAD 在我工作中**移动过**，见 §1.1） | `4397904c4c116d6bb8ef908c7502addbadf1b3fa` |
+| **提交 1** | `181f9ca52f9b86ff41d4deb8b06b30ea31d0264e`（已推，`local = origin/main`） |
+| 冻结窗口内后续落地（Lead 授权，见 §1.2） | `0a5f9965457c531d1e583be3b5417a578b1fa052`（`task-124` delta-3） |
 | `git rev-list --left-right --count origin/main...HEAD`（提交 1 前） | `0 0` |
 | `v0.8.34` 设计上的上一版 tag | `v0.8.34`（`tag v0.8.34^{commit}` = `6aa3b5e`） |
-| `git rev-list --count v0.8.34..HEAD` | **63**（时点 2026-09-23 14:07，HEAD=3c9896a）→ **64**（含 4397904） |
+| `git rev-list --count v0.8.34..HEAD` | **63**（时点 2026-09-23 14:07，HEAD=3c9896a）→ **64**（含 4397904）→ **65**（含 0a5f996） |
 | 工作树（提交 1 前） | 干净（`git status --short` 空） |
 
 > 卡面写「未发布提交数 38」是**建卡时的时点值**；`task-124/121/128/130/127` 落地后
 > 实测为 **63**（含上一版 tag 之后的「提交 2」`442d65d` —— 它不在 `v0.8.34` 里）。
+>
+> **tag 将打在「tag 前最后一个提交」上**（= 本文件的措辞同步提交，父提交 `0a5f996`），
+> 而不是提交 1 本身 —— 因为 delta-3 是 P0 隐私修复，**必须进这个版本**。
+
+### 1.2 冻结窗口内落地的 delta-3（**Lead 授权、单一写者**）
+
+`task-124` 的第三种泄漏形态（**域名紧贴字母** `Xray<域名>`）由 tester 在 `4397904` 里发现，
+由 backend-dev 在 **`0a5f996`** 修掉：`match_at` 的**左边界要求整个去掉**（右边仍挡字母/数字），
+新增 `domain_glued_to_letters_is_redacted`（两种来源）与
+`node_domain_is_redacted_inside_longer_hostnames_too`。
+
+**选择是「修代码」而不是「把界面改成三种」**，理由与代价一并记录：
+`xnode-example.xyz`（只是**包含**节点域名的另一个域名）现在也会被抹 ⇒
+原本「别误伤相似域名」的断言**主动反过来**，**宁可多抹一个相似域名，也不漏一个真实服务器地址**。
+修完「覆盖不到的形态」**仍是两类**（base64 载荷 / 不以 `HOME` 开头但带用户名的路径），
+`Logs.tsx` 那句陈述**一个字符未动** ⇒ CHANGELOG 里同口径的那句**不需要改**（已逐字核对）。
 
 ### 1.1 ⚠️ 发布过程中 HEAD 移动了，并因此产生一次**线上回归**（已实测）
 
@@ -174,32 +192,55 @@ python3 scripts/gen-site-geo.py            → robots.txt / sitemap.xml / llms.t
 `BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build` ⇒ **`GATE_EXIT=0`**，
 窗口 **13:55:38–14:03:43**，构建锁持有 **485s**，末尾 `✓ 与 CI 相同的全部检查通过`。
 
-⚠️ **提交 1 之后必须重跑**（卡面要求），本文件在提交 2 里补上那一次的**原始输出**与退出码。
+⚠️ **那一次不能替代本版的门禁**：①它是**版本号 bump 之前**的树；②`3c9896a` 之后又落了
+`4397904`（+1 文档 / −2 og）与 `0a5f996`（delta-3 改的是 `diagnostics.rs`）。
+⇒ **Lead 在 tag 前的最终 HEAD 上重跑**，原始输出与退出码在提交 2 补进本文件。
+
 ⚠️ **看前端那一步的口径**：`Test Files 28 passed / Tests 296 passed` **不等于绿** ——
-曾经同时打了 `Errors 1 error`（unhandled error），`GATE_EXIT=1`。**必须同时看 `Errors` 行与退出码。**
+曾经**同样的计数**那一次同时打了 `Errors 1 error`（unhandled error），`GATE_EXIT=1`。
+**计数相同、结论相反** ⇒ **必须同时看 `Errors` 行与退出码。**
+
+**各卡实测（不是同一时点，`0a5f996` 那次）**：`cargo test --workspace` `TEST_EXIT=0`
+（desktop **217** / type_contract 6 / xt-core 227 / helper 14 / xt_proto 22 / xt_tun 72）；
+`clippy --workspace --all-targets -D warnings` exit 0；`npx tsc --noEmit` exit 0；
+`npx vitest run` **28 files / 296 passed + 1 todo，退出码 0、无 `Errors` 行**。
 
 ## 6. 本版特有的核对项：`.app` 里真的有三个脚本（**产物级**）
 
 Tauri resources 现在应含三个脚本（`incident-bundle.sh` / `triage-incident.py` / `net-metrics.py`），
-预期落在 `.app/Contents/Resources/scripts/`。口径（Lead 已采纳）：
+预期落在 `.app/Contents/Resources/scripts/`（`tauri.conf.json` 里的映射已核：
+`"../../scripts/<name>": "scripts/<name>"` ×3）。口径（Lead 已采纳）：
 
-1. **看产物不看源码**：对打包出的 `.app` 内路径 `ls` + `shasum -a 256`，与仓库内同名文件**逐字对齐**；
+1. **看产物不看源码**：**证据取自发布资产 zip 里的 `.app`**（用户拿到的就是它；
+   CI 在 `$CARGO_TARGET_DIR/universal-apple-darwin/release/bundle/macos/XrayTun.app` 打包，
+   本机不做本地 `tauri build` —— 既省磁盘，也比中间产物更贴近事实）。
+   解包用 `ditto -x -k`（保签名/扩展属性），**不比对大小，只比 `shasum -a 256`**；
 2. `codesign --verify --strict` 通过（新增 resource 会改变被签名内容，包内未声明文件会被判「已损坏」）；
-3. **反向断言**：故意把校验路径写错 ⇒ 必须**报红**，否则这条自检等于没有。
+3. **反向断言**：故意把校验路径写错 ⇒ 必须**报红**，否则这条自检等于没有；
+4. 另外断言 `tauri.conf.json` 声明的 `scripts/*` **恰好三个**（同时防「声明了没进包」与「进了包没声明」）。
 
-> 状态：**待 tag 后 `tauri build` 产物**才能做（时点：提交 1 阶段，尚无 `.app`）。
-> 这一步的原始输出在提交 2 补。
+**工具**：`/tmp/verify-app-bundle-resources.sh`（本次先写在 `/tmp`，避免往冻结窗口叠东西；
+计划在**提交 2** 落到 `docs/verification/`）。`--self-test`（离线假 bundle）实测 **`pass=4 fail=0`**：
+T1 内容一致⇒绿、T2 内容不符⇒红、T3 缺文件⇒红、T4 **路径写错**⇒红。
+
+> ⚠️ **工具自己的诚实一条**：这个自测**第一版是假的** —— T1 把三个脚本**全**拷进假 bundle，
+> 于是 T3「缺文件」其实文件还在 ⇒ 那条自测**恒绿**（工具自己的假信号，同族）。
+> 修法是 T3 先 `rm -f`，之后 4/0。**它还没在真产物上跑过** —— 现在只是「口径已定 + 自测过」。
+
+> 状态：**待 tag 后的发布资产**才能做（时点：提交 1 阶段，尚无 `.app`）。原始输出在提交 2 补。
 
 ## 7. 提交 2 待补清单（不预填、不推测）
 
-- [ ] 提交 1 的完整 hash（push 后回填本表）
-- [ ] `BUILD_LOCK_STRICT=1` 在**提交 1** 上的门禁原始输出与退出码（Lead 跑）
+- [x] 提交 1 的完整 hash = `181f9ca52f9b86ff41d4deb8b06b30ea31d0264e`
+- [ ] `BUILD_LOCK_STRICT=1` 在 **tag 前最终 HEAD** 上的门禁原始输出与退出码（Lead 跑；
+      含前端那一步的 **`Errors` 行**）
 - [ ] annotated tag `v0.8.35` 的 `git cat-file -p` 原文 + tagger epoch
 - [ ] Release workflow 结论：`isDraft == false` + **3 个资产**的真实字节数与 SHA256
-- [ ] §6 的 `.app` 产物级核对原始输出（含反向断言）
+- [ ] §6 的 `.app` 产物级核对原始输出（含反向断言；证据 = 发布资产 zip）
 - [ ] `PUBLISHED = True` + 真实字节数 + pinned 链接 + 重跑生成器
 - [ ] `VER=0.8.35 PREV=0.8.34 scripts/verify-live-site.sh` 原始输出 + `--self-test`
 - [ ] `python3 scripts/net-metrics.py --until <打 tag 时刻>` 的基线（**带口径**）
+- [ ] **线上复核**：新 og 图 200（提交 1 已部署，见 §1.1）、`0.8.34` 残留 = 0、pinned 出现且与资产同字节
 
 ## 8. 诚实清单（**本篇已生效**的部分）
 
@@ -208,11 +249,11 @@ Tauri resources 现在应含三个脚本（`incident-bundle.sh` / `triage-incide
 * 本环境**不在中国大陆**，GFW 行为无法复现；
 * 「用户装上新版之后的 after 数字」**现在不存在**，本篇不预填、不推测；
 * §2 的磁盘数字是**时点值**：Lead 之后腾过一部分空间，**发版过程中它还在变**；
-* §5 的绿是**版本号 bump 之前**那一版的（`3c9896a`，**不是**提交 1 的父提交 `4397904`）；
-  `3c9896a → 4397904` 的树差异只有「+1 文档 / −2 og 图片」，但**它仍是不同的树**，
-  所以提交 1 上的门禁必须重跑（卡面要求），**不能用上一次的绿代替**；
-* §1.1 里「线上 og:image 404」是**实测**（curl 原始状态码），而「提交 1 部署后恢复」在
-  这一版文档里**还是待验证项**（提交 2 复核），现在不要当成已修好；
-* §6 的三脚本核对在本阶段**还没做**（没有产物），它现在只是「口径已定好」，不是「已验证」；
+* §5 的绿是**版本号 bump 之前**那一版的（`3c9896a`），且它之后又落了 `4397904` 与 `0a5f996`
+  ⇒ **不能用它替代 tag 前那次门禁**；
+* §1.1 里「线上 og:image 404」是**实测**（curl 原始状态码），修复后的复核**我已在发送报告前
+  实测过一次**（时点 2026-09-23 14:12:34：`og-image-0.8.35.png` 200 / 59389 B、
+  `og-image-en-0.8.35.png` 200 / 42634 B，与仓库逐字节一致），提交 2 会再复核一次；
+* §6 的三脚本核对在本阶段**还没做**（没有产物），现在只是「口径已定好 + 自测过」，不是「已验证」；
 * 站点两阶段发布下，**官网此刻如实写「正在发布」**，没有字节数、没有 pinned 直链 ——
   这不是缺陷，是设计。
