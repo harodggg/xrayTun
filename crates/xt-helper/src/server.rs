@@ -675,13 +675,23 @@ impl Helper {
     }
 
     fn uninstall(&self) -> Response {
-        // 先回滚，再摘 launchd，最后删文件。顺序错了会留下「服务已卸载但
-        // 路由还在」的状态。
-        //
-        // **取值只在这里**：「哪个失败优先、文案怎么写」全在 `uninstall_outcome`
-        // （纯函数、有行为测试）—— 站点不再自己组装文案，于是「响应前把失败抹掉」
-        // 这类绕过（task-157 的 V-1/V-3）在**编译层**就没有可抹的中间变量了。
-        let memory = match self.state.lock() {
+        // 站点的**唯一出口**，而且是**一行委托**：取两处回滚结果 → 纯函数给出（原因, 响应）
+        // → 记日志 → 清理落盘痕迹。守卫会要求这一层**只有这一行委托**（任何「自己造响应」
+        // 的写法都判假）；响应文案的取舍全在 `uninstall_outcome`（有行为测试）。
+        self.uninstall_with(
+            || self.rollback_memory_session(),
+            || {
+                controller::force_cleanup()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            },
+            |helper| helper.remove_system_traces(),
+        )
+    }
+
+    /// 取「内存里那份会话」的回滚结果：没有会话 / 锁中毒 ⇒ `Ok`（与旧实现一致）。
+    fn rollback_memory_session(&self) -> Result<(), String> {
+        match self.state.lock() {
             Ok(mut guard) => guard
                 .session
                 .take()
@@ -689,21 +699,12 @@ impl Helper {
                     controller::rollback(&session.snapshot).map_err(|e| e.to_string())
                 })
                 .unwrap_or(Ok(())),
-            // 锁中毒：与原来一样，不回滚内存里那份（也不谎报成功）。
             Err(_) => Ok(()),
-        };
-        // `force_cleanup` 返回 `Result<Option<SessionSnapshot>, _>` ⇒ 只关心成败。
-        let force = controller::force_cleanup()
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-        let (rollback_failed, response) = uninstall_outcome(memory, force);
-        if let Some(why) = &rollback_failed {
-            tracing::warn!(
-                error = %why,
-                "卸载时回滚网络配置失败 —— 路由/DNS 可能仍留在系统上"
-            );
         }
+    }
 
+    /// 摘 launchd + 删落盘痕迹。**与响应无关**的副作用，单独一层便于注入/跳过。
+    fn remove_system_traces(&self) {
         let _ = Command::new("/bin/launchctl")
             .args(["bootout", &format!("system/{HELPER_LABEL}")])
             .stdout(Stdio::null())
@@ -714,9 +715,35 @@ impl Helper {
         let _ = std::fs::remove_file(&self.socket_path);
         // 最后删自己。删掉之后进程仍在运行（inode 还在），由调用方要求退出。
         let _ = std::fs::remove_file(xt_proto::HELPER_INSTALLED_PATH);
+    }
 
+    /// **站点主体（可注入）**：两处回滚结果与「清理痕迹」都由参数给。
+    ///
+    /// 生产由 [`Helper::uninstall`] 传真实取值器；测试传注入结果 + 空清理 ⇒ **在完全不碰
+    /// 本机路由/DNS/系统文件**的前提下，驱动**站点自己的代码**并断言最终 `Response`
+    /// （这正是 `task-163` 要堵的 `n2`：站点自造成功响应）。
+    fn uninstall_with<R, F, C>(
+        &self,
+        session_rollback: R,
+        force_cleanup: F,
+        remove_traces: C,
+    ) -> Response
+    where
+        R: FnOnce() -> Result<(), String>,
+        F: FnOnce() -> Result<(), String>,
+        C: FnOnce(&Self),
+    {
+        let (rollback_failed, response) = uninstall_outcome(session_rollback(), force_cleanup());
+        if let Some(why) = &rollback_failed {
+            tracing::warn!(
+                error = %why,
+                "卸载时回滚网络配置失败 —— 路由/DNS 可能仍留在系统上"
+            );
+        }
+        remove_traces(self);
         response
     }
+
 }
 
 /// **卸载结局 → 响应**（纯函数：四组输入都能行为级测，不必起真 helper）。
@@ -877,6 +904,49 @@ mod tests {
         let _ = admin_gid();
     }
 
+    /// **站点级行为测试（task-163 主要修法）**：驱动**站点自己的代码**
+    /// （`uninstall_with`，两处回滚结果 + 清理动作全部注入）并断言最终 `Response`。
+    ///
+    /// 为什么不直接 `dispatch(Request::Uninstall)`：那会**真的**跑 launchctl、删
+    /// `/Library/...` 下的文件、并把磁盘上真实的会话快照回滚掉 —— 在开发机上等于
+    /// 搞破坏（哪怕测试是以普通用户跑的，也不能写这种测试）。所以把「取值」与
+    /// 「清理痕迹」做成接缝，**站点主体本身**照旧执行。
+    /// 从 `dispatch` 到这里的几跳由下面的语义判据兜（那一层是文本层，见报告）。
+    #[test]
+    fn uninstall_site_response_is_honest_under_injected_failures() {
+        fn message(r: &Response) -> String {
+            match r {
+                Response::Ok { message } => message.clone().unwrap_or_default(),
+                other => panic!("卸载响应必须是 Response::Ok，实际 {other:?}"),
+            }
+        }
+        let helper = Helper::new(PathBuf::from("/tmp/task-163-scratch.sock"));
+
+        // ① 内存那份失败（注入）：站点必须如实说出来。
+        let resp = helper.uninstall_with(
+            || Err("删除路由 203.0.113.0/24 失败: route: not in table".into()),
+            || Ok(()),
+            |_| {},
+        );
+        let text = message(&resp);
+        assert!(text.contains("回滚网络配置失败"), "{text}");
+        assert!(text.contains("203.0.113.0/24"), "要点名具体失败步骤：{text}");
+        assert_ne!(text, "helper 已卸载", "**n2 的形状**：站点自造成功响应必须在这里红");
+
+        // ② 只有 force_cleanup 那一路失败（n3 的形状）：也必须进文案。
+        let resp = helper.uninstall_with(
+            || Ok(()),
+            || Err("强制清理失败：磁盘上的快照读不出来".into()),
+            |_| {},
+        );
+        let text = message(&resp);
+        assert!(text.contains("强制清理失败"), "第二处失败也必须进响应：{text}");
+
+        // ③ 两处都成功 ⇒ 才是干净的「helper 已卸载」。
+        let resp = helper.uninstall_with(|| Ok(()), || Ok(()), |_| {});
+        assert_eq!(message(&resp), "helper 已卸载");
+    }
+
     /// **站点级行为测试（task-160；L0/L1：断言的就是用户可见的响应体）**。
     ///
     /// `task-157` 的 V-1/V-2 之所以能「守卫绿、行为吞掉」，根因是**站点没有行为测试**。
@@ -939,51 +1009,82 @@ mod tests {
         assert!(!ok.contains("失败"), "{ok}");
     }
 
-    /// **站点级块判据（task-160 (b)；对应 `GUARD-FALSE-GREEN-PATTERNS` §3
-    /// 「站点无法注入时：文本守卫可作第二道，但必须站点级块判据 + 逐条列出不可判定写法」）**：
+    /// **站点语义判据（task-163）**：只锚**语义**，不锚标识符/绑定名/`mut`/类型注解 ——
+    /// 无害的形状变化（tester 的 `n1`/`n5`）**不许红**；「站点自造成功响应」（`n2`）**必须红**。
     ///
-    /// `fn uninstall` 必须 ①把**两份原始结果**交给 `uninstall_outcome`；
-    /// ②**不自己**调用文案函数（那是 V-3 诱饵的立足点）；③返回那个函数给的响应。
+    /// 五个语义条件（见 `uninstall_site_is_semantic`）：
+    /// ① **卸载族**（入口 / 主体 / 纯函数）里 `Response::Ok` 只允许出现在 `uninstall_outcome`，
+    ///    且入口与主体里**一处都没有**；dispatch 的卸载分支必须**委托**、不许自己造响应；
+    /// ② 那一处必须真的把**两处**失败算进来（`.err().or(` + 进文案函数）；
+    /// ③ 站点主体**恰好一次**调用 `uninstall_outcome`，两个实参都**不是**字面 `Ok(`，
+    ///    返回的是那次调用解构出的**第二个绑定**（名字动态取 ⇒ 改绑定名不受影响）；
+    /// ④ 入口只允许是**一行委托**。
     #[test]
     fn uninstall_site_cannot_swallow_rollbacks_in_production_source() {
         let prod = production_source();
+        assert!(uninstall_site_is_semantic(prod), "站点语义判据不成立（四个条件见函数注释）");
+
+        // —— 正向：无害形状变化**不许**红 ——
+        let n1 = prod.replace(
+            "let (rollback_failed, response) = uninstall_outcome(",
+            "let (mut rollback_failed, response) = uninstall_outcome(",
+        );
+        assert_ne!(n1, prod, "n1 fixture 必须真的改到生产源码");
         assert!(
-            uninstall_site_delegates_outcome(prod),
-            "站点必须把两份原始结果交给 uninstall_outcome，并返回它的响应"
+            uninstall_site_is_semantic(&n1),
+            "`mut` 是无害的形状变化，守卫不许红（tester 的 n1）"
         );
 
-        // 负例 1（V-1 同族：把两份结果换成假的成功）。
+        // n5：把响应绑定改成**别名**（tester 的原文形状：改名 + 再赋回原名）。
+        let n5 = prod.replace(
+            "let (rollback_failed, response) = uninstall_outcome(",
+            "let (rollback_failed, response_alias) = uninstall_outcome(",
+        );
+        let n5 = n5.replace(
+            "        remove_traces(self);\n        response",
+            "        let response = response_alias;\n        remove_traces(self);\n        response",
+        );
+        assert_ne!(n5, prod, "n5 fixture 必须真的改到生产源码");
+        assert!(
+            uninstall_site_is_semantic(&n5),
+            "改绑定名/加别名是无害重构，守卫不许红（tester 的 n5）"
+        );
+
+        // —— 负例：必须红 ——
+        // n2：站点**自造**一个成功响应（shadowing 掉真响应）。
+        let n2 = prod.replace(
+            "        remove_traces(self);\n        response",
+            "        let honest = &response;\n        let _ = honest;\n        let response = Response::Ok {\n            message: Some(\"helper 已卸载\".to_string()),\n        };\n        remove_traces(self);\n        response",
+        );
+        assert_ne!(n2, prod, "n2 fixture 必须真的改到生产源码");
+        assert!(
+            !uninstall_site_is_semantic(&n2),
+            "站点自造响应必须红（tester 的 n2；全局只允许 uninstall_outcome 构造 Response::Ok）"
+        );
+
+        // 把两处结果换成假的成功（V-1new）。
         let v1 = prod.replace(
-            "uninstall_outcome(memory, force)",
+            "uninstall_outcome(session_rollback(), force_cleanup())",
             "uninstall_outcome(Ok(()), Ok(()))",
         );
-        assert_ne!(v1, prod, "负例 fixture 必须真的改到生产源码");
-        assert!(
-            !uninstall_site_delegates_outcome(&v1),
-            "把两份结果换成假的 Ok 必须被抓"
-        );
+        assert_ne!(v1, prod, "fixture 必须真的改到");
+        assert!(!uninstall_site_is_semantic(&v1), "把两处结果换成假的 Ok 必须红");
 
-        // 负例 2（V-2 同族：force 那一路的结果被丢掉）。
+        // 丢掉 force 那一路（V-2）。
         let v2 = prod.replace(
-            "uninstall_outcome(memory, force)",
-            "uninstall_outcome(memory, Ok(()))",
+            "uninstall_outcome(session_rollback(), force_cleanup())",
+            "uninstall_outcome(session_rollback(), Ok(()))",
         );
-        assert_ne!(v2, prod, "负例 fixture 必须真的改到生产源码");
-        assert!(
-            !uninstall_site_delegates_outcome(&v2),
-            "force 结果被丢掉必须被抓"
-        );
+        assert_ne!(v2, prod, "fixture 必须真的改到");
+        assert!(!uninstall_site_is_semantic(&v2), "force 那一路被丢掉必须红");
 
-        // 负例 3（V-3：诱饵调用 + 自己另造一个「成功」响应）。
+        // 常规吞法：`.ok()`（对照：task-134 已能抓）。
         let v3 = prod.replace(
-            "let (rollback_failed, response) = uninstall_outcome(memory, force);",
-            "let _ = uninstall_outcome(memory, force);\n        let (rollback_failed, response) = (None, Response::Ok { message: Some(uninstall_response_message(None)) });",
+            "controller::rollback(&session.snapshot).map_err(|e| e.to_string())",
+            "controller::rollback(&session.snapshot).ok().map(|_| ()).map_err(|e| e.to_string())",
         );
-        assert_ne!(v3, prod, "负例 fixture 必须真的改到生产源码");
-        assert!(
-            !uninstall_site_delegates_outcome(&v3),
-            "站点自己拼文案（诱饵）必须被抓"
-        );
+        assert_ne!(v3, prod, "fixture 必须真的改到");
+        assert!(!uninstall_site_is_semantic(&v3), "`.ok()` 这种吞法必须红");
     }
 
     /// 生产源码 = `server.rs` 去掉测试模块。
@@ -995,18 +1096,102 @@ mod tests {
         }
     }
 
-    /// `fn uninstall` 的**函数体**（用**花括号配对**取，而不是「到下一个 `    fn `」——
-    /// 后者会把紧跟其后的自由函数一起吞进来，判据就会误伤；这条第一次跑就踩了）。
-    fn uninstall_body(src: &str) -> Option<&str> {
-        let start = src.find("fn uninstall(&self) -> Response {")?;
+    /// 语义判据本体（见上面那条测试的注释）。
+    fn uninstall_site_is_semantic(src: &str) -> bool {
+        // ① **卸载族**里 Response::Ok 只允许在 uninstall_outcome 体内（其它请求的
+        //    dispatch 分支不算 —— 它们不在这条通路上）。
+        let Some(outcome) = fn_body(src, "fn uninstall_outcome(") else {
+            return false;
+        };
+        if outcome.matches("Response::Ok").count() != 1 {
+            return false;
+        }
+        // ② 两处失败都必须进文案。
+        let outcome_n = normalize(outcome);
+        if !outcome_n.contains(".err().or(")
+            || !outcome_n.contains("uninstall_response_message(")
+        {
+            return false;
+        }
+        // ③ 站点主体：恰好一次调用；两个实参都不是字面 Ok(；返回解构出的第二个绑定。
+        let Some(site) = fn_body(src, "fn uninstall_with<R, F, C>(") else {
+            return false;
+        };
+        let site_n = normalize(site);
+        if site_n.matches("uninstall_outcome(").count() != 1 {
+            return false;
+        }
+        let Some(args) = call_args(&site_n, "uninstall_outcome(") else {
+            return false;
+        };
+        let parts = split_top(&args);
+        if parts.len() != 2 || parts.iter().any(|a| a.trim_start().starts_with("Ok(")) {
+            return false;
+        }
+        let Some(returned) = destructured_second_name(&site_n) else {
+            return false;
+        };
+        // 站点返回的必须是**那次调用的响应绑定**（或它的别名）。
+        // 先剥掉函数体收尾的 `}` 与可能的分号，再取最后一个标识符 ⇒ 不锚空白形状。
+        let tail = site_n
+            .trim_end()
+            .trim_end_matches('}')
+            .trim_end()
+            .trim_end_matches(';')
+            .trim_end();
+        let tail_name = tail
+            .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or("");
+        let returned_ok = tail_name == returned
+            // 别名：`let <尾名> = <第二个绑定>`（tester 的 n5 就是这种无害重构）
+            || site_n.contains(&format!("let {tail_name}= {returned}"))
+            || site_n.contains(&format!("let {tail_name} = {returned}"));
+        if !returned_ok {
+            return false;
+        }
+        // ④ 入口只允许一行委托；入口与主体里都不许出现 Response::Ok（= n2 的立足点）。
+        let Some(entry) = fn_body(src, "fn uninstall(&self) -> Response") else {
+            return false;
+        };
+        let entry_n = normalize(entry);
+        if !(entry_n.contains("self.uninstall_with(") && !entry_n.contains("let ")) {
+            return false;
+        }
+        if entry_n.contains("Response::Ok") || site_n.contains("Response::Ok") {
+            return false;
+        }
+        // ⑥ 两处**取值器**不许在中间吞掉错误：错误必须活着到达 `uninstall_outcome`。
+        let Some(collector) = fn_body(src, "fn rollback_memory_session(&self)") else {
+            return false;
+        };
+        let collector_n = normalize(collector);
+        if collector_n.contains(".ok()") || collector_n.contains("let _ = controller::rollback(") {
+            return false;
+        }
+        if !collector_n.contains("controller::rollback(") || !entry_n.contains("map_err(") {
+            return false;
+        }
+        // ⑤ dispatch 的卸载分支必须**委托**给 uninstall()，不许自己造响应。
+        let Some(arm_at) = src.find("Request::Uninstall =>") else {
+            return false;
+        };
+        let arm = match src[arm_at..].find('\n') {
+            Some(i) => &src[arm_at..arm_at + i],
+            None => &src[arm_at..],
+        };
+        arm.contains("self.uninstall()") && !arm.contains("Response::Ok")
+    }
+
+    /// 某个函数的**函数体**（花括号配对）。
+    fn fn_body<'a>(src: &'a str, signature: &str) -> Option<&'a str> {
+        let start = src.find(signature)?;
         let open = start + src[start..].find('{')?;
         let close = matching_brace(src, open)?;
         Some(&src[start..=close])
     }
 
-    /// 从 `open`（一个 `{` 的下标）找配对的 `}`。**朴素深度计数**：这些被测块里的
-    /// 花括号（含 `format!("…{e}…")` 这种）都是成对的，够用；字符串里的花括号若不平衡
-    /// 会误判 —— 所以判据只用于**受控的**小片段，别拿去解析任意 Rust。
+    /// 从 `open`（一个 `{` 的下标）找配对的 `}`（朴素深度计数）。
     fn matching_brace(src: &str, open: usize) -> Option<usize> {
         let mut depth = 0usize;
         for (i, c) in src[open..].char_indices() {
@@ -1024,19 +1209,70 @@ mod tests {
         None
     }
 
-    /// 站点级块判据（见测试注释）。
-    fn uninstall_site_delegates_outcome(src: &str) -> bool {
-        let Some(body) = uninstall_body(src) else {
-            return false;
-        };
-        // 去行注释：判据不认注释里写的旧写法（task-75 的教训）。
-        let code = body
-            .lines()
+    /// 去行注释 + 折叠空白 + 去掉 `mut `（形状噪音）⇒ 判据只锚语义。
+    fn normalize(src: &str) -> String {
+        src.lines()
             .map(|l| l.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
-            .join("\n");
-        code.contains("let (rollback_failed, response) = uninstall_outcome(memory, force);")
-            && !code.contains("uninstall_response_message(")
-            && code.lines().any(|l| l.trim() == "response")
+            .join("\n")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace("mut ", "")
+    }
+
+    /// 取调用 `name(` 的实参原文（配对括号内）。
+    fn call_args(src: &str, name: &str) -> Option<String> {
+        let start = src.find(name)? + name.len();
+        let mut depth = 1usize;
+        for (i, c) in src[start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(src[start..start + i].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 顶层逗号切分（忽略嵌套括号里的逗号）。
+    fn split_top(args: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        let mut cur = String::new();
+        for c in args.chars() {
+            match c {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    cur.push(c);
+                }
+                ')' | ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    cur.push(c);
+                }
+                ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
+                _ => cur.push(c),
+            }
+        }
+        if !cur.trim().is_empty() {
+            out.push(cur);
+        }
+        out
+    }
+
+    /// `let (a, b) = …` 里的第二个名字（动态取 ⇒ 改绑定名不受影响）。
+    fn destructured_second_name(src: &str) -> Option<String> {
+        let p = src.find("let (")? + "let (".len();
+        let close = src[p..].find(')')? + p;
+        let names: Vec<String> = src[p..close].split(',').map(|s| s.trim().to_string()).collect();
+        if names.len() != 2 {
+            return None;
+        }
+        Some(names[1].clone())
     }
 }

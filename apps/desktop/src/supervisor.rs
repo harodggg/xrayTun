@@ -2236,15 +2236,54 @@ mod tests {
                 return false;
             };
             let block = &src[open + 1..close];
-            let handled = ["tracing::warn!", "errors.push(", "return Err("]
-                .iter()
-                .any(|h| block.contains(h));
-            if !handled {
+            // **被绑定的错误名**（从 `if let Err(<name>) = ` 里取；不锚具体名字 ⇒ 改名不误伤）。
+            let bound = before
+                .rfind("if let Err(")
+                .map(|p| {
+                    let rest = &before[p + "if let Err(".len()..];
+                    rest.split(')').next().unwrap_or("").trim().to_string()
+                })
+                .filter(|n| !n.is_empty());
+            // **handler 必须在块的顶层**（task-163 的 s3：`if false { warn! }` 的 handler
+            // 在深度 1，属于「不可达留痕」，不许算 handled），并且要**引用那个错误名**。
+            if !handler_at_top_level(block, bound.as_deref()) {
                 return false;
             }
             from = close;
         }
         sites > 0
+    }
+
+    /// 块内**顶层**（深度 0）是否有一个 handler，且它**引用了被绑定的错误名**。
+    ///
+    /// 为什么要「顶层」：`if false { tracing::warn!(..) }` 也是「块内出现 warn」，
+    /// 但那条留痕**不可达**（tester 的 `s3`；release 下等于静默）。为什么要求引用错误名：
+    /// 否则空 warn 也能充数。
+    fn handler_at_top_level(block: &str, bound: Option<&str>) -> bool {
+        let mut depth = 0usize;
+        for (i, c) in block.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if depth != 0 {
+                continue;
+            }
+            let rest = &block[i..];
+            for h in ["tracing::warn!", "errors.push(", "return Err("] {
+                if rest.starts_with(h) {
+                    // handler 的实参窗口里必须出现被绑定的错误名。
+                    let window = &rest[..rest.len().min(200)];
+                    if let Some(name) = bound {
+                        if window.contains(name) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// 从 `open`（一个 `{` 的下标）找配对的 `}`（朴素深度计数；被测块的括号都成对）。
