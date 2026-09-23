@@ -139,6 +139,27 @@ export function CopyButton({
 
 type Phase = "idle" | "loading" | "preview" | "uploading" | "done";
 
+/**
+ * 哨兵角标的刷新间隔（task-149）。
+ *
+ * # 为什么是 30 秒、为什么不挂在别处
+ *
+ * `incident_anomaly_count()` **只是在本地读一个文件**（不走网络、不进核心），
+ * 所以 30 秒一次的成本可以忽略；但它反映的是「现在有多少条待上报」——
+ * 只在挂载时对一次的话，用户开着这一页会看到「有 0 条」而以为没出事，
+ * 这正是本项目最忌的「你以为没事」。
+ *
+ * **刻意不绑到 2 秒级的快照轮询上**：那是另一个 cadence（拓扑/状态刷新），
+ * 为了一个角标把它抬到 2 秒既没必要，也会让「刷新频率」这件事在代码里变得含糊。
+ *
+ * 刷新时机（四条，全部在下面的 effect 里）：
+ * 1. 挂载；
+ * 2. 页面 `visibilitychange` 变可见 / 窗口重新获得焦点；
+ * 3. 上传成功后（`confirmUpload` 里直接调一次）；
+ * 4. 页面可见时每 30 秒一次 —— **不可见就停掉**（不留后台 timer）。
+ */
+export const ANOMALY_REFRESH_MS = 30_000;
+
 export default function IncidentReport() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [preview, setPreview] = useState<IncidentPreview | null>(null);
@@ -160,8 +181,44 @@ export default function IncidentReport() {
     }
   }, []);
 
+  /**
+   * 角标的刷新调度（task-149）：挂载 / 变可见 / 获得焦点 ⇒ 立刻读一次；
+   * **只在页面可见时**起 30 秒的定时器，不可见或卸载都清掉（不留后台 timer）。
+   *
+   * `visibilityState` 与 `focus` 在真机 WKWebView 里的行为未验证（见诚实清单），
+   * 这里用的是标准 DOM API，jsdom 下可注入/可测。
+   */
   useEffect(() => {
-    void loadCount();
+    let timer: number | null = null;
+    const stopTimer = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+    const startTimer = () => {
+      stopTimer();
+      timer = window.setInterval(() => void loadCount(), ANOMALY_REFRESH_MS);
+    };
+    const onVisibleOrFocused = () => {
+      if (document.visibilityState === "hidden") {
+        // 不可见 ⇒ 不读、也不留定时器（后台标签页不该有 timer 在跑）
+        stopTimer();
+        return;
+      }
+      void loadCount();
+      startTimer();
+    };
+
+    void loadCount(); // ① 挂载先读一次
+    if (document.visibilityState !== "hidden") startTimer(); // ④ 可见才起表
+    document.addEventListener("visibilitychange", onVisibleOrFocused);
+    window.addEventListener("focus", onVisibleOrFocused);
+    return () => {
+      stopTimer();
+      document.removeEventListener("visibilitychange", onVisibleOrFocused);
+      window.removeEventListener("focus", onVisibleOrFocused);
+    };
   }, [loadCount]);
 
   const collect = async () => {
@@ -221,16 +278,21 @@ export default function IncidentReport() {
         哪些内容被截断」先给你看一遍；你点「确认上传」之后才会发出去。
       </p>
 
+      {/* 角标在任何阶段都显示（它说的是**状态**，不是某个阶段的信息）：
+          「有 N 条待上报」= 本地哨兵已经记下的异常条数；刷新时机见上面 `ANOMALY_REFRESH_MS` 的注释。 */}
+      {badge && (
+        <div className="row row--wrap" style={{ marginTop: 8 }}>
+          <span className="badge badge--unknown" title="只统计本地记录，上传仍然只由你点击触发">
+            {badge}
+          </span>
+        </div>
+      )}
+
       {phase === "idle" && (
         <div className="row row--wrap">
           <button className="btn btn--primary" onClick={() => void collect()}>
             报告问题
           </button>
-          {badge && (
-            <span className="badge badge--unknown" title="只统计本地记录，上传仍然只由你点击触发">
-              {badge}
-            </span>
-          )}
         </div>
       )}
 
