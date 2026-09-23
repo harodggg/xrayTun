@@ -163,6 +163,68 @@ CI 原始 body（未补动作）    = 2890 字节   ⇒ 模板段 2889 + "\n" ==
 且**与完全没带令牌同一响应** ⇒ 拿到 401 先看头名，别当成「令牌不对」。
 （端点源码 `worker.mjs` 只取 `request.headers.get('X-Auth-Token')`。）
 
+## 4.1 `.app` 三脚本核对：基准必须取 **git blob**，不是工作树（`task-174`，v0.8.37 的真实事故）
+
+**事故**：`docs/verification/verify-app-bundle-resources.sh` 第一版的判据是「发布资产里的 `.app` ↔
+**当前工作树**」。v0.8.37（tag `ef768fa`）发布后，工作树又被 `96df259`（task-171）改过那两个脚本
+⇒ 自检报 **2 红**；而按 **tag 里的文件**比，三个脚本 sha256 **完全相同**。
+代价：把「工作树在前进」误判成「包里带的是旧脚本」，**逼人对一个不存在的缺陷做决定**
+（细节见 `RELEASE-v0.8.37.md` §10/§13）。
+
+**修法（`--rev`）**：
+
+```
+# 发布后核实的正确用法（照这条做）
+docs/verification/verify-app-bundle-resources.sh /tmp/XrayTun.app --rev v0.8.37
+```
+
+* 比较对象一律是 **`git show <rev>:<path>` 的 blob**，与工作树无关；
+* **默认**（不传 `--rev`）：先读 `.app` 的 `CFBundleShortVersionString`，存在同名 tag `v<版本>`
+  就**用它**（多数情况正好是产出这个包的发布提交）；**没有**同名 tag 才退到 `HEAD`，
+  并且**显式警告**「发布后核实请显式传 `--rev v<版本>`」。**绝不静默拿工作树当基准**；
+* 报告固定打印 **基准来源 / rev / commit / 每个文件两侧 sha256**；工作树那份只作**信息性**对照，
+  与基准不同时提示「基准取的是 rev，不计入判红」；
+* 工作树有未提交改动时**显式警告**（列出改动文件），基准仍是 rev 的 blob；
+* 浅克隆里取不到该 rev 的对象/blob ⇒ 退出码 **2**（环境问题），**不是**判红。
+
+**敏感性（`--self-test`，用临时夹具仓库，不碰共享工作树）**：`pass=6 fail=0` ——
+T1 一致⇒绿 / T2 与 rev **差 1 字节**⇒红 / T3 缺文件⇒红 / T4 路径写错⇒红 /
+**T5 工作树脏（改过 `net-metrics.py`）而基准取 blob ⇒ 不产生假红** / T6 rev 不存在⇒判为「取不到基准」。
+
+**真产物的四种场景（v0.8.37 的 `.app`，原始输出见 §4.2）**：
+`--rev v0.8.37` ⇒ **5/0 绿**；不传 `--rev` ⇒ 由 `.app` 版本推出 tag ⇒ **5/0 绿（无假红）**；
+`--rev HEAD` ⇒ **2/2 红**（HEAD 已越过发布提交，差别**显式可归因**而不是静默假红）；
+把包内一个脚本改 1 字节 ⇒ **3/1 红**（负对照）。
+
+**诚实边界**：①浅克隆（没有该 rev 的 blob）读不到基准 ⇒ 退出 2，需先 `git fetch --tags`；
+②**同一 tag 被移动**（force-update）这种极端情况脚本看不出来 —— 它只证明「与本地解析到的那个 rev 一致」，
+不证明「远端 tag 没被改过」（远端 tag 指向可用 `git ls-remote --tags origin <tag>` 独立核对）；
+③它只覆盖**三个脚本是否进包且与 rev 同字节** + 签名有效，**不**验证脚本在真机上的功能。
+
+### 4.2 四种场景的原始输出（节选）
+
+```
+$ verify-app-bundle-resources.sh /tmp/v0837-app/XrayTun.app --rev v0.8.37
+基准来源：显式 --rev v0.8.37
+基准 rev：v0.8.37 → commit ef768fa4863c1492edc9b708b769cd3d0be25a47
+  ✓ scripts/incident-bundle.sh == rev 的 blob（sha256 7662c2193a9e6bf7…）
+  ⚠️      （信息）工作树那份与基准不同：工作树=d26ffed62f80e635… —— 基准取的是 rev，**不计入判红**
+  ✓ scripts/triage-incident.py == rev 的 blob（sha256 6969e38b5355bab4…）   （同上，工作树 f359b5de…）
+  ✓ scripts/net-metrics.py == rev 的 blob（sha256 e45318da088cb16f…）
+  ✓ codesign --verify --strict 通过
+pass=5 fail=0
+
+$ verify-app-bundle-resources.sh /tmp/v0837-app/XrayTun.app            # 不传 --rev
+基准来源：tag v0.8.37（由 .app 的 CFBundleShortVersionString 推出）
+pass=5 fail=0                      ← **工作树/HEAD 与 tag 不同，但没有假红**
+
+$ verify-app-bundle-resources.sh /tmp/v0837-app/XrayTun.app --rev HEAD --no-codesign
+pass=2 fail=2                      ← 两个脚本「与 HEAD 的 blob 不同」= 事实，不是假红
+
+$ printf 'x' >> <那份 app 的 net-metrics.py>; … --rev v0.8.37 --no-codesign
+pass=3 fail=1                      ← 负对照：差 1 字节必须红
+```
+
 ## 5. 诚实清单（这条机制**覆盖不到**的）
 
 * **已经发布的正文改不了历史**：v0.8.35 的 body 仍是当天手工补的（本卡不改它）。
