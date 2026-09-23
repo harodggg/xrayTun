@@ -180,7 +180,16 @@ export interface AppSettings {
    * 生效条件见 `commands/core.rs` 的 `should_auto_reconnect`（四个条件缺一不可）。
    */
   auto_reconnect: boolean;
-  /** 实时网速显示在窗口标题栏与菜单栏。 */
+  /**
+   * 实时网速显示在**顶栏**与**菜单栏**。
+   *
+   * ⚠️ 不是「窗口标题栏」：`tauri.conf.json` 设了 `"titleBarStyle": "Overlay"` +
+   * `"hiddenTitle": true`，macOS 会隐藏原生标题文字 —— 用户看到的带速率的那条是
+   * **App 自画的顶栏**（`App.tsx` 的 `TopBar`，`types.ts` 的 `formatRate` ⇒ 1024 进制
+   * `KiB/s`/`MiB/s`）；菜单栏走 `traffic.rs` 的 `tray_title`，用更短的 `↓1.2M ↑34K`
+   * 且速率为 0 时留空。原生窗口标题（`window.set_title`）仍在同步，它决定
+   * 「窗口」菜单与 Mission Control 里显示什么，**但标题栏上仍然看不到**（task-140）。
+   */
   show_speed_in_title: boolean;
 }
 
