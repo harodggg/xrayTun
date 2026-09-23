@@ -2187,32 +2187,82 @@ mod tests {
             "`.ok()` 这种吞法也必须被抓（这是原守卫的 lint 缺口）"
         );
 
+        // 负例 3（tester 在 task-157 实测的**窗口绕过**）：本站点改成 `let _ = e;`，
+        // 靠同一段里**邻近**的 `return Err(format!("核心未在预期时间内就绪…"))` 充数。
+        // 400B 窗口判据对它绿 —— 块级判据必须抓住。
+        let m3 = prod.replace(
+            "tracing::warn!(error = %e, \"数据面进程未干净退出（网络配置仍会单独回滚）\");",
+            "let _ = e; // 吞掉：靠邻近的 return Err 给窗口判据充数",
+        );
+        assert_ne!(m3, prod, "fixture 必须真的改到生产源码");
+        assert!(
+            !every_shutdown_failure_is_warned(&m3),
+            "本站点吞掉、靠邻近 `return Err(` 充数 —— 块级判据必须红（task-157 的窗口绕过）"
+        );
+
         assert!(
             prod.contains("数据面进程未干净退出"),
             "要留下可搜的痕迹，说明「核心没干净退出、但网络仍会单独回滚」"
         );
     }
 
-    /// **正向判据**：每个 `process.shutdown(` 站点前面必须是 `if let Err(e) = `、
-    /// 后面（同一段内）必须**处理**了它 —— `tracing::warn!` 留痕，**或**把错误攒进
-    /// `errors`（第 6 处在 `stop` 的收尾里就是攒起来一起返回的，比 warn 更强）。
+    /// **正向判据（task-160 起改成「站点级块判据」）**：每个 `process.shutdown(` 站点
+    /// 前面必须是 `if let Err(e) = `，而且**这一站自己的块内**必须**处理**了它 ——
+    /// `tracing::warn!` 留痕，**或**把错误攒进 `errors`（第 6 处在 `stop` 的收尾里就是
+    /// 攒起来一起返回的，比 warn 更强）。
+    ///
+    /// # 为什么从「后 400B 窗口」改成「本站点块」
+    ///
+    /// `task-157` 实测：本站点写成 `let _ = e;` 时，窗口里**邻近**的
+    /// `return Err(format!("核心未在预期时间内就绪…"))` 会给它充数 ⇒ 守卫仍绿。
+    /// 这正是 `docs/verification/GUARD-FALSE-GREEN-PATTERNS.md` §2 R1（「保留受检文本 +
+    /// 运行时吞掉」）与 §3「站点无法注入时：必须站点级**块**判据」那一条。
     fn every_shutdown_failure_is_warned(src: &str) -> bool {
         let mut sites = 0usize;
-        for (idx, _) in src.match_indices("process.shutdown(") {
+        let mut from = 0usize;
+        while let Some(rel) = src[from..].find("process.shutdown(") {
+            let idx = from + rel;
             sites += 1;
             let before = window_before(src, idx, 60);
             if !before.contains("if let Err(e) = ") {
                 return false;
             }
-            let after = window_after(src, idx, 400);
-            let handled = after.contains("tracing::warn!")
-                || after.contains("errors.push(")
-                || after.contains("return Err(");
+            // **本站点自己的块**：从它后面第一个 `{` 到配对 `}`，不看邻近文本。
+            let Some(open_rel) = src[idx..].find('{') else {
+                return false;
+            };
+            let open = idx + open_rel;
+            let Some(close) = matching_brace(src, open) else {
+                return false;
+            };
+            let block = &src[open + 1..close];
+            let handled = ["tracing::warn!", "errors.push(", "return Err("]
+                .iter()
+                .any(|h| block.contains(h));
             if !handled {
                 return false;
             }
+            from = close;
         }
         sites > 0
+    }
+
+    /// 从 `open`（一个 `{` 的下标）找配对的 `}`（朴素深度计数；被测块的括号都成对）。
+    fn matching_brace(src: &str, open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// 取 `idx` 之前至多 `n` 字节的窗口。**必须向内收**到字符边界为止 ——
@@ -2229,15 +2279,4 @@ mod tests {
         ""
     }
 
-    /// 取 `idx` 之后至多 `n` 字节的窗口；同样向内收到字符边界。
-    fn window_after(src: &str, idx: usize, n: usize) -> &str {
-        let mut end = (idx + n).min(src.len());
-        while end > idx {
-            if let Some(s) = src.get(idx..end) {
-                return s;
-            }
-            end -= 1;
-        }
-        ""
-    }
 }

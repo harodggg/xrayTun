@@ -678,21 +678,25 @@ impl Helper {
         // 先回滚，再摘 launchd，最后删文件。顺序错了会留下「服务已卸载但
         // 路由还在」的状态。
         //
-        // **回滚失败要如实说出来**（task-122 A-2）：卸载必须继续（摘 launchd、
-        // 删文件是卸载本身的语义），但绝不能让用户以为「网络已经回到直连」。
-        // 以前这里是两处 `let _ =`，失败连一条 `warn` 都没有。
-        let mut rollback_failed: Option<String> = None;
-        if let Ok(mut guard) = self.state.lock() {
-            if let Some(session) = guard.session.take() {
-                if let Err(e) = controller::rollback(&session.snapshot) {
-                    rollback_failed = Some(e.to_string());
-                }
-            }
-        }
-        if let Err(e) = controller::force_cleanup() {
-            // 内存里那份已经试过了：这里失败同样要带上（保留第一条即可）。
-            rollback_failed.get_or_insert_with(|| e.to_string());
-        }
+        // **取值只在这里**：「哪个失败优先、文案怎么写」全在 `uninstall_outcome`
+        // （纯函数、有行为测试）—— 站点不再自己组装文案，于是「响应前把失败抹掉」
+        // 这类绕过（task-157 的 V-1/V-3）在**编译层**就没有可抹的中间变量了。
+        let memory = match self.state.lock() {
+            Ok(mut guard) => guard
+                .session
+                .take()
+                .map(|session| {
+                    controller::rollback(&session.snapshot).map_err(|e| e.to_string())
+                })
+                .unwrap_or(Ok(())),
+            // 锁中毒：与原来一样，不回滚内存里那份（也不谎报成功）。
+            Err(_) => Ok(()),
+        };
+        // `force_cleanup` 返回 `Result<Option<SessionSnapshot>, _>` ⇒ 只关心成败。
+        let force = controller::force_cleanup()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let (rollback_failed, response) = uninstall_outcome(memory, force);
         if let Some(why) = &rollback_failed {
             tracing::warn!(
                 error = %why,
@@ -711,10 +715,33 @@ impl Helper {
         // 最后删自己。删掉之后进程仍在运行（inode 还在），由调用方要求退出。
         let _ = std::fs::remove_file(xt_proto::HELPER_INSTALLED_PATH);
 
-        Response::Ok {
-            message: Some(uninstall_response_message(rollback_failed.as_deref())),
-        }
+        response
     }
+}
+
+/// **卸载结局 → 响应**（纯函数：四组输入都能行为级测，不必起真 helper）。
+///
+/// # 为什么把这段从站点里挪出来（task-160，采纳 tester 的 (a)）
+///
+/// `task-157` 实测：`fn uninstall` 的**文本守卫**能被三种「保留受检文本 + 运行时吞掉」
+/// 绕过（响应前 `rollback_failed = None;` / 第二处分支 `let _ = e;` / 诱饵调用），
+/// 而整个 `xt-helper` 仍然 **15/15 全绿** —— 根因是**站点没有任何行为测试**。
+///
+/// 抽成纯函数之后：
+/// * 站点里**没有**「先抹掉失败、再拼文案」的中间变量（原来那种 V-1 写法编译不过）；
+/// * 两处失败各自是否进文案，由下面的行为测试直接钉（V-2 的形状会红）；
+/// * 响应**必定**是这里返回的那个（站点没有自己造文案的地方 ⇒ 诱饵 V-3 失去掩护）。
+fn uninstall_outcome(
+    rollback: Result<(), String>,
+    force: Result<(), String>,
+) -> (Option<String>, Response) {
+    // 第一处（内存里那份会话）的失败**优先保留**：它更接近现场；`force_cleanup`
+    // 只是补一刀（同一份快照在磁盘上再试一次）。但**任何一处失败都不许丢**。
+    let why = rollback.err().or(force.err());
+    let response = Response::Ok {
+        message: Some(uninstall_response_message(why.as_deref())),
+    };
+    (why, response)
 }
 
 /// 卸载响应的文案（**纯函数**：两条路径都能行为级测，不必起真 helper）。
@@ -850,59 +877,113 @@ mod tests {
         let _ = admin_gid();
     }
 
-    /// **task-122 A-2 守卫（task-134 收窄成「按站点 + 正向断言」）**：卸载路径必须把
-    /// `controller::rollback` 的 Err **绑进变量**，并把它**带进响应文案**。
+    /// **站点级行为测试（task-160；L0/L1：断言的就是用户可见的响应体）**。
     ///
-    /// 原来是文件级「不许出现 `let _ = controller::rollback(`」—— tester 实测 M3：
-    /// 换成 `.ok()` 这种**另一种吞法**就能绕过（守卫当时仍然绿）。现在改成
-    /// ①**限定在 `fn uninstall` 的函数体内**；②**正向**要求错误被捕获并流进响应。
-    /// 下面还带一条**负例**：现场把那一处改成 `.ok()`，判据必须翻假（= M3 现在会红）。
+    /// `task-157` 的 V-1/V-2 之所以能「守卫绿、行为吞掉」，根因是**站点没有行为测试**。
+    /// 这条直接驱动抽出来的纯函数，把四组组合的**响应文案**钉死。
     #[test]
-    fn uninstall_propagates_rollback_failure_in_production_source() {
-        let prod = production_source();
-        assert!(
-            uninstall_propagates_rollback_failure(prod),
-            "卸载站点必须把回滚失败绑下来并带进响应文案（fixture/判据见本测试的负例）"
+    fn uninstall_outcome_never_hides_a_rollback_failure() {
+        fn message(r: &Response) -> String {
+            match r {
+                Response::Ok { message } => message.clone().unwrap_or_default(),
+                other => panic!("卸载响应必须是 Response::Ok，实际 {other:?}"),
+            }
+        }
+
+        // ① 内存那份失败 ⇒ 必须在响应里、点名**具体失败步骤**、且不含「已回滚」。
+        let (_why, resp) = uninstall_outcome(
+            Err("删除路由 203.0.113.0/24 失败: route: not in table".into()),
+            Ok(()),
+        );
+        let text = message(&resp);
+        assert!(text.contains("回滚网络配置失败"), "{text}");
+        assert!(text.contains("203.0.113.0/24"), "要点名具体失败步骤：{text}");
+        assert!(!text.contains("已回滚"), "失败时不许说「已回滚」：{text}");
+        assert_ne!(
+            text, "helper 已卸载",
+            "**V-1 的形状**：失败被抹掉后响应会退回成功文案 —— 这里必须红"
         );
 
-        // 负例（= tester 的 M3）：把那一处换成 `.ok()`（换一种吞法）。
-        let m3 = prod.replace(
-            "if let Err(e) = controller::rollback(&session.snapshot) {\n                    rollback_failed = Some(e.to_string());\n                }",
-            "let _ = controller::rollback(&session.snapshot).ok();",
-        );
-        assert_ne!(m3, prod, "M3 fixture 必须真的改到生产源码（否则这条是空壳）");
+        // ② **第二处（force_cleanup）失败也必须进响应** —— 这正是 V-2 吞掉的那条分支。
+        let (_why, resp) = uninstall_outcome(Ok(()), Err("强制清理失败：磁盘上的快照读不出来".into()));
+        let text = message(&resp);
         assert!(
-            !uninstall_propagates_rollback_failure(&m3),
-            "M3 那种吞法（.ok()）必须被判据抓住 —— 这正是收窄要解决的 lint 缺口"
+            text.contains("强制清理失败"),
+            "**V-2 的形状**：第二处失败不进文案 ⇒ 这里必须红：{text}"
         );
+        assert!(!text.contains("已回滚"), "{text}");
 
-        // 反向：直接把「绑下来但不带进响应」的写法也判假。
-        let swallow = prod.replace(
-            "uninstall_response_message(rollback_failed.as_deref())",
-            "uninstall_response_message(None)",
-        );
-        assert_ne!(swallow, prod);
-        assert!(
-            !uninstall_propagates_rollback_failure(&swallow),
-            "把失败「绑了却不用」同样要判假（否则只是换了个人骗）"
-        );
+        // ③ 两处都失败：第一处优先（更接近现场），但「有失败」这件事不许丢。
+        let (_why, resp) = uninstall_outcome(Err("第一条失败".into()), Err("第二条失败".into()));
+        let text = message(&resp);
+        assert!(text.contains("第一条失败"), "{text}");
+        assert!(!text.contains("第二条失败"), "只保留第一条（现场更近）：{text}");
+
+        // ④ 两处都成功 ⇒ 这才是干净的「helper 已卸载」。
+        let (_why, resp) = uninstall_outcome(Ok(()), Ok(()));
+        assert_eq!(message(&resp), "helper 已卸载");
     }
 
-    /// **行为级**：响应文案在有失败时如实、在无失败时干净（不起真 helper）。
+    /// 上一轮那两条（格式化函数本身）保留：它们是**纯函数**的更细一层。
     #[test]
     fn uninstall_message_is_honest_when_rollback_fails() {
-        let failed = uninstall_response_message(Some("删除路由 203.0.113.0/24 失败: route: not in table"));
+        let failed =
+            uninstall_response_message(Some("删除路由 203.0.113.0/24 失败: route: not in table"));
         assert!(failed.contains("回滚网络配置失败"), "{failed}");
-        assert!(
-            failed.contains("203.0.113.0/24"),
-            "要点名**具体失败步骤**：{failed}"
-        );
-        assert!(!failed.contains("已回滚"), "失败时不许说「已回滚」：{failed}");
-        assert!(failed.contains("修复网络"), "要给出下一步：{failed}");
+        assert!(failed.contains("203.0.113.0/24"), "{failed}");
+        assert!(!failed.contains("已回滚"), "{failed}");
+        assert!(failed.contains("修复网络"), "{failed}");
 
         let ok = uninstall_response_message(None);
         assert_eq!(ok, "helper 已卸载");
         assert!(!ok.contains("失败"), "{ok}");
+    }
+
+    /// **站点级块判据（task-160 (b)；对应 `GUARD-FALSE-GREEN-PATTERNS` §3
+    /// 「站点无法注入时：文本守卫可作第二道，但必须站点级块判据 + 逐条列出不可判定写法」）**：
+    ///
+    /// `fn uninstall` 必须 ①把**两份原始结果**交给 `uninstall_outcome`；
+    /// ②**不自己**调用文案函数（那是 V-3 诱饵的立足点）；③返回那个函数给的响应。
+    #[test]
+    fn uninstall_site_cannot_swallow_rollbacks_in_production_source() {
+        let prod = production_source();
+        assert!(
+            uninstall_site_delegates_outcome(prod),
+            "站点必须把两份原始结果交给 uninstall_outcome，并返回它的响应"
+        );
+
+        // 负例 1（V-1 同族：把两份结果换成假的成功）。
+        let v1 = prod.replace(
+            "uninstall_outcome(memory, force)",
+            "uninstall_outcome(Ok(()), Ok(()))",
+        );
+        assert_ne!(v1, prod, "负例 fixture 必须真的改到生产源码");
+        assert!(
+            !uninstall_site_delegates_outcome(&v1),
+            "把两份结果换成假的 Ok 必须被抓"
+        );
+
+        // 负例 2（V-2 同族：force 那一路的结果被丢掉）。
+        let v2 = prod.replace(
+            "uninstall_outcome(memory, force)",
+            "uninstall_outcome(memory, Ok(()))",
+        );
+        assert_ne!(v2, prod, "负例 fixture 必须真的改到生产源码");
+        assert!(
+            !uninstall_site_delegates_outcome(&v2),
+            "force 结果被丢掉必须被抓"
+        );
+
+        // 负例 3（V-3：诱饵调用 + 自己另造一个「成功」响应）。
+        let v3 = prod.replace(
+            "let (rollback_failed, response) = uninstall_outcome(memory, force);",
+            "let _ = uninstall_outcome(memory, force);\n        let (rollback_failed, response) = (None, Response::Ok { message: Some(uninstall_response_message(None)) });",
+        );
+        assert_ne!(v3, prod, "负例 fixture 必须真的改到生产源码");
+        assert!(
+            !uninstall_site_delegates_outcome(&v3),
+            "站点自己拼文案（诱饵）必须被抓"
+        );
     }
 
     /// 生产源码 = `server.rs` 去掉测试模块。
@@ -914,27 +995,48 @@ mod tests {
         }
     }
 
-    /// `fn uninstall` 的函数体（**按站点限定**，到下一个方法为止）。
+    /// `fn uninstall` 的**函数体**（用**花括号配对**取，而不是「到下一个 `    fn `」——
+    /// 后者会把紧跟其后的自由函数一起吞进来，判据就会误伤；这条第一次跑就踩了）。
     fn uninstall_body(src: &str) -> Option<&str> {
         let start = src.find("fn uninstall(&self) -> Response {")?;
-        let rest = &src[start..];
-        let end = rest.find("\n    fn ").unwrap_or(rest.len());
-        Some(&rest[..end])
+        let open = start + src[start..].find('{')?;
+        let close = matching_brace(src, open)?;
+        Some(&src[start..=close])
     }
 
-    /// **正向判据**：卸载站点把回滚失败**绑下来**并**带进响应**。
-    fn uninstall_propagates_rollback_failure(src: &str) -> bool {
+    /// 从 `open`（一个 `{` 的下标）找配对的 `}`。**朴素深度计数**：这些被测块里的
+    /// 花括号（含 `format!("…{e}…")` 这种）都是成对的，够用；字符串里的花括号若不平衡
+    /// 会误判 —— 所以判据只用于**受控的**小片段，别拿去解析任意 Rust。
+    fn matching_brace(src: &str, open: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(open + i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// 站点级块判据（见测试注释）。
+    fn uninstall_site_delegates_outcome(src: &str) -> bool {
         let Some(body) = uninstall_body(src) else {
             return false;
         };
-        // 去掉行注释：判据不认注释里写的旧写法（task-75 的教训）。
+        // 去行注释：判据不认注释里写的旧写法（task-75 的教训）。
         let code = body
             .lines()
             .map(|l| l.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
-        code.contains("if let Err(e) = controller::rollback(")
-            && code.contains("rollback_failed = Some(")
-            && code.contains("uninstall_response_message(rollback_failed.as_deref())")
+        code.contains("let (rollback_failed, response) = uninstall_outcome(memory, force);")
+            && !code.contains("uninstall_response_message(")
+            && code.lines().any(|l| l.trim() == "response")
     }
 }
