@@ -63,6 +63,42 @@ function choiceOf(action: RuleAction): ActionChoice {
   return action.outbound ? "proxy_node" : "proxy_current";
 }
 
+/**
+ * App **自己**给规则 id 用的前缀（task-167）。
+ *
+ * ⚠️ 这是**约定**，不是「预设 id 清单」：`crates/xt-core/src/routing/mod.rs` 里所有预设规则的
+ * id 都以 `preset-` 开头（`preset-private` / `preset-ads` / `preset-cn-domain` /
+ * `preset-cn-ip` / `preset-proxy-google` / `preset-proxy-list` / `preset-fallback-direct` /
+ * `preset-direct-all`），`crates/xt-core/src/xray/config.rs` 里所有内部规则的 tag 都以
+ * `internal-` 开头（`internal-api` / `internal-fallback` / `internal-dns-hijack`）。
+ * 具体**某个预设**里有哪些 id 由后端决定，前端不抄 —— 所以这里只用来提示「可能撞」，
+ * 真正「确实撞了」的判据是运行中配置里的 `#N` 后缀标记（见 `duplicatedRuleIds`）。
+ */
+export const APP_RULE_ID_PREFIXES = ["preset-", "internal-"];
+
+/**
+ * 运行中配置里**已经撞过**的 rule id。
+ *
+ * 后端（`task-165`）的修法是「首次出现保持原样，重复的确定性加 `#2`/`#3`」⇒
+ * 只要 tag 形如 `<base>#<n>`，就说明 `<base>` 这次配置里出现了不止一次。
+ * 这是**唯一**能证明「确实重名」的真源，不需要前端知道任何预设 id。
+ */
+export function duplicatedRuleIds(tags: string[]): string[] {
+  const out = new Set<string>();
+  for (const t of tags) {
+    const m = /^(.*)#\d+$/.exec(t);
+    if (m && m[1]) out.add(m[1]);
+  }
+  return [...out];
+}
+
+/** 自定义规则里「用了 App 自有前缀」的 id：**可能**与预设/内部规则同名。 */
+export function appPrefixedIds(rules: RoutingRule[]): string[] {
+  return rules
+    .filter((r) => APP_RULE_ID_PREFIXES.some((p) => r.id.startsWith(p)))
+    .map((r) => r.id);
+}
+
 /** 出站 tag 必须与 Rust 侧一致：`model.rs` 的 `Node::outbound_tag()` = `node-<id>`。 */
 export function outboundTagOf(nodeId: string): string {
   return `node-${nodeId}`;
@@ -150,6 +186,28 @@ export default function Routing() {
 
   const startedAt = snapshot?.runtime.started_at_unix ?? null;
 
+  /**
+   * 运行中配置的 ruleTag 列表（task-167）。`null` = 读不到（核心没在跑 / 命令缺席）——
+   * 那就**只**能靠前缀提示，并且要如实说自己没确认。失败了不打扰用户（这一页本来
+   * 就有「核心没在跑时读不到拓扑」的语义），但也**不假装**读过。
+   */
+  const [topoTags, setTopoTags] = useState<string[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const t = await api.routingTopology();
+        if (alive) setTopoTags(t.rule.map((r) => r.tag));
+      } catch {
+        if (alive) setTopoTags(null);
+      }
+    };
+    void load();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // 核心**重新启动**过（新配置已生成）→ 提示自动消失。
   // 这条同时覆盖「用户在顶栏自己重连」：那种情况下「需要重连」已经是假话了。
   useEffect(() => {
@@ -225,6 +283,17 @@ export default function Routing() {
   const needsReconnect =
     pendingSave !== null && running && startedAt !== null && startedAt < pendingSave.savedAt;
 
+  /**
+   * task-167 的两组结论：
+   * * `collidingIds` —— **确实**会撞：运行中配置里出现过 `<id>#n`，而这个 id 又是你自己的规则
+   *   （所以那对重名里有一条属于你）；
+   * * `suspiciousIds` —— 只是**可能**撞：id 用了 App 自己的前缀，但当前配置里还没看到重复标记。
+   *   用户真实遇到的场景正好落在这里（预设本来是「自定义」⇒ 配置里只有你那几条，看不出重复）。
+   */
+  const runningDuplicates = duplicatedRuleIds(topoTags ?? []);
+  const collidingIds = runningDuplicates.filter((id) => rules.some((r) => r.id === id));
+  const suspiciousIds = appPrefixedIds(rules).filter((id) => !collidingIds.includes(id));
+
   return (
     <div className="page">
       <section className="page__sec">
@@ -256,6 +325,44 @@ export default function Routing() {
             );
           })}
         </div>
+
+        {/* task-167：**确实**会撞（运行中配置里已经有 `<id>#n`）—— 指名 + 说清后果。
+            后端会加后缀保证**能启动**，所以这里是告警而不是拦；措辞不许夸大。 */}
+        {collidingIds.length > 0 && (
+          <div className="banner banner--warn" role="alert" style={{ marginTop: 12 }}>
+            <span>⚠︎</span>
+            <div>
+              <strong>你的自定义规则与预设/内部规则重名了：</strong>
+              <span className="mono"> {collidingIds.join("、")}</span>。
+              这会让配置里出现两条同名 <span className="mono">ruleTag</span>
+              （Xray 那条 <span className="mono">duplicate ruleTag</span> 启动失败就是它）。
+              后端会给重复的加后缀（<span className="mono">#2</span>/<span className="mono">#3</span>）
+              保证<strong>能启动</strong> —— 但两条同名规则<strong>都会生效</strong>，且
+              <strong>预设那条在前</strong>（Xray 取第一条命中）。
+              想去掉歧义：把自定义规则的 id 改成不重名的（例如
+              <span className="mono"> mine-private</span>），或把预设设为「自定义」。
+            </div>
+          </div>
+        )}
+
+        {/* **可能**会撞：id 用了 App 自己的前缀，而当前运行中的配置里还没看到重复标记。
+            这一态在「预设本来是自定义」时正是用户踩到的场景，所以必须提；但措辞是条件句，
+            不假装已经确认。 */}
+        {suspiciousIds.length > 0 && (
+          <div className="banner banner--info" role="status" style={{ marginTop: 12 }}>
+            <span>ℹ︎</span>
+            <div>
+              这些自定义规则的 id 用了 App 自己给预设/内部规则用的前缀：
+              <span className="mono"> {suspiciousIds.join("、")}</span>。
+              如果<strong>目标预设</strong>里也存在同名规则，就会出现两条同名
+              <span className="mono"> ruleTag</span> —— 后端会加后缀保证<strong>能启动</strong>，
+              但两条都会生效、<strong>预设在前</strong>。
+              {topoTags === null
+                ? "（读不到运行中的配置，所以无法确认当前是否已经撞上。）"
+                : "（当前运行中的配置里没有发现重复标记。）"}
+            </div>
+          </div>
+        )}
 
         {presetShadowsCustom && (
           <div className="banner banner--warn" role="alert" style={{ marginTop: 12 }}>
@@ -329,6 +436,15 @@ export default function Routing() {
                       <div className="list__name">
                         {rule.name}
                         {!rule.enabled && <span className="list__meta">（已停用）</span>}
+                        {collidingIds.includes(rule.id) ? (
+                          <span className="badge badge--slow" title="与预设/内部规则同名的 id">
+                            与预设重名
+                          </span>
+                        ) : suspiciousIds.includes(rule.id) ? (
+                          <span className="badge badge--unknown" title="id 用了 App 自己的前缀，可能与预设同名">
+                            id 可能重名
+                          </span>
+                        ) : null}
                       </div>
                       <div className="list__meta">
                         {describeMatch(rule.when)} → {actionText(rule.then, nodes)}
