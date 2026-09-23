@@ -22,6 +22,7 @@ import { formatBytes, formatTimestamp, type Subscription } from "../types";
 export default function Subscriptions() {
   const { snapshot, busy, run } = useStore();
   const subs = snapshot?.subscriptions ?? [];
+  const nodes = snapshot?.nodes ?? [];
 
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
@@ -103,6 +104,18 @@ export default function Subscriptions() {
                 key={sub.id}
                 sub={sub}
                 busy={busy !== null}
+                /**
+                 * task-120：**这是「删这个订阅会连带删掉几个节点」的唯一正确判据。**
+                 *
+                 * 原来用的是 `sub.node_count` —— 那个字段只在**订阅刷新成功**时写一次
+                 * （`commands/nodes.rs:348`），手动删节点、导入去重（`:341`）都不会回写。
+                 * 它是「上次解析出几条」，不是「现在真有几条」。删除确认语直接引用了它，
+                 * 于是会告诉用户一个错的数量（本机预览数据里 sub-1 就写着 3，而实际只有 2 个）。
+                 *
+                 * 后端删除是按 source id 真删的（`nodes.rs:283-292`），所以这里也按同一个
+                 * 判据数 —— 界面说的和即将发生的必须是同一件事。
+                 */
+                nodeCount={nodes.filter((n) => n.source.kind === "subscription" && n.source.id === sub.id).length}
                 onRefresh={() => void run("refresh-one", () => api.refreshSubscriptions([sub.id]))}
                 onRemove={() => void run("remove-sub", () => api.removeSubscription(sub.id))}
               />
@@ -120,11 +133,14 @@ const DANGER_RATIO = 0.9;
 
 function SubscriptionRow({
   sub,
+  nodeCount,
   busy,
   onRefresh,
   onRemove,
 }: {
   sub: Subscription;
+  /** 现在真的有几个节点属于这个订阅（**不是** `sub.node_count`，见调用处注释）。 */
+  nodeCount: number;
   busy: boolean;
   onRefresh: () => void;
   onRemove: () => void;
@@ -148,8 +164,8 @@ function SubscriptionRow({
         <div className="sub-row__head">
           <span className="list__name">{sub.name}</span>
           <span className="list__meta">
-            {sub.node_count} 个节点 · 上次成功 {formatTimestamp(sub.last_updated)}
-            {sub.node_count === 0 && !sub.last_error ? "（还没拉到节点）" : ""}
+            {nodeCount} 个节点 · 上次成功 {formatTimestamp(sub.last_updated)}
+            {nodeCount === 0 && sub.last_updated === null && !sub.last_error ? "（还没拉到节点）" : ""}
           </span>
         </div>
 
@@ -186,7 +202,7 @@ function SubscriptionRow({
           <div className="sub-row__err">
             上次更新失败：{sub.last_error}
             <span className="sub-row__err-hint">
-              {sub.node_count > 0
+              {nodeCount > 0
                 ? "（已有节点仍然可用，可以稍后重试）"
                 : "（拉取失败时不会移除既有节点，直接重试即可）"}
             </span>
@@ -209,8 +225,8 @@ function SubscriptionRow({
           disabled={busy}
           title="删除该订阅"
           question={
-            sub.node_count > 0
-              ? `删除订阅「${sub.name}」？会同时删除它带来的 ${sub.node_count} 个节点，无法撤销。`
+            nodeCount > 0
+              ? `删除订阅「${sub.name}」？会同时删除它带来的 ${nodeCount} 个节点，无法撤销。`
               : `删除订阅「${sub.name}」？此操作会写入配置文件，无法撤销。`
           }
           confirmLabel="确认删除"

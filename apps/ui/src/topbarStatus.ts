@@ -264,7 +264,13 @@ function baseStatus(input: StatusInput): AppStatus {
 }
 
 /**
- * 顶栏那条「未设系统代理」徽章的文字；`null` = **不显示**。
+ * 顶栏那条「本应用不设系统代理」徽章的文字；`null` = **不显示**。
+ *
+ * task-120 改名：原来写的是「**未设**系统代理 · 需指向 …」—— 那是**对这台机器上
+ * 系统代理现状的断言**，而这个 App **从来不读**系统代理设置（全仓
+ * `setwebproxy` / `getwebproxy` / `scutil --proxy` / `SCDynamicStore` 0 命中）。
+ * 用户照这句话手动设好代理之后，徽章仍然写着「未设系统代理」—— 界面就地变成假话。
+ * 现在只说**本应用这一侧**可核实的事实（它不设），用户侧的状态不猜。
  *
  * # 为什么只在「核心运行中 + 系统代理模式」显示（task-72）
  *
@@ -283,8 +289,8 @@ export function systemProxyBadge(
 ): string | null {
   if (!running || mode !== "system_proxy") return null;
   return socksPort !== null
-    ? `未设系统代理 · 需指向 127.0.0.1:${socksPort}`
-    : "未设系统代理 · 需手动指向本地端口";
+    ? `本应用不设系统代理 · 需手动指向 127.0.0.1:${socksPort}`
+    : "本应用不设系统代理 · 需手动指向本地端口";
 }
 
 /**

@@ -246,6 +246,15 @@ describe("六处真实站点都先确认（task-23 B + task-65）", () => {
   it("订阅「删除」：问句必须写出会连带删掉几个节点", async () => {
     mocks.snapshot.mockResolvedValue(
       snapWith({
+        // task-120：这个数字**必须来自 nodes[].source.id**（后端就是按它真删的），
+        // 不能再用 `sub.node_count` —— 那是「上次刷新解析出几条」的快照值，
+        // 手动删节点/导入去重都不会回写。所以这里把 3 个节点真的放进列表里，
+        // 让断言钉住「问句里的数量 = 即将被删掉的节点数」。
+        nodes: [
+          { id: "n1", name: "节点 1", source: { kind: "subscription", id: "s1" } },
+          { id: "n2", name: "节点 2", source: { kind: "subscription", id: "s1" } },
+          { id: "n3", name: "节点 3", source: { kind: "subscription", id: "s1" } },
+        ],
         subscriptions: [
           {
             id: "s1",

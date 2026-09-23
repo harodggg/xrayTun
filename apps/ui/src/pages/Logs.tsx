@@ -24,6 +24,7 @@ import { api } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
 import { useFollowScroll, usePreserveReadingPosition } from "../useFollowScroll";
 import { useStore } from "../store";
+import { formatTimestamp } from "../types";
 
 const LEVELS = ["all", "info", "warn", "error", "debug"] as const;
 type Level = (typeof LEVELS)[number];
@@ -42,8 +43,15 @@ const NOTABLE: readonly Level[] = ["error", "warn"];
 export default function Logs() {
   const { logs, logsLoad, reloadLogs, clearLogs, runVoid, snapshot } = useStore();
   // 「核心有没有在跑」取自**后端快照**（`runtime.running`），不是按日志条数或时间猜。
-  // 它只用来区分**两种不同的空**：核心没启动过 / 启动过但还没输出。
+  // 它只用来区分**两种不同的空**：核心启动过但没输出 / 核心从没启动过。
   const coreRunning = snapshot?.runtime.running === true;
+  /**
+   * task-120：「启动过」的判据是 `runtime.started_at_unix`，**不是** `!running`。
+   * 它只在核心启动时写一次（`supervisor.rs:700`），停止时不清
+   * （`commands/core.rs::runtime_after_stop` 只改 running/pid）⇒ 非 null 就说明
+   * 这次 App 会话里核心确实起来过。停过之后再说「还没启动过」是给错因。
+   */
+  const coreStarted = (snapshot?.runtime.started_at_unix ?? null) !== null;
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
   const [level, setLevel] = useState<Level>("all");
   const [query, setQuery] = useState("");
@@ -107,8 +115,11 @@ export default function Logs() {
               key={l}
               className={level === l ? "is-active" : ""}
               onClick={() => setLevel(l)}
-              // 有内容才显示计数，0 会让标签变吵
-              title={`${LEVEL_LABEL[l]}：${counts[l] ?? 0} 条`}
+              // task-120：这个数字是**已加载窗口**里的条数（初始 `tailLogs(500)`、
+              // 之后封顶 `MAX_UI_LOGS = 1500`，见 `store.tsx`），不是文件里的总数。
+              // 原来说「错误：1 条」—— 用户会读成「整个日志只有 1 条错误」。
+              // 判据就是手里这份 `logs`，所以直接把它的口径写出来。
+              title={`${LEVEL_LABEL[l]}：已加载的 ${logs.length} 条中有 ${counts[l] ?? 0} 条`}
             >
               {LEVEL_LABEL[l]}
               {(counts[l] ?? 0) > 0 && (
@@ -172,7 +183,18 @@ export default function Logs() {
           <div className="logs-diag__head">
             <strong>诊断报告</strong>
             <span className="logs-diag__note">
-              已抹掉订阅 URL、节点地址与 UUID —— 可以直接贴到公开的 issue 里
+              {/* task-120：这句原来是「已抹掉订阅 URL、**节点地址**与 UUID ——
+                  可以直接贴到公开的 issue 里」。脱敏实现只做两件事
+                  （`commands/diagnostics.rs`）：`redact_url` 抹掉订阅 URL 里的凭据、
+                  `redact_secrets` 只把 **UUID 形状的 token**（36 字符 + 4 个 `-`，
+                  `commands/util.rs::is_uuid_like`）换成 `<uuid>`。
+                  **IP、域名、IP:port 一律原样保留** —— 核心日志里就有
+                  `transport/internet/tcp: dialing TCP to tcp:<节点 IP>:443`
+                  （本机日志实测含节点 IP 的行 11421 条），而报告会收进最近 ≤50 条日志。
+                  所以原话等于让用户把自己的服务器地址贴到公开 issue 里。
+                  现在只说脱敏真正做了什么，并把「要自己核对」写出来。 */}
+              已抹掉订阅 URL 里的凭据与 UUID 形状的 token。节点地址、域名与 IP:port
+              <strong>会原样保留</strong> —— 贴到公开 issue 前请自己核对一遍。
             </span>
             <span className="spacer" />
             <button className="btn btn--ghost" onClick={() => void navigator.clipboard.writeText(diagnostics)}>
@@ -200,6 +222,16 @@ export default function Logs() {
               </>
             ) : coreRunning ? (
               <>核心已在运行，但还没有产生日志 —— 刚启动时这样是正常的，有输出会被实时转发到这里。</>
+            ) : coreStarted ? (
+              // task-120：原来这里只有「核心还没启动过」一句，判据却只是
+              // `runtime.running === false`（现在时）。而「启动过、现在停了」
+              // 与「从来没启动过」是两件事：`runtime.started_at_unix` 只在
+              // 核心启动时写一次（`supervisor.rs:700`），停止时**不清**
+              // （`commands/core.rs::runtime_after_stop` 只改 running/pid）。
+              // 另外：日志文件全部读不到时后端回退内存并返回 `Ok(空)`、不上报失败
+              // （`diagnostics.rs:52-58`），所以「读不到」也得算进这一句里。
+              <>还没有日志：核心启动过（{formatTimestamp(snapshot?.runtime.started_at_unix ?? null)}），
+                但本次没有输出 —— 也可能是日志刚被清空，或文件读不到。</>
             ) : (
               <>还没有日志：核心还没启动过。启动后它的 stdout/stderr 会被实时转发到这里。</>
             )}

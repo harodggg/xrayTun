@@ -147,8 +147,27 @@ export default function Dashboard({
             <>
               <span className="dash__sep">·</span>
               <span className="dash__state-node">{selected.name}</span>
-              {rtt !== null && (
-                <span className={`badge badge--${latencyTier(rtt)}`}>{rtt} ms</span>
+              {/* task-120：**延迟数字不能替「这个节点能不能用」背书。**
+                  `ProbeResult` 里有 `available` 与 `server_rtt_ms` 两个独立字段，
+                  后端明确保留「不可用但量得到距离」这一态
+                  （`xray/probe.rs:296-298`：`available=false` 时仍然写回 rtt）。
+                  节点页早就按这个口径做了中性色（`Nodes.tsx:257`
+                  `available === false ? "unknown" : latencyTier(...)`），
+                  而这里原来无条件按 `latencyTier(rtt)` 上色 ——
+                  一个刚探测失败的节点会在这里显示成绿色的「53 ms」。 */}
+              {selectedLatency?.available === false ? (
+                <span
+                  className="badge badge--unknown"
+                  title={
+                    rtt !== null
+                      ? `最近一次探测：经该节点取不到数据（${rtt} ms 只是本地到服务器的 TCP 距离，不代表能用）`
+                      : "最近一次探测：经该节点取不到数据"
+                  }
+                >
+                  {rtt !== null ? `${rtt} ms · 不可用` : "不可用"}
+                </span>
+              ) : (
+                rtt !== null && <span className={`badge badge--${latencyTier(rtt)}`}>{rtt} ms</span>
               )}
             </>
           )}
