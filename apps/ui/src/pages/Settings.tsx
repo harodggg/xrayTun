@@ -274,6 +274,24 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
    */
   const versionCheck: HelperVersionCheck | undefined = snapshot.helper.version_check;
 
+  /**
+   * IPv6 下拉里**真正提供**的两个选项（task-142）。
+   * 第三个值 `disabled` 仍然存在于 `xt-proto` 的枚举里（旧请求兼容），但界面不再给 ——
+   * 它今天与 `passthrough` 逐字节相同，摆出来就是一句假承诺。
+   */
+  const IPV6_CHOICES: Ipv6Mode[] = ["passthrough", "override"];
+  /** 已存的值 `disabled` 按「不接管」显示（最简 UI 侧兼容；不做静默迁移）。 */
+  const ipv6Shown: Ipv6Mode = settings.tun.ipv6 === "disabled" ? "passthrough" : settings.tun.ipv6;
+
+  /**
+   * A12 的两个派生值。**都来自真实字段**：
+   * * `fakednsOn` —— `settings.fakedns.enabled`；
+   * * `sniffingEffective` —— 后端生成配置时的真值 `sniffing || fakedns`
+   *   （`crates/xt-core/src/xray/config.rs:346`），所以 Fake-IP 开着时它恒为 true。
+   */
+  const fakednsOn = settings.fakedns.enabled;
+  const sniffingEffective = settings.dns.sniffing || fakednsOn;
+
   const patchDns = (p: Partial<AppSettings["dns"]>) => patch({ dns: { ...settings.dns, ...p } });
   const patchFake = (p: Partial<AppSettings["fakedns"]>) =>
     patch({ fakedns: { ...settings.fakedns, ...p } });
@@ -599,13 +617,28 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
                 默认 1500。出现「大文件下载卡住但网页能开」时可以试 1400。
               </div>
             </div>
+            {/*
+              task-142（A11，Lead 裁决 2b）：**这里原来有三个选项，其中「禁用 IPv6」是一句
+              假承诺**。依据（只读核对）：
+
+              * `Ipv6Mode::Disabled` 与 `Passthrough` 在路由计划里落在**同一个空分支**
+                （`crates/xt-tun/src/plan.rs:233-243`），而 `Ipv6Mode::Disabled` 在**全仓
+                只出现一次**就是那处（`grep -rn "Ipv6Mode::Disabled" crates apps`）。
+              * 核心侧也只认 `Override`（`crates/xt-core/src/xray/config.rs:104-112`），
+                没有任何地方会因为 `disabled` 去阻断 v6。
+              ⇒ 选它**什么都不会发生**，但用户会得到「我已经防住 v6 泄漏」的错误信念。
+
+              **没有动的**：`crates/xt-proto` 的枚举（旧请求里可能带着 `disabled`，
+              删枚举会破坏兼容）、Rust 语义、以及已存值本身 —— UI 只是不再**提供**它，
+              并把已存值按「不接管」显示（下面 `ipv6Shown`）。见 `docs/design/DECISION-A11-A12.md`。
+            */}
             <div className="field">
               <label>IPv6 处理</label>
               <select
-                value={settings.tun.ipv6}
+                value={ipv6Shown}
                 onChange={(e) => patchTun({ ipv6: e.target.value as Ipv6Mode })}
               >
-                {(Object.keys(IPV6_LABEL) as Ipv6Mode[]).map((k) => (
+                {IPV6_CHOICES.map((k) => (
                   <option key={k} value={k}>
                     {IPV6_LABEL[k]}
                   </option>
@@ -614,6 +647,11 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               <div className="field__hint">
                 选「不接管」时，IPv6 流量会绕过隧道走物理网卡 —— 可能泄漏真实出口，
                 但不会因为内核 IPv6 配置问题导致断网。这是一个刻意的取舍。
+                <br />
+                本版本<strong>不提供「禁用 v6」这一档</strong>：它在路由计划里与「不接管」
+                逐字节相同（没有任何代码会因为它去阻断 v6），摆出来就是一句假承诺。
+                所以当前版本 TUN <strong>不会阻断 IPv6</strong>，v6 流量仍然走物理网卡。
+                要真正避免 v6 泄漏，请在<strong>系统层面</strong>关闭 IPv6。
               </div>
             </div>
           </div>
@@ -704,17 +742,40 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             />
           </div>
         </div>
+        {/*
+          task-142（A12，Lead 裁决选项 1）：**这个复选框在 Fake-IP 打开时不生效。**
+          依据（只读核对）：生成配置时嗅探的开关是
+          `crates/xt-core/src/xray/config.rs:346` 的 `s.dns.sniffing || s.fakedns.enabled`
+          —— 开了 Fake-IP，嗅探恒为真（`destOverride` 也随之为 `fakedns+others`，
+          `routeOnly` 必须保持 false，否则假地址还原不回来）。
+          所以这里做三件事：① 显示**实际生效**的值；② Fake-IP 开着时让它不可点（点了也没用）；
+          ③ 把原因与**真正能关掉嗅探的动作**写出来。—— 行为一行未改（后端仍是那个 `||`）。
+        */}
         <label className="row" style={{ gap: 8, fontSize: 12 }}>
           <input
             type="checkbox"
-            checked={settings.dns.sniffing}
+            checked={sniffingEffective}
+            disabled={fakednsOn}
             onChange={(e) => patchDns({ sniffing: e.target.checked })}
           />
           开启流量嗅探（按 SNI / Host 分流）
         </label>
-        <div className="field__hint" style={{ marginTop: 6 }}>
-          关闭嗅探后，域名分流只能依赖 DNS 阶段的信息，对「直接用 IP 发起连接」的程序会失效。
-        </div>
+        {fakednsOn ? (
+          <div className="field__hint" style={{ marginTop: 6 }}>
+            现在显示的是<strong>实际生效</strong>的值：<strong>Fake-IP 已开启，嗅探被强制打开</strong>
+            （生成配置时是 <span className="mono">sniffing || fakedns</span>），
+            因为假地址要靠嗅探还原成域名。所以这个复选框现在<strong>不可点，关掉它不生效</strong>。
+            <br />
+            真正能关掉嗅探的动作：先到<strong>「连接」分类里关闭 Fake-IP</strong>，
+            再回来关这个复选框。另外，关掉嗅探之后域名分流只能依赖 DNS 阶段的信息，
+            对「直接用 IP 发起连接」的程序会失效。
+          </div>
+        ) : (
+          <div className="field__hint" style={{ marginTop: 6 }}>
+            关闭嗅探后，域名分流只能依赖 DNS 阶段的信息，对「直接用 IP 发起连接」的程序会失效。
+            （Fake-IP 没开，所以这里关掉就是真的关掉了。）
+          </div>
+        )}
       </Section>
 
       {/* ------------------------------------------------------- Fake-IP */}
@@ -734,6 +795,12 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           />
           启用 Fake-IP
         </label>
+        {/* task-142（A12 反向说明）：两个开关在**两个分类**里，用户会来回猜。
+            这一句把耦合写在 Fake-IP 这一侧（依据同样是 `config.rs:346` 的 `sniffing || fakedns`）。 */}
+        <div className="field__hint" style={{ marginTop: 6 }}>
+          开启 Fake-IP <strong>会同时把「流量嗅探」强制打开</strong>（假地址要靠嗅探还原成域名）——
+          那之后到「DNS 解析器」里取消勾选嗅探<strong>不生效</strong>；想关掉嗅探，先关掉这里的 Fake-IP。
+        </div>
         {settings.fakedns.enabled && (
           <>
             <div className="banner banner--warn" style={{ marginTop: 12 }}>
@@ -919,7 +986,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             question={
               snapshot.helper.reachable
                 ? "卸载 helper 会停止数据面、回滚它装的路由与 DNS，并从 launchd 与磁盘上移除。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
-                : "卸载 helper 会从 launchd 与磁盘上移除它，并停止数据面。**但助手当前没有在应答（没在跑）**，而回滚路由与 DNS 是它收到停止信号后自己做的 —— 没有进程时这一步不会发生，**系统里可能残留它装过的路由与 DNS**。建议先用左边的「修复网络」清一遍，再卸载。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
+                : "卸载 helper 会从 launchd 与磁盘上移除它，并停止数据面。<strong>但助手当前没有在应答（没在跑）</strong>，而回滚路由与 DNS 是它收到停止信号后自己做的 —— 没有进程时这一步不会发生，<strong>系统里可能残留它装过的路由与 DNS</strong>。建议先用左边的「修复网络」清一遍，再卸载。之后 TUN 模式将不可用，要再使用需要重新安装并再次输入管理员密码。"
             }
             confirmLabel="确认卸载"
             onConfirm={() => void run("uninstall-helper", () => api.uninstallHelper())}
@@ -1057,7 +1124,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           {snapshot.runtime.running ? (
             <>
               {" "}
-              现在<strong>核心在跑</strong>，所以这一组是**真的在探测**（经上面的本地 SOCKS
+              现在<strong>核心在跑</strong>，所以这一组是<strong>真的在探测</strong>（经上面的本地 SOCKS
               入站）；测不出来会如实写成「不通」或「答得出，量不到延迟」。
             </>
           ) : (
@@ -1152,7 +1219,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
         )}
 
         <div className="field__hint" style={{ marginTop: 10 }}>
-          更新装在数据目录里，**不会改动 App 包本身**（改包内文件会让签名失效），
+          更新装在数据目录里，<strong>不会改动 App 包本身</strong>（改包内文件会让签名失效），
           所以「回退到随包版本」就是删掉那些文件，永远可用。
           装上后需要重新连接才会生效。
           <br />

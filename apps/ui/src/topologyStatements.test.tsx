@@ -82,6 +82,9 @@ describe("task-126 · B-1：拓扑「累计值只增不减」必须写清适用�
     expect(text).toContain("本次会话内");
     expect(text, "还要说清重启 App 之后会怎样").toContain("重启 App");
     expect(text, "不能再用无条件的那句").not.toContain("（累计值只增不减，不代表当前速率）");
+    // task-142 补：这页曾经把 `**强调**` 写进 JSX 文本（用户看到的是字面星号），
+    // 而当时的断言用 toContain 正好能从 `**只活在…**` 里匹配到 ⇒ 测试是绿的。
+    expect(text, "渲染给用户看的文本里不许有字面 **").not.toContain("**");
   });
 
   /** 那条「核心重启过 N 次」的说明（`.note`），而不是页面描述里的引用。 */

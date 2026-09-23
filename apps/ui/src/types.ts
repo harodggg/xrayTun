@@ -470,6 +470,16 @@ export const DNS_MODE_LABEL: Record<DnsHandling, string> = {
 export const IPV6_LABEL: Record<Ipv6Mode, string> = {
   passthrough: "不接管（走物理网卡）",
   override: "同样接管 IPv6",
+  /**
+   * ⚠️ **界面不再提供这一档**（task-142）。
+   *
+   * `Ipv6Mode::Disabled` 与 `Passthrough` 在路由计划里落在**同一个空分支**
+   * （`crates/xt-tun/src/plan.rs:233-243`，且它是全仓唯一一处读 `Disabled` 的地方）
+   * ⇒ 选它什么都不会发生，而标签承诺「禁用」= 一句**假承诺**。
+   * Lead 裁决 2b：界面只提供上面两项，已存值 `disabled` 按「不接管」显示
+   * （`Settings.tsx` 的 `ipv6Shown`）；**枚举保留**，因为旧请求里可能带着它。
+   * 这个字符串留在类型表里只为兼容，**不要**再渲染进下拉框。
+   */
   disabled: "禁用 IPv6",
 };
 

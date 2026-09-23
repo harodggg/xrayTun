@@ -144,9 +144,9 @@ export default function Topology() {
           「不会发生」。所以这里把适用范围写出来，不猜、也不平滑掩盖。
         */}
         <p className="page__desc">
-          ⚠︎ 这条「只增不减」的保证**只活在本次 App 运行期间**：重启 App 后第一次读到的是
+          ⚠︎ 这条「只增不减」的保证<strong>只活在本次 App 运行期间</strong>：重启 App 后第一次读到的是
           核心当时的原始计数（核心也一起重启了就会看到数字掉回 0），而下面那条
-          「核心重启过 N 次」只统计**本次运行期间**观察到的归零。两件事都不隐瞒。
+          「核心重启过 N 次」只统计<strong>本次运行期间</strong>观察到的归零。两件事都不隐瞒。
         </p>
         <MemoHighway topo={topo} match={selectedMatch} />
         {selectedMatch?.note && (
