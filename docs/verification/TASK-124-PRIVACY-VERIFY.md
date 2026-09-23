@@ -107,3 +107,61 @@ M1 把判据集合**置空** ⇒ **探测器自己也跟着空了** ⇒ `red_hit
    但「节点地址脱敏后还剩 2 行」在**三次运行里都成立**（不是抖动）。
 7. **`Home` 判据只测了 `HOME` 环境变量那条路径**；若 `HOME` 取不到（`home = None`），实现会退化成「路径不脱敏」
    —— 那种情况下会怎样，我**没有构造**（生产路径应从快照传 `home`，属另一条线）。
+
+## 6. 附录：探针源码与复现要点（`task-145` 直接复用）
+
+```rust
+// 加在 worktree 的 apps/desktop/src/commands/diagnostics.rs 的 `mod tests` 里（已随 worktree 删除）
+#[test]
+fn v137_real_log_redaction_probe() {
+    use std::fs;
+    let home = std::env::var("HOME").expect("HOME");
+    let user = std::path::Path::new(&home).file_name().unwrap().to_string_lossy().to_string();
+    let dir = std::path::PathBuf::from(&home).join("Library/Application Support/com.xraytun.desktop");
+    let nodes: Vec<xt_core::model::Node> =
+        serde_json::from_str(&fs::read_to_string(dir.join("nodes.json")).unwrap()).unwrap();
+    // 走**生产路径**（`from_nodes` 是 #[cfg(test)] 的退路）
+    let addresses = ReportRedaction::from_nodes_and_home(&nodes, Some(&home));
+    let log = fs::read_to_string(dir.join("logs/app.jsonl")).unwrap();
+    let all: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+
+    // ⚠️ **独立真值**：只从 nodes.json 取（address + 节点名里形如 IP 的段），
+    //    **绝不**复用 `addresses.entries` —— 否则「把判据置空」的突变会把探测器一起清空（实测假绿）。
+    let mut truth: Vec<String> = nodes.iter().map(|n| n.address.clone()).collect();
+    for n in &nodes {
+        for tok in n.name.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == ':')) {
+            if tok.parse::<std::net::IpAddr>().is_ok() { truth.push(tok.to_string()); }
+        }
+    }
+    truth.sort(); truth.dedup();
+    let hit = |t: &str| truth.iter().any(|a| t.contains(a.as_str()));
+
+    let redacted: Vec<String> = all.iter().map(|l| redact_secrets(l, &addresses)).collect();
+    let raw_hits = all.iter().filter(|l| hit(l)).count();
+    let red_hits = redacted.iter().filter(|l| hit(l)).count();
+    let impl_hits = redacted.iter()
+        .filter(|l| addresses.entries.iter().any(|a| l.contains(a.as_str()))).count();
+    let red = redacted.join("\n");
+    println!("PROBE 节点地址（独立真值）：原始={} ⇒ 脱敏后={}", raw_hits, red_hits);
+    println!("PROBE 对照：用实现内部列表数 ⇒ {}", impl_hits);   // M1 下会是 0（假绿的来源）
+    println!("PROBE 公网 1.0.0.1={} / 用户名={} / 198.18.={} / baidu={} / 127.0.0.={}",
+        red.matches("1.0.0.1").count(), red.matches(&user).count(), red.matches("198.18.").count(),
+        red.matches("www.baidu.com").count(), red.matches("127.0.0.").count());
+
+    // 掩码诊断：把整行里所有 entry 换成 <NODE>，取命中点两侧各 36 字符 ⇒ 看「形状」而**不泄漏值**；
+    // `before=/after=` 打印字符类别（`hyphen` 就是本次的根因）。
+    // 断言按 `V137_ONLY=node,user,public,keep19818,keepnice` 门控，便于逐条突变。
+    assert_eq!(red_hits, 0, "仍有节点地址/域名残留（不打印原值）");
+}
+```
+
+**复现要点**：
+```bash
+df -h /                                   # 低于 10 GiB 停下报 Lead
+./scripts/wt.sh new vXXX <冻结哈希>
+# 把上面这段（含 V137_ONLY 门控与掩码诊断）注入该 worktree 的 diagnostics.rs
+./scripts/wt.sh run vXXX -- cargo test -p xraytun-desktop --lib -- v137_real_log_redaction_probe --nocapture
+./scripts/wt.sh rm vXXX                   # **收工立刻删**（含它自己的 target dir）
+```
+突变时**先把「探针版」`cp` 成基准副本**，每次从副本还原再改实现 —— **不要用 `git checkout`**：
+它会把探针一起还原，之后 `-- <filter>` 匹配 0 个测试、退出码 0 ⇒ **假绿**（我踩过一次）。
