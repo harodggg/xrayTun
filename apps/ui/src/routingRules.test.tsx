@@ -99,6 +99,86 @@ async function saveAndGetRules(): Promise<RoutingRule[]> {
   return payload.custom_rules;
 }
 
+/**
+ * **真实生产数据**：本机 `settings.json` 里那 5 条 `custom_rules`（逐字抄下来，
+ * 只去掉与本测试无关的导入/凭据）。存在本条的目的：证明「编辑器能不能原样处理
+ * 用户机器上那条 `google-to-us`」，而不是只处理我编出来的形状。
+ *
+ * 配套的真实 `runtime/config.json` 里这条是：
+ * `{"domain":["geosite:google","googleapis.com","gstatic.com","googleusercontent.com"],
+ *   "outboundTag":"node-nd97712f6aa0fa28a","ruleTag":"google-to-us","type":"field"}`
+ * ⇒ `ruleTag` 就是规则 `id`，`outboundTag` 就是 `then.outbound` 原样。
+ */
+const REAL_RULES: RoutingRule[] = [
+  {
+    id: "preset-private",
+    name: "私有与保留地址直连",
+    enabled: true,
+    when: { ...EMPTY_WHEN, domains: ["geosite:private"], ip: ["geoip:private"] },
+    then: { kind: "direct" },
+  },
+  {
+    id: "preset-ads",
+    name: "拦截常见广告域名",
+    enabled: true,
+    when: { ...EMPTY_WHEN, domains: ["geosite:category-ads-all"] },
+    then: { kind: "block" },
+  },
+  {
+    id: "google-to-us",
+    name: "Google 系（含 Gemini）走美国",
+    enabled: true,
+    when: {
+      ...EMPTY_WHEN,
+      domains: ["geosite:google", "googleapis.com", "gstatic.com", "googleusercontent.com"],
+    },
+    then: { kind: "proxy", outbound: "node-nd97712f6aa0fa28a" },
+  },
+  {
+    id: "preset-cn-domain",
+    name: "大陆域名直连",
+    enabled: true,
+    when: { ...EMPTY_WHEN, domains: ["geosite:cn"] },
+    then: { kind: "direct" },
+  },
+  {
+    id: "preset-cn-ip",
+    name: "大陆 IP 直连",
+    enabled: true,
+    when: { ...EMPTY_WHEN, ip: ["geoip:cn"] },
+    then: { kind: "direct" },
+  },
+];
+
+/** 本机 `nodes.json` 的两个真实节点（id / 名字逐字抄；地址用于区分，无凭据）。 */
+const REAL_NODES = [
+  { id: "n1d232c6b8c7a5004", name: "Xray-45.207.197.185" },
+  { id: "nd97712f6aa0fa28a", name: "XrayTun-US" },
+];
+
+/** 用真实节点列表 + 真实规则渲染。 */
+async function renderReal() {
+  const base = scenarioSnapshot();
+  const s = {
+    ...base,
+    nodes: REAL_NODES.map((n, i) => ({ ...base.nodes[i]!, ...n })),
+    latency: {
+      n1d232c6b8c7a5004: { ...base.latency["n-hk-1"]!, node_id: "n1d232c6b8c7a5004", server_rtt_ms: 46 },
+      nd97712f6aa0fa28a: { ...base.latency["n-us-3"]!, node_id: "nd97712f6aa0fa28a", server_rtt_ms: 168 },
+    },
+    settings: { ...base.settings, routing_preset: "custom" as const, custom_rules: REAL_RULES },
+  };
+  mocks.snapshot.mockResolvedValue(s as never);
+  mocks.tailLogs.mockResolvedValue([]);
+  mocks.saveSettings.mockImplementation(async (ns: unknown) => ({ ...s, settings: ns }));
+  render(
+    <StoreProvider>
+      <Routing />
+    </StoreProvider>,
+  );
+  await screen.findByRole("radiogroup", { name: "分流预设" });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.start.mockResolvedValue(snap("custom", []));
@@ -230,5 +310,48 @@ describe("路由规则编辑器（task-117）", () => {
     const saved = await saveAndGetRules();
     expect(saved).toHaveLength(1);
     expect(saved[0]!.then).toEqual({ kind: "proxy", outbound: null });
+  });
+
+  /**
+   * **用用户机器上的真数据**跑一遍：这 5 条 `custom_rules` 就是本机
+   * `settings.json` 的内容，而它们生成的本机 `runtime/config.json` 里
+   * `rules[2] = {domain:[geosite:google, ...], outboundTag:"node-nd97712f6aa0fa28a",
+   * ruleTag:"google-to-us"}`（原文已核对）。
+   *
+   * 所以这条测的不是「我编的形状能不能过」，而是「编辑器会不会把用户真在用的
+   * 那份规则改坏」—— 顺序、id、when 的每个字段、outbound 的 tag 都要逐字保留。
+   */
+  it("真实生产规则往返：本机 settings.json 的 5 条规则过了编辑器仍逐字一致", async () => {
+    await renderReal();
+
+    // 行上显示的是**节点名**（XrayTun-US），不是 node-nd977… 这个 tag
+    const row = rowOf("Google 系（含 Gemini）走美国");
+    expect(within(row).getByText(/代理（XrayTun-US）/)).toBeTruthy();
+    expect(screen.queryByText(/已经不在节点列表里/)).toBeNull();
+
+    fireEvent.click(within(row).getByRole("button", { name: "编辑" }));
+    expect((screen.getByRole("combobox", { name: /动作/ }) as HTMLSelectElement).value).toBe(
+      "proxy_node",
+    );
+    const nodeSelect = screen.getByRole("combobox", { name: /指定节点/ }) as HTMLSelectElement;
+    expect(nodeSelect.value).toBe("node-nd97712f6aa0fa28a");
+    // 下拉里带延迟（延迟取自 snapshot.latency[].server_rtt_ms）
+    expect(within(nodeSelect).getByRole("option", { name: "XrayTun-US · 168ms" })).toBeTruthy();
+
+    // 只改名字，保存后其余四条与这条的其余字段必须逐字不动、顺序不动
+    fireEvent.change(screen.getByDisplayValue("Google 系（含 Gemini）走美国"), {
+      target: { value: "Google 系（含 Gemini）走美国节点" },
+    });
+    const saved = await saveAndGetRules();
+    expect(saved.map((r) => r.id)).toEqual([
+      "preset-private",
+      "preset-ads",
+      "google-to-us",
+      "preset-cn-domain",
+      "preset-cn-ip",
+    ]);
+    expect(saved[2]).toEqual({ ...REAL_RULES[2]!, name: "Google 系（含 Gemini）走美国节点" });
+    expect(saved.filter((_, i) => i !== 2)).toEqual(REAL_RULES.filter((_, i) => i !== 2));
+    expect(saved).toHaveLength(REAL_RULES.length);
   });
 });
