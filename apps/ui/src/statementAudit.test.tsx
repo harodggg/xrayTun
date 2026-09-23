@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   saveSettings: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
+  globeData: vi.fn(),
 }));
 
 // `recoveryView` 等纯函数保持真的（用 importOriginal 展开）：被测的是**页面**，
@@ -54,6 +55,7 @@ vi.mock("./ipc", async (importOriginal) => {
       saveSettings: mocks.saveSettings,
       start: mocks.start,
       stop: mocks.stop,
+      globeData: mocks.globeData,
     },
     subscribe: () => () => {},
   };
@@ -61,6 +63,9 @@ vi.mock("./ipc", async (importOriginal) => {
 
 import { TopBar } from "./App";
 import Dashboard from "./pages/Dashboard";
+import Globe from "./pages/Globe";
+import Nodes from "./pages/Nodes";
+import { DestChecker } from "./topology/DestChecker";
 import Logs from "./pages/Logs";
 import Subscriptions from "./pages/Subscriptions";
 import { scenarioSnapshot } from "./previewSnapshot";
@@ -239,6 +244,89 @@ describe("task-120 · 日志页的三种「空」与诊断说明", () => {
     ]);
     const btn = await screen.findByRole("button", { name: /错误/ });
     expect(btn.getAttribute("title")).toBe("错误：已加载的 1 条中有 1 条");
+  });
+});
+
+describe("task-120 · 节点页不能说「正在使用」（那是选中，不是数据面）", () => {
+  it("核心没在跑时也不能说「正在使用这个节点」/「当前」", async () => {
+    await renderWith(snap({ running: false }), <Nodes />);
+    const row = (await screen.findByText("香港 · REALITY 01")).closest(".node-row") as HTMLElement;
+    expect(row.getAttribute("title")).toContain("已选中");
+    expect(row.textContent).toContain("已选中");
+    expect(row.textContent).not.toContain("当前");
+    expect(row.getAttribute("title")).not.toContain("正在使用");
+  });
+
+  it("反例：核心在跑时也**不**改口说「正在使用」—— 那是 Dashboard 的活（connected && selected）", async () => {
+    await renderWith(snap({ running: true }), <Nodes />);
+    const row = (await screen.findByText("香港 · REALITY 01")).closest(".node-row") as HTMLElement;
+    expect(row.getAttribute("title")).not.toContain("正在使用");
+  });
+});
+
+describe("task-120 · 地球仪「出口累计流量（实测）」必须看 traffic_ok", () => {
+  const geo = () => ({
+    city: "X",
+    country: "Y",
+    ip: "203.0.113.1",
+    lat: 1,
+    lon: 2,
+    isp: null,
+    source: "ip-api",
+    sources: [],
+    consistent: true,
+  });
+
+  const globeWith = (route: Record<string, unknown>) => ({
+    route: { from: geo(), to: geo(), node_name: "XrayTun-US", ...route },
+    origin: geo(),
+    error: null,
+  });
+
+  it("traffic_ok === false ⇒ 不得显示「0 B（实测）」，必须说读不到", async () => {
+    mocks.snapshot.mockResolvedValue(snap());
+    mocks.tailLogs.mockResolvedValue([]);
+    mocks.globeData.mockResolvedValue(globeWith({ bytes: 0, traffic_ok: false, counter_resets: 0 }));
+    render(
+      <StoreProvider>
+        <Globe />
+      </StoreProvider>,
+    );
+    await screen.findByText(/出口流量读不到/);
+    expect(screen.queryByText(/出口累计流量（实测）/)).toBeNull();
+  });
+
+  it("反例：traffic_ok === true ⇒ 显示实测数字 + 续接说明", async () => {
+    mocks.snapshot.mockResolvedValue(snap());
+    mocks.tailLogs.mockResolvedValue([]);
+    mocks.globeData.mockResolvedValue(
+      globeWith({ bytes: 1024 * 1024, traffic_ok: true, counter_resets: 2 }),
+    );
+    render(
+      <StoreProvider>
+        <Globe />
+      </StoreProvider>,
+    );
+    await screen.findByText(/出口累计流量（实测）/);
+    expect(screen.getByText(/核心重启过 2 次/)).toBeTruthy();
+  });
+});
+
+describe("task-120 · 判定器必须说清结论的适用范围", () => {
+  it("geoAvailable ⇒ 必须写明是「按 443/tcp 求值」，不能再只说「确定的」", async () => {
+    render(<DestChecker geoAvailable />);
+    await screen.findByText(/一条结论|结论/);
+    const desc = document.querySelector(".page__desc")?.textContent ?? "";
+    expect(desc).toContain("443/tcp");
+    expect(desc).toContain("端口");
+  });
+
+  it("反例：没有 geo 数据时不得给出「确定的」结论", async () => {
+    render(<DestChecker geoAvailable={false} />);
+    const desc = document.querySelector(".page__desc")?.textContent ?? "";
+    expect(desc).not.toContain("确定性");
+    expect(desc).not.toContain("对拍过");
+    expect(desc).toContain("无法判定");
   });
 });
 

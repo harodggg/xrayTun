@@ -152,8 +152,24 @@ function RouteFacts({ data }: { data: GlobeData }) {
       <div className="facts__mid">
         <div className="facts__km">{Math.round(km).toLocaleString()} km</div>
         <div className="facts__hint">大圆距离</div>
-        <div className="facts__km facts__km--small">{formatBytes(r.bytes)}</div>
-        <div className="facts__hint">出口累计流量（实测）</div>
+        {/* task-120：`GlobeRoute.traffic_ok === false` 时 `bytes` 是**占位 0**，
+            不是真实读数（`globe.rs:35`/`types.ts:664` 都写明了），而这里原来无条件
+            写「0 B（实测）」—— 正是本项目在流量那一族问题里反复禁止的
+            「把没查到画成 0」。判据就是同一个结构体上的 `traffic_ok`。 */}
+        {r.traffic_ok ? (
+          <>
+            <div className="facts__km facts__km--small">{formatBytes(r.bytes)}</div>
+            <div className="facts__hint">
+              出口累计流量（实测）
+              {r.counter_resets > 0 ? ` · 核心重启过 ${r.counter_resets} 次，累计值已续接` : ""}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="facts__km facts__km--small">—</div>
+            <div className="facts__hint">出口流量读不到（不是 0）</div>
+          </>
+        )}
       </div>
       <Fact label={`出口 · ${r.node_name}`} loc={r.to} />
     </div>

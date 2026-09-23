@@ -267,12 +267,19 @@ function NodeRow({
     <div
       className={`list__row node-row${selected ? " is-selected" : ""}`}
       onClick={busy ? undefined : onSelect}
-      title={selected ? "正在使用这个节点" : "点击切换到该节点"}
+      // task-120：这里原来是「**正在使用**这个节点」/「当前」。判据是
+      // `settings.selected_node`，那是**选中的意图**，不是数据面正在用的出口：
+      // 断开后（`runtime.running=false`）它不变；`mode=direct` 时核心不接管流量；
+      // 删掉当前节点时后端会把 selected_node 静默改成列表第一个**且不重启核心**
+      // （`commands/nodes.rs:239-241`），流量还在被删的那台。
+      // 所以只说**确实由这个字段成立**的事：它被选中了。现在时的那半交给
+      // 仪表盘（`Dashboard.tsx:148` 用的是 `connected && selected`）。
+      title={selected ? "已选中：核心运行时流量走这个节点" : "点击切换到该节点"}
     >
       <div className="list__main">
         <div className="node-row__head">
           <span className="list__name">{node.name}</span>
-          {selected && <span className="node-row__tag">当前</span>}
+          {selected && <span className="node-row__tag">已选中</span>}
         </div>
         <div className="list__meta">
           {nodeSummary(node)} · {node.address}:{node.port}

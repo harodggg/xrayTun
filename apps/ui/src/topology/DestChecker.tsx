@@ -48,7 +48,14 @@ export function DestChecker({ geoAvailable }: { geoAvailable: boolean }) {
       <p className="page__desc">
         输入域名或 IP，用真实的规则与 geosite/geoip 数据判定它命中哪条规则。
         {geoAvailable ? (
-          <> 这条结论是确定的（已与真实核心对拍过）。</>
+          <>
+            {" "}
+            这条结论是确定的（已与真实核心对拍过）—— 但只在<strong>按 443/tcp 求值</strong>这个前提下：
+            判定器固定用 <span className="mono">port: 443, network: tcp</span>
+            （`commands/topology.rs:456-469`），而真实规则是端口/网络/入站一起做
+            AND 匹配。所以只按端口或只按 udp 命中的规则（例如 `198.18.0.2:53 → dns-out`
+            这类内部规则）不在这里的结论里。
+          </>
         ) : (
           <> 当前数据目录里没有 geosite.dat / geoip.dat，域名规则无法判定。</>
         )}
