@@ -416,8 +416,11 @@ PY
   echo "## route -n get 127.0.0.2      （判据：interface 必须是 lo0；不是 ⇒ loopback 空洞）"
   route -n get 127.0.0.2 2>&1 || true
   echo
-  echo "## netstat -rn -f inet（只留与判据有关的行：default / 0/1 / 128/1 / 127 / 198.18）"
-  netstat -rn -f inet 2>/dev/null | awk 'NR<=2 || /^(default|0\/1|128\/1|127|198\.18)/' || true
+  echo "## netstat -rn -f inet（default / 0/1 / 128/1 / 127 / 198.18，**以及所有 HOST 路由**）"
+  echo "##   ⚠️ 为什么要带上 HOST 路由：节点 IP 的「旁路 /32」就是 HOST 路由。"
+  echo "##   换节点后**旧节点那条残留不被删除**（实测 2026-09-23：选中 US，HK 的 /32 仍在）"
+  echo "##   ⇒ 「规则指向节点 B 时 B 是直连还是经选中节点中转」**只能从这张表判定**（task-118 的第一判据）。"
+  netstat -rn -f inet 2>/dev/null | awk 'NR<=2 || /^(default|0\/1|128\/1|127|198\.18)/ || $3 ~ /H/ || $4 ~ /H/' || true
   echo
   echo "## netstat -rn -f inet 全表行数（上面是过滤后的；全表不进包，避免体积与噪音）"
   netstat -rn -f inet 2>/dev/null | wc -l || true
