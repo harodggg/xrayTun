@@ -36,7 +36,8 @@ import {
   type IncidentPreview,
   type IncidentUpload,
 } from "./incident";
-import { formatBytes, formatTimestamp } from "./types";
+import { formatServerTime } from "./incident";
+import { formatBytes } from "./types";
 
 /**
  * 复制按钮：**失败必须可见**，并给一个可手动选中的文本区。
@@ -208,6 +209,8 @@ export default function IncidentReport() {
 
   const badge =
     anomalies !== null && anomalies > 0 ? `有 ${anomalies} 条待上报` : null;
+  /** 服务器时间（ISO 串 ⇒ 本地化显示）；解析不出来就是 `null`（不渲染）。 */
+  const serverTime = upload ? formatServerTime(upload.received_at) : null;
 
   return (
     <section className="page__sec">
@@ -294,17 +297,16 @@ export default function IncidentReport() {
         </>
       )}
 
+      {/* `received_at` 是 **ISO 8601 串**（Lead 裁决，依据 `src/worker.mjs:263` 的
+          `new Date(nowMs).toISOString()`）。原来这里是「只有 number 才渲染 ⇒ 永远不显示」；
+          现在交给 `formatServerTime`：解析不出有限值就整段不渲染（**一个时间都不编**）。 */}
       {phase === "done" && upload && (
         <div className="note" style={{ marginTop: 10 }}>
           <strong>已上传。</strong>编号：
           <span className="mono"> {upload.id}</span>
           <div className="field__hint" style={{ marginTop: 6 }}>
             {formatBytes(upload.bytes)} · sha256 {upload.sha256.slice(0, 16)}…
-            {/* 契约没写 `received_at` 的类型 ⇒ 只有在它确实是 unix 秒数字时才渲染，
-                否则一个数字都不编（并已在报告里请 Lead 补契约）。 */}
-            {typeof upload.received_at === "number" && Number.isFinite(upload.received_at)
-              ? ` · 服务器时间 ${formatTimestamp(upload.received_at)}`
-              : ""}
+            {serverTime !== null ? ` · 服务器时间 ${serverTime}` : ""}
           </div>
           <div className="row row--wrap" style={{ marginTop: 8 }}>
             <CopyButton label="复制编号" text={upload.id} />

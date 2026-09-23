@@ -41,6 +41,7 @@ vi.mock("./ipc", () => ({
 }));
 
 import IncidentReport, { CopyButton } from "./IncidentReport";
+import { formatServerTime } from "./incident";
 import { scenarioSnapshot } from "./previewSnapshot";
 import { StoreProvider } from "./store";
 
@@ -84,7 +85,8 @@ beforeEach(() => {
     id: "inc-201",
     sha256: "c".repeat(64),
     bytes: 2048,
-    received_at: 1_700_000_000,
+    // ISO 8601 串（不是 unix 秒）—— 与 `src/worker.mjs:263` 的契约一致
+    received_at: "2026-09-23T03:29:48.123Z",
   });
   setClipboard(() => Promise.resolve());
 });
@@ -138,6 +140,22 @@ describe("task-131 · 四条上传路径", () => {
     expect(mocks.incidentUpload).toHaveBeenCalledWith(BUNDLE);
     expect(screen.getByText("inc-201")).toBeTruthy();
     expect(screen.getByRole("button", { name: "复制编号" })).toBeTruthy();
+    // `received_at` 是 ISO 串 ⇒ 必须真的渲染出「服务器时间 …」（不是永远不显示）
+    expect(screen.getByText(new RegExp(`服务器时间 ${formatServerTime("2026-09-23T03:29:48.123Z")}`))).toBeTruthy();
+  });
+
+  it("反例：received_at 解析不出来 ⇒ 一个时间都不编", async () => {
+    mocks.incidentUpload.mockResolvedValue({
+      id: "inc-202",
+      sha256: "d".repeat(64),
+      bytes: 2048,
+      received_at: "不是时间",
+    });
+    fireEvent.click(await toPreview());
+    await screen.findByText(/已上传/);
+    expect(screen.queryByText(/服务器时间/)).toBeNull();
+    // 编号照旧要显示 —— 缺时间不影响主信息
+    expect(screen.getByText("inc-202")).toBeTruthy();
   });
 
   it("422：SecretDetected ⇒ 已阻止上传 + `文件:行号:类型`，且**不回显密钥原文**", async () => {

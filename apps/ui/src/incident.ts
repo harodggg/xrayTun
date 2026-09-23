@@ -45,12 +45,45 @@ export interface IncidentPreview {
   truncated: string[];
 }
 
-/** `incident_upload()` 成功的结果。 */
+/**
+ * `incident_upload()` 成功的结果。
+ *
+ * `received_at` 是 **ISO 8601 字符串**（Lead 裁决 + 端点源码：`src/worker.mjs:263`
+ * `new Date(nowMs).toISOString()`，`:286` 原样返回，形如
+ * `2026-09-23T03:29:48.123Z`）。**不是** unix 秒 —— 别拿 `formatTimestamp` 喂它。
+ * 渲染走 [`formatServerTime`]，解析不出来就**不显示**（不编时间）。
+ */
 export interface IncidentUpload {
   id: string;
   sha256: string;
   bytes: number;
-  received_at: number;
+  received_at: string;
+}
+
+/**
+ * 待上报的一条异常（`incident_anomalies()` 的元素，**契约已冻结**）。
+ *
+ * 本卡（task-131）**不展示这个列表**：角标只用 `incident_anomaly_count()` 的计数。
+ * 这里把冻结字段记下来，是为了将来要用时不必再问一遍 —— 不是给未实现的命令占位。
+ */
+export interface IncidentAnomaly {
+  ts_unix: number;
+  kind: string;
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+/**
+ * 把服务端给的 ISO 时间渲染成人能读的样子。
+ *
+ * 解析不出有限值 ⇒ 返回 `null`（调用方**一个时间都不显示**）。
+ * 之前这里写成「只有是 `number` 才渲染」，而契约是 ISO 串 ⇒ 那一支**永远不显示**。
+ */
+export function formatServerTime(iso: unknown): string | null {
+  if (typeof iso !== "string" || iso.trim() === "") return null;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toLocaleString("zh-CN", { hour12: false });
 }
 
 /** `SecretDetected` 里的一条命中：**只有位置与类型，没有密钥原文**。 */
