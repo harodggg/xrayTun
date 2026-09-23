@@ -59,7 +59,13 @@ export function RecentConnections({
       <h2 className="page__title">最近连接</h2>
       <p className="page__desc">
         每条连接 = 核心访问日志里的一行 <span className="mono">accepted</span>。
-        点一条，就会在上面那张车流图上高亮它走的那条路（入口 → 出站）。
+        点一条会展开它的详情；<strong>入口与出口都在车流图里的连接</strong>
+        （也就是经节点出去的那些）<strong>才会</strong>在上面那张车流图上高亮那条路
+        （入口 → 出站）。走<span className="mono">内部通道</span>的
+        （<span className="mono">dns-out</span> / <span className="mono">api</span> /
+        <span className="mono">direct</span>）<strong>画不出线</strong> —— 这类行上有
+        「内部通道」标记，详情里会说明原因（task-126：原来的写法是无条件承诺「点一条就会
+        高亮」，而内部通道实测占多数，点了不画线）。
         域名带 <span className="conn__star">*</span> 的是<strong>时序配对</strong>得到
         的近似值。
       </p>
@@ -163,6 +169,12 @@ export function RecentConnections({
               {shown.map((c) => {
                 const k = connectionKey(c);
                 const on = k === selectedKey;
+                // task-126：**在点之前**就告诉用户这一行画不画得出线 ——
+                // 判据是同一个纯函数 `matchConnectionToTopology` 的 `inFlow`
+                // （`inlet !== null && outletInFlow !== null`），不是猜的。
+                // 「点了什么也不发生」和「这条走内部通道所以不画线」是两件事，
+                // 前者伤信任，后者是可解释的正常态。
+                const m = matchConnectionToTopology(c, tags);
                 return (
                   <button
                     type="button"
@@ -192,6 +204,16 @@ export function RecentConnections({
                     <span className="conn-row__route mono">
                       {c.inbound_tag} → {shortTag(c.outbound_tag)}
                     </span>
+                    {!m.inFlow && (
+                      <span
+                        className="field__hint"
+                        title={m.note ?? "这条连接不在流向图里"}
+                      >
+                        {m.internalInbound || m.internalOutbound
+                          ? "内部通道 · 不画线"
+                          : "不在当前拓扑里"}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -225,8 +247,13 @@ export function ConnectionDetail({
     <div className="conn-detail">
       <div className="conn-detail__head">
         选中的连接
-        {match.inlet && match.outlet && !match.note && (
+        {/* task-126：判据用 `match.inFlow`（那个字段的定义就是「能不能画线」），
+            而不是再拼一遍 `inlet && outlet && !note`；没画线时必须**说没画线**，
+            否则只有一个沉默的详情面板，用户会以为自己点错了。 */}
+        {match.inFlow ? (
           <span className="conn-detail__ok">已在车流图上高亮</span>
+        ) : (
+          <span className="conn-detail__muted">未在车流图上高亮（原因见下）</span>
         )}
       </div>
       <dl className="conn-detail__grid">

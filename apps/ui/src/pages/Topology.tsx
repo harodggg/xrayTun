@@ -128,12 +128,32 @@ export default function Topology() {
         <h2 className="page__title">网络流动</h2>
         <p className="page__desc">
           入口是流量进来的地方，规则链按真实顺序决定去哪，出口是最终去向。
-          车上的货物是字节；车辆数量由累计流量决定（累计值只增不减，不代表当前速率）。
+          车上的货物是字节；车辆数量由累计流量决定（<strong>本次会话内</strong>
+          累计值只增不减，不代表当前速率）。
+        </p>
+        {/*
+          task-126：原来的写法是**无条件**的「累计值只增不减」。这句话只在**本次 App
+          运行期间**成立 —— 续接用的单调化基数是一个**进程内的 static**
+          （`apps/desktop/src/commands/topology.rs:225` 的 `TRAFFIC_COUNTERS`，
+          `OnceLock<Mutex<MonotonicCounters>>`），进程结束就没了；而
+          `counter_resets` 报的是 `MonotonicCounters::max_resets()`，也就是
+          **本进程内观察到的**归零次数。
+          ⇒ 重启 App 之后第一次读到的是核心当时的**原始**计数：核心如果跟着重启
+          （正常退出路径就是这样），数字会掉回 ~0，而这一次掉回**不会**出现在
+          `counter_resets` 里（那时新进程刚开始观察）。原来的说法把这种情形说成了
+          「不会发生」。所以这里把适用范围写出来，不猜、也不平滑掩盖。
+        */}
+        <p className="page__desc">
+          ⚠︎ 这条「只增不减」的保证**只活在本次 App 运行期间**：重启 App 后第一次读到的是
+          核心当时的原始计数（核心也一起重启了就会看到数字掉回 0），而下面那条
+          「核心重启过 N 次」只统计**本次运行期间**观察到的归零。两件事都不隐瞒。
         </p>
         <MemoHighway topo={topo} match={selectedMatch} />
         {selectedMatch?.note && (
           <div className="note">
-            单连接高亮：{selectedMatch.note}
+            {/* task-126：内部通道**画不出线**，前缀却写着「高亮」—— 一句话自相矛盾。
+                前缀跟着 `inFlow`（那个字段就是「能不能画线」）走。 */}
+            单连接{selectedMatch.inFlow ? "高亮" : ""}：{selectedMatch.note}
           </div>
         )}
         {topo.traffic_error && (
