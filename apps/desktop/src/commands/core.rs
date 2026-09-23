@@ -229,8 +229,13 @@ pub(crate) async fn start_core(
     let forward_pid = runtime.pid;
     tokio::spawn(async move {
         let mut throttle = LogThrottle::default();
-        // 每秒一次：把被限流掉的行数**补成可见的摘要**（task-91 A 的红线：
-        // 不许静默丢弃）。空闲时 take_summary() 返回 None，不会打噪音。
+        let mut persist_gate = PersistSummaryGate::default();
+        // **一秒一次心跳**，但两条通路**分开兑现**（`throttle_tick` 是纯函数，可测）：
+        // * 界面通路：每秒一条摘要，只 `emit`（用户正在看时它有意义）；
+        // * 持久化通路：每个窗口一条**窗口账**，只 `state.log`。
+        // 以前两条通路共用同一条摘要 ⇒ debug 级别下 `source=app` 的事件流
+        // （自愈/重建/作废/连接）被每秒一条的计数淹掉（task-121 的实测）。
+        // 空闲时两条通路都返回 None，不会打噪音。
         let mut flush = tokio::time::interval(LOG_THROTTLE_SUMMARY_INTERVAL);
         loop {
             tokio::select! {
@@ -255,24 +260,34 @@ pub(crate) async fn start_core(
                     }
                 }
                 _ = flush.tick() => {
-                    if let Some((n, sample)) = throttle.take_summary() {
-                        if let Some(state) = app_handle.try_state::<AppState>() {
+                    let tick = throttle_tick(&mut throttle, &mut persist_gate, xt_core::util::now_unix());
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        // 界面：只推事件，**不落盘**（磁盘上要的是窗口账）。
+                        if let Some((n, sample)) = tick.ui {
                             let msg = throttled_summary_message(n, &sample);
-                            state.log("app", "warn", msg.clone());
                             let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: msg, level: "warn".into() });
+                        }
+                        // 持久化：窗口聚合（`state.log` 同时进环形缓冲，日志页刷新也能看到）。
+                        if let Some((n, sample)) = tick.persist {
+                            state.log("app", "warn", throttled_window_summary_message(n, &sample));
                         }
                     }
                 }
             }
         }
 
-        // 循环结束时把最后一批省略数补上 —— 否则核心退出前那一段被压下的行
-        // **永远不可见**（这正是不许静默丢弃的意思）。
-        if let Some((n, sample)) = throttle.take_summary() {
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                let msg = throttled_summary_message(n, &sample);
-                state.log("app", "warn", msg.clone());
-                let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: msg, level: "warn".into() });
+        // 循环结束时**两条通路都要收尾** —— 否则核心退出前那一段被压下的行
+        // **永远不可见**（这正是不许静默丢弃的意思）。持久化这条**不看窗口节拍**：
+        // 不到点也得把账落下来，否则退出会吞掉最后不足一个窗口的计数。
+        // （窗口长度按「至多」理解：这条覆盖的是退出前那一段。）
+        let ui_left = throttle.take_ui_summary();
+        let persist_left = throttle.take_persist_summary();
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            if let Some((n, sample)) = ui_left {
+                let _ = app_handle.emit(events::CORE_LOG, events::LogPayload { line: throttled_summary_message(n, &sample), level: "warn".into() });
+            }
+            if let Some((n, sample)) = persist_left {
+                state.log("app", "warn", throttled_window_summary_message(n, &sample));
             }
         }
 
@@ -1982,6 +1997,18 @@ pub(crate) const LOG_SHAPE_WINDOW_SECS: u64 = 5;
 pub(crate) const LOG_UI_LINES_PER_SEC: u32 = 5;
 /// 限流摘要的补发间隔：被压下的条数最多延迟这么久就可见。
 pub(crate) const LOG_THROTTLE_SUMMARY_INTERVAL: Duration = Duration::from_secs(1);
+/// **持久化**摘要的窗口长度（秒）。
+///
+/// # 为什么持久化要单独一个窗口（task-121）
+///
+/// 界面与磁盘要的是**两种东西**：界面上「每秒有多少条没实时显示」是**正在刷屏**的
+/// 信号（用户盯着看有意义）；而磁盘上同一句话每秒一条，会把 `source=app` 的**事件流**
+/// （自愈 / 重建 / 作废意图 / 连接 / 断开）淹掉 —— 实测「最近 12 条 `source=app` 全是
+/// 同一句限流摘要」。所以磁盘上只留**窗口账**：每个非空窗口一条，条数 = 窗口内被压下的
+/// 总和（计数在 `LogThrottle` 里累积，**一条都不丢**）。
+///
+/// 60 秒是权衡：再长，用户翻日志时容易以为「没在被限流」；再短，就接近原来的每秒噪声。
+pub(crate) const LOG_PERSIST_SUMMARY_WINDOW_SECS: u64 = 60;
 /// 形状记忆的容量上限。它不是账本，超了整体清一次即可（代价：这些形状各重放行一次）。
 const LOG_SHAPE_MEMORY: usize = 1024;
 
@@ -2060,20 +2087,27 @@ fn mask_token(tok: &str) -> String {
 ///
 /// * 原文照旧进后端环形缓冲与**日志文件**（调用点里 `state.log` 不受本限流影响）；
 /// * 本限流只决定「哪些行**立即**推给界面」；
-/// * 被压下的条数**必须可见**：调用方每秒（以及循环结束时）补一条
-///   「已省略 N 条」的摘要 —— 界面永远不会「比事实少而看不出来」。
+/// * 被压下的条数**必须可见**，而且是**两条通路各记一份**（task-121）：
+///   界面每秒兑现一次（`take_ui_summary`）、磁盘按窗口兑现（`take_persist_summary`）。
 #[derive(Default)]
 pub(crate) struct LogThrottle {
     /// 形状 → 上次推给界面的秒。
     last_sent: std::collections::HashMap<String, u64>,
     second: u64,
     sent_this_second: u32,
-    suppressed: u64,
-    sample: Option<String>,
+    /// **界面通路**：自上次界面摘要以来被压下的条数（每秒兑现、**不落盘**）。
+    suppressed_ui: u64,
+    sample_ui: Option<String>,
+    /// **持久化通路**：自上次落盘摘要以来被压下的条数（按窗口兑现）。
+    ///
+    /// 与界面通路**独立计数**：界面摘要每秒就把 `suppressed_ui` 清空，但它不落盘；
+    /// 磁盘上看到的是这个窗口累计的账（见 `throttle_tick`）。
+    suppressed_persist: u64,
+    sample_persist: Option<String>,
 }
 
 impl LogThrottle {
-    /// 这一行现在能不能推给界面？被压下的会计入 `suppressed`（由 `take_summary` 兑现可见性）。
+    /// 这一行现在能不能推给界面？被压下的会计入两条通路的账（各由对应的 take 兑现可见性）。
     pub(crate) fn admit(&mut self, now_unix: u64, line: &str) -> bool {
         let shape = log_shape(line);
         if now_unix != self.second {
@@ -2095,32 +2129,110 @@ impl LogThrottle {
             self.sent_this_second += 1;
             true
         } else {
-            self.suppressed += 1;
-            if self.sample.is_none() {
-                self.sample = Some(shape);
+            self.suppressed_ui += 1;
+            if self.sample_ui.is_none() {
+                self.sample_ui = Some(shape.clone());
+            }
+            self.suppressed_persist += 1;
+            if self.sample_persist.is_none() {
+                self.sample_persist = Some(shape);
             }
             false
         }
     }
 
-    /// 取走「自上次取走以来被压下的条数 + 一个形状示例」。
+    /// 取走「自上次取走以来被压下的条数 + 一个形状示例」（**界面**通路，每秒一次）。
     /// `None` = 这段时间没压过任何行（**不打无谓的噪音**）。
-    pub(crate) fn take_summary(&mut self) -> Option<(u64, String)> {
-        if self.suppressed == 0 {
-            return None;
-        }
-        let n = self.suppressed;
-        self.suppressed = 0;
-        let sample = self.sample.take().unwrap_or_else(|| "（无示例）".to_string());
-        Some((n, sample))
+    pub(crate) fn take_ui_summary(&mut self) -> Option<(u64, String)> {
+        take_summary_from(&mut self.suppressed_ui, &mut self.sample_ui)
+    }
+
+    /// 取走**持久化**通路自上次落盘以来的条数（窗口兑现；核心退出前也会收一次尾）。
+    pub(crate) fn take_persist_summary(&mut self) -> Option<(u64, String)> {
+        take_summary_from(&mut self.suppressed_persist, &mut self.sample_persist)
     }
 }
 
-/// 限流摘要的文案。**必须说清「有 N 条没实时显示」并指出原文在哪** ——
+fn take_summary_from(count: &mut u64, sample: &mut Option<String>) -> Option<(u64, String)> {
+    if *count == 0 {
+        return None;
+    }
+    let n = *count;
+    *count = 0;
+    let sample = sample.take().unwrap_or_else(|| "（无示例）".to_string());
+    Some((n, sample))
+}
+
+/// **持久化摘要的窗口节拍**（纯逻辑，可测）。
+///
+/// 抽出来是为了让「多久一条」只有**一处实现**：生产循环每个心跳调一次，
+/// 单测驱动的也是它 —— 不是测试里另写一遍节奏。
+#[derive(Debug, Default)]
+pub(crate) struct PersistSummaryGate {
+    next_due: Option<u64>,
+}
+
+impl PersistSummaryGate {
+    /// 现在到点了吗？第一次调用只是**起表**（窗口还没满 ⇒ 不落）。
+    ///
+    /// 跨过整数个窗口也不补多条：计数在 `LogThrottle` 里累积，一条窗口摘要把这段时间
+    /// 的全部条数一起报出来（**不静默丢弃**这条红线与「不淹没事件流」并不冲突）。
+    pub(crate) fn due(&mut self, now_unix: u64) -> bool {
+        match self.next_due {
+            None => {
+                self.next_due = Some(now_unix + LOG_PERSIST_SUMMARY_WINDOW_SECS);
+                false
+            }
+            Some(due) if now_unix >= due => {
+                self.next_due = Some(now_unix + LOG_PERSIST_SUMMARY_WINDOW_SECS);
+                true
+            }
+            Some(_) => false,
+        }
+    }
+}
+
+/// 一次心跳（1 秒）的全部产出：**两条通路各一条**，互不影响。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ThrottleTick {
+    /// 界面通路：每秒一条，只 `emit`，**不落盘**。
+    pub(crate) ui: Option<(u64, String)>,
+    /// 持久化通路：每个窗口一条，只落盘（`state.log`）。
+    pub(crate) persist: Option<(u64, String)>,
+}
+
+/// **一次心跳的全部决策**（纯函数）：生产循环只负责把两个结果分别接到
+/// `emit(CORE_LOG)` 与 `state.log` 上。
+///
+/// 这就是 task-121 的修法：以前两条通路**共用**同一条摘要（每秒一条同时 `emit` +
+/// `state.log`），于是持久化的 app 日志被每秒计数淹没。
+pub(crate) fn throttle_tick(
+    throttle: &mut LogThrottle,
+    gate: &mut PersistSummaryGate,
+    now_unix: u64,
+) -> ThrottleTick {
+    let ui = throttle.take_ui_summary();
+    let persist = if gate.due(now_unix) {
+        throttle.take_persist_summary()
+    } else {
+        None
+    };
+    ThrottleTick { ui, persist }
+}
+
+/// 限流摘要的**界面**文案。**必须说清「有 N 条没实时显示」并指出原文在哪** ——
 /// 界面不许比事实弱。
 pub(crate) fn throttled_summary_message(n: u64, sample: &str) -> String {
     format!(
         "核心日志已限流：最近有 {n} 条未实时显示（原文已完整写入日志文件；刷新日志页可看到最近 2000 条）。示例格式：{sample}"
+    )
+}
+
+/// 限流摘要的**持久化**文案（窗口账）。与界面那条**刻意不同**：磁盘上要能看出
+/// 这是「一个窗口的汇总」，而不是每秒一次的快照。
+pub(crate) fn throttled_window_summary_message(n: u64, sample: &str) -> String {
+    format!(
+        "核心日志限流汇总（{LOG_PERSIST_SUMMARY_WINDOW_SECS} 秒窗口）：本窗口有 {n} 条未实时显示（原文已完整写入日志文件）。示例格式：{sample}"
     )
 }
 
@@ -3463,11 +3575,18 @@ mod tests {
         assert!(t.admit(100, a), "第一次见到这个形状 → 放行（第一现场）");
         assert!(!t.admit(100, b), "同一形状在窗口内不再推给界面");
         assert_eq!(
-            t.take_summary(),
+            t.take_ui_summary(),
             Some((1, log_shape(a))),
             "被压下的 1 条必须能对账（这就是「不许静默丢弃」）",
         );
-        assert_eq!(t.take_summary(), None, "没有新的省略就不该打噪音");
+        // 两条通路**各自记账**（task-121）：界面取过之后，持久化那条仍然欠着这笔账。
+        assert_eq!(
+            t.take_persist_summary(),
+            Some((1, log_shape(a))),
+            "持久化通路是独立的窗口账，不能被界面通路取走",
+        );
+        assert_eq!(t.take_ui_summary(), None, "没有新的省略就不该打噪音");
+        assert_eq!(t.take_persist_summary(), None, "持久化侧也不该重复报");
         assert!(
             t.admit(100 + LOG_SHAPE_WINDOW_SECS, b),
             "窗口过后放行",
@@ -3490,7 +3609,7 @@ mod tests {
             admitted, LOG_UI_LINES_PER_SEC,
             "一秒内的全局上限必须生效（否则「形状多」的突发等于没限流）",
         );
-        let (n, _) = t.take_summary().expect("被压下的必须有摘要");
+        let (n, _) = t.take_ui_summary().expect("被压下的必须有摘要");
         assert_eq!(n, 50 - u64::from(LOG_UI_LINES_PER_SEC), "省略数必须精确对账");
         // 下一秒：剩下的 45 种形状会各放行一次（又被 5 行/秒截住）
         let mut admitted_next = 0;
@@ -3503,16 +3622,23 @@ mod tests {
         assert_eq!(admitted_next, LOG_UI_LINES_PER_SEC, "配額逐秒重置");
     }
 
-    /// 用实测速率搭一个洪流（**31 行/秒、两种形状、10 分钟**），界面入库行数必须有界。
+    /// 用实测速率搭一个洪流（**31 行/秒、两种形状、10 分钟**），界面入库行数必须有界，
+    /// 且**持久化的窗口账**必须对得上（task-121）。
     ///
     /// 依据：用户机器 12:05–12:35 实测平均 31.3 行/秒；前两种形状占 14%。
     /// 界面日志页只有 1500 行 ⇒ 不限制的话 10 分钟就是 18,600 行灌进去、持续滚动。
+    ///
+    /// 驱动的是**生产同一个纯函数** `throttle_tick`（心跳 + 窗口节拍），
+    /// 不是在测试里另写一遍「每 60 秒一次」。
     #[test]
     fn throttle_cuts_a_realistic_flood_to_a_bounded_ui_rate() {
         let mut t = LogThrottle::default();
+        let mut gate = PersistSummaryGate::default();
         let mut admitted = 0u64;
-        let mut summaries = 0u64;
-        let mut accounted = 0u64;
+        let mut ui_summaries = 0u64;
+        let mut ui_accounted = 0u64;
+        let mut persist_summaries = 0u64;
+        let mut persist_accounted = 0u64;
         for sec in 0..600u64 {
             for i in 0..31 {
                 let line = if i % 2 == 0 {
@@ -3524,27 +3650,112 @@ mod tests {
                     admitted += 1;
                 }
             }
-            if let Some((n, _)) = t.take_summary() {
-                summaries += 1;
-                accounted += n;
+            let tick = throttle_tick(&mut t, &mut gate, sec);
+            if let Some((n, _)) = tick.ui {
+                ui_summaries += 1;
+                ui_accounted += n;
             }
+            if let Some((n, _)) = tick.persist {
+                persist_summaries += 1;
+                persist_accounted += n;
+            }
+        }
+        // 循环结束时的收尾（生产里就是 `rx` 关掉之后那一段）：**两条通路都要收**。
+        if let Some((n, _)) = t.take_ui_summary() {
+            ui_summaries += 1;
+            ui_accounted += n;
+        }
+        if let Some((n, _)) = t.take_persist_summary() {
+            persist_summaries += 1;
+            persist_accounted += n;
         }
         let total = 600 * 31;
         assert_eq!(
-            admitted + accounted,
+            admitted + ui_accounted,
             total,
-            "**每一行都要有着落**：放行的 + 明确记账省略的 = 全部（不许静默丢弃）",
+            "**界面通路**每一行都要有着落：放行的 + 明确记账省略的 = 全部（不许静默丢弃）",
+        );
+        assert_eq!(
+            admitted + persist_accounted,
+            total,
+            "**持久化通路**同样要有着落（窗口聚合不许把计数吃掉）",
         );
         assert!(
             admitted <= 600 / LOG_SHAPE_WINDOW_SECS * 2 + 2,
             "两种形状 × 每 {LOG_SHAPE_WINDOW_SECS}s 一条 ⇒ 放行数必须有界，实际 {admitted}",
         );
-        assert_eq!(summaries, 600, "每秒一条摘要（被压下过的那一秒）");
+        assert_eq!(ui_summaries, 600, "界面：每秒一条摘要（被压下过的那一秒）");
+        assert_eq!(
+            persist_summaries,
+            600 / LOG_PERSIST_SUMMARY_WINDOW_SECS,
+            "**持久化：每 {LOG_PERSIST_SUMMARY_WINDOW_SECS} 秒一条窗口账**（600 秒 ⇒ 10 条），\
+             而不是每秒一条 —— 这就是 task-121 修的「淹没事件流」",
+        );
         // 换算：31 行/秒 → 放行 ≤ (2/5) 行/秒 + 摘要 1 行/秒
         assert!(
             (admitted as f64) / 600.0 <= 0.5,
             "界面入库速率必须从 31 行/秒降到 ≤0.5 行/秒（实测数据模拟），实际 {}",
             (admitted as f64) / 600.0,
+        );
+        // 磁盘那条路的噪声水平：10 分钟只写 10 行（原来 600 行）。
+        assert_eq!(
+            persist_summaries * LOG_PERSIST_SUMMARY_WINDOW_SECS,
+            600,
+            "窗口账必须恰好覆盖这 600 秒",
+        );
+    }
+
+    /// **task-121 主回归**：持久化摘要按**窗口聚合**，且每个窗口的账 == 该窗口内
+    /// 每秒账之和（聚合不丢一条）；不足一个窗口的部分在退出时收尾补上。
+    #[test]
+    fn persist_summary_is_window_aggregated_and_covers_every_second() {
+        let mut t = LogThrottle::default();
+        let mut gate = PersistSummaryGate::default();
+        let mut ui_counts: Vec<u64> = Vec::new();
+        let mut windows: Vec<(u64, u64)> = Vec::new(); // (落点秒, 该窗口账)
+        for sec in 0..(LOG_PERSIST_SUMMARY_WINDOW_SECS * 3) {
+            for i in 0..31 {
+                let line = format!("2026/09/22 12:16:00.{i} [Debug] app/dns: UDP:1.2.4.8:53 cache HIT host{i}.com. -> [1.2.3.4]");
+                let _ = t.admit(sec, &line);
+            }
+            let tick = throttle_tick(&mut t, &mut gate, sec);
+            ui_counts.push(tick.ui.as_ref().map(|(n, _)| *n).unwrap_or(0));
+            if let Some((n, _)) = tick.persist {
+                windows.push((sec, n));
+            }
+        }
+        assert_eq!(
+            windows.len() as u64,
+            2,
+            "3 个窗口的数据里，到点的只有 2 个（60s / 120s）—— 第三个窗口还没满：{windows:?}",
+        );
+        // 窗口在 `t = k * WINDOW` 秒**关闭**，并且把「关闭那一秒」的账也一起报出
+        // （心跳是在该秒的行到达之后才处理的）⇒ 用**累计**对账，不对边界秒做假设。
+        let mut cum_win = 0u64;
+        for (i, (sec, n)) in windows.iter().enumerate() {
+            let close = (i as u64 + 1) * LOG_PERSIST_SUMMARY_WINDOW_SECS;
+            cum_win += n;
+            let cum_ui: u64 = ui_counts[..=close as usize].iter().sum();
+            assert_eq!(
+                *sec, close,
+                "窗口必须恰好在 {LOG_PERSIST_SUMMARY_WINDOW_SECS} 秒的整数倍关闭",
+            );
+            assert_eq!(
+                cum_win, cum_ui,
+                "第 {} 个窗口关闭时（@{sec}s）的累计账必须与界面通路**完全一致**",
+                i + 1,
+            );
+        }
+        // 退出收尾：最后一个没满的窗口也要落下来，**不能因为不到点就吞掉**。
+        let (last_n, _) = t.take_persist_summary().expect("退出时必须收尾");
+        let tail_start = (LOG_PERSIST_SUMMARY_WINDOW_SECS * 2 + 1) as usize;
+        let tail: u64 = ui_counts[tail_start..].iter().sum();
+        assert_eq!(last_n, tail, "退出收尾必须把最后一个窗口的账补齐");
+        let all: u64 = ui_counts.iter().sum();
+        assert_eq!(
+            windows.iter().map(|(_, n)| n).sum::<u64>() + last_n,
+            all,
+            "窗口账之和 + 退出收尾必须覆盖全程（一条都不能丢）",
         );
     }
 
@@ -3555,6 +3766,123 @@ mod tests {
         assert!(msg.contains("137"), "要点出省略条数：{msg}");
         assert!(msg.contains("日志文件"), "要指出完整原文在哪：{msg}");
         assert!(msg.contains("刷新"), "要告诉用户怎么看全（刷新日志页）：{msg}");
+    }
+
+    /// 窗口摘要文案必须说清「这是窗口的账」+ 多少条 —— 与界面那条**要能区分开**
+    /// （否则读日志的人分不清「每秒快照」还是「窗口汇总」）。
+    #[test]
+    fn throttled_window_summary_says_it_is_a_window() {
+        let msg = throttled_window_summary_message(137, "app/dns: failed to lookup ip for domain <host>");
+        assert!(msg.contains("137"), "要点出省略条数：{msg}");
+        assert!(msg.contains("窗口"), "磁盘那条要能看出是窗口账：{msg}");
+        assert!(
+            msg.contains(&LOG_PERSIST_SUMMARY_WINDOW_SECS.to_string()),
+            "要写出窗口长度：{msg}"
+        );
+        assert!(msg.contains("日志文件"), "要指出完整原文在哪：{msg}");
+        assert_ne!(
+            msg,
+            throttled_summary_message(137, "app/dns: failed to lookup ip for domain <host>"),
+            "磁盘那条与界面那条必须不同",
+        );
+    }
+
+    /// **手动证据工具**（`#[ignore]`，不进 CI）：把**真实** `app.jsonl` 里已经写下的
+    /// 每秒限流摘要，按**新的窗口口径**重放一遍 —— 得到「改前 / 改后持久化日志片段对照」。
+    ///
+    /// **诚实边界**：这不是「真机跑过新版本」（用户机器上仍是 0.8.33），而是
+    /// **用真实数据驱动生产函数**（`PersistSummaryGate` + `throttled_window_summary_message`）；
+    /// 「窗口账 = 逐秒账之和、退出收尾不丢」由 `persist_summary_is_window_aggregated_and_covers_every_second` 钉住。
+    ///
+    /// ```text
+    /// XT_REAL_LOG="$HOME/Library/Application Support/com.xraytun.desktop/logs/app.jsonl" \
+    ///   cargo test -p xraytun-desktop --lib real_throttle_summaries_under_the_new_window_rule -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "手动证据工具：需要 XT_REAL_LOG=<app.jsonl 路径>"]
+    fn real_throttle_summaries_under_the_new_window_rule() {
+        let Ok(path) = std::env::var("XT_REAL_LOG") else {
+            eprintln!("跳过：请设置 XT_REAL_LOG");
+            return;
+        };
+        let raw = std::fs::read_to_string(&path).expect("读 app.jsonl");
+        // 真实每秒账：(ts, n, 示例格式)
+        let mut per_sec: Vec<(u64, u64, String)> = Vec::new();
+        for line in raw.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v.get("source").and_then(|s| s.as_str()) != Some("app") {
+                continue;
+            }
+            let Some(msg) = v.get("message").and_then(|m| m.as_str()) else {
+                continue;
+            };
+            if !msg.contains("核心日志已限流") {
+                continue;
+            }
+            let n = msg
+                .split_whitespace()
+                .find_map(|t| t.parse::<u64>().ok())
+                .unwrap_or(0);
+            let sample = msg
+                .split("示例格式：")
+                .nth(1)
+                .unwrap_or("（无示例）")
+                .to_string();
+            let ts = v.get("ts_unix").and_then(|t| t.as_u64()).unwrap_or(0);
+            per_sec.push((ts, n, sample));
+        }
+        if per_sec.is_empty() {
+            println!("真实日志里没有限流摘要");
+            return;
+        }
+        let (first, last) = (per_sec[0].0, per_sec[per_sec.len() - 1].0);
+        let total: u64 = per_sec.iter().map(|(_, n, _)| n).sum();
+        println!("=== 改前（真实 app.jsonl 里已经写下的行）===");
+        println!("摘要行数 {}，被压下的条数合计 {}，时间跨度 {} 秒", per_sec.len(), total, last - first);
+        for (ts, n, _) in per_sec.iter().take(3) {
+            println!(
+                "  [{}] 核心日志已限流：最近有 {} 条未实时显示（原文已完整写入日志文件…）",
+                crate::commands::diagnostics::utc_iso(*ts),
+                n
+            );
+        }
+        // 改后：同一批计数按窗口节拍重放（**生产的 gate + 文案**）。
+        let mut gate = PersistSummaryGate::default();
+        let mut pending = 0u64;
+        let mut sample = String::new();
+        let mut emitted: Vec<(u64, u64, String)> = Vec::new();
+        let mut idx = 0usize;
+        for sec in first..=last {
+            while idx < per_sec.len() && per_sec[idx].0 == sec {
+                pending += per_sec[idx].1;
+                if sample.is_empty() {
+                    sample = per_sec[idx].2.clone();
+                }
+                idx += 1;
+            }
+            if gate.due(sec) && pending > 0 {
+                emitted.push((sec, pending, std::mem::take(&mut sample)));
+                pending = 0;
+            }
+        }
+        // 退出收尾（生产里 `rx` 关掉之后那一段）。
+        if pending > 0 {
+            emitted.push((last, pending, sample));
+        }
+        println!("=== 改后（同一批计数，按新的 {LOG_PERSIST_SUMMARY_WINDOW_SECS} 秒窗口口径重放）===");
+        println!("窗口账行数 {}", emitted.len());
+        for (ts, n, s) in emitted.iter().take(3) {
+            println!(
+                "  [{}] {}",
+                crate::commands::diagnostics::utc_iso(*ts),
+                throttled_window_summary_message(*n, s)
+            );
+        }
+        let sum: u64 = emitted.iter().map(|(_, n, _)| n).sum();
+        assert_eq!(sum, total, "重放不许丢计数");
+        println!("（对账：窗口账合计 {sum} == 真实被压下合计 {total}）");
     }
 
     // -----------------------------------------------------------------------
