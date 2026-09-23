@@ -32,8 +32,11 @@ python3 scripts/triage-incident.py --bundle /tmp/inc-real2.zip \
 **读法**（这两条都在包里可复核）：
 * `loopback-hole` 与 `docs/09-network-drop/LOOPBACK-ROUTE-BASELINE.md` 的 T3 是同一现象；
   这次现场是 **`utun6`**（TUN 正在接管），比「指向局域网网关」更严重 —— 回环流量被塞进隧道。
+  ⇒ **后续时点**（2026-09-23 10:43 复采，仍然 `utun6`）与「何时才会消失」记在
+  **`docs/incidents/OPEN-FINDINGS.md` 的 F-1**：这份记录是入口，那份是**跟踪**。
 * `tun-iface-einval` 的原始行里还能看到 v0.8.34 的**新限流在起作用**
   （`source=app, level=warn`：`核心日志已限流：最近有 13 条未实时显示…`）—— 与本包 `events.jsonl` 一致。
+  ⇒ 后续时点见 `OPEN-FINDINGS.md` 的 **F-2**（第二次采样 73.3 次/分，**窗口长度不同，不可直接比倍数**）。
 
 ## 3. 这一份里**没有**入库什么
 

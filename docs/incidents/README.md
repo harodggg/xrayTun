@@ -74,7 +74,42 @@ python3 scripts/triage-incident.py --self-test     # 8 条 signature 的 fixture
 * **双向敏感性**：每条 signature 一份**正 fixture**（必须命中）+ 一份**边界 fixture**（必须不命中）；
   再把谓词**改坏一个条件** ⇒ 边界 fixture **必须**变成命中（即原断言会红）。`--self-test` 会逐条打印。
 
-## 4. 入库约定（**现场留可引用原件**）
+## 4. 上传前的隐私闸（`--privacy-check`）——**fail closed**
+
+脱敏在**客户端**做（`incident-bundle.sh`），而上传端点会把包**原样**存起来
+⇒ **漏一次，密钥就在云上躺很久**。task-113 的真实教训就是脱敏自己漏了三处
+（JSON 形键值 `"password":"x"`、URI 的 `?query`（`pbk=SECRET` 就在里面）、`Authorization` 只吃掉 `Bearer`）。
+所以上传前再过一道**可测**的闸：
+
+```bash
+python3 scripts/triage-incident.py --privacy-check /tmp/xraytun-incident-XXXX.zip
+python3 scripts/triage-incident.py --privacy-check <包> --privacy-json   # 给流水线/服务端用
+```
+
+* **命中 ⇒ 非 0 退出**（`1`；路径不存在 `2`）—— **fail closed**，不是「提示一下」；
+* 输出 `文件:行号:类型` + **值只显示前 4 字符与长度**：**报告本身不许成为泄漏源**；
+* 扫**包内所有文本文件**；zip 与解开的目录都支持；只读、不联网。
+
+命中的类型（每条都是可测谓词，逐条敏感性见 `--self-test`）：
+
+| 类型 | 抓什么 |
+|---|---|
+| `uuid` / `uuid-32hex` | 带连字符的 UUID、32 位十六进制（**排除**我们自己的 `<uuid>` 占位） |
+| `uri-secret-param` | `?pbk=`/`&sid=`/`token=`/`password=`/`secret=`/`key=`/`spx=`… 的值 |
+| `credential-field-json` | JSON 形键值，**含转义形**（`\"password\":\"x\"` —— 核心日志的 message 里就是这种） |
+| `subscription-url` | 订阅路径（`/subscribe`、`/api/vN/client/subscribe`、`/link/…`） |
+| `proxy-url-with-credentials` | `vless://`/`vmess://`/`ss://`/`trojan://` 且带 userinfo |
+| `vmess-base64` | `vmess://<base64>`（**内容不可读** —— 见 §6 诚实清单） |
+| `private-key-block` | `-----BEGIN … PRIVATE KEY-----` |
+| `bearer-token` / `authorization-header` | `Bearer <token>`、`Authorization:` 的值（`<redacted>` 除外） |
+| `email` | 邮箱形（**精确**白名单 `example.com/org/net`、`localhost`、`xraytun.top`；**子域照报**） |
+
+**与 `task-114` 的服务端拒收互不替代**：这一层是上传前自检，那一层是最后防线。
+
+**真包实测（2026-09-22 19:08 与 2026-09-23 10:43 各一份）：两份都 `✓ 未发现疑似密钥模式`（exit 0）**
+—— 即当时的客户端脱敏在这些规则下站得住。**这不等于「一定没有」**（见 §6）。
+
+## 5. 入库约定（**现场留可引用原件**）
 
 ```
 docs/incidents/<INC-ID>/            INC-ID = INC-YYYYMMDD-HHMMSS-<4hex>（不含任何用户标识）
@@ -90,7 +125,7 @@ docs/incidents/<INC-ID>/            INC-ID = INC-YYYYMMDD-HHMMSS-<4hex>（不含
   让后来人能核对「原件长什么样」，而不是把 100 MB 日志塞进仓库。
 * `INC-ID` 里的 `<4hex>` 用 **manifest 的 sha256 前 4 位** ⇒ ID 与内容绑定（同一份包只会有一个 ID）。
 
-## 5. 本流程**不能**证明什么（诚实清单）
+## 6. 本流程**不能**证明什么（诚实清单）
 
 1. **命中是症状，不是根因**：`v6-rewrite` 只说明「窗口里有 v6 改写、且这些连接里有失败」——
    它**不**证明「v6 改写导致了用户的问题」。
@@ -100,3 +135,21 @@ docs/incidents/<INC-ID>/            INC-ID = INC-YYYYMMDD-HHMMSS-<4hex>（不含
 5. **脱敏是规则化的**：它挡住的是**已知形状**的凭据；一条没见过的凭据形状可能漏过去 ——
    所以 `README.txt` 明确请用户在**上传前**自己看一眼。
 6. **不做因果、不做统计推断**：阈值是「该去看看」的提示，不是判决。
+
+### 6.1 隐私闸**测不到**什么（正则会误报/漏报，至少这四个具体形态）
+
+1. **base64 里裹着的密钥**：`vmess://<base64>` 只报「**这里有一个不可读的载荷**」——
+   我们**不**解码、也不假装知道里面有没有 UUID/口令。同理：任何被 base64 编码后的
+   `password=…`、私钥、订阅 URL，本条规则一概**读不出来**。
+2. **二进制/压缩容器里的密钥**：只扫**文本**。zip 里若嵌了二进制附件、或日志中出现压缩过的字节流，
+   扫描不做解压、不做熵分析 ⇒ **漏报**。
+3. **自造形状的令牌**：例如某个上游用「大写字母 + 数字 + 下划线、不带任何关键字」的裸密钥，
+   本闸**没有**「高熵长串」这一类判据（故意不加：它会把 commit hash、Xray 横幅里的构建号、
+   各种 ID 全部报出来，闸门一有噪音就会被绕过）⇒ **漏报**。
+4. **误报方向同样是代价**：白名单只有 5 个域，所以文档里写 `foo@sub.example.com` 会**被报出**；
+   `uuid-32hex` 会命中任何 32 位十六进制串（例如某些设备 ID / 构建哈希）。
+   这是**故意**的 fail-closed 取舍：宁可让人多看一眼，也不放过。**但**过度误报会让人把闸当噪音 ——
+   所以每次**扩大**规则都要跑 `--self-test` 的干净 fixture。
+
+⇒ 结论：**它是上传前的自检，不是安全保证**。服务端那一层（`task-114` 的拒收）是最后防线，
+两层**互不替代**；而真正的保证只有一条：**不要把凭据写进日志**。

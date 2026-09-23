@@ -25,6 +25,9 @@
 用法：
   python3 scripts/triage-incident.py --bundle /tmp/xraytun-incident-XXXX.zip
   python3 scripts/triage-incident.py --bundle <目录> --json-out incident.json --md-out SUMMARY.md
+  python3 scripts/triage-incident.py --privacy-check /tmp/xraytun-incident-XXXX.zip
+                                                          # **上传前的隐私闸**：命中即非 0（fail closed）
+  python3 scripts/triage-incident.py --privacy-check <包> --privacy-json
   python3 scripts/triage-incident.py --self-test          # 每个 signature 一条 fixture + 双向敏感性
 """
 from __future__ import annotations
@@ -345,6 +348,230 @@ PREDICATES = {
 }
 
 
+# ---------------------------------------------------------------- 隐私闸（上传前最后一道自检）
+#
+# 为什么要有它：脱敏在**客户端**做（`scripts/incident-bundle.sh`），而上传端点会把包**原样**存起来
+# ⇒ **漏一次，密钥就在云上躺很久**。task-113 的真实教训：脱敏自己做漏了三处
+# （JSON 形键值 `"password":"x"`、URI 的 `?query`（`pbk=SECRET`）、`Authorization` 只吃掉 `Bearer`）。
+#
+# 红线：**报告本身不许成为泄漏源** ⇒ 命中项只报 `文件:行号:类型` + **前 4 字符与长度**，绝不回显原值。
+#
+# 与 task-114（服务端拒收）**互不替代**：这一层是**上传前自检**，那一层是**最后防线**。
+PRIVACY_PATTERNS = [
+    ("uuid", re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")),
+    ("uuid-32hex", re.compile(r"\b[0-9a-fA-F]{32}\b")),
+    # 值里排除 `<`/`>`，这样我们自己的 `<uuid>` / `<redacted>` 占位不会被误报
+    ("uri-secret-param", re.compile(
+        r"(?i)[?&#;](?:pbk|sid|spx|token|password|passwd|pwd|uuid|key|api[_-]?key|secret|auth|psk"
+        r"|private[_-]?key)=([^&\s\"'<>]{4,})")),
+    # 同时覆盖**转义形**（`\"password\":\"x\"`：核心日志里 message 本身是 JSON 字符串时就是这种）
+    ("credential-field-json", re.compile(
+        r'''(?i)\\?"(?:password|passwd|pwd|token|secret|uuid|api[_-]?key|private[_-]?key|auth|psk|key)\\?"'''
+        r'''\s*:\s*\\?"([^"\\]{4,})''')),
+    ("subscription-url", re.compile(
+        r"https?://[^\s\"']*(?:/subscribe|/sub\?|/api/v\d+/client/subscribe|/link/[A-Za-z0-9]+)[^\s\"']*")),
+    ("proxy-url-with-credentials", re.compile(
+        r"(?i)\b(?:vmess|vless|ss|ssr|trojan|hysteria2?|tuic)://[^\s\"']*@[^\s\"']+")),
+    ("vmess-base64", re.compile(r"(?i)\bvmess://[A-Za-z0-9+/=]{16,}")),
+    ("private-key-block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+    ("bearer-token", re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{16,}")),
+    ("authorization-header", re.compile(r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*(?!<redacted>)\S{4,}")),
+    ("email", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")),
+]
+
+# 文档/示例里**故意**写的邮箱域：不白名单的话，每份文档都会报一片（假阳性会让闸门被绕过）
+EMAIL_WHITELIST = ("example.com", "example.org", "example.net", "localhost",
+                   "users.noreply.github.com", "xraytun.top")
+# 我们自己的脱敏占位：它们出现在产物里是**好事**，不是命中
+PLACEHOLDERS = {"<uuid>", "<redacted>", "<host>", "<home>", "<HOME>", "<your-uuid>", "xxx", "***", "（无示例）"}
+
+
+def _mask(v):
+    """只给「前 4 字符 + 长度」：报告本身不许成为泄漏源。"""
+    v = v.strip().strip("\"'")
+    return f"{v[:4]}…（len={len(v)}）"
+
+
+def _is_placeholder(v):
+    s = v.strip().strip("\"'")
+    return s in PLACEHOLDERS or (s.startswith("<") and s.endswith(">"))
+
+
+def _should_skip(typ, val, whole):
+    if _is_placeholder(val):
+        return True
+    if typ == "proxy-url-with-credentials":
+        userinfo = whole.split("://", 1)[-1].split("@", 1)[0]
+        if _is_placeholder(userinfo):      # `vless://<uuid>@host:443` 是**已脱敏**的，不算命中
+            return True
+    if typ == "email":
+        dom = val.rsplit("@", 1)[-1].lower()
+        # **精确匹配**白名单域：`corp-mail.example.net` 这种子域**照报**（fail closed）。
+        # 一开始写成「后缀匹配」，结果把真值 fixture 里的邮箱也一起吞了 —— 自测的对照断言当场抓到。
+        if any(dom == d for d in EMAIL_WHITELIST):
+            return True
+    return False
+
+
+def _looks_like_uri_userinfo(line, start):
+    """`xxx://<userinfo>@host` 里的 userinfo 会被**邮箱**正则误判（实测两处：
+    `vless://<uuid>@host`、`ss://<base64>@host`）⇒ 紧邻的前几个字符里有 `//` 就跳过。
+    这些 case 已经由 `proxy-url-with-credentials` 报过，重复报只会让闸门变噪音。"""
+    prefix = line[max(0, start - 3):start]
+    return "//" in prefix or prefix.endswith("@")
+
+
+def privacy_scan_text(name, text):
+    """扫一段文本 → findings（每项 `{file,line,type,masked}`）。**不回显原值。**"""
+    findings = []
+    for lineno, line in enumerate(text.split("\n"), 1):
+        for typ, pat in PRIVACY_PATTERNS:
+            for m in pat.finditer(line):
+                val = m.group(1) if m.groups() else m.group(0)
+                if typ == "email" and _looks_like_uri_userinfo(line, m.start()):
+                    continue
+                if _should_skip(typ, val, m.group(0)):
+                    continue
+                findings.append({"file": name, "line": lineno, "type": typ, "masked": _mask(val)})
+    return findings
+
+
+def privacy_scan_bundle(path, patterns=None):
+    """扫一个包（zip 或目录）里的**所有文本文件**。只读：不改包内任何东西。
+
+    `patterns` 只给自测用（逐条删掉一个谓词做敏感性）；生产路径不传。
+    """
+    global PRIVACY_PATTERNS
+    saved = PRIVACY_PATTERNS
+    if patterns is not None:
+        PRIVACY_PATTERNS = patterns
+    try:
+        b = load_bundle(path)
+        root = b["root"]
+        found, scanned = [], []
+        for dirpath, _dirs, names in os.walk(root):
+            for n in sorted(names):
+                p = os.path.join(dirpath, n)
+                rel = os.path.relpath(p, root)
+                try:
+                    text = open(p, encoding="utf-8", errors="replace").read()
+                except Exception:  # noqa: BLE001
+                    continue
+                scanned.append(rel)
+                found.extend(privacy_scan_text(rel, text))
+        return found, scanned
+    finally:
+        PRIVACY_PATTERNS = saved
+
+
+def privacy_check(path, as_json=False):
+    """CLI 入口。命中 ⇒ 返回 1（**fail closed**）；干净 ⇒ 0；路径不存在 ⇒ 2。"""
+    if not os.path.exists(path):
+        print(f"✗ 找不到：{path}", file=sys.stderr)
+        return 2
+    findings, scanned = privacy_scan_bundle(path)
+    if as_json:
+        print(json.dumps({"ok": not findings, "path": os.path.basename(os.path.abspath(path)),
+                          "scanned_files": scanned, "findings": findings,
+                          "note": "值只显示前 4 字符与长度；本输出不含原值"},
+                         ensure_ascii=False, indent=2))
+        return 1 if findings else 0
+    print(f"隐私闸：扫描 {os.path.basename(os.path.abspath(path))}（{len(scanned)} 个文件）")
+    if findings:
+        print(f"✗ 命中 {len(findings)} 处疑似密钥/隐私模式 —— **fail closed（退出码 1）**，请先修脱敏再上传：")
+        for f in findings:
+            print(f"    {f['file']}:{f['line']}:{f['type']}    {f['masked']}")
+        print("  说明：只显示前 4 字符与长度；本报告不含原值，也不会写下原值。")
+        print(f"  复现：python3 scripts/triage-incident.py --privacy-check {path}")
+        return 1
+    print("✓ 未发现疑似密钥模式")
+    return 0
+
+
+def privacy_self_test():
+    """真值 fixture（必须全中）/ 干净 fixture（必须零中）/ **逐条谓词的双向敏感性**。"""
+    fails = []
+    tmp = tempfile.mkdtemp(prefix="privacy-selftest-")
+
+    def check(name, got, want):
+        ok = got == want
+        print(f"  {'✓' if ok else '✗'} {name}: got={got!r} want={want!r}")
+        if not ok:
+            fails.append(name)
+
+    dirty = "\n".join([
+        '{"ts_unix":1790070000,"source":"core","level":"info","message":"start"}',
+        "vless://11111111-2222-3333-4444-555555555555@node.example.com:443?pbk=SECRETPBK&sid=abc123def456",
+        '{"password":"hunter2","token":"abcDEF123456"}',
+        '{"message":"{\\"password\\":\\"escapedSECRET1\\"}"}',
+        "https://sub.example.org/api/v1/client/subscribe?token=TOPSECRETVALUE",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.SECRETPART",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "contact: alice.smith@corp-mail.example.net",
+        "vmess://eyJ2IjoiMiIsInBzIjoibm9kZSIsImFkZCI6Im5vZGUuZXhhbXBsZS5jb20ifQ==",
+        "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@node.example.com:8388",
+        "api_key=abcd1234efgh5678",
+        "deadbeefdeadbeefdeadbeefdeadbeef",
+        "route to: 127.0.0.2",
+    ]) + "\n"
+    clean = "\n".join([
+        '{"ts_unix":1,"source":"app","level":"info","message":"vless://<uuid>@node.example.com:443?pbk=<redacted>"}',
+        '{"ts_unix":2,"source":"app","level":"info","message":"订阅已更新"}',
+        "password=<redacted>",
+        "uuid=<uuid>",
+        "contact: someone@example.com",      # 白名单域
+        "route to: 127.0.0.2",
+        "app.1.jsonl=29293980B/mtime13:16:42",
+    ]) + "\n"
+
+    d_dir = os.path.join(tmp, "dirty")
+    os.makedirs(d_dir, exist_ok=True)
+    with open(os.path.join(d_dir, "logs.txt"), "w", encoding="utf-8") as f:
+        f.write(dirty)
+    c_dir = os.path.join(tmp, "clean")
+    os.makedirs(c_dir, exist_ok=True)
+    with open(os.path.join(c_dir, "logs.txt"), "w", encoding="utf-8") as f:
+        f.write(clean)
+
+    print("=== 隐私闸：真值 fixture ⇒ 必须全部命中 ===")
+    d_find, d_files = privacy_scan_bundle(d_dir)
+    got_types = {f["type"] for f in d_find}
+    print(f"  扫了 {d_files}；命中类型 = {sorted(got_types)}")
+    for typ, _ in PRIVACY_PATTERNS:
+        check(f"真值 fixture 命中 `{typ}`", typ in got_types, True)
+    check("命中项里**不含原值**（SECRETPBK 不得出现在报告里）",
+          any("SECRETPBK" in json.dumps(f, ensure_ascii=False) for f in d_find), False)
+    check("命中项的值被掩成「前 4 字符 + 长度」",
+          all("（len=" in f["masked"] for f in d_find), True)
+    # 反例（实测抓到的假阳性）：`vless://<uuid>@host` 与 `ss://<base64>@host` 的 userinfo
+    # 会被邮箱正则当成 `xxxx@host` ⇒ 必须被排除，否则闸门全是噪音、会被绕过。
+    emails = [f for f in d_find if f["type"] == "email"]
+    check("脏 fixture 的 email 命中**只有 1 处**（URI 里的 userinfo 不再被误报）", len(emails), 1)
+    check("那 1 处是真实邮箱（掩码以 alic 开头）", emails[0]["masked"].startswith("alic"), True)
+
+    print("\n=== 隐私闸：干净 fixture（已脱敏 + 白名单域）⇒ 必须零命中 ===")
+    c_find, _ = privacy_scan_bundle(c_dir)
+    check("干净 fixture 零命中", c_find, [])
+    check("干净 fixture 退出码为 0（fail closed 的反面）", privacy_check(c_dir), 0)
+
+    print("\n=== 隐私闸：双向敏感性 —— 逐条删掉一个谓词 ⇒ 该类型必须不再被报出 ===")
+    for typ, _ in PRIVACY_PATTERNS:
+        weakened = [p for p in PRIVACY_PATTERNS if p[0] != typ]
+        miss_find, _ = privacy_scan_bundle(d_dir, patterns=weakened)
+        miss_types = {f["type"] for f in miss_find}
+        check(f"删掉 `{typ}` 的规则后不再报出该类型（⇒ 原断言会红）", typ in miss_types, False)
+        others = [p[0] for p in weakened]
+        check(f"（对照）删掉 `{typ}` 后其余类型仍然报出", all(o in miss_types for o in others), True)
+
+    shutil.rmtree(tmp, ignore_errors=True)
+    print()
+    if fails:
+        print(f"privacy self-test：**失败**（{len(fails)} 项）：{fails}")
+        return 1
+    print("privacy self-test：**全部通过**（真值 11 类全中 / 干净零中 / 逐条谓词双向敏感性）")
+    return 0
+
+
 # ---------------------------------------------------------------- 分诊 + 输出
 
 
@@ -656,13 +883,21 @@ def main(argv=None):
     ap.add_argument("--bundle", help="bundle 的 zip 或目录")
     ap.add_argument("--json-out", help="把 incident.json 写到这个路径（默认只打印）")
     ap.add_argument("--md-out", help="把 Markdown 摘要写到这个路径（默认打印到 stdout）")
+    ap.add_argument("--privacy-check", metavar="PATH",
+                    help="上传前的隐私闸：扫包内文本的密钥模式，命中即**非 0 退出**（fail closed）")
+    ap.add_argument("--privacy-json", action="store_true",
+                    help="配合 --privacy-check：以 JSON 输出（给流水线/服务端用）；命中仍非 0")
     ap.add_argument("--self-test", action="store_true", help="fixture + 双向敏感性（不读真实数据）")
     a = ap.parse_args(argv)
 
+    if a.privacy_check:
+        return privacy_check(a.privacy_check, as_json=a.privacy_json)
     if a.self_test:
-        return self_test()
+        rc = self_test()
+        rc2 = privacy_self_test()
+        return rc or rc2
     if not a.bundle:
-        ap.error("需要 --bundle（或用 --self-test）")
+        ap.error("需要 --bundle、--privacy-check 或 --self-test")
 
     b = load_bundle(a.bundle)
     tri = triage(b)
