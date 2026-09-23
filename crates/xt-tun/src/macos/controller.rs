@@ -355,7 +355,16 @@ pub fn force_cleanup() -> Result<Option<SessionSnapshot>> {
         return Ok(None);
     };
     tracing::warn!(session = %snap.session_id, "强制清理遗留会话");
-    let _ = rollback(&snap);
+    // **回滚失败必须往上抛，不许在源头吞掉**（task-122 A-1）。
+    //
+    // 以前这里是 `let _ = rollback(&snap); Ok(Some(snap))` ⇒ 调用方（helper 的
+    // `Request::Restore`）里那个 `Err` 分支**不可达** ⇒ 删路由/还原 DNS 任一步
+    // 失败，用户看到的仍是「已回滚会话 …」，而界面文案承诺「网络会回到直连」。
+    // 这就是 A 级判据：**用户据此得出了错误结论**。
+    //
+    // 安全性：`rollback` 只在**全部步骤成功**时删快照（失败会留着让下次启动重试），
+    // 所以这里 `?` 既让错误可见，也不破坏「失败可重试」。
+    rollback(&snap)?;
     Ok(Some(snap))
 }
 
@@ -366,6 +375,41 @@ fn parse_utun_unit(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **task-122 A-1 守卫**：`force_cleanup` 不许吞回滚错误。
+    ///
+    /// 吞掉的后果不是"少一条日志"，而是**调用方的 Err 分支不可达** ——
+    /// 用户会看到「已回滚会话 …」，而网络其实没回去。
+    #[test]
+    fn force_cleanup_propagates_rollback_errors_in_production_source() {
+        let prod = include_str!("controller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        // **先去掉行注释**：这条守卫第一次跑就红在它自己的解释性注释上
+        // （注释里引用了旧的 `let _ = rollback(...)` 写法）—— 守卫自己假红，
+        // 正是 task-75 那次"文本守卫"的同一个坑。（本文件这几行里没有
+        // 字符串字面量含 `//`，所以按行截断足够。）
+        let code = prod
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = code
+            .split("pub fn force_cleanup")
+            .nth(1)
+            .and_then(|r| r.split("\nfn ").next())
+            .unwrap_or("");
+        assert!(!body.is_empty(), "没找到 force_cleanup 的函数体（锚点变了？）");
+        assert!(
+            body.contains("rollback(&snap)?"),
+            "force_cleanup 必须把回滚失败往上抛（`rollback(&snap)?`）"
+        );
+        assert!(
+            !body.contains("let _ = rollback"),
+            "不许再把回滚错误吞掉 —— 那会让 server.rs 的 Err 分支不可达"
+        );
+    }
 
     #[test]
     fn parses_utun_unit_from_name() {

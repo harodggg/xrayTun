@@ -415,10 +415,19 @@ impl Helper {
                     match outcome.handed_fd {
                         Some(fd) => fd,
                         None => {
-                            let _ = controller::rollback(&outcome.snapshot);
+                            // 回滚失败也**要说出来**（task-122 A-2）：主错误已经返回了，
+                            // 但用户很可能据此以为「网络已经清干净」——所以把回滚的
+                            // 结果一并带上，而不是 `let _ =` 吞掉。
+                            let retry = match controller::rollback(&outcome.snapshot) {
+                                Ok(()) => String::new(),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "回滚网络配置失败（fd 传递缺失）");
+                                    format!("；回滚网络配置也失败：{e}")
+                                }
+                            };
                             return Response::Error(HelperError::new(
                                 ErrorCode::DatapathFailed,
-                                "请求了 fd 传递，但 helper 没有可交付的 utun fd",
+                                format!("请求了 fd 传递，但 helper 没有可交付的 utun fd{retry}"),
                             ));
                         }
                     }
@@ -432,8 +441,17 @@ impl Helper {
                     Err(e) => {
                         // 数据面起不来，整个会话就没有意义：立刻回滚。
                         tracing::error!(error = %e, "数据面启动失败，回滚会话");
-                        let _ = controller::rollback(&outcome.snapshot);
-                        return Response::Error(HelperError::new(ErrorCode::DatapathFailed, e.to_string()));
+                        let retry = match controller::rollback(&outcome.snapshot) {
+                            Ok(()) => String::new(),
+                            Err(re) => {
+                                tracing::warn!(error = %re, "回滚网络配置失败（数据面启动失败之后）");
+                                format!("；回滚网络配置也失败：{re}")
+                            }
+                        };
+                        return Response::Error(HelperError::new(
+                            ErrorCode::DatapathFailed,
+                            format!("{e}{retry}"),
+                        ));
                     }
                 }
             }
@@ -505,7 +523,14 @@ impl Helper {
                 tracing::error!(error = %e, "提交路由失败，回滚会话");
                 let snap = session.snapshot.clone();
                 let _ = guard.session.take();
-                let _ = controller::rollback(&snap);
+                // 回滚失败**至少留痕**（task-122 A-2）：主错误（提交失败）已经返回，
+                // 但「回滚没成功」意味着路由可能处于半改状态，日志里必须查得到。
+                if let Err(re) = controller::rollback(&snap) {
+                    tracing::warn!(
+                        error = %re,
+                        "提交失败后的回滚也失败 —— 路由/DNS 可能停在半改状态"
+                    );
+                }
                 Response::Error(tun_err(e))
             }
         }
@@ -652,12 +677,28 @@ impl Helper {
     fn uninstall(&self) -> Response {
         // 先回滚，再摘 launchd，最后删文件。顺序错了会留下「服务已卸载但
         // 路由还在」的状态。
+        //
+        // **回滚失败要如实说出来**（task-122 A-2）：卸载必须继续（摘 launchd、
+        // 删文件是卸载本身的语义），但绝不能让用户以为「网络已经回到直连」。
+        // 以前这里是两处 `let _ =`，失败连一条 `warn` 都没有。
+        let mut rollback_failed: Option<String> = None;
         if let Ok(mut guard) = self.state.lock() {
             if let Some(session) = guard.session.take() {
-                let _ = controller::rollback(&session.snapshot);
+                if let Err(e) = controller::rollback(&session.snapshot) {
+                    rollback_failed = Some(e.to_string());
+                }
             }
         }
-        let _ = controller::force_cleanup();
+        if let Err(e) = controller::force_cleanup() {
+            // 内存里那份已经试过了：这里失败同样要带上（保留第一条即可）。
+            rollback_failed.get_or_insert_with(|| e.to_string());
+        }
+        if let Some(why) = &rollback_failed {
+            tracing::warn!(
+                error = %why,
+                "卸载时回滚网络配置失败 —— 路由/DNS 可能仍留在系统上"
+            );
+        }
 
         let _ = Command::new("/bin/launchctl")
             .args(["bootout", &format!("system/{HELPER_LABEL}")])
@@ -670,7 +711,14 @@ impl Helper {
         // 最后删自己。删掉之后进程仍在运行（inode 还在），由调用方要求退出。
         let _ = std::fs::remove_file(xt_proto::HELPER_INSTALLED_PATH);
 
-        Response::Ok { message: Some("helper 已卸载".into()) }
+        Response::Ok {
+            message: Some(match rollback_failed {
+                Some(why) => format!(
+                    "helper 已卸载；但回滚网络配置失败：{why} —— 请用「修复网络」再试一次"
+                ),
+                None => "helper 已卸载".into(),
+            }),
+        }
     }
 }
 
@@ -792,5 +840,22 @@ mod tests {
     fn admin_gid_lookup_does_not_panic() {
         // 在真实 macOS 上 admin 组一定存在；这里只要求不 panic。
         let _ = admin_gid();
+    }
+
+    /// **task-122 A-2 守卫**：卸载路径不许静默吞回滚错误。
+    #[test]
+    fn uninstall_does_not_swallow_rollback_failures_in_production_source() {
+        let prod = include_str!("server.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !prod.contains("let _ = controller::rollback("),
+            "卸载时回滚失败不许静默吞掉"
+        );
+        assert!(
+            prod.contains("回滚网络配置失败"),
+            "失败必须在响应里如实说出来（用户据此才知道网络可能没回去）"
+        );
     }
 }

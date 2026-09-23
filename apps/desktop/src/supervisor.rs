@@ -591,7 +591,12 @@ impl Supervisor {
         // ---- 5) 等待就绪 ----
         let port_started = std::time::Instant::now();
         if let Err(e) = xray::wait_for_port(settings.socks_port, CORE_READY_TIMEOUT).await {
-            let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+            // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
+            // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
+            // 只留痕、不改控制流（task-122 A-3）。
+            if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {
+                tracing::warn!(error = %e, "数据面进程未干净退出（网络配置仍会单独回滚）");
+            }
             self.rollback_tun(helper);
             return Err(format!("核心未在预期时间内就绪：{e}"));
         }
@@ -615,7 +620,12 @@ impl Supervisor {
         if deferred_commit {
             if let Some(target) = server_probe_target {
                 if !tcp_reachable(target, REGION_PROBE_TIMEOUT).await {
-                    let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+                    // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
+                    // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
+                    // 只留痕、不改控制流（task-122 A-3）。
+                    if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {
+                        tracing::warn!(error = %e, "数据面进程未干净退出（网络配置仍会单独回滚）");
+                    }
                     self.rollback_tun(helper);
                     return Err(format!(
                         "接管默认路由之前就联系不上代理服务器 {target}。\n\
@@ -663,12 +673,22 @@ impl Supervisor {
             match gate {
                 Ok(()) => {}
                 Err(GateFailure::Commit(msg)) => {
-                    let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+                    // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
+                    // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
+                    // 只留痕、不改控制流（task-122 A-3）。
+                    if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {
+                        tracing::warn!(error = %e, "数据面进程未干净退出（网络配置仍会单独回滚）");
+                    }
                     self.rollback_tun(helper);
                     return Err(format!("接管默认路由失败（已回滚）：{msg}"));
                 }
                 Err(e) => {
-                    let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+                    // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
+                    // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
+                    // 只留痕、不改控制流（task-122 A-3）。
+                    if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {
+                        tracing::warn!(error = %e, "数据面进程未干净退出（网络配置仍会单独回滚）");
+                    }
                     self.rollback_tun(helper);
                     tracing::warn!(reason = %e.describe(), "端到端门禁未通过，已放弃接管默认路由");
                     return Err(e.describe());
@@ -679,7 +699,12 @@ impl Supervisor {
             // 如果 bypass 路由没生效，这个连接会被送进隧道而永远出不去。
             if let Some(target) = server_probe_target {
                 if !tcp_reachable(target, REGION_PROBE_TIMEOUT).await {
-                    let _ = process.shutdown(CORE_SHUTDOWN_GRACE).await;
+                    // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
+                    // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
+                    // 只留痕、不改控制流（task-122 A-3）。
+                    if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {
+                        tracing::warn!(error = %e, "数据面进程未干净退出（网络配置仍会单独回滚）");
+                    }
                     self.rollback_tun(helper);
                     return Err(format!(
                         "接管默认路由之后无法再联系代理服务器 {target} —— \
@@ -2113,5 +2138,26 @@ mod tests {
         );
         // 非 TUN 模式没有物理出口时不写这个字段（别凭空造一个网卡名）。
         assert_eq!(interface_of(&build(None)), "<缺失>");
+    }
+
+    /// **task-122 A-3 守卫**：核心退出失败不许静默吞掉（B 级：至少留痕）。
+    #[test]
+    fn core_shutdown_result_is_not_swallowed_in_production_source() {
+        // ⚠️ **不能**按第一个 `#[cfg(test)]` 截断：本文件在 :232 就有一个
+        // （测试用的小函数），那样会把 :594 起的 warn 也切掉 —— 这条守卫第一次
+        // 跑就因为这个假红了。按**测试模块**的锚点切。
+        let src = include_str!("supervisor.rs");
+        let prod = match src.find("\n#[cfg(test)]\nmod tests") {
+            Some(i) => &src[..i],
+            None => src,
+        };
+        assert!(
+            !prod.contains("let _ = process.shutdown("),
+            "核心退出失败不许静默吞掉 —— 至少 `warn!` 留痕"
+        );
+        assert!(
+            prod.contains("数据面进程未干净退出"),
+            "要留下可搜的痕迹，说明「核心没干净退出、但网络仍会单独回滚」"
+        );
     }
 }
