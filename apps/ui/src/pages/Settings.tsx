@@ -143,6 +143,48 @@ function resolveInitialCategory(target: string | null | undefined): SettingsCate
  */
 const XRAY_LOG_LEVELS = ["none", "error", "warning", "info", "debug"];
 
+/**
+ * 「遗留会话」这一行该说什么（task-152 / A13）。
+ *
+ * # 为什么不能只看 `stale_session`
+ *
+ * 这个字段的判据是 `SessionSnapshot::is_stale()`＝「**崩在半路**」。而一条
+ * **提交完路由**的会话状态是 `Up`，不算崩在半路 ⇒ 它**不会**出现在 `stale_session` 里，
+ * 但 helper 内存里确实挂着它（`helper.tun_active = state.session.is_some()`，
+ * `crates/xt-helper/src/server.rs:272-276`）。
+ *
+ * # 但也不能只看 `tun_active`（这一步很关键）
+ *
+ * `tun_active` 是「helper 里有一条**活的**会话」，**正常连接时它也是 true**！
+ * 所以 `tun_active && !stale_session` **不等于**「遗留」—— 直接在界面上报警会在
+ * **每一次正常连接**时误报（本项目对这种假警报零容忍）。
+ *
+ * 区分依据是 `runtime.running`：
+ * * **核心在跑** ⇒ 这条会话就是本 App 的当前隧道（Dashboard 的「 · 有活跃隧道」
+ *   说的正是它，两处不再互相打脸）；
+ * * **核心没在跑** ⇒ 没人接管它 —— 这正是 `apps/desktop/src/lib.rs:242` 的启动判据
+ *   `orphaned = stale_session.is_some() || tun_active` 想抓的东西；那里的前提成立，
+ *   是因为它在 **setup 阶段**运行、**本 App 的核心还没起来**（`:301` 才开始连）。
+ *   界面在整个运行期都要渲染，所以必须多这一个条件。
+ *
+ * 措辞口径：**不夸大、不承诺** —— 只说「有一条没人接管的会话」与「可以点修复网络」，
+ * 不写「已自动清理」之类（启动时的回滚失败会留下这一态，`:255` 的日志里有
+ * 「自动修复失败，请点「修复网络」重试」）。
+ */
+export function legacySessionView(
+  staleSession: string | null,
+  tunActive: boolean,
+  coreRunning: boolean,
+): string {
+  if (staleSession) return `${staleSession}（磁盘快照：上次崩在半路的会话）`;
+  if (tunActive && !coreRunning) {
+    return "有：helper 里挂着一条活的 TUN 会话，但本 App 没有在跑核心 —— 没人接管它，" +
+      "也没有可回滚的磁盘快照。点「修复网络」可以拆掉它（路由与 DNS 会一起还原）。";
+  }
+  if (tunActive) return "无（当前的隧道会话由本次运行管理）";
+  return "无";
+}
+
 const HELPER_STATE_LABEL: Record<string, string> = {
   ready: "已就绪",
   not_installed: "未安装",
@@ -874,7 +916,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           <dt>socket</dt>
           <dd className="mono">{"/var/run/com.xraytun.helper.sock"}</dd>
           <dt>遗留会话</dt>
-          <dd>{snapshot.helper.stale_session ?? "无"}</dd>
+          <dd>{legacySessionView(snapshot.helper.stale_session, snapshot.helper.tun_active, snapshot.runtime.running)}</dd>
         </dl>
 
         {/* ── 助手版本核对（task-84 的 Rust 半 + task-86 的 UI 半）────────────
