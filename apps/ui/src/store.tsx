@@ -79,7 +79,20 @@ interface StoreValue {
   recoveredAttempt: number | null;
   dismissRecovered: () => void;
   refresh: () => Promise<void>;
-  /** 执行一个会返回新快照的操作。 */
+  /**
+   * 执行一个会返回新快照的操作。
+   *
+   * # 返回值的语义（task-151 写清，别让下一个调用方再误解）
+   *
+   * `true` = **命令执行完成，且它的结果被接受为一份可用快照**。
+   * `false` = **结果不可用**，有三种来源，调用方**无法从返回值区分**：
+   * 1. 已有操作在进行中（`busy` 竞态，直接返回 false，不报错）；
+   * 2. 命令抛错（真实原因已写进 `error`，App 顶部横幅会显示）；
+   * 3. 命令成功但**返回的快照形状异常**（`acceptSnapshot` 守卫拦下，原因同样在 `error` 里）。
+   *
+   * ⇒ 拿到 `false` 时**不许替后端编一个具体原因**（例如「链接格式错」）：
+   * 要么说「操作未生效 + 原因见顶部提示」，要么只在**本地就能确定**的原因上断言。
+   */
   run: (name: string, action: () => Promise<AppSnapshot>) => Promise<boolean>;
   /** 执行一个不返回快照的操作。 */
   runVoid: (name: string, action: () => Promise<void>) => Promise<boolean>;
