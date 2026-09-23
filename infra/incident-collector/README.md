@@ -23,6 +23,11 @@
 | `GET` | `/api/incident/<id>/blob` | `X-Auth-Token` | 原始 zip |
 | `DELETE` | `/api/incident/<id>` | `X-Auth-Token` | 删除该 id 的 zip + manifest（用于「用户要求删除」） |
 
+* ⚠️ **鉴权头只有 `X-Auth-Token` 一个**：写成 `Authorization: Bearer <token>` **一律 401**，
+  而且响应与「完全没带令牌」**一模一样**（端点根本不读 `Authorization`：
+  `worker.mjs` 只取 `request.headers.get('X-Auth-Token')`）—— 所以别把 401 当成「令牌不对」，
+  先看头名。tester 的 `task-123` 实测过这一点。
+
 * `id` = `INC-YYYYMMDD-HHMMSS-<4hex>`（UTC 时间 + 2 字节随机；**不含任何用户标识**）；
 * 上传的**公开性**用三道门兜住：**大小上限**（`MAX_BYTES`，默认 10 MiB）、
   **content-type 白名单 + zip 魔数**（不认自述，`PK\x03\x04` 之类）、

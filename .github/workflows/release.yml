@@ -167,64 +167,21 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -eu
-          # 说明写在文件里，避免在 YAML 里塞大段中文。
-          cat > NOTES.md <<'EOF'
-          ## 安装
-
-          1. 下载 `.dmg` 或 `.zip`，把 `XrayTun.app` 拖进「应用程序」
-          2. 首次打开会被 Gatekeeper 拦下（这个包是 **ad-hoc 签名、未公证**的）。
-             按你的 macOS 版本选一条放行方式：
-
-             **macOS 15 及以上**：右键「打开」**已被 Apple 移除**（2024-08-06 公告）。
-             先双击一次让它被拦下，再打开「系统设置 → 隐私与安全性」，
-             在「安全性」区域找到关于 XrayTun 的提示，点「仍要打开」，然后确认。
-
-             **macOS 14 及更早**：在「应用程序」里右键（或 Control-点击）
-             `XrayTun.app` →「打开」，在弹窗里再点一次「打开」。
-
-             **终端（两个版本都适用）**：
-             ```bash
-             find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
-             ```
-             注意 `xattr` 有**两个不同实现**，`-r` 的支持**随实现与版本而异**
-             （实测 macOS 26.6.2 / build 25G83）：
-             `which -a xattr` 在 PATH 上先命中 Python 的 `xattr` 包，
-             `xattr -dr …` → **exit 64**（`option -r not recognized`）；
-             而 Apple 的 `/usr/bin/xattr -dr …` → **exit 0**，标记真的被删掉
-             （它的 usage 是 `xattr [-l] [-r] [-s] [-v] [-x] file …`，**有 `-r`**）。
-             所以：**一律写绝对路径 `/usr/bin/xattr`**；**不要依赖 `-r`**
-             （需要递归就用上面那条 `find … -exec … +`）；
-             `2>/dev/null` 按上下文用：**产品脚本里不许用**（失败要留痕，例如自动更新
-             会写 `app-update.log`）；这条**给用户手动执行的指引**可以保留它 ——
-             只为压掉 `No such xattr` 这类刷屏噪声，不影响判断成败。
-             另一个独立事实：只给 bundle 根路径的
-             `xattr -d com.apple.quarantine /Applications/XrayTun.app`
-             只清掉根上那一个（实测 13 个里还剩 12 个），所以要逐文件清。
-
-          3. 打开后：侧栏「设置」→「特权助手（helper）」→点「安装 helper」
-             （会弹一次管理员密码）。**只有 TUN 模式需要它**，系统代理模式不需要。
-
-          ## 不需要自己安装 Xray 核心
-
-          核心与规则数据**随包附带**，开箱即用：
-          `Contents/Resources/{xray, geoip.dat, geosite.dat}`。
-          不用另外下载 Xray，也不用配 `XRAY_LOCATION_ASSET`。
-
-          ## 关于 Gatekeeper
-
-          这个包是 **ad-hoc 签名、未公证**的，因为仓库里没有 Developer ID 证书。
-          要免打扰分发，需要付费开发者账号，然后在 CI 里加签名与公证步骤。
-
-          ## 架构
-
-          universal（x86_64 + arm64），App / helper / 核心三者都是。
-
-          ## 这个 App 会改你的系统网络配置
-
-          TUN 模式会创建 utun 网卡、接管默认路由并修改 DNS。它通过一个
-          特权 helper 完成这些改动，**每一条改动都先落盘成快照**，
-          退出或崩溃后可按快照完整回滚。详见 `docs/02-tun-and-privileges.md`。
-          EOF
+          # Release 正文 = 本版「用户动作」+ 固定模板（安装说明等）。
+          #
+          # 动作的**单一来源**是 docs/release-notes/<tag>.md（每个 tag 一份）：
+          #   · 为什么不用 CHANGELOG 的固定小节：那要新增一套「从 Markdown 里切出小节」的
+          #     解析（标题层级/先后顺序都会成为新的脆弱点），而这里只要一个**路径由 tag 派生**的
+          #     文件 —— 存在性检查是 `test -f`，没有解析；
+          #   · 为什么动作不能藏在通用模板里：v0.8.35 需要「**重新**安装特权助手」，而模板里
+          #     只有通用的「点安装 helper」⇒ 那一版只能发布后手工 `gh release edit` 补，
+          #     这正是本条要消灭的「靠纪律」。判据写在 scripts/bump-release.py 的 notes 子命令里：
+          #     **动作文件缺 / 空 / 既没有 Markdown 标题也没有「本版无需用户额外动作」这句 ⇒ 失败**，
+          #     不许静默退化成通用模板。
+          #   · 为什么合成逻辑在脚本里而不在这个 YAML 里：heredoc 没法单测；脚本可以用
+          #     `--tag v<假版本>` 在本地演练（见 docs/verification/verify-release-notes-step.sh）。
+          python3 scripts/bump-release.py notes --tag "$TAG" --out NOTES.md
+          test -s NOTES.md || { echo "✗ NOTES.md 为空" >&2; exit 1; }
 
           # 先建 Release（不带资产），再**逐个**上传。
           #
