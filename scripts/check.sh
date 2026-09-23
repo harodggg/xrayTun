@@ -84,18 +84,44 @@ _git_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null
 # ⚠️ 主工作区的 target dir 必须从 git common dir 推：在 worktree 里 `$ROOT/../.cargo-target`
 # 指的是**worktree 自己旁边**的目录，拿它比较会漏判（第一版就漏了）。
 _main_target="$(dirname "$_git_common")/../.cargo-target"
-if [ -n "$_git_common" ] && [ "$_git_dir" != "$_git_common" ] &&
-   [ "$(cd "$CARGO_TARGET_DIR" 2>/dev/null && pwd -P)" = "$(cd "$_main_target" 2>/dev/null && pwd -P)" ]; then
-  echo
-  echo "  ⚠️  正在 **linked worktree** 里跑门禁，且 CARGO_TARGET_DIR 指向**主工作区**的 target dir："
-  echo "      cwd              = $ROOT"
-  echo "      CARGO_TARGET_DIR = $CARGO_TARGET_DIR"
-  echo "      同一个 target dir 里会有两个 checkout 的同名同版本 crate ⇒ 可能链到**另一份**的 rlib，"
-  echo "      症状是「源码里明明有的类型却报 E0425」，或者更糟：敏感性实验静默链到对面那份。"
-  echo "      正确做法：./scripts/wt.sh run <name> -- ./scripts/check.sh $*"
-  if [ "${WT_STRICT:-0}" = "1" ]; then
-    echo "  ✗ WT_STRICT=1：共享 target dir ⇒ 明确失败（退出码 75）" >&2
-    exit 75
+#
+# 判据是**三态**，不是两态：**只有两侧都成功取到真实路径才比较**。
+# 取不到时（例如全新 checkout 还没建过 target dir、或 CARGO_TARGET_DIR 指向不存在的路径）
+# ⇒ 明确说「**无法判定**」——**既不能判为相等，也不能因此假失败**：
+#   · 普通模式：打一行**可见**提示（不是 debug），然后继续跑；
+#   · `WT_STRICT=1`：退出 **75**。75 在本项目的定义是「**环境问题，不是代码失败**」
+#     （见 `docs/verification/BUILD-LOCK.md`），而 strict 的意义就是
+#     「拿不到干净结论就不要门禁结论」—— fail closed，与本项目其它处一致。
+# ⚠️ 已知摩擦（不是 bug）：**全新 checkout 上主 target dir 还不存在** ⇒ `WT_STRICT=1` 会给一次 75。
+#     先跑一次构建（或先用普通模式跑一次门禁）让 target dir 出现即可。
+if [ -n "$_git_common" ] && [ "$_git_dir" != "$_git_common" ]; then
+  _tgt_real="$(cd "${CARGO_TARGET_DIR:-}" 2>/dev/null && pwd -P || true)"
+  _main_real="$(cd "$_main_target" 2>/dev/null && pwd -P || true)"
+  if [ -z "$_tgt_real" ] || [ -z "$_main_real" ]; then
+    echo
+    echo "  ℹ️  **无法判定** worktree 产物身份（target dir 的真实路径取不到）—— **这是环境问题，不是代码失败**："
+    echo "      CARGO_TARGET_DIR = ${CARGO_TARGET_DIR:-（未设）}"
+    echo "                          → ${_tgt_real:-取不到（路径不存在？）}"
+    echo "      主工作区 target   = ${_main_target}（期望值，由 git-common-dir 推得）"
+    echo "                          → ${_main_real:-取不到（还没建过？）}"
+    echo "      因此**不做判定**：它不等于「两边是同一份」，也不等于「已经隔离」。"
+    echo "      提示：全新 checkout 还没跑过构建时，主 target dir 尚不存在 —— 先跑一次即可。"
+    if [ "${WT_STRICT:-0}" = "1" ]; then
+      echo "  ✗ WT_STRICT=1：无法判定 ⇒ 明确失败（退出码 75）；**这是环境问题，不是代码失败**" >&2
+      exit 75
+    fi
+  elif [ "$_tgt_real" = "$_main_real" ]; then
+    echo
+    echo "  ⚠️  正在 **linked worktree** 里跑门禁，且 CARGO_TARGET_DIR 指向**主工作区**的 target dir："
+    echo "      cwd              = $ROOT"
+    echo "      CARGO_TARGET_DIR = $CARGO_TARGET_DIR"
+    echo "      同一个 target dir 里会有两个 checkout 的同名同版本 crate ⇒ 可能链到**另一份**的 rlib，"
+    echo "      症状是「源码里明明有的类型却报 E0425」，或者更糟：敏感性实验静默链到对面那份。"
+    echo "      正确做法：./scripts/wt.sh run <name> -- ./scripts/check.sh $*"
+    if [ "${WT_STRICT:-0}" = "1" ]; then
+      echo "  ✗ WT_STRICT=1：共享 target dir ⇒ 明确失败（退出码 75）" >&2
+      exit 75
+    fi
   fi
 fi
 

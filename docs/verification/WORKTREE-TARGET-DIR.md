@@ -48,8 +48,11 @@ worktree 用自己的 target dir ⇒ 也用自己的锁，连排队都不会跟�
 ./scripts/wt.sh rm fix1                   # 删 worktree，同时删它自己的 target dir
 ```
 
-`check.sh` 里也内置了同一条守卫：**在 linked worktree 里、且 `CARGO_TARGET_DIR` 指向主工作区的
-target dir** 时，开头就打印警告；`WT_STRICT=1` 时**明确失败（退出码 75）**。
+`check.sh` 里也内置了同一条守卫（**三态**）：**只有两侧都成功取到真实路径才比较** ——
+两侧相同 ⇒ 共享警告（`WT_STRICT=1` ⇒ 75）；不同 ⇒ 不吭声；**任一取不到 ⇒ 说「无法判定」**
+（写明「这是环境问题，不是代码失败」，普通模式继续跑、`WT_STRICT=1` ⇒ 75）。
+**已知摩擦（不是 bug）**：全新 checkout 上主 target dir 还不存在 ⇒ `WT_STRICT=1` 会给一次 75，
+先跑一次构建即可。验证脚本：`scripts/verify-worktree-guard.sh`（T1–T5 + 双向敏感性）。
 （主工作区的 target dir 是从 `git rev-parse --git-common-dir` 推出来的 ——
 在 worktree 里用 `$ROOT/../.cargo-target` 比会**漏判**，第一版就漏了。）
 

@@ -151,6 +151,21 @@ BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build
 
 `75` 与「检查失败」分开，是为了让「门禁失败」和「环境问题」可区分 —— 这正是这张卡存在的理由。
 
+### 6.1 worktree 产物身份：三态判据（2026-09-23 修）
+
+`check.sh` 在 **linked worktree** 里还会判「`CARGO_TARGET_DIR` 是否指向主工作区」（产物身份，防链到旧 rlib）。
+判据是**三态**，只有**两侧都成功取到真实路径**才比较：
+
+| 情形 | 行为 |
+|---|---|
+| 两侧都能解析、且**相同** | ⚠️ 共享警告；`WT_STRICT=1` ⇒ **75** |
+| 两侧都能解析、且**不同** | 不打印任何东西（正常） |
+| **任一取不到**（全新 checkout 还没建 target dir、或 `CARGO_TARGET_DIR` 指向不存在的路径） | ℹ️ **「无法判定」**：打印两边的值与「取不到」，写明**这是环境问题、不是代码失败**；普通模式**继续跑**，`WT_STRICT=1` ⇒ **75** |
+
+**⚠️ 已知摩擦（不是 bug）**：**全新 checkout 上主 target dir 还不存在** ⇒ `WT_STRICT=1` 会给一次 75。
+先跑一次构建（或先用普通模式跑一次门禁）让 target dir 出现即可。
+（修的是旧形态：两个 `cd` 都失败时两侧空串 ⇒ 判为相等 ⇒ **假警告 + 假 75**；验证见 `scripts/verify-worktree-guard.sh`。）
+
 **它在 CI 上是无害的 no-op**：`ci.yml` / `release.yml` 跑在**隔离 runner** 上，没有并发 cargo；
 不设这个变量也完全正常（脚本末尾会打一行提示，提醒发版的人该用它）。`release.yml` 的实质语义**未改**。
 
