@@ -22,8 +22,11 @@
 # * **不联网、不上传** —— 上传是别的卡；本脚本只在本机产出 zip（放桌面，用户自己决定传不传）。
 # * **不改任何东西**：不改仓库、不改用户日志、不改网络配置、不装/不重启 helper。
 # * 只读命令里唯一「执行」的是 helper 的 `version` 子命令（**纯打印**：clap 解析后 println 退出，
-#   不需要 root、不连 socket、不碰系统配置）—— 与产品自己判三态用的是**同一条口径**
-#   （`apps/desktop/src/commands/helper.rs` 的 `read_binary_version`）。
+#   不需要 root、不连 socket、不碰系统配置）—— 三态判定与产品**同一条口径**：
+#   **协议号相等 ⇒ Match**（即使包版本不同）；**协议号任一边读不到 ⇒ 退回包版本相等**；
+#   **任一边读不到 `version` 输出 ⇒ Unreadable**（不许猜成不一致）。
+#   权威实现在 Rust（`apps/desktop/src/commands/helper.rs:139-147` + `:176-203`），
+#   脚本侧是同构实现 `scripts/helper_tristate.py`（`--self-test` 四类用例 + 双向敏感性）。
 #
 # 用法：
 #   ./scripts/incident-bundle.sh                       # 产出 ~/Desktop/xraytun-incident-<UTC>.zip
@@ -182,6 +185,9 @@ self_test() {
   else
     echo "  ✗ 坏实现下原值竟然不出现 —— 断言无效"; fail=$((fail + 1))
   fi
+
+  echo "=== helper 三态（与产品同构：协议号优先 + 退化路径）==="
+  python3 "${SELF}/helper_tristate.py" --self-test || fail=$((fail + 1))
 
   echo
   if [ "$fail" -eq 0 ]; then
@@ -554,7 +560,7 @@ if [ -n "$SHRINK_NOTES" ]; then
 fi
 
 # --- manifest.json：**最后**写（它要带每个文件的 sha256）
-python3 - "${BUNDLE_DIR}" "${APP_PATH}" "${HELPER_INSTALLED_DEFAULT}" "${DATA_DIR}" \
+XRAYTUN_SCRIPTS_DIR="${SELF}" python3 - "${BUNDLE_DIR}" "${APP_PATH}" "${HELPER_INSTALLED_DEFAULT}" "${DATA_DIR}" \
   "${SINCE_EPOCH}" "${NOW_EPOCH}" "${SINCE_SOURCE}" "${SINCE_DEGRADED}" \
   "${COLLECT_START_UTC}" "${SINCE_LOCAL}" "${NOW_LOCAL}" \
   "${CORE_TAIL_BYTES}" "${MAX_BYTES}" "${TOTAL_LINES}" "${TOTAL_BYTES}" "${KEPT_LINES}" \
@@ -606,25 +612,21 @@ def core_version_from_logs():
 
 core_version = core_version_from_logs()
 
-# helper 三态：与产品**同一条口径** —— 执行 `<binary> version`（纯打印）并解析
-def helper_version(binary):
-    txt = out([binary, "version"])
-    if not txt:
-        return None
-    parts = txt.split()
-    if len(parts) >= 2 and parts[0] == "xraytun-helper" and parts[1][:1].isdigit():
-        return parts[1]
-    return None
+# helper 三态：**与产品同一条口径**（权威在 Rust：apps/desktop/src/commands/helper.rs:139-147 + :176-203）
+#   * 两边都读到 ⇒ **先比协议号**（`(protocol N)`）：相等 ⇒ Match（**包版本可以不同**）；
+#   * 协议号任一边读不到 ⇒ 退回「包版本相等」；
+#   * 任一边 `version` 输出读不到 ⇒ Unreadable（不许猜成不一致）。
+# 判据本体放在共享模块 scripts/helper_tristate.py ⇒ 现场包与分诊不可能再各写一份。
+import os as _os
+import sys as _sys
 
-installed_h = helper_version(helper_installed)
-bundled_h = helper_version(os.path.join(app_path, "Contents/MacOS/xraytun-helper"))
-if installed_h and bundled_h and installed_h == bundled_h:
-    check = {"state": "Match", "version": installed_h}
-elif installed_h and bundled_h:
-    check = {"state": "Mismatch", "installed": installed_h, "bundled": bundled_h}
-else:
-    check = {"state": "Unreadable", "installed": installed_h, "bundled": bundled_h,
-             "reason": "两边都读到才能比 —— 读不到不许猜成不一致"}
+if _os.environ.get("XRAYTUN_SCRIPTS_DIR"):
+    _sys.path.insert(0, _os.environ["XRAYTUN_SCRIPTS_DIR"])
+from helper_tristate import classify_from_outputs   # noqa: E402
+
+installed_txt = out([helper_installed, "version"])
+bundled_txt = out([os.path.join(app_path, "Contents/MacOS/xraytun-helper"), "version"])
+check = classify_from_outputs(installed_txt, bundled_txt)
 
 # mode / log_level：从 settings.json 读（**只读键名与两个非敏感值**）
 mode = log_level = None

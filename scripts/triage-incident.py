@@ -59,6 +59,14 @@ TUN_EINVAL_PER_MIN_THRESHOLD = 1.0
 WATCHDOG_WINDOW_SECS = 60
 
 # 签名清单（顺序 = 输出顺序；`unknown` 是兜底，不在这里）
+# helper 三态：**与产品同一条口径**（协议号相等 ⇒ Match；读不到才退回包版本）。
+# 判据放在共享模块里 ⇒ 现场包（incident-bundle.sh）与分诊（本脚本）不可能再各写一份。
+import sys as _sys
+
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from helper_tristate import classify as _classify_helper  # noqa: E402
+
+
 SIGNATURES = [
     "v6-rewrite",
     "watchdog-false-positive",
@@ -275,15 +283,46 @@ def sig_log_write_interleave(b):
 
 
 def sig_helper_mismatch(b):
+    """按**产品口径**（协议号相等 ⇒ Match；读不到才退回包版本）复算，而不是照抄 manifest 的旧字段。
+
+    * 新格式（`task-171` 起 manifest 带 `criterion`/`*_protocol`）⇒ 用 [`_classify_helper`] 复算；
+    * **老格式**（只有包版本）⇒ 产品口径是协议号 ⇒ **无法从本包判定**：标成 `unknown` 并给出说明，
+      **不算命中**（历史真例：`INC-20260923-123641-af29` 里写着 Mismatch，而两个二进制都报 protocol 1）。
+    """
     chk = (((b.get("manifest") or {}).get("versions") or {}).get("helper") or {}).get("check") or {}
     state = chk.get("state")
-    hit = state == "Mismatch"
+    has_protocol = any(k in chk for k in ("criterion", "installed_protocol", "bundled_protocol"))
+    note = None
+    if has_protocol:
+        inst = {"version": chk.get("installed"), "protocol": chk.get("installed_protocol")} \
+            if chk.get("installed") else None
+        bund = {"version": chk.get("bundled"), "protocol": chk.get("bundled_protocol")} \
+            if chk.get("bundled") else None
+        verdict = _classify_helper(inst, bund)
+        by_rule = verdict["state"]
+        criterion = verdict.get("criterion")
+        if by_rule == "Unreadable":
+            note = "任一边读不到 ⇒ 按产品口径**不许猜成不一致**（Unreadable 不算命中）"
+    else:
+        by_rule = "unknown"
+        criterion = "老格式：manifest 只有包版本；产品口径是**协议号** ⇒ 无法从本包判定"
+        note = ("manifest 里的 Mismatch 是**旧脚本的包版本判据**，不等于不兼容。真例："
+                "`INC-20260923-123641-af29` 的 installed/bundled 两个二进制都报 `(protocol 1)`，"
+                "按产品口径应为 Match。要判定请对两个二进制跑 `<binary> version`。")
+    hit = by_rule == "Mismatch"
+    ev = {"版本检查三态（manifest 原始字段）": state,
+          "state_by_product_rule": by_rule,
+          "判据": criterion,
+          "installed": chk.get("installed"), "bundled": chk.get("bundled"),
+          "installed_protocol": chk.get("installed_protocol"),
+          "bundled_protocol": chk.get("bundled_protocol"),
+          "predicate": "**按产品口径复算**（协议号相等 ⇒ Match；协议号读不到才退回包版本）后 == Mismatch 才算命中"}
+    if note:
+        ev["说明"] = note
     return {
         "hit": hit,
-        "evidence": {"版本检查三态": state, "version": chk.get("version"),
-                     "installed": chk.get("installed"), "bundled": chk.get("bundled"),
-                     "predicate": "manifest 的 helper 版本三态 == Mismatch（读不到时是 Unreadable，**不算命中**）"},
-        "near_miss": 0.7 if state == "Unreadable" else (1.0 if hit else 0.0),
+        "evidence": ev,
+        "near_miss": 1.0 if hit else (0.7 if by_rule in ("unknown", "Unreadable") else 0.0),
         "samples": [],
     }
 
@@ -627,8 +666,9 @@ def to_markdown(bundle, tri, caliber):
     w = caliber["window"] or {}
     L.append(f"* 窗口：{w.get('since_local')} → {w.get('until_local')}"
              f"（来源：{w.get('source')}；degraded={w.get('degraded')}）")
+    hc = caliber["helper_check"] or {}
     L.append(f"* 版本：App {caliber['app_version']} / 核心 {caliber['core_version']} / "
-             f"helper 三态 {((caliber['helper_check'] or {}).get('state'))}")
+             f"helper 三态 {hc.get('state')}（判据：{hc.get('criterion') or '旧格式未记录'}）")
     L.append(f"* 阈值：{json.dumps(caliber['thresholds'], ensure_ascii=False)}")
     L.append(f"* 包内文件（bytes/sha256）：")
     for name, meta in caliber["bundle_files"].items():
@@ -757,11 +797,15 @@ def self_test():
         os.path.join(tmp, "interleave"), _base_manifest(app="0.8.34"),
         core=[_core_line(t0, "x") + _core_line(t0, "y")])   # 一行两个对象（中间无换行）
 
+    # 正 fixture（task-171 起）：**协议号不同** ⇒ 按产品口径 Mismatch（新格式带 protocol 字段）
     fixtures["helper-mismatch"] = _write_fixture(
         os.path.join(tmp, "helper"),
         {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
          "versions": {"app": {"value": "0.8.34"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "installed": "0.8.33", "bundled": "0.8.34"}}}})
+                      "helper": {"check": {"state": "Mismatch", "criterion": "protocol",
+                                           "installed": "0.8.33", "bundled": "0.8.34",
+                                           "installed_protocol": 1, "bundled_protocol": 2,
+                                           "state_by_product_rule": "Mismatch"}}}})
 
     fixtures["loopback-hole"] = _write_fixture(
         os.path.join(tmp, "loop"), _base_manifest(),
@@ -818,11 +862,13 @@ def self_test():
     edge["log-write-interleave"] = _write_fixture(
         os.path.join(tmp, "interleave-edge"), _base_manifest(app="0.8.33"),   # **修复前**的版本
         core=[_core_line(t0, "x") + _core_line(t0, "y")])
+    # 边界 fixture（= 真实现场包 INC-20260923-123641-af29 的形状）：**老格式**只有包版本，
+    # 旧脚本写了 Mismatch；产品口径是协议号 ⇒ 分诊**不许**直接判成不一致（如实标为无法判定）
     edge["helper-mismatch"] = _write_fixture(
         os.path.join(tmp, "helper-edge"),
         {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.34"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Unreadable", "installed": None, "bundled": None}}}})
+         "versions": {"app": {"value": "0.8.36"}, "core": {"value": "26.9.9"},
+                      "helper": {"check": {"state": "Mismatch", "installed": "0.8.35", "bundled": "0.8.36"}}}})
     edge["loopback-hole"] = _write_fixture(
         os.path.join(tmp, "loop-edge"), _base_manifest(),
         network="## route -n get 127.0.0.2\n   route to: 127.0.0.2\n"
@@ -845,7 +891,7 @@ def self_test():
         "probe-false-negative": lambda ev: (ev["失败·有 failed 行"] + ev["失败·无结局行"]) >= 0,  # 恒真
         "log-read-loss": lambda ev: ev["截断·残缺行"] + ev["非 JSON 行"] >= 0,                 # 恒真
         "log-write-interleave": lambda ev: ev["多对象行"] > 0,                              # 丢掉版本要求
-        "helper-mismatch": lambda ev: ev["版本检查三态"] is not None,                        # 读不到也算命中
+        "helper-mismatch": lambda ev: ev["installed"] != ev["bundled"],                     # 旧口径：包版本相等（就是被修掉的那条）
         "loopback-hole": lambda ev: ev["interface"] is not None,                            # 两个方向都算命中
         "tun-iface-einval": lambda ev: ev["次数"] > 0,                                      # 丢掉每分钟阈值
     }
@@ -856,6 +902,24 @@ def self_test():
         check(f"改坏 `{name}` 后边界 fixture 会被误判命中（⇒ 原断言红）", bool(mutants[name](edge_ev)), True)
         check(f"（对照）同一改坏版在正 fixture 上也为真：`{name}`", bool(mutants[name](pos_ev)), True)
 
+
+    # --- helper 三态（task-171）：协议号口径的额外断言 + 老格式的如实说明
+    print("\n=== helper 三态（协议号口径）额外断言 ===")
+    ev_old = PREDICATES["helper-mismatch"](load_bundle(edge["helper-mismatch"]))["evidence"]
+    check("老格式 manifest（只有包版本）⇒ **不判成不一致**，标为无法判定",
+          ev_old["state_by_product_rule"], "unknown")
+    check("老格式：判据里必须点出「产品口径是协议号」", "协议号" in (ev_old.get("判据") or ""), True)
+    check("老格式：说明里必须写明「旧脚本的包版本判据 ≠ 不兼容」",
+          "旧脚本的包版本判据" in (ev_old.get("说明") or ""), True)
+    fx_eq = _write_fixture(os.path.join(tmp, "helper-eq-proto"),
+        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
+         "versions": {"app": {"value": "0.8.36"}, "core": {"value": "26.9.9"},
+                      "helper": {"check": {"state": "Mismatch", "criterion": "protocol",
+                                           "installed": "0.8.35", "bundled": "0.8.36",
+                                           "installed_protocol": 1, "bundled_protocol": 1,
+                                           "state_by_product_rule": "Match"}}}})
+    check("协议号相同 + 包版本不同 ⇒ **不命中**（产品口径 Match；PROTOCOL 命中 0）",
+          PREDICATES["helper-mismatch"](load_bundle(fx_eq))["hit"], False)
 
     # --- unknown 的「最像三条」必须给出，且不猜根因
     print("\n=== unknown 行为 ===")

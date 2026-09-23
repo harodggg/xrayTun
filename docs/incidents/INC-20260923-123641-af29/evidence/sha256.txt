@@ -10,8 +10,8 @@ metrics.json                                                      375ff24a884e4f
 network.txt                                                       d56a9652cb1b99140c31dbd8aefafdad3a0777fbe8b6ffc2075d90e147644e0d  5356 bytes
 
 ## 2) 入库的文档/切片（本目录内）
-README.md                                                         0dffb744dc22eb5c29998e0cf02f6a169fd04fdd3f9722000ec3bcc4054faac5  3669 bytes
-SUMMARY.md                                                        383db4a41a6becd96d12a4f99c688f5bf0e244dbc741d03831814f437bf4ee4a  7409 bytes
+README.md                                                         4cd73d759342c5afe85be829639f8a4476164d0dd944cc7299b500d0d6df7884  3927 bytes
+SUMMARY.md                                                        fe0175461b6a9f7964f43bb4c3047e5192e8da2fde0664bf29ea76edf2c78f9f  8162 bytes
 evidence/core-einval-lines.txt                                    cd71e23742963637a218192d2191d6b3d3e92b0edf6fe4826c85d0ccbe8e8361  480 bytes
 evidence/events-doh-failures.txt                                  00b382659f7469ec07c40f19ae030a7e75624eee5b26790c1aa57e3762d3076d  547 bytes
 evidence/events-probe-false-negative.txt                          308519a4aaf95429229366d25b9d200dcb37bd69d5e663f1399002c4dee621c4  247 bytes
@@ -19,5 +19,6 @@ evidence/events-tun-refused.txt                                   a8633295c6594e
 evidence/loopback-route.txt                                       0e597f1dda8b4d29e3e352bd4e662aed8f1d8f6a2bab0b5ba007f9b1daae70b6  232 bytes
 evidence/metrics-keycounts.json                                   e4c0e52117d5818a7539e9b04c4d11f32ff9534d7a3ddf07025fe79167a93504  1949 bytes
 evidence/triage-raw.md                                            b335f2171bf889fec340c1d5f9a3dc52ee9dd282f161870f6852ddf63e51a055  3840 bytes
+incident.after-caliber-fix.json                                   400c0d2abdae1a803602bdb4b209eb1c2539cc698b74e64acda18ed65620ea2c  5940 bytes
 incident.json                                                     4ca4a82157ae725324c6a2fc105be771740c5fa93f762c68b4d3d318f34f61d8  5424 bytes
 manifest.json                                                     a89fe7e9353feba3ecb4296850b315492c65a656be5a64c67b886786ae6cd6a3  3186 bytes

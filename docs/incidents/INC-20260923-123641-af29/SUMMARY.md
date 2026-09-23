@@ -39,7 +39,12 @@ hit: probe-false-negative (near_miss 0.9) / helper-mismatch (1.0) / loopback-hol
 not hit: v6-rewrite / watchdog-false-positive / log-read-loss / log-write-interleave
 ```
 
-## 4. ⚠️ 一条**口径缺陷**（我独立复核后确认；对应 `incident-bundle.sh` 的 helper 三态判据）
+## 4. ⚠️ 一条**口径缺陷**（我独立复核后确认）—— **已修：`task-171`**
+
+（修复与敏感性证据：`docs/verification/HELPER-TRISTATE-CALIBER.md`；本包是暴露它的现场。）
+
+**修后回归**：对同一份包重跑分诊 ⇒ 命中从 **4 条降到 3 条**，`helper-mismatch` 不再命中，
+输出另存为 `incident.after-caliber-fix.json`（原 `incident.json` **保持原样** = 「当时工具这么说」的记录）。
 
 * 现场包说 **Mismatch**，判据是 **包版本相等**（installed 0.8.35 ≠ bundled 0.8.36），而 source 字段还写着
   「与产品同一口径」。
@@ -59,6 +64,9 @@ not hit: v6-rewrite / watchdog-false-positive / log-read-loss / log-write-interl
 **能说的**：
 1. 窗口内（20:27:52→20:36:29，degraded）用户机器处于**降级状态**：核心持续吐 tun 接口 EINVAL（504/分）、
    App 探针出现「整侧不通」但未达自愈阈值、DoH 与 proxy/tun 连接均有失败、回环地址被路由到 utun6。
+   ⚠️ **分寸**：E2 的 `falied to set interface` 是**已知高频现象**；团队此前已用证据**排除它作为断网主因**
+   （同一批证据里 **261 次该错误之后紧跟 `connection opened`**）。**该排除结论我是引用，未在本卡复核。**
+   另：`task-106`（探针集合两份真源、国内只有 1 个目标）由 backend-dev 接手，本包是**现场证据**。
 2. **回环空洞（F-1）仍在**：`127.0.0.2` 走 utun6 而不是 `lo0` —— 与 `docs/incidents/OPEN-FINDINGS.md` 的 F-1 是同一现象，
    本包是它在真实用户机器上的**又一次现场证据**。
 3. **`helper-mismatch` 命中是口径造成的**，不是真的不兼容（§4）。

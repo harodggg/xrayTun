@@ -53,4 +53,6 @@ evidence/          脱敏后的最小切片 + 原件指纹（sha256.txt）
 `docs/incidents/README.md` §5 写：`INC-ID` 的 `<4hex>` = **manifest 的 sha256 前 4 位**（⇒ ID 与内容绑定）。
 本体实测：ID 后缀 = `af29`，而这份 `manifest.json` 的 sha256 前 4 位 = `a89f` ⇒ **不相等**。
 （上一份 `INC-20260922-190335-23f5` 是相符的：`23f5` ≡ 其 manifest sha256 前缀。）
-⇒ 要么 App/服务端生成 ID 的方式变了，要么这条约定已经过时。**我只报事实，不改约定**。
+⇒ Lead 读了端点源码：`<4hex>` 由 `infra/incident-collector/src/worker.mjs:64-73` 的 `crypto.getRandomValues`
+**随机**生成（与内容无关、不含用户标识；**同一份包上传两次会得到两个不同 ID**）⇒ **约定那句是假的，文档已按实现改正**
+（`docs/incidents/README.md` §5）。「内容绑定」若要做，属端点侧新卡。
