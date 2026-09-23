@@ -481,25 +481,21 @@ impl ReportRedaction {
 
     /// 在 `i` 处匹配一个节点地址/域名（忽略大小写），连同紧跟的 `:port`。
     ///
-    /// # 边界规则（task-124 delta 后）
+    /// # 边界规则（task-124 delta-3 后：**左边界完全不要求**）
     ///
-    /// * **不挡 `.`**：这样 `www.<节点域名>` 与 `<节点域名>.cn` 里的节点域名都会被
-    ///   吃掉，不会因为多了个前缀/后缀就把节点域名漏在报告里；
-    /// * **不挡 `-`/`_`**：节点显示名就是 `Xray-<地址>` 这种形状；
-    /// * **当条目本身是 IP 字面量时，连左边界也不要求**：名字里会出现
-    ///   `Xray45.207.197.185`（地址**紧贴字母**，没有分隔符）。
-    ///   代价是**可能多抹** —— 例如 `v1.2.3.4` 这种四段版本号若恰好等于节点 IP
-    ///   也会被抹。隐私优先：宁可多抹一个字符串，也不漏一个真实的服务器地址。
-    ///   域名条目**保持**左边界严格，否则 `xnode-example.xyz` 会被误伤成节点域名。
+    /// 节点显示名里的地址可以紧贴**任意**字符：
+    ///
+    /// * `Xray-<地址>`（`-`）、`Xray_<地址>`（`_`）、`Xray<地址>`（**紧贴字母**）；
+    /// * `www.<节点域名>` / `<节点域名>.cn`（`.` 在前或在后）。
+    ///
+    /// 所以这里**只在右边**要求边界（右边仍需挡字母/数字：`<节点域名>.cn` 要能命中，
+    /// 但 `1.2.3.45` 不能被 `1.2.3.4` 的半截匹配 —— 右边是数字就跳过）。
+    ///
+    /// **代价（诚实清单里有）**：可能**多抹**。例：节点域名 `node-example.xyz` 时，
+    /// `xnode-example.xyz`（另一个域名，只是包含它）也会被抹成 `x<addr>`。
+    /// 隐私优先：宁可多抹一个字符串，也不漏一个真实的服务器地址；
+    /// tester 的第三轮独立验证证明「只放宽 IP 条目」还不够 —— 域名紧贴字母照样漏。
     fn match_at(&self, line: &str, i: usize) -> Option<usize> {
-        if !boundary_before(line, i)
-            && !self
-                .entries
-                .iter()
-                .any(|c| c.parse::<IpAddr>().is_ok() && line.get(i..i + c.len()).is_some_and(|s| s.eq_ignore_ascii_case(c)))
-        {
-            return None;
-        }
         for cand in &self.entries {
             let end = i + cand.len();
             let Some(slice) = line.get(i..end) else { continue };
@@ -1100,12 +1096,50 @@ mod tests {
                 "a www.node-example.xyz and node-example.xyz.cn and xnode-example.xyz",
                 &addresses,
             );
-            // 两处都带着节点域名这段文本 ⇒ 都必须被替换掉（前缀/后缀都留不住它）。
+            // 三处都带着节点域名这段文本 ⇒ 都必须被替换掉（前缀/后缀/紧贴都留不住它）。
             assert!(!out.contains("www.node-example.xyz"), "{out}");
             assert!(!out.contains("node-example.xyz.cn"), "{out}");
             assert!(out.contains("www.<addr>"), "{out}");
             assert!(out.contains("<addr>.cn"), "{out}");
-            assert!(out.contains("xnode-example.xyz"), "别把相似域名误伤成节点域名：{out}");
+            // ⚠️ **任务 delta-3 起这条断言反过来了**：`xnode-example.xyz`（只是**包含**
+            // 节点域名的另一个域名）**也会被抹**成 `x<addr>`。
+            // 这是**主动接受的过抹**：tester 第三轮独立验证证明「只放宽 IP 条目」不够 ——
+            // 域名紧贴字母（`Xray<域名>`）照样漏，而那是用户真实的服务器地址。
+            // 隐私方向：宁可多抹一个相似域名，也不漏一个真域名。
+            assert!(!out.contains("xnode-example.xyz"), "含节点域名的相似域名也要抹：{out}");
+            assert!(out.contains("x<addr>"), "{out}");
+        }
+
+        /// **task-124 delta-3（tester 第三轮独立验证）**：**域名紧贴字母**也要抹。
+        ///
+        /// 两种来源都要覆盖：
+        /// * 域名**只在节点名里**（`Xrayjp1.node-example.xyz`，address 是别的 IP）；
+        /// * 域名是**节点的 address**，而日志里它被显示名的前缀紧贴
+        ///   （名字 `Xray` + 地址 `jp1.node-example.xyz` ⇒ 日志 `「Xrayjp1.node-example.xyz」`）。
+        #[test]
+        fn domain_glued_to_letters_is_redacted() {
+            let from_name = ReportRedaction::from_nodes(&[fixture_node(
+                "1.0.0.1",
+                "Xrayjp1.node-example.xyz",
+                "",
+                "",
+            )]);
+            let out = redact_secrets("当前节点「Xrayjp1.node-example.xyz」", &from_name);
+            assert!(!out.contains("jp1.node-example.xyz"), "节点名里的域名紧贴字母仍泄漏：{out}");
+
+            let from_address = ReportRedaction::from_nodes(&[fixture_node(
+                "jp1.node-example.xyz",
+                "Xray",
+                "",
+                "",
+            )]);
+            let out = redact_secrets("当前节点「Xrayjp1.node-example.xyz」", &from_address);
+            assert!(
+                !out.contains("jp1.node-example.xyz"),
+                "address 是域名、日志里紧贴显示名前缀时仍泄漏：{out}"
+            );
+            // 反例：不许为了省事把整行抹掉。
+            assert!(out.contains("当前节点"), "{out}");
         }
 
         /// **不许把报告抹成没法看**：公开目标域名、版本号、时间戳都要原样保留。
