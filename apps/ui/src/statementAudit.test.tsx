@@ -15,11 +15,12 @@
  * | `Dashboard.tsx` 延迟徽章 | `available=false` 也按 `latencyTier` 上绿色 | `available === false` ⇒ 必须写「不可用」 |
  * | `topbarStatus.ts` 徽章 | 「未设系统代理」（对机器状态的断言，读不到） | 只说本应用不设 |
  * | `Subscriptions.tsx` 删除确认 | `sub.node_count`（刷新时写一次的快照值） | 按 `nodes[].source.id` 现数 |
- * | `Logs.tsx` 诊断说明 | 「已抹掉节点地址…可以直接贴到公开 issue」 | 只说真抹了什么 + 要自己核对 |
+ * | `Logs.tsx` 诊断说明 | 「已抹掉节点地址…可以直接贴到公开 issue」 | 只说真抹了什么（task-124：地址 → `<addr>`，公开域名/本机地址保留，覆盖不到的形态点名写出） |
+ * | `Logs.tsx` 诊断块「复制」 | 裸 `writeText`（失败静默） | 复用 `CopyButton` ⇒ 失败 `role=alert` + 可手动选中的兜底 |
  * | `Logs.tsx` 空态 | `!running` ⇒ 「核心还没启动过」 | 看 `runtime.started_at_unix` |
  * | `Logs.tsx` 等级计数 | 「错误：1 条」（读成总数） | 说明是**已加载**窗口里的条数 |
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -226,17 +227,58 @@ describe("task-120 · 日志页的三种「空」与诊断说明", () => {
     expect(screen.queryByText(/核心启动过/)).toBeNull();
   });
 
-  it("诊断说明必须如实：节点地址/IP 原样保留，不能说「可以直接贴到公开 issue」", async () => {
+  it("诊断说明必须与脱敏实现同口径：节点地址会抹、公开域名与本机地址保留、并点名写清覆盖不到的形态", async () => {
     await renderWith(snap(), <Logs />, [
       { seq: 1, ts_unix: 1, source: "core", level: "info", message: "既有日志" },
     ]);
     fireEvent.click(await screen.findByRole("button", { name: "诊断" }));
-    const note = await screen.findByText(/已抹掉订阅 URL/);
+    const note = await screen.findByText(/已抹掉/);
     const text = note.textContent ?? "";
-    expect(text, "只抹 UUID 形状的 token").toContain("UUID");
-    expect(text, "IP/域名/IP:port 一律原样保留").toContain("会原样保留");
-    expect(text, "必须让人自己核对").toContain("核对");
-    expect(text, "不能再说「已抹掉…节点地址」").not.toContain("已抹掉订阅 URL、节点地址");
+    expect(text, "必须说清地址被替换成 <addr>").toContain("<addr>");
+    expect(text, "还要抹订阅 URL 凭据与 UUID 形状的 token").toContain("UUID");
+    // task-124：脱敏做够之后，「节点地址原样保留 + 自己核对」这句已经是假的。
+    expect(text, "不许再说节点地址会原样保留").not.toContain("节点地址、域名与 IP:port 会原样保留");
+    expect(text, "不许再把「自己核对」当兜底").not.toContain("请自己核对");
+    expect(text, "必须说清公开目标域名与本机地址保留").toContain("www.baidu.com");
+    expect(text, "覆盖不到的形态要**点名**（base64），不能笼统地让用户自查").toContain("base64");
+    expect(text, "不能再说「可以直接贴到公开的 issue 里」").not.toContain("可以直接贴到公开的 issue");
+  });
+
+  it("诊断块的「复制」失败必须可见 —— 原来是裸 writeText，剪贴板被拒时毫无提示", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn(() => Promise.reject(new Error("NotAllowedError"))) },
+      configurable: true,
+    });
+    await renderWith(snap(), <Logs />, [
+      { seq: 1, ts_unix: 1, source: "core", level: "info", message: "既有日志" },
+    ]);
+    fireEvent.click(await screen.findByRole("button", { name: "诊断" }));
+    await screen.findByText(/已抹掉/);
+    // 工具栏也有一个「复制」（复制日志），所以只在诊断块里找。
+    const head = document.querySelector(".logs-diag__head") as HTMLElement;
+    fireEvent.click(within(head).getByRole("button", { name: "复制" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent, "失败必须说出来，不许静默").toContain("复制失败");
+    expect(alert.textContent).toContain("剪贴板不可用");
+    const box = screen.getByLabelText("手动复制内容") as HTMLTextAreaElement;
+    expect(box.value, "兜底里要放报告正文本身").toBe("（诊断报告正文）");
+    expect(box.readOnly).toBe(true);
+  });
+
+  it("反例：剪贴板成功 ⇒ 给「已复制」确认，且不出现失败块", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn(() => Promise.resolve()) },
+      configurable: true,
+    });
+    await renderWith(snap(), <Logs />, [
+      { seq: 1, ts_unix: 1, source: "core", level: "info", message: "既有日志" },
+    ]);
+    fireEvent.click(await screen.findByRole("button", { name: "诊断" }));
+    await screen.findByText(/已抹掉/);
+    const head = document.querySelector(".logs-diag__head") as HTMLElement;
+    fireEvent.click(within(head).getByRole("button", { name: "复制" }));
+    expect(await screen.findByText(/已复制到剪贴板/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("等级计数必须写明是「已加载的窗口」里的条数，而不是总数", async () => {

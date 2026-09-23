@@ -24,7 +24,7 @@ import { api } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
 import { useFollowScroll, usePreserveReadingPosition } from "../useFollowScroll";
 import { useStore } from "../store";
-import IncidentReport from "../IncidentReport";
+import IncidentReport, { CopyButton } from "../IncidentReport";
 import { formatTimestamp } from "../types";
 
 const LEVELS = ["all", "info", "warn", "error", "debug"] as const;
@@ -186,23 +186,30 @@ export default function Logs() {
           <div className="logs-diag__head">
             <strong>诊断报告</strong>
             <span className="logs-diag__note">
-              {/* task-120：这句原来是「已抹掉订阅 URL、**节点地址**与 UUID ——
-                  可以直接贴到公开的 issue 里」。脱敏实现只做两件事
-                  （`commands/diagnostics.rs`）：`redact_url` 抹掉订阅 URL 里的凭据、
-                  `redact_secrets` 只把 **UUID 形状的 token**（36 字符 + 4 个 `-`，
-                  `commands/util.rs::is_uuid_like`）换成 `<uuid>`。
-                  **IP、域名、IP:port 一律原样保留** —— 核心日志里就有
-                  `transport/internet/tcp: dialing TCP to tcp:<节点 IP>:443`
-                  （本机日志实测含节点 IP 的行 11421 条），而报告会收进最近 ≤50 条日志。
-                  所以原话等于让用户把自己的服务器地址贴到公开 issue 里。
-                  现在只说脱敏真正做了什么，并把「要自己核对」写出来。 */}
-              已抹掉订阅 URL 里的凭据与 UUID 形状的 token。节点地址、域名与 IP:port
-              <strong>会原样保留</strong> —— 贴到公开 issue 前请自己核对一遍。
+              {/* task-124：task-120 收尾时这里写的是「节点地址、域名与 IP:port
+                  **会原样保留** —— 贴到公开 issue 前请自己核对一遍」。那句话**如实**，
+                  而如实描述的恰恰是一个缺陷：报告会把用户自己的服务器地址留在里面。
+                  现在后端把脱敏做够了（`commands/diagnostics.rs::redact_secrets`）：
+                  · 判据来自**当前节点列表**（`Node::address` / SNI / 传输层 host /
+                    节点名里的域名段）—— 命中即换成 `<addr>`；
+                  · **没命中列表的公网 IP** 也换：域名节点在日志里出现的是**解析后的 IP**，
+                    已经被切走的旧节点 IP 更不在列表里；
+                  · **本机管道地址保留**（`127/8`、RFC1918、`::1`、ULA）—— 它们不带身份，
+                    却是排查「回环洞」这类问题的命门；
+                  · 公开目标域名（`www.baidu.com`）保留，否则报告没法看。
+                  只有一种形态覆盖不到，所以直接点名写出来：base64 载荷。 */}
+              已抹掉：订阅 URL 的凭据、UUID 形状的 token、<strong>节点地址/域名</strong>与
+              IP:port（替换成 <code>&lt;addr&gt;</code>）。App/核心/助手版本、时间，以及
+              <code>www.baidu.com</code> 这类公开目标域名与本机地址（<code>127.0.0.1</code>）
+              保留 —— 排查要用。唯一覆盖不到的形态是 <strong>base64 载荷</strong>
+              （如 vmess 分享链接里那段），日志里出现时请手动删掉再贴。
             </span>
             <span className="spacer" />
-            <button className="btn btn--ghost" onClick={() => void navigator.clipboard.writeText(diagnostics)}>
-              复制
-            </button>
+            {/* task-124：这里原来是**裸** `navigator.clipboard.writeText(diagnostics)`
+                （未 catch）—— 剪贴板被拒（权限/非聚焦窗口）时界面毫无提示，
+                用户以为复制成功、贴出去却是空的。改用与设置页/「报告问题」同一个
+                `CopyButton`：失败给 `role="alert"` + 可手动选中的 textarea 兜底。 */}
+            <CopyButton label="复制" text={diagnostics} className="btn btn--ghost" />
             <button className="btn btn--ghost" onClick={() => setDiagnostics(null)}>
               关闭
             </button>
