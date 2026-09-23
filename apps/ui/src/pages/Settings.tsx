@@ -1250,12 +1250,51 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             checked={settings.show_speed_in_title}
             onChange={(e) => patch({ show_speed_in_title: e.target.checked })}
           />
-          在标题栏与菜单栏显示实时网速
+          在顶栏与菜单栏显示实时网速
         </label>
+        {/*
+          task-140：这段原来写「**窗口标题栏**显示 ↓ 1.2 MB/s ↑ 34 KB/s」。两处都不对，
+          而且第 1 处会让用户按图索骥找不到东西（他会以为功能坏了）：
+
+          * **原生标题栏上的文字是看不见的**：`apps/desktop/tauri.conf.json` 的窗口配置写着
+            `"titleBarStyle": "Overlay"` + `"hiddenTitle": true`（macOS 会隐藏原生标题文字）。
+            界面上那条带速率的「标题栏」是 **webview 自己画的顶栏**
+            （`apps/ui/src/App.tsx` 的 `TopBar`，`:262-275`）。Rust 侧同一件事也写在
+            `apps/desktop/src/traffic.rs:113-124` 的注释里，并且说明
+            `window.set_title` 仍然保留 —— 它决定的是**「窗口」菜单与 Mission Control**
+            里显示什么（我未在真机验证这两处的渲染，见诚实清单）。
+          * **单位不对**：顶栏用的是 `types.ts` 的 `formatRate` → `formatBytes`
+            （1024 进制、单位是 `KiB`/`MiB`、非字节时两位小数）⇒ 例子应是
+            `↓ 1.20 MiB/s ↑ 34.00 KiB/s`，而不是 `MB/s`/`KB/s`。
+          菜单栏那一半是**对的**（`traffic.rs` 的 `tray_title` → `format_rate_compact`
+          给 `↓1.2M ↑34K`，且速率为 0 时整串留空 ⇒ 「空闲时不显示」），保留。
+        */}
+        {/*
+          这段话**按开关的真值分两句**（task-140 后半段）：`show_speed_in_title` 关着时，
+          顶栏那块速率根本不渲染（`App.tsx:224` `showSpeed = show_speed_in_title && running`），
+          菜单栏也会被清空（`traffic.rs:130-135` `tray.set_title(Some(""))`）——
+          所以关着的时候不能再用现在时描述「顶栏显示 ↓…」。
+        */}
         <div className="field__hint" style={{ marginBottom: 10 }}>
-          窗口标题栏显示 <span className="mono">↓ 1.2 MB/s ↑ 34 KB/s</span>；
-          菜单栏因为要和系统图标抢地方，用更短的 <span className="mono">↓1.2M ↑34K</span>，
-          且空闲时不显示。速率来自核心的流量计数器，系统代理与 TUN 两种模式都有效。
+          {settings.show_speed_in_title ? (
+            <>
+              现在开着：<strong>顶栏</strong>（App 自己画的那条 —— <strong>不是</strong> macOS
+              原生标题栏，原生标题被隐藏了，去标题栏找是找不到的）显示{" "}
+              <span className="mono">↓ 1.20 MiB/s ↑ 34.00 KiB/s</span>；
+            </>
+          ) : (
+            <>
+              现在<strong>关着</strong>：顶栏不再带速率（只留页面标题），菜单栏里的读数也会被清空。
+              打开之后：<strong>顶栏</strong>（App 自己画的那条 —— <strong>不是</strong> macOS
+              原生标题栏，原生标题被隐藏了，去标题栏找是找不到的）显示{" "}
+              <span className="mono">↓ 1.20 MiB/s ↑ 34.00 KiB/s</span>；
+            </>
+          )}
+          菜单栏因为要和系统图标抢地方，用更短的{" "}
+          <span className="mono">↓1.2M ↑34K</span>，且空闲（速率为 0）时不显示。
+          速率来自核心的流量计数器，系统代理与 TUN 两种模式都有效；
+          原生窗口标题也在同步更新（所以「窗口」菜单与 Mission Control 的窗口列表里带速率），
+          但标题栏上仍然看不到它。
         </div>
         {/* ⚠️ 「退出时还原系统代理设置」这个复选框**已从界面移除**（task-65）。
             原因：它绑定的 `settings.restore_system_proxy_on_exit` 在**全仓没有任何逻辑读它**
