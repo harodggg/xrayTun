@@ -488,4 +488,122 @@ mod tests {
         };
         assert!(bring_up(&req).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // task-134：A-1 的**行为级**接缝测试（注入失败的路由执行器）
+    // -----------------------------------------------------------------------
+
+    fn tmp_snapshot_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xt-tun-snap-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时快照根");
+        dir
+    }
+
+    fn fixture_uplink() -> PhysicalUplink {
+        PhysicalUplink {
+            interface: "en0".into(),
+            gateway: Some("192.168.0.1".parse().unwrap()),
+            service: None,
+        }
+    }
+
+    fn fixture_route(destination: &str) -> InstalledRoute {
+        InstalledRoute {
+            destination: destination.parse().unwrap(),
+            via: RouteVia::Interface {
+                name: "utun9".into(),
+            },
+            replaced: None,
+        }
+    }
+
+    /// **task-134 行为级接缝测试**：真失败时 `force_cleanup()` 必须
+    ///
+    /// * 返回 **`Err`**（不是 `Ok(Some(..))`）—— 旧实现 `let _ =` 会吞掉；
+    /// * **快照留着**（失败可重试语义仍在）；
+    /// * 文案含**具体失败步骤**，且**不含「已回滚」**；
+    /// * 修好后**重试能成功**、成功才删快照（同一条测试里行为级验证）。
+    ///
+    /// 注入的替身让**第二步**失败 —— 这正是会被静默吞掉的那条路径。
+    /// 注入钩子是 `#[cfg(test)]` 的（见 `macos::with_executor`、`snapshot::with_test_root`），
+    /// **生产路径一行都没动**。
+    #[test]
+    fn force_cleanup_returns_err_keeps_snapshot_and_names_the_failed_step() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::with_executor;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = tmp_snapshot_root("a1-fail");
+        let mut snap = SessionSnapshot::new("s-134".into(), "utun9".into(), fixture_uplink());
+        // 回滚动作 = 倒序删除：先 198.51.100.0/24，再 203.0.113.0/24（第二步）。
+        snap.installed_routes = vec![
+            fixture_route("203.0.113.0/24"),
+            fixture_route("198.51.100.0/24"),
+        ];
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        let calls = Rc::new(Cell::new(0u32));
+        let counter = calls.clone();
+        let failing: crate::macos::TestExecutor =
+            Rc::new(move |program: &str, args: &[String]| {
+                counter.set(counter.get() + 1);
+                if counter.get() == 2 {
+                    Err(Error::Invalid(format!(
+                        "注入：{program} {} 失败",
+                        args.join(" ")
+                    )))
+                } else {
+                    Ok(String::new())
+                }
+            });
+
+        let (err_msg, kept) = with_test_root(&root, || {
+            let result = with_executor(failing, force_cleanup);
+            let kept = SessionSnapshot::snapshot_path().exists();
+            let msg = result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| format!("_ = {result:?} —— 必须返回 Err，不许吞"));
+            (msg, kept)
+        });
+
+        assert!(kept, "回滚失败时快照必须留着（否则失败不可重试）");
+        assert!(err_msg.contains("失败"), "文案要说清是失败：{err_msg}");
+        assert!(
+            err_msg.contains("203.0.113.0/24"),
+            "文案要含**具体失败步骤**（第二步那条路由）：{err_msg}"
+        );
+        assert!(
+            !err_msg.contains("已回滚"),
+            "失败时绝不许出现「已回滚」——那正是 A-1 要修的假结论：{err_msg}"
+        );
+        assert_eq!(calls.get(), 2, "只该跑到失败的那一步为止");
+
+        // 「失败可重试」也要行为级成立：换全成功的执行器再跑一次 ⇒ Ok，且这时才删快照。
+        let ok: crate::macos::TestExecutor = Rc::new(|_, _| Ok(String::new()));
+        let (retry, gone) = with_test_root(&root, || {
+            let r = with_executor(ok, force_cleanup);
+            (
+                r.map(|o| o.is_some()),
+                !SessionSnapshot::snapshot_path().exists(),
+            )
+        });
+        assert_eq!(
+            retry.as_ref().ok(),
+            Some(&true),
+            "修好后重试必须成功（失败是暂时的）：{retry:?}"
+        );
+        assert!(gone, "只有全部成功才允许删快照");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

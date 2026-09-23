@@ -22,6 +22,38 @@ use crate::plan::PhysicalUplink;
 pub const SNAPSHOT_DIR: &str = "/Library/Application Support/XrayTun";
 pub const SNAPSHOT_FILE: &str = "helper-session.json";
 
+/// 快照目录。**生产固定为系统目录**；测试构建里可以被 [`with_test_root`] 临时
+/// 换成临时目录 —— 否则「失败时快照是否被删」这条语义**没法在普通用户下验证**
+/// （系统目录要 root 才能写）。
+fn snapshot_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEST_SNAPSHOT_ROOT.with(|c| c.borrow().clone()) {
+        return root;
+    }
+    PathBuf::from(SNAPSHOT_DIR)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 测试用的快照根（**只在测试构建里存在**）。
+    static TEST_SNAPSHOT_ROOT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 在 `f()` 期间把快照根换成 `root`；**退出（含 panic）时自动还原**。
+#[cfg(test)]
+pub(crate) fn with_test_root<R>(root: &std::path::Path, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_SNAPSHOT_ROOT.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+    let prev = TEST_SNAPSHOT_ROOT.with(|c| c.borrow_mut().replace(root.to_path_buf()));
+    let _guard = Restore(prev);
+    f()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
@@ -72,13 +104,13 @@ impl SessionSnapshot {
     }
 
     pub fn snapshot_path() -> PathBuf {
-        PathBuf::from(SNAPSHOT_DIR).join(SNAPSHOT_FILE)
+        snapshot_dir().join(SNAPSHOT_FILE)
     }
 
     /// 落盘。**每次状态变更后都应调用。**
     pub fn save(&mut self) -> Result<()> {
         self.updated_at = now_unix();
-        let dir = PathBuf::from(SNAPSHOT_DIR);
+        let dir = snapshot_dir();
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::Snapshot(format!("创建 {} 失败: {e}", dir.display())))?;
 

@@ -2140,7 +2140,11 @@ mod tests {
         assert_eq!(interface_of(&build(None)), "<缺失>");
     }
 
-    /// **task-122 A-3 守卫**：核心退出失败不许静默吞掉（B 级：至少留痕）。
+    /// **task-122 A-3 守卫（task-134 收窄成「按站点 + 正向断言」）**：核心退出失败不许
+    /// 静默吞掉 —— **每一处** `process.shutdown(` 都要把 Err 绑下来并 `tracing::warn!`。
+    ///
+    /// 原来是文件级「不许出现 `let _ = process.shutdown(`」：换成 `.ok()` 或别的写法
+    /// 就能绕过（tester 的 M3 是同族缺口）。现在逐个站点正向检查，并带两条负例。
     #[test]
     fn core_shutdown_result_is_not_swallowed_in_production_source() {
         // ⚠️ **不能**按第一个 `#[cfg(test)]` 截断：本文件在 :232 就有一个
@@ -2152,12 +2156,88 @@ mod tests {
             None => src,
         };
         assert!(
-            !prod.contains("let _ = process.shutdown("),
-            "核心退出失败不许静默吞掉 —— 至少 `warn!` 留痕"
+            every_shutdown_failure_is_warned(prod),
+            "每一处 `process.shutdown(` 都要绑 Err 并 tracing::warn!（失败不许静默）"
         );
+        assert_eq!(
+            prod.matches("process.shutdown(").count(),
+            prod.matches("if let Err(e) = process.shutdown(").count(),
+            "不许有站点用别的写法（`let _ =` / `.ok()` 都不行）"
+        );
+
+        // 负例 1（task-122 之前的写法）：`let _ =`。
+        let m1 = prod.replace(
+            "if let Err(e) = process.shutdown(",
+            "let _ = process.shutdown(",
+        );
+        assert_ne!(m1, prod, "fixture 必须真的改到生产源码");
+        assert!(
+            !every_shutdown_failure_is_warned(&m1),
+            "`let _ = process.shutdown(…)` 必须被判据抓住"
+        );
+
+        // 负例 2（换一种吞法，与 tester 的 M3 同族）：`.ok()`。
+        let m2 = prod.replace(
+            "if let Err(e) = process.shutdown(CORE_SHUTDOWN_GRACE).await {",
+            "process.shutdown(CORE_SHUTDOWN_GRACE).await.ok();",
+        );
+        assert_ne!(m2, prod, "fixture 必须真的改到生产源码");
+        assert!(
+            !every_shutdown_failure_is_warned(&m2),
+            "`.ok()` 这种吞法也必须被抓（这是原守卫的 lint 缺口）"
+        );
+
         assert!(
             prod.contains("数据面进程未干净退出"),
             "要留下可搜的痕迹，说明「核心没干净退出、但网络仍会单独回滚」"
         );
+    }
+
+    /// **正向判据**：每个 `process.shutdown(` 站点前面必须是 `if let Err(e) = `、
+    /// 后面（同一段内）必须**处理**了它 —— `tracing::warn!` 留痕，**或**把错误攒进
+    /// `errors`（第 6 处在 `stop` 的收尾里就是攒起来一起返回的，比 warn 更强）。
+    fn every_shutdown_failure_is_warned(src: &str) -> bool {
+        let mut sites = 0usize;
+        for (idx, _) in src.match_indices("process.shutdown(") {
+            sites += 1;
+            let before = window_before(src, idx, 60);
+            if !before.contains("if let Err(e) = ") {
+                return false;
+            }
+            let after = window_after(src, idx, 400);
+            let handled = after.contains("tracing::warn!")
+                || after.contains("errors.push(")
+                || after.contains("return Err(");
+            if !handled {
+                return false;
+            }
+        }
+        sites > 0
+    }
+
+    /// 取 `idx` 之前至多 `n` 字节的窗口。**必须向内收**到字符边界为止 ——
+    /// 本文件到处是中文注释，直接 `&src[idx-60..idx]` 会落在多字节字符中间
+    /// （`get` 返回 `None` ⇒ 窗口变空 ⇒ **判据假红**；这条第一次跑就踩了）。
+    fn window_before(src: &str, idx: usize, n: usize) -> &str {
+        let mut start = idx.saturating_sub(n);
+        while start < idx {
+            if let Some(s) = src.get(start..idx) {
+                return s;
+            }
+            start += 1;
+        }
+        ""
+    }
+
+    /// 取 `idx` 之后至多 `n` 字节的窗口；同样向内收到字符边界。
+    fn window_after(src: &str, idx: usize, n: usize) -> &str {
+        let mut end = (idx + n).min(src.len());
+        while end > idx {
+            if let Some(s) = src.get(idx..end) {
+                return s;
+            }
+            end -= 1;
+        }
+        ""
     }
 }

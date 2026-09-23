@@ -712,13 +712,21 @@ impl Helper {
         let _ = std::fs::remove_file(xt_proto::HELPER_INSTALLED_PATH);
 
         Response::Ok {
-            message: Some(match rollback_failed {
-                Some(why) => format!(
-                    "helper 已卸载；但回滚网络配置失败：{why} —— 请用「修复网络」再试一次"
-                ),
-                None => "helper 已卸载".into(),
-            }),
+            message: Some(uninstall_response_message(rollback_failed.as_deref())),
         }
+    }
+}
+
+/// 卸载响应的文案（**纯函数**：两条路径都能行为级测，不必起真 helper）。
+///
+/// 回滚失败时必须**点名失败原因**，且**不许**出现「已回滚」这类会让用户
+/// 以为网络已经回去的说法 —— 这正是 task-122 A-1/A-2 要守住的那条线。
+fn uninstall_response_message(rollback_failed: Option<&str>) -> String {
+    match rollback_failed {
+        Some(why) => format!(
+            "helper 已卸载；但回滚网络配置失败：{why} —— 请用「修复网络」再试一次"
+        ),
+        None => "helper 已卸载".to_string(),
     }
 }
 
@@ -842,20 +850,91 @@ mod tests {
         let _ = admin_gid();
     }
 
-    /// **task-122 A-2 守卫**：卸载路径不许静默吞回滚错误。
+    /// **task-122 A-2 守卫（task-134 收窄成「按站点 + 正向断言」）**：卸载路径必须把
+    /// `controller::rollback` 的 Err **绑进变量**，并把它**带进响应文案**。
+    ///
+    /// 原来是文件级「不许出现 `let _ = controller::rollback(`」—— tester 实测 M3：
+    /// 换成 `.ok()` 这种**另一种吞法**就能绕过（守卫当时仍然绿）。现在改成
+    /// ①**限定在 `fn uninstall` 的函数体内**；②**正向**要求错误被捕获并流进响应。
+    /// 下面还带一条**负例**：现场把那一处改成 `.ok()`，判据必须翻假（= M3 现在会红）。
     #[test]
-    fn uninstall_does_not_swallow_rollback_failures_in_production_source() {
-        let prod = include_str!("server.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or("");
+    fn uninstall_propagates_rollback_failure_in_production_source() {
+        let prod = production_source();
         assert!(
-            !prod.contains("let _ = controller::rollback("),
-            "卸载时回滚失败不许静默吞掉"
+            uninstall_propagates_rollback_failure(prod),
+            "卸载站点必须把回滚失败绑下来并带进响应文案（fixture/判据见本测试的负例）"
         );
+
+        // 负例（= tester 的 M3）：把那一处换成 `.ok()`（换一种吞法）。
+        let m3 = prod.replace(
+            "if let Err(e) = controller::rollback(&session.snapshot) {\n                    rollback_failed = Some(e.to_string());\n                }",
+            "let _ = controller::rollback(&session.snapshot).ok();",
+        );
+        assert_ne!(m3, prod, "M3 fixture 必须真的改到生产源码（否则这条是空壳）");
         assert!(
-            prod.contains("回滚网络配置失败"),
-            "失败必须在响应里如实说出来（用户据此才知道网络可能没回去）"
+            !uninstall_propagates_rollback_failure(&m3),
+            "M3 那种吞法（.ok()）必须被判据抓住 —— 这正是收窄要解决的 lint 缺口"
         );
+
+        // 反向：直接把「绑下来但不带进响应」的写法也判假。
+        let swallow = prod.replace(
+            "uninstall_response_message(rollback_failed.as_deref())",
+            "uninstall_response_message(None)",
+        );
+        assert_ne!(swallow, prod);
+        assert!(
+            !uninstall_propagates_rollback_failure(&swallow),
+            "把失败「绑了却不用」同样要判假（否则只是换了个人骗）"
+        );
+    }
+
+    /// **行为级**：响应文案在有失败时如实、在无失败时干净（不起真 helper）。
+    #[test]
+    fn uninstall_message_is_honest_when_rollback_fails() {
+        let failed = uninstall_response_message(Some("删除路由 203.0.113.0/24 失败: route: not in table"));
+        assert!(failed.contains("回滚网络配置失败"), "{failed}");
+        assert!(
+            failed.contains("203.0.113.0/24"),
+            "要点名**具体失败步骤**：{failed}"
+        );
+        assert!(!failed.contains("已回滚"), "失败时不许说「已回滚」：{failed}");
+        assert!(failed.contains("修复网络"), "要给出下一步：{failed}");
+
+        let ok = uninstall_response_message(None);
+        assert_eq!(ok, "helper 已卸载");
+        assert!(!ok.contains("失败"), "{ok}");
+    }
+
+    /// 生产源码 = `server.rs` 去掉测试模块。
+    fn production_source() -> &'static str {
+        let src = include_str!("server.rs");
+        match src.find("\n#[cfg(test)]\nmod tests") {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    /// `fn uninstall` 的函数体（**按站点限定**，到下一个方法为止）。
+    fn uninstall_body(src: &str) -> Option<&str> {
+        let start = src.find("fn uninstall(&self) -> Response {")?;
+        let rest = &src[start..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        Some(&rest[..end])
+    }
+
+    /// **正向判据**：卸载站点把回滚失败**绑下来**并**带进响应**。
+    fn uninstall_propagates_rollback_failure(src: &str) -> bool {
+        let Some(body) = uninstall_body(src) else {
+            return false;
+        };
+        // 去掉行注释：判据不认注释里写的旧写法（task-75 的教训）。
+        let code = body
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        code.contains("if let Err(e) = controller::rollback(")
+            && code.contains("rollback_failed = Some(")
+            && code.contains("uninstall_response_message(rollback_failed.as_deref())")
     }
 }
