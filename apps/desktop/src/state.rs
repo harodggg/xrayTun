@@ -306,6 +306,35 @@ impl UpdateStatus {
     }
 }
 
+/// **进度收尾守卫**：`Drop` 时清掉下载进度。
+///
+/// # 为什么是守卫，而不是在每个出口手写一句（task-158 的机制）
+///
+/// 界面判据是 `progress !== null`（同时驱动「下载中，请勿关闭…」与**升级按钮禁用**）。
+/// 三条更新路径各有 3~5 个出口（成功 / join 失败 / `user_msg` 错误 / 写脚本失败 /
+/// 启动脚本失败 / 提前 `return`），**逐个记住去清迟早会漏**：
+/// A17 是「geo 整条路径一个出口都没清」，`task-158` 是「core 的失败出口漏了」。
+/// 守卫靠 `Drop` —— `?`、`return`、甚至 panic unwind 都绕不过它。
+///
+/// 用法：建了 `progress_reporter` 之后立刻 `let progress = ProgressGuard::new(&state);`，
+/// 并在 `build_snapshot(...)` **之前** `drop(progress);`（否则返回给界面的那份快照里
+/// 还带着进度；后面那次轮询才会消失 —— 那就又变成「一会儿假下载中」了）。
+pub(crate) struct ProgressGuard<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> ProgressGuard<'a> {
+    pub(crate) fn new(state: &'a AppState) -> Self {
+        Self { state }
+    }
+}
+
+impl Drop for ProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.state.with(|i| i.update.finish_download());
+    }
+}
+
 impl Inner {
     fn new(store: &Store) -> Self {
         Self {

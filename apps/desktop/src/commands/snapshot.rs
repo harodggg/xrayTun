@@ -269,6 +269,8 @@ pub async fn install_app_update(
     let latest2 = latest.clone();
     let total = latest.size;
     let reporter = core::progress_reporter(app.clone(), "客户端", latest.size);
+    // **机制**：写脚本 / 启动脚本失败这些出口原来都会漏进度。
+    let progress = crate::state::ProgressGuard::new(&state);
     let staged = tauri::async_runtime::spawn_blocking(move || {
         stage_app_update(&latest2, proxy, &tmp2, total, reporter)
     })
@@ -314,6 +316,8 @@ pub async fn install_app_update(
         handle.exit(0);
     });
 
+    // 先收尾再生成快照：否则返回给界面的那份快照里还带着 progress。
+    drop(progress);
     build_snapshot(&app, &state).await
 }
 
@@ -369,25 +373,36 @@ pub async fn install_core_update(
     let dir = xt_core::update::managed_core_dir(state.store.root());
 
     let reporter = core::progress_reporter(app.clone(), "核心", available.size);
-    let meta = tauri::async_runtime::spawn_blocking(move || {
+    // **机制**：任何出口（成功 / join 失败 / `user_msg` 错误 / 提前 return）都由
+    // 守卫的 `Drop` 收尾 —— task-158 之前 core 的两条失败出口会漏掉进度，
+    // 于是装核心失败后永久「下载中」+ 升级按钮永久禁用。
+    let progress = crate::state::ProgressGuard::new(&state);
+    let result = match tauri::async_runtime::spawn_blocking(move || {
         xt_core::update::install_core(&available, &dir, Some(proxy), reporter)
     })
     .await
-    .map_err(|e| format!("安装任务失败：{e}"))?
-    .map_err(util::user_msg)?;
+    {
+        Ok(r) => r.map_err(util::user_msg),
+        Err(e) => Err(format!("安装任务失败：{e}")),
+    };
 
-    state.with(|i| {
-        i.update.progress = None;
-        i.push_log(
-            "app",
-            "info",
-            format!(
-                "核心已更新到 {}（下次连接生效）",
-                meta.core_version.clone().unwrap_or_default()
-            ),
-        );
-        i.update.latest_core = None;
+    state.with(|i| match &result {
+        Ok(meta) => {
+            i.push_log(
+                "app",
+                "info",
+                format!(
+                    "核心已更新到 {}（下次连接生效）",
+                    meta.core_version.clone().unwrap_or_default()
+                ),
+            );
+            i.update.latest_core = None;
+        }
+        Err(e) => i.push_log("app", "error", format!("核心更新失败：{e}")),
     });
+    // 先收尾再生成快照：否则返回给界面的那份快照里还带着 progress。
+    drop(progress);
+    result?;
     build_snapshot(&app, &state).await
 }
 
@@ -405,9 +420,10 @@ pub async fn install_geo_update(
     let dir = xt_core::update::managed_core_dir(state.store.root());
 
     let reporter = core::progress_reporter(app.clone(), "geo 数据", available.size);
-    // ⚠️ **不要在收尾之前用 `?` 提早返回**：这条路径的**每个出口**都必须经过下面
-    // 那个唯一收尾点。A17（task-153）就是这里漏的 —— geo 成功路径压根没有收尾点，
-    // 于是界面永久显示「下载中，请勿关闭…」并且**升级按钮永久禁用**（只有重启才恢复）。
+    // **机制**：守卫在后任何出口（成功 / join 失败 / `user_msg` 错误 / 提前 return）
+    // 都清进度（与 core / app 同一条口径）。A17（task-153）就是这条路径原来
+    // 一个出口都没收尾 ⇒ 装完 geo 永久「下载中」+ 升级按钮永久禁用。
+    let progress = crate::state::ProgressGuard::new(&state);
     let result = match tauri::async_runtime::spawn_blocking(move || {
         xt_core::update::install_geo(&available, &dir, Some(proxy), reporter)
     })
@@ -418,8 +434,6 @@ pub async fn install_geo_update(
     };
 
     state.with(|i| {
-        // **唯一收尾点：无论成败都清进度**（界面据此恢复升级按钮）。
-        i.update.finish_download();
         match &result {
             Ok(meta) => i.push_log(
                 "app",
@@ -435,6 +449,8 @@ pub async fn install_geo_update(
             i.update.latest_geo = None;
         }
     });
+    // 先收尾再生成快照：否则返回给界面的那份快照里还带着 progress。
+    drop(progress);
     result?;
     build_snapshot(&app, &state).await
 }
@@ -841,64 +857,141 @@ mod tests {
         );
     }
 
-    /// **A17 源码守卫（按站点 + 正向）**：geo 路径必须经过**唯一收尾点**清进度，
-    /// 而且收尾必须发生在把错误往上抛**之前**、收尾前不许有 `?` 提早返回。
+    /// **机制行为测试（task-158）**：`ProgressGuard` 在**任何出口**都收尾 ——
+    /// 正常出口、**提前 `return`**（core 路径原来的失败形状）、以及 **panic unwind**。
     ///
-    /// 自带负例：把收尾点删掉（= A17 的原始实现）⇒ 判据必须翻假。
+    /// 用真实 `AppState` + 真实 `UpdateStatus`；界面判据（`progress !== null`）就是断言对象。
     #[test]
-    fn geo_update_path_always_finishes_download_in_production_source() {
+    fn progress_guard_finishes_download_on_early_return_and_panic() {
+        let dir = std::env::temp_dir().join(format!(
+            "t158-guard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = crate::state::AppState::new(xt_core::store::Store::new(&dir));
+
+        let set_downloading = |state: &crate::state::AppState| {
+            state.with(|i| {
+                i.update.progress = Some(crate::state::UpdateProgress {
+                    label: "核心".into(),
+                    done_bytes: 1,
+                    total_bytes: Some(2),
+                })
+            });
+        };
+        let is_downloading = |state: &crate::state::AppState| {
+            state
+                .with(|i| i.update.progress.is_some())
+                .unwrap_or(false)
+        };
+
+        // ① 正常出口。
+        set_downloading(&state);
+        {
+            let _guard = crate::state::ProgressGuard::new(&state);
+        }
+        assert!(!is_downloading(&state), "正常出口必须收尾");
+
+        // ② **提前 `return`**：守卫作用域内直接返回 Err（= core 路径原来的失败出口）。
+        fn fail_like_core(state: &crate::state::AppState) -> Result<(), String> {
+            let _guard = crate::state::ProgressGuard::new(state);
+            // 等价于「`spawn_blocking` join 失败 / `user_msg` 错误后直接 `?` 返回」：
+            // **中途**返回、绝不走到函数末尾 ⇒ 只有 `Drop` 能收拾进度。
+            // 写成 if+return 而不是 `?`：`?` 会被 clippy 认成 question_mark 的目标写法，
+            // 而这里要的就是「显式的中途返回」这个形状。
+            let injected = true;
+            if injected {
+                return Err("安装任务失败：注入".into());
+            }
+            Ok(())
+        }
+        set_downloading(&state);
+        assert!(fail_like_core(&state).is_err());
+        assert!(
+            !is_downloading(&state),
+            "**提前返回也必须收尾** —— 这正是 task-158 的缺口形状"
+        );
+
+        // ③ panic unwind 同样绕不过 `Drop`。
+        set_downloading(&state);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = crate::state::ProgressGuard::new(&state);
+            panic!("注入 panic");
+        }));
+        assert!(caught.is_err(), "前置：确实 panic 了");
+        assert!(!is_downloading(&state), "panic 也要收尾");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **机制守卫（task-158）**：三条更新路径（app / core / geo）都必须
+    /// `ProgressGuard::new(&state)` → `drop(progress)` → `build_snapshot(` 顺序成立。
+    ///
+    /// 为什么这样判：守卫靠 `Drop` ⇒ **任何出口**（`?` / `return` / panic unwind）都
+    /// 绕不过它 —— 这正是「不再靠人眼逐个出口清进度」那件事；而「在 `build_snapshot`
+    /// 之前 drop」保证**返回给界面的那份快照**里已经没有进度（否则那份快照还会带着
+    /// 「下载中」，要等下一次轮询才消失 = 又一截假指令）。
+    ///
+    /// 回归：A17（geo 一个出口都没收尾）与 task-158（core 的失败出口漏掉）都被它覆盖。
+    #[test]
+    fn every_update_path_guards_the_progress_in_production_source() {
         let src = include_str!("snapshot.rs");
         let prod = src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src);
         assert!(
-            geo_update_finishes_download(prod),
-            "geo 更新路径必须在唯一收尾点清进度（否则永久「下载中」+ 按钮永久禁用）"
+            every_update_path_guards_progress(prod),
+            "三条更新路径都必须挂 ProgressGuard，并在生成快照前显式收尾"
         );
 
-        let broken = prod.replace("        i.update.finish_download();", "");
-        assert_ne!(broken, prod, "负例 fixture 必须真的改到生产源码");
+        // 负例 1：撤掉守卫（= task-158 之前 core 的形状：失败出口直接 `?` 漏进度）。
+        let no_guard = prod.replace("let progress = crate::state::ProgressGuard::new(&state);", "");
+        assert_ne!(no_guard, prod, "负例 1 fixture 必须真的改到生产源码");
         assert!(
-            !geo_update_finishes_download(&broken),
-            "去掉收尾点必须被判据抓住（这正是 A17 的形状）"
+            !every_update_path_guards_progress(&no_guard),
+            "撤掉守卫必须被判据抓住"
         );
 
-        // 负例 2：**收尾之前提早返回**（在 `let result = …` 里 `return Err(…)`）——
-        // 这是「有人把 `?` 加回来」的等价形状，同样必须判假。
-        let early = prod.replace(
-            "        Ok(r) => r.map_err(util::user_msg),",
-            "        Ok(r) => match r { Ok(m) => m, Err(e) => return Err(util::user_msg(e)) },",
-        );
-        assert_ne!(early, prod, "负例 2 fixture 必须真的改到");
+        // 负例 2：守卫在、但显式 `drop(progress)` 被删（返回的快照仍带进度）。
+        let no_drop = prod.replace("    drop(progress);\n", "");
+        assert_ne!(no_drop, prod, "负例 2 fixture 必须真的改到生产源码");
         assert!(
-            !geo_update_finishes_download(&early),
-            "收尾前提早返回也必须被判据抓住"
+            !every_update_path_guards_progress(&no_drop),
+            "没有显式收尾（快照里仍带进度）同样要被抓"
         );
     }
 
-    /// 判据：`install_geo_update` 体内 ①有收尾调用；②收尾在 `result?;` **之前**；
-    /// ③**从开始报到收尾之间不许有任何 `?` / `return`**（那会跳过收尾 = A17 的形状）。
-    fn geo_update_finishes_download(src: &str) -> bool {
-        let Some(start) = src.find("pub async fn install_geo_update(") else {
-            return false;
-        };
-        let rest = &src[start..];
-        let end = rest.find("\n/// 回退到包内自带的版本").unwrap_or(rest.len());
-        let body = &rest[..end];
-        // 去行注释：判据不认注释里写的旧写法（task-75 的教训）。
-        let code = body
-            .lines()
-            .map(|l| l.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let (Some(reporting), Some(clear), Some(propagate)) = (
-            code.find("progress_reporter("),
-            code.find("i.update.finish_download()"),
-            code.find("result?;"),
-        ) else {
-            return false;
-        };
-        let before_finish = &code[reporting..clear];
-        clear < propagate
-            && !before_finish.contains('?')
-            && !before_finish.contains("return ")
+    /// 判据：三条路径各自 `ProgressGuard::new(&state)` → `drop(progress)` → `build_snapshot(`。
+    fn every_update_path_guards_progress(src: &str) -> bool {
+        for fname in [
+            "pub async fn install_app_update(",
+            "pub async fn install_core_update(",
+            "pub async fn install_geo_update(",
+        ] {
+            let Some(start) = src.find(fname) else {
+                return false;
+            };
+            let rest = &src[start..];
+            let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+            let body = &rest[..end];
+            // 去行注释：判据不认注释里写的旧写法（task-75 的教训）。
+            let code = body
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (Some(guard), Some(dropped), Some(snapshot)) = (
+                code.find("ProgressGuard::new(&state)"),
+                code.find("drop(progress)"),
+                code.find("build_snapshot("),
+            ) else {
+                return false;
+            };
+            if !(guard < dropped && dropped < snapshot) {
+                return false;
+            }
+        }
+        true
     }
 }
