@@ -77,17 +77,27 @@ import { StoreProvider } from "./store";
  * 与本组断言无关。**用 `as unknown as` 而不是把类型放宽** —— 免得为了测试
  * 把生产类型改成可选。
  */
+/**
+ * 快照替身（**必须从完整快照出发**）。
+ *
+ * 这里原来是「给全最小骨架」（只放 runtime/nodes/latency/subscriptions/settings 五个键）。
+ * 那是**夹具在说谎**：`store.tsx:157` 的 `setSnapshot(await action())` 会把命令返回值
+ * 直接当快照，而这些替身正是 `deleteNode` / `removeSubscription` 的返回值 ⇒ 调用之后
+ * 页面拿到的是一个**形状不完整**的快照。今天侥幸不炸（当前页面只读那几个键），
+ * 但任何人给这些页面加一次字段读取，异常就会以 **unhandled error** 的形式出现
+ * —— vitest 的 `Errors 1 error` 会把退出码变成 1，而**通过数看起来仍然是全绿**
+ * （冻结门禁 `d95b4ef` 上就是这样红的：`TypeError … 'selected_node' ❯ Nodes.tsx:37`）。
+ * 所以改成从 `scenarioSnapshot()` 出发，`extra` 只覆盖它真正要换的那几个键。
+ */
 function snapWith(extra: Record<string, unknown>) {
-  return {
-    runtime: { running: true, last_error: null, recovery: null },
-    // 页面各取所需；给全最小骨架，免得某个页面读 `settings.selected_node` 时炸掉
-    // （那会让「测试挂了」看起来像产品缺陷）。
-    nodes: [],
-    latency: {},
-    subscriptions: [],
-    settings: { selected_node: null },
-    ...extra,
-  } as never;
+  const base = scenarioSnapshot();
+  const merged: Record<string, unknown> = { ...base, ...extra };
+  // `settings` 这类嵌套对象如果整块替换，就会把一个**部分** settings 塞回去
+  // （例如 `{selected_node: null}`）—— 同样是不完整形状，所以按字段合并。
+  if (extra.settings && typeof extra.settings === "object") {
+    merged.settings = { ...base.settings, ...(extra.settings as Record<string, unknown>) };
+  }
+  return merged as never;
 }
 
 function renderIn(node: ReactElement) {

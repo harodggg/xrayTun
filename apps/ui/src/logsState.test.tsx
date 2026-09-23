@@ -39,11 +39,22 @@ vi.mock("./ipc", () => ({
 }));
 
 import Logs from "./pages/Logs";
+import { scenarioSnapshot } from "./previewSnapshot";
 import { StoreProvider } from "./store";
 
-/** 本页只关心 `runtime.running`，其余字段与这些断言无关。 */
-function snap(running: boolean) {
-  return { runtime: { running } } as never;
+/**
+ * 本页只关心 `runtime.running`，但快照**仍然要给完整的**：
+ * 部分形状的替身是「夹具在说谎」—— 页面今天只读这一个字段，明天多读一个就会
+ * 以 unhandled error 的形式炸掉（`Errors N` 会让退出码变 1，而通过数看不出来）。
+ */
+function snap(running: boolean, startedAt: number | null = running ? 1_700_000_000 : null) {
+  const base = scenarioSnapshot();
+  // `started_at_unix` 必须**显式**表达场景：空态文案的判据是它（task-128 的 B9），
+  // 而不是「字段恰好缺席」—— 原来那个部分形状的替身正是因为没写这个字段，
+  // 才让「核心没在跑」蒙对了「还没启动过」这句。
+  //   * 没在跑 ⇒ null（确实没启动过）
+  //   * 在跑   ⇒ 给一个真实时刻（于是走「已运行、但当前没有日志」那一支）
+  return { ...base, runtime: { ...base.runtime, running, started_at_unix: startedAt } } as never;
 }
 
 function renderLogs() {

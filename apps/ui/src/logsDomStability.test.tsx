@@ -49,6 +49,7 @@ vi.mock("./ipc", () => ({
 }));
 
 import Logs from "./pages/Logs";
+import { scenarioSnapshot } from "./previewSnapshot";
 import { MAX_UI_LOGS, StoreProvider } from "./store";
 
 /** 历史日志：故意让**同一秒内多行**（真实日志就是这样，所以 `ts_unix` 不能当身份）。 */
@@ -62,7 +63,16 @@ function seedHistory(n: number) {
 }
 
 async function renderLogs(seedCount = MAX_UI_LOGS) {
-  mocks.snapshot.mockResolvedValue({ runtime: { running: true } } as never);
+  // 同上（task-128 复盘）：快照替身必须**完整**，不能只给 `runtime`。
+  // 部分形状的替身会让「页面多读一个字段」变成 **unhandled error**，
+  // 而 unhandled error 在 vitest 里只体现在 `Errors N` 这一行 —— 通过数看不出来。
+  {
+    const base = scenarioSnapshot();
+    mocks.snapshot.mockResolvedValue({
+      ...base,
+      runtime: { ...base.runtime, running: true },
+    } as never);
+  }
   mocks.tailLogs.mockResolvedValue(seedHistory(seedCount));
   const r = render(
     <StoreProvider>

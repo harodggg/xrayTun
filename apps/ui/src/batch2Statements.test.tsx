@@ -173,7 +173,18 @@ describe("task-128 · 节点行在 busy 时不得继续承诺「点击切换」"
     const busyRow = document.querySelector(".node-row") as HTMLElement;
     expect(busyRow.getAttribute("title")).toBe("操作进行中，暂时不能切换节点");
     expect(busyRow.getAttribute("title")).not.toContain("点击切换");
-    release({});
+
+    // **这个 Promise 必须用一份真实的快照来结束。**
+    // `store.tsx:157` 是 `setSnapshot(await action())` —— 命令的返回值**就是**
+    // 新快照，所以任何「部分对象」都会在下一帧把 `snapshot.settings` 变成
+    // `undefined`，进而让 `Nodes.tsx:37`（`snapshot?.settings.selected_node`）抛异常。
+    // 这个异常**不再是这个测试的失败**，而是挂到整个 run 的 unhandled error 上
+    // （vitest 会打印 `Errors 1 error` 并把退出码变成 1）—— 冻结门禁在 `d95b4ef`
+    // 上就是这样红的（Lead 的证据：`TypeError: Cannot read properties of undefined
+    // (reading 'selected_node') ❯ Nodes src/pages/Nodes.tsx:37:32`）。
+    // 生产里 `add_manual_node` 返回的是完整 `AppSnapshot`，`{}` 是**夹具在说谎**；
+    // 所以这里补一份真实形状的快照（`snap()`），而不是给产品代码加防御。
+    release(snap());
   });
 });
 

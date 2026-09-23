@@ -114,8 +114,12 @@ async function renderWith(snapshot: unknown, ui: React.ReactElement, logs: unkno
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.diagnostics.mockResolvedValue("（诊断报告正文）");
-  mocks.start.mockResolvedValue(undefined);
-  mocks.stop.mockResolvedValue(undefined);
+  // `run("start"/"stop", …)` 走的是 `store.tsx:157` `setSnapshot(await action())`
+  // —— 返回值**就是**新快照，所以这里必须给完整快照，不能给 `undefined`
+  // （`{}`/部分对象更糟：会让 `snapshot.settings` 变成 undefined，把异常挂到
+  // 整个 run 的 unhandled error 上，冻结门禁就是这么红的 —— Lead 在 `d95b4ef` 上实测）。
+  mocks.start.mockResolvedValue(snap());
+  mocks.stop.mockResolvedValue(snap());
 });
 
 describe("task-120 · App 模式按钮的 tooltip 不能承诺产品做不到的事", () => {
