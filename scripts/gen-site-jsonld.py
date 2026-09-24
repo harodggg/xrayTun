@@ -53,7 +53,7 @@ WASM_REPO = "https://github.com/harodggg/xray-wasm"
 # 它与 XrayTun **不是同一个产品**：下载地址、Release、许可证都指向它自己的仓库，
 # 所以 SoftwareApplication 分支允许逐页覆盖这些字段（默认值仍是 XrayTun 的那套）。
 JEVX_REPO = "https://github.com/harodggg/jev-x-filter"
-JEVX_VERSION = "0.2.1"
+JEVX_VERSION = "0.3.0"
 JEVX_RELEASES = f"{JEVX_REPO}/releases"
 JEVX_DL = f"{JEVX_REPO}/releases/download/v{JEVX_VERSION}/jev-x-filter-{JEVX_VERSION}.zip"
 
@@ -126,10 +126,10 @@ PAGES = [
         "lang": "zh-Hans",
         "url": f"{BASE}/jev-x-filter/",
         "type": "SoftwareApplication",
-        "name": "黄推过滤器 · Jev",
+        "name": "信息过滤器 · Jev",
         "version": JEVX_VERSION,
         # 必须与页面 <meta name="description"> 逐字一致 —— 由 check() 强制。
-        "description": "黄推过滤器 · Jev 是一个 Chrome MV3 扩展：用 Jev（TypeSafe System One）的类型化决策在本地判定 x.com 时间线、回复区与推荐流里的色情推广，高置信度才隐藏并可选静音账号，附模型先行预检、文案农场检测与黑名单导入导出。它与 XrayTun 是同一个作者的两个独立项目。",
+        "description": "信息过滤器 · Jev 是一个 Chrome MV3 扩展：用 Jev（TypeSafe System One）的类型化决策在本地判定 x.com 时间线、回复区与推荐流里的垃圾信息 —— 色情/性交易引流、诈骗/博彩/荐股、广告导流、标题党、低质 AI、重复文案农场，六类独立开关。命中即隐藏，只有高置信度的类别才会动账号（默认演练模式）。它与 XrayTun 是同一个作者的两个独立项目。",
         "os": "Chrome 120 or later (Manifest V3)",
         "application_category": "BrowserApplication",
         "help_url": f"{BASE}/jev-x-filter/",
@@ -146,9 +146,9 @@ PAGES = [
         "lang": "en",
         "url": f"{BASE}/en/jev-x-filter/",
         "type": "SoftwareApplication",
-        "name": "Porn-tweet Filter · Jev",
+        "name": "Info Filter · Jev",
         "version": JEVX_VERSION,
-        "description": "Porn-tweet Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge adult promotion in your x.com timeline, replies and recommendations locally: hide on a hit, mute or block only at high confidence, with a model-first triage tier, a repeated-text farm detector and blocklist import/export. It is a separate project by the same author as XrayTun.",
+        "description": "Info Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge timeline junk in your x.com timeline, replies and recommendations locally: adult solicitation, scam/gambling/stock-tip fraud, ad and traffic spam, clickbait, low-quality AI filler and repeated-text farms — six categories with individual switches. Hits are hidden; only high-confidence categories can touch the account (dry-run by default). It is a separate project by the same author as XrayTun.",
         "os": "Chrome 120 or later (Manifest V3)",
         "application_category": "BrowserApplication",
         "help_url": f"{BASE}/en/jev-x-filter/",

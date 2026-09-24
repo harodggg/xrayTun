@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Porn-tweet Filter · Jev — filter adult promotion on X with Jev's typed decisions (Chrome extension)</title>
+    <title>Info Filter · Jev — filtering timeline junk on X with Jev's typed decisions (Chrome extension)</title>
     <meta
       name="description"
-      content="Porn-tweet Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge adult promotion in your x.com timeline, replies and recommendations locally: hide on a hit, mute or block only at high confidence, with a model-first triage tier, a repeated-text farm detector and blocklist import/export. It is a separate project by the same author as XrayTun."
+      content="Info Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge timeline junk in your x.com timeline, replies and recommendations locally: adult solicitation, scam/gambling/stock-tip fraud, ad and traffic spam, clickbait, low-quality AI filler and repeated-text farms — six categories with individual switches. Hits are hidden; only high-confidence categories can touch the account (dry-run by default). It is a separate project by the same author as XrayTun."
     />
     <link rel="canonical" href="https://xraytun.top/en/jev-x-filter/" />
     <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/jev-x-filter/" />
@@ -15,18 +15,18 @@
     <meta name="theme-color" content="#0f1420" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="XrayTun" />
-    <meta property="og:title" content="Porn-tweet Filter · Jev — filter adult promotion on X with Jev's typed decisions" />
+    <meta property="og:title" content="Info Filter · Jev — filtering timeline junk on X with Jev's typed decisions" />
     <meta
       property="og:description"
-      content="Chrome MV3 extension: model-first triage, repeated-text farm detection and confidence gates. Account actions only at high confidence, dry-run by default. A separate project by the same author as XrayTun."
+      content="Chrome MV3 extension: six switchable categories (adult / scam / ad spam / clickbait / low-quality AI / repeated-text farms), model-first triage plus confidence gates; only high-confidence categories can act on the account, dry-run by default."
     />
     <meta property="og:url" content="https://xraytun.top/en/jev-x-filter/" />
     <meta property="og:locale" content="en" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content="Porn-tweet Filter · Jev — filter adult promotion on X with Jev's typed decisions" />
+    <meta name="twitter:title" content="Info Filter · Jev — filtering timeline junk on X" />
     <meta
       name="twitter:description"
-      content="Chrome MV3 extension: model-first triage, repeated-text farm detection and confidence gates. Account actions only at high confidence, dry-run by default."
+      content="Chrome MV3 extension: six switchable categories, model-first triage plus confidence gates; only high-confidence categories can act on the account, dry-run by default."
     />
     <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="../../favicon.ico" sizes="32x32" />
@@ -37,13 +37,13 @@
 <script type="application/ld+json">{
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
-  "name": "Porn-tweet Filter · Jev",
+  "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.2.1",
+  "softwareVersion": "0.3.0",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -51,7 +51,7 @@
     "price": "0",
     "priceCurrency": "USD"
   },
-  "description": "Porn-tweet Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge adult promotion in your x.com timeline, replies and recommendations locally: hide on a hit, mute or block only at high confidence, with a model-first triage tier, a repeated-text farm detector and blocklist import/export. It is a separate project by the same author as XrayTun.",
+  "description": "Info Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge timeline junk in your x.com timeline, replies and recommendations locally: adult solicitation, scam/gambling/stock-tip fraud, ad and traffic spam, clickbait, low-quality AI filler and repeated-text farms — six categories with individual switches. Hits are hidden; only high-confidence categories can touch the account (dry-run by default). It is a separate project by the same author as XrayTun.",
   "inLanguage": "en"
 }</script>
 <!-- JSON-LD: generated by scripts/gen-site-jsonld.py — 改文案后重跑，别手改 -->
@@ -60,6 +60,14 @@
   "@type": "FAQPage",
   "inLanguage": "en",
   "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Which kinds of information can it filter?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Six, each individually switchable: adult and sexual solicitation, scam/gambling/stock-tip fraud, ad and traffic spam, clickbait and outrage bait, low-quality AI and rewritten filler, and repeated-text farms. The first three can mute or block an account at high confidence; the last three are hidden only."
+      }
+    },
     {
       "@type": "Question",
       "name": "Will it hide normal content?",
@@ -81,7 +89,7 @@
       "name": "Does it cost anything to use?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "The default preset is the TypeSafe official gateway, which needs your own Jev API key; you can also switch to OpenCode Zen’s free tier (model jev-1.13-free, no key required) to try it at zero cost. Rate limits and daily budgets are built in, and exceeding them degrades decisions to “needs review” instead of calling the model anyway."
+        "text": "The default preset is the TypeSafe official gateway, which needs your own Jev API key; you can also switch to OpenCode Zen’s free tier (model jev-1.13-free, no key required) to try it at zero cost. Rate limits and daily budgets are built in, and exceeding them degrades decisions to \"needs review\" instead of calling the model anyway."
       }
     },
     {
@@ -97,7 +105,7 @@
       "name": "Why is image judgement weaker than text?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Because Jev is a text-only decision model: its input can only be text, and it cannot see pictures. Images therefore go through a local skin-tone pixel heuristic that is only used to hide image-only posts as “needs review”, and it never triggers an account action on its own. For stronger image judgement you can configure a vision model endpoint in the options page."
+        "text": "Because Jev is a text-only decision model: its input can only be text, and it cannot see pictures. Images therefore go through a local skin-tone pixel heuristic that is only used to hide image-only posts as \"needs review\", and it never triggers an account action on its own. For stronger image judgement you can configure a vision model endpoint in the options page."
       }
     },
     {
@@ -132,7 +140,7 @@
     {
       "@type": "ListItem",
       "position": 2,
-      "name": "Porn-tweet Filter · Jev",
+      "name": "Info Filter · Jev",
       "item": "https://xraytun.top/en/jev-x-filter/"
     }
   ]
@@ -146,6 +154,7 @@
         <a class="brand" href="../../">XrayTun</a>
         <nav class="site-nav" aria-label="Page navigation">
           <a href="#what">What it is</a>
+          <a href="#categories">Categories</a>
           <a href="#decide">How it decides</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
@@ -161,24 +170,25 @@
 
     <main id="main">
       <section class="hero wrap" id="what">
-        <h1>Porn-tweet Filter · Jev: filtering adult promotion on X with Jev's typed decisions</h1>
+        <h1>Info Filter · Jev: filtering timeline junk on X with Jev's typed decisions</h1>
         <p class="lead">
           This is a <strong>Chrome MV3 extension</strong>. It screens locally, then asks
-          <a href="https://typesafe.ai/">Jev (TypeSafe System One)</a> a few
-          <strong>typed questions</strong> (yes/no, single choice, scale) and acts on the returned
-          <strong>probability and confidence</strong>: a hit is hidden, and only high-confidence adult content or
-          adult solicitation can touch the account (mute / block) — and by default it only
-          <strong>dry-runs</strong>. It is not a keyword blocklist: the real decision is made by the model,
+          <a href="https://typesafe.ai/">Jev (TypeSafe System One)</a> a few <strong>typed questions</strong>
+          (which category of junk this is, plus three independent pieces of evidence — adult, off-platform
+          solicitation, deception — and a severity score) and acts on the returned
+          <strong>category, probability and confidence</strong>: a hit is hidden;
+          <strong>only high-confidence categories can touch the account</strong> (mute/block), and by default it
+          only <strong>dry-runs</strong>. It is not a keyword blocklist: the decision is made by the model,
           keywords only decide whether a call is worth paying for.
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip"
-            >Download v0.2.1 (zip, 115.7 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip"
+            >Download v0.3.0 (zip, 123.4 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.2.1 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.3.0 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -189,13 +199,64 @@
       <section class="wrap prose" id="relation">
         <h2>Relationship to XrayTun: two independent projects by the same author</h2>
         <p>
-          This page is about <strong>Porn-tweet Filter · Jev</strong>, which
+          This page is about <strong>Info Filter · Jev</strong>, which
           <strong>is another independent project by the same author</strong> as <a href="../../">XrayTun</a>:
           XrayTun is an Xray GUI client for macOS, this is a browser extension. They
           <strong>are not integrated, share no code and do not depend on each other</strong>, and you cannot
           use this project to configure or manage Xray. They live on the same site because they come from the
           same author, not because they are one product.
         </p>
+      </section>
+
+      <section class="wrap prose" id="categories">
+        <h2>Six kinds of junk, each with its own switch</h2>
+        <p>
+          Turning a category off means it is <strong>neither hidden nor acted on</strong> (fallback paths are
+          switched off with it). Categories are decided by the model; the local pre-screen only decides whether
+          a call is worth paying for. <strong>Whether an account can be touched is a property of the category,
+          not of a threshold.</strong>
+        </p>
+        <table class="facts-table">
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Typical shape</th>
+              <th>Can it touch the account?</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Adult / sexual solicitation</td>
+              <td>local hookups, premium-content promos, "contact via profile", suggestive bait posts</td>
+              <td><strong>Yes</strong> at high confidence</td>
+            </tr>
+            <tr>
+              <td>Scam / gambling / stock tips</td>
+              <td>guaranteed returns, insider tips, pig-butchering, deposit bonuses, betting groups</td>
+              <td><strong>Yes</strong> when the deception evidence clears</td>
+            </tr>
+            <tr>
+              <td>Ad / traffic spam</td>
+              <td>"DM me", "link in bio", group recruitment, affiliate and agency spam, coupon bait</td>
+              <td><strong>Yes</strong> with strong solicitation and high severity</td>
+            </tr>
+            <tr>
+              <td>Clickbait / outrage bait</td>
+              <td>"you will not believe", "share before it is deleted", fake urgency</td>
+              <td>No — hidden only</td>
+            </tr>
+            <tr>
+              <td>Low-quality AI / rewritten filler</td>
+              <td>empty platitudes, copy-paste rewrites, keyword stuffing, AI boilerplate</td>
+              <td>No — hidden only</td>
+            </tr>
+            <tr>
+              <td>Repeated-text farm</td>
+              <td>one line copied by several accounts within minutes (structural signal, no model call)</td>
+              <td>No — hidden only</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section class="wrap prose" id="decide">
@@ -216,61 +277,54 @@
             <tr>
               <td>Local pre-screen</td>
               <td>
-                Readable regex over the text, the <strong>display name</strong>, card text and image alt;
-                whitelisted accounts, your own posts and too-short posts without media are skipped
+                Readable regex over the text, the <strong>display name</strong>, card text and image alt; emoji
+                inserted inside keywords (<code>处🐕男</code>) are stripped before matching; whitelisted
+                accounts, your own posts and too-short posts without media are skipped
               </td>
               <td>0 requests</td>
             </tr>
             <tr>
               <td>Triage (model first)</td>
               <td>
-                Posts the keywords missed are still asked <strong>one</strong> cheap question
-                (“is this bot-driven adult bait or suggestive self-promotion?”). At ≥0.75 it escalates to the
-                full four questions; at ≥0.65 it is only hidden as “needs review”
+                Posts the keywords missed are still asked <strong>one</strong> cheap question ("is this junk:
+                spam, scam bait or filler?"). At ≥0.75 it escalates to the full five questions; at ≥0.65 it is
+                only hidden as "needs review"
               </td>
-              <td>one single-question call (≈ 1/4 of the full set)</td>
+              <td>one single-question call (≈ 1/5 of the full set)</td>
             </tr>
             <tr>
               <td>Repeated-text farm</td>
               <td>
-                The same content-free line copied by <strong>≥3 different accounts</strong> within 30 minutes
-                → all of them hidden (including earlier ones that were let through). Normalisation strips
-                emoji, punctuation and case
+                The same content-free line copied by <strong>≥2 different accounts</strong> within 30 minutes
+                → all of them hidden (including earlier ones that were let through). Normalisation strips emoji,
+                punctuation and case
               </td>
               <td>0 requests</td>
             </tr>
             <tr>
               <td>Jev typed questions</td>
               <td>
-                Adult? Off-platform solicitation? Category (one of five, with confidence)? Severity (four-level
-                scale)? Questions are written in English; the post itself is never translated
+                Which category? Is it adult? Is it off-platform solicitation? Is it deceptive? How severe? —
+                questions are written in English; the post itself is never translated
               </td>
               <td>one call</td>
-            </tr>
-            <tr>
-              <td>Image signal</td>
-              <td>
-                Jev is a <strong>text-only model and cannot see images</strong>: images go through a local
-                skin-tone pixel heuristic (<code>OffscreenCanvas</code> inside the service worker, no network)
-                and only ever corroborate
-              </td>
-              <td>thumbnail download only</td>
             </tr>
           </tbody>
         </table>
         <p>
           Three invariants (documented in code and covered by unit tests): <strong>①</strong>
-          account actions require Jev’s strong category plus both confidence gates; triage, the farm
-          detector, the skin-tone heuristic and the optional vision model
-          <strong>on their own</strong> can reach “hidden” or “needs review” but
-          <strong>never block</strong>; <strong>②</strong> uncertainty is downgraded, never patched;
-          <strong>③</strong> every band states its reasons, visible in the filter bar and the audit log.
+          an account action needs an account-eligible category plus category confidence, severity and at least
+          one piece of hard evidence (adult / deception / strong solicitation); the pre-screen, the skin-tone
+          heuristic, the farm detector, the vision model and the triage probe
+          <strong>on their own</strong> can reach "hidden" or "needs review" but <strong>never block</strong>;
+          <strong>②</strong> uncertainty is downgraded, never patched; <strong>③</strong> every band states its
+          reasons, visible in the filter bar and the audit log.
         </p>
         <p class="warn">
           <strong>What happens on a hit is entirely your choice.</strong> The default is <strong>dry-run</strong>:
-          it only records “who would have been muted” in the audit log and clicks nothing. To make it act you
-          must explicitly enable “auto mute” (and optionally “mute hidden-band accounts too”) in the popup.
-          <strong>Blocking always requires the high-confidence four-question verdict.</strong>
+          it only records "who would have been muted" in the audit log and clicks nothing. To make it act you
+          must explicitly enable "auto mute" (and optionally "mute hidden-band accounts too") in the popup.
+          <strong>Blocking always requires the high-confidence action band.</strong>
         </p>
       </section>
 
@@ -278,23 +332,24 @@
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.2.0.zip -d jev-x-filter
+unzip jev-x-filter-0.3.0.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
-#    → "Load unpacked" → select the unzipped jev-x-filter directory
+#    → "Load unpacked" → select the unzipped info-filter directory
 
 # 3) click the extension icon → Options → section 1 "Jev access"
 #    · to use your own key: keep the TypeSafe Official preset and paste the key
 #    · to try it for free: switch to OpenCode Zen (jev-1.13-free, no key needed)
 #    · press "Test connection" and make sure typed answers come back
 
-# 4) open x.com. Watch the filter bars and the audit log, and only turn off dry-run
+# 4) pick the categories you want in section 1.5, then open x.com.
+#    Watch the filter bars and the audit log, and only turn off dry-run
 #    once you have seen it behave on your own timeline</code></pre>
         <p>
           Judging happens inside the extension’s service worker; the API key is stored only in
           <code>chrome.storage.local</code> and is <strong>never exposed to the page</strong>. The options page can
-          export and import the account blocklist (JSON), and one click on a filter bar adds a false positive to
-          the whitelist.
+          export and import the account blocklist (JSON), one click on a filter bar adds a false positive to the
+          whitelist, and the popup has six quick category switches.
         </p>
       </section>
 
@@ -316,15 +371,15 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td>131 passing (wire contract, gate invariants, pre-screen, farm, image pixels, blocklist, audit, pipeline)</td>
+              <td>136 passing (wire contract, category gates and switches, pre-screen, farm, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                71 passing: load the extension over CDP → fake-X fixture page → decide → hide → click the menu
-                (including two traps: Unmute/Unblock entries inside the menu and a pre-existing confirmation
-                button reusing the same test id)
+                75 passing: load the extension over CDP → fake-X fixture page (12 posts: adult, display-name
+                solicitation, emoji evasion, farm, scam, clickbait) → decide → hide → click the menu (including
+                UI traps and the "mute hidden band too" boundary)
               </td>
             </tr>
             <tr>
@@ -336,23 +391,25 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
               <td>Real-model check</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                22 real-world samples, 22/22 as designed (0 safety violations): adult spam is caught while
-                everyday posts, moderation news, sex education and swimwear posts all pass
+                27 real-world samples, 27/27 as designed (0 safety violations): adult solicitation and scams are
+                caught, clickbait and low-quality filler are hidden only, while everyday posts, moderation news,
+                sex education, swimwear and fitness posts all pass
               </td>
             </tr>
           </tbody>
         </table>
         <p>
-          Real-world feedback drove three rounds of fixes, each of which left a regression fixture behind: the
+          Real-world feedback drove four rounds of fixes, each of which left a regression fixture behind: the
           <strong>display-name vector</strong> (<code>🍑真实同城约p🍑主页联系🔞免费</code> with harmless post
-          text), the <strong>keyword-free suggestive brag</strong>
-          (<code>比我好看的没我骚🔧👏</code> from a gibberish account name), and the
+          text), the <strong>keyword-free suggestive brag</strong> from a gibberish account name, the
           <strong>reply-section text farm</strong> (one line posted by four accounts within a minute), and
           <strong>emoji inserted inside keywords</strong> (display name <code>❤️处男免费❤️</code>, post text
-          <code>处🐕男</code>). Two of
-          them were <strong>architectural</strong> misses: as soon as keyword matching decides whether the model is
-          asked at all, phrasings outside the table are unreachable for the model — which is exactly why the
-          model-first triage tier exists.
+          <code>处🐕男</code>). Two of them were <strong>architectural</strong> misses: as soon as keyword
+          matching decides whether the model is asked at all, phrasings outside the table are unreachable for the
+          model — which is exactly why the model-first triage tier exists. The emoji case then led to
+          symbol-stripping matches and to dropping the farm threshold to two accounts, and v0.3.0 turned the
+          adult-only gate into a <strong>category-based</strong> one: whether an account can be touched is decided
+          by the category.
         </p>
       </section>
 
@@ -361,8 +418,9 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
         <ul>
           <li>
             <strong>It will hide things it shouldn’t.</strong> The decision is probabilistic: sex education, art,
-            fitness, edgy jokes and local slang can be caught or missed. Every hit can be restored with one click
-            or added to the whitelist; treat the default dry-run as an observation period.
+            fitness, edgy jokes, local slang, ordinary advertising and serious news headlines can all be caught or
+            missed. Every hit can be restored with one click or added to the whitelist; treat the default dry-run
+            as an observation period.
           </li>
           <li>
             <strong>Auto mute/block are real account actions</strong> (performed by clicking the UI menus, not by
@@ -370,10 +428,10 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
             dry-runs by default, but it cannot promise immunity.
           </li>
           <li>
-            <strong>Jev cannot see images.</strong> Image-only adult spam relies on the local skin-tone heuristic
-            plus the “image-only post” shape and is hidden as “needs review”; it will
-            <strong>not</strong> mute an account because of a picture. A vision endpoint can be configured
-            separately for stronger image judgement.
+            <strong>Jev cannot see images.</strong> Image-only content relies on the local skin-tone heuristic plus
+            the "image-only post" shape and is hidden as "needs review"; it will <strong>not</strong> mute an
+            account because of a picture. A vision endpoint can be configured separately for stronger image
+            judgement.
           </li>
           <li>
             <strong>It depends on X’s DOM.</strong> A redesign can break the menu automation; failures are logged
@@ -382,7 +440,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
           </li>
           <li>
             <strong>You pay for your own model quota.</strong> Candidates and triage each cost one call; rate
-            limits and daily budgets are built in, and going over the budget degrades to “needs review” rather
+            limits and daily budgets are built in, and going over the budget degrades to "needs review" rather
             than hiding everything.
           </li>
           <li>
@@ -394,6 +452,13 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
 
       <section class="wrap prose" id="faq">
         <h2>FAQ</h2>
+
+        <h3>Which kinds of information can it filter?</h3>
+        <p>
+          Six, each individually switchable: adult and sexual solicitation, scam/gambling/stock-tip fraud, ad and
+          traffic spam, clickbait and outrage bait, low-quality AI and rewritten filler, and repeated-text farms.
+          The first three can mute or block an account at high confidence; the last three are hidden only.
+        </p>
 
         <h3>Will it hide normal content?</h3>
         <p>
@@ -413,7 +478,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
         <p>
           The default preset is the TypeSafe official gateway, which needs your own Jev API key; you can also switch
           to OpenCode Zen’s free tier (model jev-1.13-free, no key required) to try it at zero cost. Rate limits and
-          daily budgets are built in, and exceeding them degrades decisions to “needs review” instead of calling the
+          daily budgets are built in, and exceeding them degrades decisions to "needs review" instead of calling the
           model anyway.
         </p>
 
@@ -427,7 +492,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
         <p>
           Because Jev is a text-only decision model: its input can only be text, and it cannot see pictures. Images
           therefore go through a local skin-tone pixel heuristic that is only used to hide image-only posts as
-          “needs review”, and it never triggers an account action on its own. For stronger image judgement you can
+          "needs review", and it never triggers an account action on its own. For stronger image judgement you can
           configure a vision model endpoint in the options page.
         </p>
 
@@ -445,7 +510,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -457,13 +522,13 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
     <footer class="site-footer">
       <div class="wrap prose">
         <p>
-          This page is about <strong>Porn-tweet Filter · Jev</strong> — a
+          This page is about <strong>Info Filter · Jev</strong> — a
           <strong>separate</strong> project by the same author as <a href="../../">XrayTun</a>. Its licence is
           <strong>MIT</strong>, as is the bundled official Jev client; both live in the
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Porn-tweet Filter · Jev v0.2.1 · Chrome MV3 · page last updated 2026-09-23 ·
+          Info Filter · Jev v0.3.0 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
