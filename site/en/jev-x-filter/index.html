@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.1",
+  "softwareVersion": "0.4.2",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -173,6 +173,7 @@
           <a href="#categories">Categories</a>
           <a href="#decide">How it decides</a>
           <a href="#semantics">Duplicates &amp; outliers</a>
+          <a href="#lowsignal">Agreement once</a>
           <a href="#samples">Live samples</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
@@ -203,12 +204,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip"
-            >Download v0.4.1 (zip, 161.1 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip"
+            >Download v0.4.2 (zip, 167.2 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.4.1 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.2 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -389,6 +390,28 @@
         </p>
       </section>
 
+      <section class="wrap prose" id="lowsignal">
+        <h2>v0.4.2: pure agreement replies show once</h2>
+        <p>
+          Replies that carry no substance &mdash; agreement, confirmation, laughter, emoji-only &mdash; now keep only the
+          earliest one per thread; the rest collapse into a thin bar:
+          <code>same kind of agreement as @… · N more · [expand]</code>.
+        </p>
+        <p>
+          They are <strong>lexically different but semantically the same</strong>, so this runs as a local classifier
+          (<code>β.kind = agreement</code>) with <strong>zero model calls</strong>: no budget, and it never changes hiding or
+          account actions. It is deliberately conservative &mdash; <code>disagree</code> / <code>not sure</code> / questions /
+          numbers / links are never folded, and it only applies inside reply threads. Such replies are usually 2&ndash;4
+          characters long (previously skipped locally as too short); the skip now only skips the judgement, not the tidy-up.
+          A switch in options section 1.6 turns it off.
+        </p>
+        <p>
+          The same release promotes <code>只入身体…不入生活</code> to a strong local feature: before, a single occurrence
+          only reached junk 0.69 (review, no account action); now it goes straight to the full five questions
+          (measured: the gibberish-name one &rarr; <code>hide</code>, the one with a keyword display name &rarr; <code>block</code>).
+          In news/discussion context the rule downgrades to weight 1, so quoting the phrase is not hidden.
+        </p>
+      </section>
       <section class="wrap prose" id="samples">
         <h2>v0.4.1: three real-world samples, two misses closed</h2>
         <p>
@@ -415,7 +438,7 @@
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.4.1.zip -d info-filter
+unzip jev-x-filter-0.4.2.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -454,13 +477,13 @@ unzip jev-x-filter-0.4.1.zip -d info-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td><strong>234 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
+              <td><strong>246 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>116 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
+                <strong>125 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
                 anti-item menu entries, a stale Dropdown, a trigger with no layout box, async menu rendering,
                 localised menu entries, and a menu that genuinely lacks the target item) → decide → hide →
                 α badge / β fold → click the menu (including the “mute hidden band too” boundary and
@@ -476,7 +499,7 @@ unzip jev-x-filter-0.4.1.zip -d info-filter
               <td>Real-model check</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                <strong>37 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 11 · α flags 1 · semantic calls 12: adult solicitation and scams are
+                <strong>38 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 12 · α flags 1 · semantic calls 13: adult solicitation and scams are
                 caught, clickbait and low-quality filler are hidden only, while everyday posts, moderation news,
                 sex education, swimwear and fitness posts all pass
               </td>
@@ -625,7 +648,7 @@ unzip jev-x-filter-0.4.1.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -643,7 +666,7 @@ unzip jev-x-filter-0.4.1.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.4.1 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.4.2 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
