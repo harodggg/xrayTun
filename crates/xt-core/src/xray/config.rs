@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashSet};
 use serde_json::{json, Map, Value};
 
 use crate::model::{AppSettings, DnsHandling, Node, Protocol, RoutingPreset, Transport};
-use crate::routing::{self, RoutingRule};
+use crate::routing::{self, MatchCondition, Network, PortMatcher, RoutingRule, RuleAction};
 
 /// 管理 API 的本地端口。
 ///
@@ -91,6 +91,43 @@ impl InboundProfile {
     pub fn is_tun(&self) -> bool {
         matches!(self, Self::Tun(_) | Self::TunExternalDatapath)
     }
+}
+
+/// 把 opt-in 域名归一成 Xray 的域名表达式：没有前缀的加 `full:`（精确匹配）。
+///
+/// 为什么不一律加：用户可能自己写 `domain:` / `geosite:` —— 那些是合法表达式，
+/// 硬加前缀会把它变成一个不存在的域名。
+fn mitm_domains(s: &AppSettings) -> Vec<String> {
+    s.mitm
+        .domains
+        .iter()
+        .map(|d| d.trim().to_ascii_lowercase())
+        .filter(|d| !d.is_empty())
+        .map(|d| if d.contains(':') { d } else { format!("full:{d}") })
+        .collect()
+}
+
+/// MITM 的**回连**入站。未启用/空名单时返回 `Null`（`inbounds` 里会被过滤掉）。
+///
+/// 为什么用 `Vec<Value>` 而不是单个 `Value`：调用点直接在 `vec![...]` 里写它，
+/// 不启用时不想留一个占位元素（那会让"有没有这个入站"变得难判）。
+fn mitm_inbound(s: &AppSettings) -> Vec<Value> {
+    if !s.mitm.is_active() {
+        return Vec::new();
+    }
+    vec![json!({
+        "tag": "mitm-upstream",
+        "listen": "127.0.0.1",
+        "port": s.mitm.upstream_port,
+        "protocol": "socks",
+        "settings": {
+            "auth": "noauth",
+            // MITM 回连的是 TCP（它自己就是 TLS 终结方，不需要 UDP）。
+            "udp": false,
+            "userLevel": 0
+        }
+        // **刻意不开 sniffing**：目标域名由 SOCKS 请求自带，不需要再嗅探一遍。
+    })]
 }
 
 /// 根据设置推导出原生 TUN 入站的参数。
@@ -354,7 +391,7 @@ fn build_inbounds(s: &AppSettings, profile: &InboundProfile) -> Value {
 
     let listen = if s.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
 
-    let mut inbounds = vec![
+    let mut inbounds: Vec<Value> = vec![
         json!({
             "tag": "socks",
             "listen": listen,
@@ -368,6 +405,11 @@ fn build_inbounds(s: &AppSettings, profile: &InboundProfile) -> Value {
             },
             "sniffing": sniffing
         }),
+        // MITM 的**回连**入站：MITM 进程通过它把重新加密后的流量送回核心。
+        //
+        // 它必须有**自己的 tag**：steer 规则里的 `inboundTag` 只列 tun/socks/http，
+        // 于是回连天然不命中 steer 规则 —— 防自环靠的是构造，而不是一条"旁路规则"。
+        // 环回地址不进 TUN，所以从 MITM 到这里的这一步不经过隧道。
         json!({
             "tag": "http",
             "listen": listen,
@@ -379,6 +421,9 @@ fn build_inbounds(s: &AppSettings, profile: &InboundProfile) -> Value {
     ];
 
     // API 入站：只监听回环。
+    // MITM 的回连入站（未启用时是空的，不留占位元素）。
+    inbounds.extend(mitm_inbound(s));
+
     inbounds.push(json!({
         "tag": "api",
         "listen": "127.0.0.1",
@@ -520,6 +565,21 @@ fn build_outbounds(nodes: &[Node], input: &CoreConfigInput<'_>) -> Value {
         "settings": {},
         "streamSettings": { "sockopt": Value::Object(direct_sockopt) }
     }));
+
+    // MITM 出站：把被 steer 的流量**重定向**到本机 MITM 端口。
+    //
+    // 用 `freedom.settings.redirect` 而不是 `http` outbound：后者只支持 TCP
+    // （`proxy/http/client.go` 对 UDP 直接报错），而 redirect 的
+    // `DestinationOverride` TCP/UDP 都走。
+    //
+    // 注意它**不传递原始目标**：MITM 必须自己从 SNI/Host 还原 —— 这是数据面的硬约束。
+    if input.settings.mitm.is_active() {
+        out.push(json!({
+            "tag": "mitm-out",
+            "protocol": "freedom",
+            "settings": { "redirect": format!("127.0.0.1:{}", input.settings.mitm.listen_port) }
+        }));
+    }
 
     // 拦截出站。
     out.push(json!({
@@ -745,6 +805,52 @@ pub fn merge_rules_with_intent(
         let mut band: Vec<RoutingRule> = Vec::with_capacity(intent_allow.len() + intent_block.len());
         band.extend(intent_allow.iter().cloned());
         band.extend(intent_block.iter().cloned());
+        rules.splice(at..at, band);
+    }
+
+    // ---- MITM 的 steer 带（内容级判定） ----
+    //
+    // 位置：**紧跟在意图带之后**。理由与 intent 带相同（必须早于 preset-ads / cn，
+    // 否则被 direct 先命中），而放在意图带之后是因为：**已经被判为广告、直接拦掉的域名
+    // 没必要再拆一次 TLS**。
+    if s.mitm.is_active() {
+        let domains = mitm_domains(s);
+        let mut at = rules
+            .iter()
+            .position(|r| r.id == "preset-private")
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        while at < rules.len() && rules[at].id.starts_with("intent-") {
+            at += 1;
+        }
+        let mut band = vec![RoutingRule::new(
+            "mitm-steer",
+            "MITM 拆包（仅 opt-in 域名）",
+            MatchCondition {
+                domains: domains.clone(),
+                // **只列本地入口**：回连走的是 `mitm-upstream`，不在这个列表里 ⇒
+                // 从构造上不可能自环（也就不需要一条容易被改坏的"旁路规则"）。
+                inbound_tags: vec!["tun".into(), "socks".into(), "http".into()],
+                ..Default::default()
+            },
+            RuleAction::Proxy { outbound: Some("mitm-out".into()) },
+        )];
+        if s.mitm.block_quic {
+            // QUIC 拆不了：只对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP。
+            // **不做全局**（那会打断所有 HTTP/3 站点），代价是首次回退要等一次超时。
+            band.push(RoutingRule::new(
+                "mitm-quic-fallback",
+                "MITM：opt-in 域名禁 QUIC（逼回 TCP）",
+                MatchCondition {
+                    domains,
+                    inbound_tags: vec!["tun".into()],
+                    ports: vec![PortMatcher::Single(443)],
+                    network: Network::Udp,
+                    ..Default::default()
+                },
+                RuleAction::Block,
+            ));
+        }
         rules.splice(at..at, band);
     }
 
@@ -1132,6 +1238,7 @@ pub fn lint_node(node: &Node) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::model::{NodeSource, ProxyMode, TlsSettings};
+    use crate::model::MitmSettings;
     use crate::routing::{MatchCondition, RuleAction};
 
     fn node() -> Node {
@@ -1172,6 +1279,157 @@ mod tests {
 
     fn tun_profile(s: &AppSettings) -> InboundProfile {
         InboundProfile::Tun(tun_inbound_spec(s, Some("en0"), true))
+    }
+
+    // -----------------------------------------------------------------------
+    // MITM：引导与防自环（P4 第三步的第一半）
+    // -----------------------------------------------------------------------
+
+    fn mitm_settings() -> AppSettings {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        s.mitm.enabled = true;
+        s.mitm.domains = vec!["news.example".into(), "domain:shop.example".into()];
+        s.mitm.listen_port = 39010;
+        s.mitm.upstream_port = 39011;
+        s
+    }
+
+    fn inbound_tags(cfg: &serde_json::Value) -> Vec<String> {
+        cfg["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|i| i["tag"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// **防自环的不变量**（这条是本轮最重要的断言）：steer 规则的 `inboundTag`
+    /// 里**绝不能**出现回连入站的 tag —— 否则 MITM 的重新拨号会再次命中 steer，
+    /// 形成"拆包 → 再拆包"的无限环。
+    #[test]
+    fn the_steer_rule_can_never_match_the_mitm_upstream_inbound() {
+        let s = mitm_settings();
+        let rules = merge_rules_with_intent(&s, &[], &[]);
+        let steer = rules.iter().find(|r| r.id == "mitm-steer").expect("必须有 steer 规则");
+        assert!(
+            !steer.when.inbound_tags.iter().any(|t| t == "mitm-upstream"),
+            "steer 规则包含了回连入站 ⇒ 会自环：{:?}",
+            steer.when.inbound_tags
+        );
+        // 而回连入站**确实存在**（否则这条断言的"不包含"就没有意义 —— 可能只是没建）。
+        let cfg: serde_json::Value =
+            serde_json::from_str(&build_pretty(&CoreConfigInput {
+                settings: &s,
+                nodes: &[],
+                selected: None,
+                rules: &rules,
+                profile: InboundProfile::LocalProxy,
+                physical_interface: None,
+            }))
+            .unwrap();
+        assert!(inbound_tags(&cfg).contains(&"mitm-upstream".to_string()));
+        assert!(
+            cfg["outbounds"].as_array().unwrap().iter().any(|o| o["tag"] == "mitm-out"),
+            "没有 mitm-out 出站，规则会指向一个不存在的 tag（核心拒启）"
+        );
+    }
+
+    #[test]
+    fn the_steer_band_sits_after_the_intent_band_and_before_ads_and_cn() {
+        let s = mitm_settings();
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+        let rules = merge_rules_with_intent(&s, &[], &block);
+        let steer = order_of(&rules, "mitm-steer");
+        assert!(order_of(&rules, "preset-private") < steer);
+        assert!(order_of(&rules, "intent-block-ads.example") < steer, "意图带必须在 MITM 之前");
+        assert!(steer < order_of(&rules, "preset-ads"), "被 direct 先命中就等于没 steer");
+        assert!(steer < order_of(&rules, "preset-cn-domain"));
+    }
+
+    #[test]
+    fn mitm_generates_nothing_when_disabled_or_the_list_is_empty() {
+        // 关闭
+        let off = settings();
+        assert!(!off.mitm.enabled);
+        assert!(!merge_rules_with_intent(&off, &[], &[]).iter().any(|r| r.id.starts_with("mitm-")));
+
+        // 打开但名单为空 ⇒ 行为上等于没开（不能因为"开关是开的"就生成规则）
+        let mut empty = mitm_settings();
+        empty.mitm.domains.clear();
+        assert!(!empty.mitm.is_active());
+        assert!(!merge_rules_with_intent(&empty, &[], &[]).iter().any(|r| r.id.starts_with("mitm-")));
+    }
+
+    #[test]
+    fn the_mitm_outbound_redirects_to_the_configured_port() {
+        let s = mitm_settings();
+        let rules = merge_rules_with_intent(&s, &[], &[]);
+        let cfg: serde_json::Value = serde_json::from_str(&build_pretty(&CoreConfigInput {
+            settings: &s, nodes: &[], selected: None, rules: &rules,
+            profile: InboundProfile::LocalProxy, physical_interface: None,
+        }))
+        .unwrap();
+        let out = cfg["outbounds"].as_array().unwrap().iter()
+            .find(|o| o["tag"] == "mitm-out").expect("mitm-out");
+        assert_eq!(out["protocol"], "freedom");
+        assert_eq!(out["settings"]["redirect"], "127.0.0.1:39010");
+        // 回连入站的端口也要在
+        let up = cfg["inbounds"].as_array().unwrap().iter()
+            .find(|i| i["tag"] == "mitm-upstream").expect("mitm-upstream");
+        assert_eq!(up["port"], 39011);
+        assert_eq!(up["protocol"], "socks");
+    }
+
+    #[test]
+    fn domains_without_a_prefix_become_full_matches_and_prefixed_ones_are_left_alone() {
+        let s = mitm_settings();
+        let rules = merge_rules_with_intent(&s, &[], &[]);
+        let steer = rules.iter().find(|r| r.id == "mitm-steer").unwrap();
+        assert_eq!(
+            steer.when.domains,
+            vec!["full:news.example".to_string(), "domain:shop.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn quic_fallback_only_exists_when_asked_and_only_for_the_opt_in_list() {
+        let s = mitm_settings();
+        assert!(!merge_rules_with_intent(&s, &[], &[]).iter().any(|r| r.id == "mitm-quic-fallback"));
+
+        let mut q = mitm_settings();
+        q.mitm.block_quic = true;
+        let rules = merge_rules_with_intent(&q, &[], &[]);
+        let fb = rules.iter().find(|r| r.id == "mitm-quic-fallback").expect("开了就该有");
+        assert_eq!(fb.when.network, Network::Udp);
+        assert_eq!(fb.when.ports, vec![PortMatcher::Single(443)]);
+        assert_eq!(fb.when.inbound_tags, vec!["tun".to_string()]);
+        assert_eq!(fb.then, RuleAction::Block);
+        // 它必须也在 preset-ads / cn 之前（否则同样被 direct 吃掉）。
+        let ads = order_of(&rules, "preset-ads");
+        let cn = order_of(&rules, "preset-cn-domain");
+        let at = order_of(&rules, "mitm-quic-fallback");
+        assert!(at < ads && at < cn);
+    }
+
+    #[test]
+    fn mitm_ports_must_not_collide_with_each_other() {
+        let mut s = MitmSettings { enabled: true, domains: vec!["a.example".into()], ..Default::default() };
+        assert!(s.validate().is_empty());
+        s.upstream_port = s.listen_port;
+        let errs = s.validate();
+        assert!(errs.iter().any(|e| e.contains("不能相同")), "{errs:?}");
+
+        let mut zero = MitmSettings { enabled: true, domains: vec!["a.example".into()], ..Default::default() };
+        zero.listen_port = 0;
+        assert!(zero.validate().iter().any(|e| e.contains("不能为 0")));
+    }
+
+    #[test]
+    fn an_enabled_mitm_with_an_empty_list_is_reported_by_validate() {
+        let s = MitmSettings { enabled: true, domains: Vec::new(), ..Default::default() };
+        assert!(s.validate().iter().any(|e| e.contains("空的")), "{:?}", s.validate());
+        assert!(!s.is_active());
     }
 
     // -----------------------------------------------------------------------

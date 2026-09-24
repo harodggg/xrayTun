@@ -1045,6 +1045,78 @@ impl IntentSettings {
     }
 }
 
+/// MITM（内容级判定）的设置。
+///
+/// # 默认全关，而且**空名单 = 不出规则**
+///
+/// 这是整个功能里唯一会改系统状态的部分（要往系统钥匙串装一个本地根证书、
+/// 还要拆 TLS），所以默认关闭；而且即使打开了，**名单为空时也不生成任何 steer 规则** ——
+/// 「打开了但什么都没配」在行为上应当等于没开。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MitmSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// MITM 进程监听的本地端口（被 steer 的流量会送到这里）。
+    #[serde(default = "default_mitm_port")]
+    pub listen_port: u16,
+    /// MITM **回连**用的本地 socks 入站端口。
+    ///
+    /// **必须与 tun 的入站分开**：steer 规则里的 `inboundTag` 只列 tun/socks/http，
+    /// 于是回连天然不会命中 steer 规则 —— 防自环是靠**构造**，不是靠一条"旁路规则"
+    /// （后者容易被后来者调整顺序时改坏）。
+    #[serde(default = "default_mitm_upstream_port")]
+    pub upstream_port: u16,
+    /// 只对**这些域名**拆 TLS（opt-in）。空 = 等同于没开。
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// 对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP（QUIC 拆不了）。
+    #[serde(default)]
+    pub block_quic: bool,
+}
+
+fn default_mitm_port() -> u16 {
+    10810
+}
+fn default_mitm_upstream_port() -> u16 {
+    10811
+}
+
+impl Default for MitmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_port: default_mitm_port(),
+            upstream_port: default_mitm_upstream_port(),
+            domains: Vec::new(),
+            block_quic: false,
+        }
+    }
+}
+
+impl MitmSettings {
+    /// 出站/入站/规则要不要生成 —— 由它一处决定，避免三处各判一遍。
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.domains.is_empty()
+    }
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut errs = Vec::new();
+        if self.enabled && self.domains.is_empty() {
+            errs.push("MITM 已开启，但 opt-in 域名列表是空的（等于没开）".into());
+        }
+        if !self.enabled {
+            return errs;
+        }
+        if self.listen_port == 0 || self.upstream_port == 0 {
+            errs.push("MITM 的监听/回连端口不能为 0".into());
+        }
+        if self.listen_port == self.upstream_port {
+            errs.push("MITM 的监听端口与回连端口不能相同（会自己连自己）".into());
+        }
+        errs
+    }
+}
+
 /// 设置文件的版本号。用来做**一次性迁移**。
 ///
 /// 0 表示 0.1.0 时代写下的文件（那时还没有这个字段）。
@@ -1110,6 +1182,9 @@ pub struct AppSettings {
     /// 新字段缺省就等于"用户从没开过这个功能"，与迁移的语义一致。
     #[serde(default)]
     pub intent: IntentSettings,
+    /// MITM（内容级判定）。默认关闭；空名单等于没开。见 [`MitmSettings`]。
+    #[serde(default)]
+    pub mitm: MitmSettings,
 }
 
 fn default_socks_port() -> u16 {
@@ -1146,6 +1221,7 @@ impl Default for AppSettings {
             restore_system_proxy_on_exit: true,
             show_speed_in_title: true,
             intent: IntentSettings::default(),
+            mitm: MitmSettings::default(),
         }
     }
 }
