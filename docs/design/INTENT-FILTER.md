@@ -758,7 +758,9 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P1 传输层（提前做，P2b 的前置） | ✅ 完成 | `cargo test -p xt-intent` ⇒ **127 passed**（新增 `transport` 的 14 条 + `jev` 网关的 14 条：URL/请求组包/头注入防护/`Content-Length`/`chunked`/三种状态映射/退避与 `Retry-After`/抖动上界/不重试的 4xx）；在线用例见上 |
 | P2b-1 桌面接线（**只观察/判定/审计**） | ✅ 完成 | `cargo test --workspace` ⇒ **770 passed**（含 `apps/desktop/src/intent.rs` 的 21 条）；`clippy --workspace --all-targets -D warnings` 干净；UI `vitest` 366 passed |
 | P2b-2 规则物化进配置 | ✅ 完成 | `IntentRuntime::rules()` → `Supervisor::set_intent_rules` → `start()` 生成配置时走 `merge_rules_with_intent`。单测钉住"意图规则真的进了那份规则表"及位置（`preset-private` → 放行 → 拦截 → `preset-ads` → `cn`）；配置级别由 `real_core.rs` 用真实核心验收 |
-| P2b-3 生效时机与自动应用 | ⏳ 未开始 | 见下面「P2b-2 的边界」：规则**在下次核心启动时生效**，本版**不自动重启核心**；`needs_apply()` 已经能报"待生效"，但还没有界面去消费它 |
+| P2b-3 免重启热加规则 | 🔬 契约已核实、实现未开始 | 字段号与 RPC 见**附录 A**（按 `v26.9.9` 原始 proto 逐个核对）；六个坑与 DoD 也写在那里 |
+| P3a 界面入口（6 个命令 + 契约） | ✅ 完成 | `commands/intent.rs` + `ipc.ts`；契约测试的**两把哨兵**（Rust 注册数、TS 字面量数）都同步到 43 |
+| P3b 意图过滤页 | ✅ 完成 | 导航新增「意图过滤」；`cargo test --workspace` 797 passed、`vitest` **39 文件 / 381 passed**、`tsc --noEmit` 干净 |
 | **数据面验收（真实核心 + 真实 TCP）** | ✅ 完成 | `cargo test -p xt-intent --test real_core_dataplane` ⇒ **2 passed**：对照组 `allowed.intent-dataplane` 拿到 **200**，实验组 `blocked.intent-dataplane` 拿到 **403**（blackhole 的响应）；全离线（本地 HTTP 服务 + `dns.hosts` 映射 + 全部现取端口），不打扰机器上正在跑的 xray |
 | **P1.5 离线评测** | ✅ 完成（模型指标待额度） | `cargo run -p xt-intent --example eval_domains` ⇒ 本机真实语料，见 `docs/verification/INTENT-EVAL-BASELINE.md`。**已量到**：16,634 条连接 / 259 个域名，静态名单只覆盖 **0.78% 的连接**，**138 个域名无标注**（模型要判的那批），**63.2% 的连接行配不到域名**。**还量不到**：模型指标 —— 免密钥档返回 429（原因分布 `gateway_errors=12`），需要一个 Key 或额度恢复 |
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
@@ -807,3 +809,104 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 
 Jev 在**域名级**问题上的精确率/误杀率，本设计一次都没有假设过。P1.5 的评测夹具
 是把它变成数字的唯一途径；在这个数字出来之前，功能默认关闭、即使打开也是演练模式。
+
+---
+
+## 附录 A · `RoutingService` 的 protobuf 契约（**已按 tag 逐个核对**）
+
+> 来源：`github.com/XTLS/Xray-core` 的 **tag `v26.9.9`** 原始文件
+> （`app/router/command/command.proto`、`app/router/config.proto`、
+> `common/geodata/geodat.proto`、`common/net/port.proto`、`common/net/network.proto`、
+> `common/serial/typed_message.proto`）。
+> **下一步实现 P2b-3 时直接用这张表，不要再凭记忆猜字段号** ——
+> 猜错的症状是"调用成功但规则没生效"或者整份规则表被清空。
+
+### A.1 RPC
+
+```text
+/xray.app.router.command.RoutingService/AddRule
+/xray.app.router.command.RoutingService/RemoveRule
+/xray.app.router.command.RoutingService/ListRule
+```
+
+传输就是本项目已经用手写过的那条：**明文 h2c**（`crates/xt-core/src/xray/stats.rs`
+同一个模式），api 入站 + `"services": ["RoutingService"]`（`config.rs::build_api` 已经开了）。
+
+### A.2 消息与字段号
+
+```proto
+message AddRuleRequest  { TypedMessage config = 1; bool shouldAppend = 2; }
+message AddRuleResponse {}
+message RemoveRuleRequest { string ruleTag = 1; }
+message RemoveRuleResponse {}
+message ListRuleRequest {}
+message ListRuleItem   { string tag = 1; string ruleTag = 2; }
+message ListRuleResponse { repeated ListRuleItem rules = 1; }
+
+message TypedMessage { string type = 1; bytes value = 2; }   // type = "xray.app.router.Config"
+
+message Config {
+  enum DomainStrategy { AsIs = 0; /* reserved 1; */ IpIfNonMatch = 2; IpOnDemand = 3; }
+  DomainStrategy domain_strategy = 1;
+  repeated RoutingRule rule = 2;
+  repeated BalancingRule balancing_rule = 3;
+}
+
+message RoutingRule {
+  oneof target_tag { string tag = 1; string balancing_tag = 12; }
+  string rule_tag = 19;
+  repeated DomainRule domain = 2;
+  repeated IPRule ip = 10;
+  PortList port_list = 14;            // 2 → domain 之后的字段号**不是递增的**，别猜
+  repeated Network networks = 13;
+  repeated IPRule source_ip = 11;
+  PortList source_port_list = 16;
+  repeated string user_email = 7;
+  repeated string inbound_tag = 8;
+  repeated string protocol = 9;
+  map<string, string> attributes = 15;
+  repeated IPRule local_ip = 17;
+  PortList local_port_list = 18;
+  PortList vless_route_list = 20;
+  repeated string process = 21;
+  WebhookConfig webhook = 22;
+}
+
+message DomainRule { oneof value { GeoSiteRule geosite = 1; Domain custom = 2; } }
+message Domain {
+  enum Type { Substr = 0; Regex = 1; Domain = 2; Full = 3; }
+  Type type = 1; string value = 2;
+}
+message PortList  { repeated PortRange range = 1; }
+message PortRange { uint32 From = 1; uint32 To = 2; }
+enum Network { Unknown = 0; TCP = 2; UDP = 3; UNIX = 4; }   // **没有 1**
+```
+
+### A.3 本项目要用的映射
+
+| 我们的 `MatchCondition` | protobuf |
+|---|---|
+| `domains: ["full:ads.example"]` | `RoutingRule.domain += DomainRule{ custom: Domain{ type: Full(3), value: "ads.example" } }` |
+| `domains: ["geosite:cn"]` | `DomainRule{ geosite: GeoSiteRule{...} }`（要另外编码，P2b-3 用不到） |
+| `inbound_tags: ["tun"]` | `inbound_tag += "tun"` |
+| `then: Block` | `target_tag = { tag: "block" }`（**出站 tag 是字符串字段，不是枚举**） |
+| `id`（我们的 ruleTag） | `rule_tag = "intent-block-ads.example"` |
+
+### A.4 六个必须记住的坑（否则会静默改坏路由）
+
+1. **`shouldAppend: false` 会替换整份规则表。** 规则表里同时有预设、自定义与我们的
+   `internal-*`；整份替换等于把它们全删掉。**只允许 `true` + 按 `ruleTag` 逐条删。**
+2. **`domain_strategy` 只在 `Router.Init` 里读**，`AddRule` 改不动它 ⇒ 本功能不碰它。
+3. **`ruleTag` 全局唯一**，撞了整次调用报错且**什么都不变**（幂等，不需要回滚）。
+4. **`RemoveRule` 删不存在的 tag 会静默成功** —— 不能拿它当"这条规则在不在"的判据，
+   要用 `ListRule`。
+5. **运行期加的规则不在生成的 `config.json` 里** ⇒ 核心一重启就没了。
+   所以"重启后重新下发"必须由调用方保证（`start_core` 成功之后那一处）。
+6. **`AddRule` 引用不存在的 balancer 会失败**，而我们不用 balancer。
+
+### A.5 验收判据（P2b-3 的 Definition of Done）
+
+* `AddRule` 之后 `ListRule` 里能看到那条 `ruleTag`；
+* **切换拦截集合时已建立的连接不断**：一条长连接在两个时刻都取得到数据；
+* 负对照：删掉规则之后同一个域名**恢复**可达（证明"不断"不是因为规则压根没生效）；
+* 整份规则表在操作前后**只多/少了 `intent-*`**（`ListRule` 逐条比对）。
