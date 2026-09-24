@@ -40,10 +40,10 @@
   "name": "信息过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.3.0",
+  "softwareVersion": "0.3.1",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -181,13 +181,13 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip"
-            >下载 v0.3.0（zip，123.4 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip"
+            >下载 v0.3.1（zip，128.1 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.3.0 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.3.1 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -291,7 +291,7 @@
               <td>重复文案农场</td>
               <td>
                 同一段无实质内容的话被 <strong>≥2 个不同账号</strong>在 30 分钟内复制 → 全部隐藏
-                （含更早出现、当时被判放行的那几条）。归一会吃掉 emoji、标点与大小写
+                （含更早出现、当时被判放行的那几条）。**近似去重**（3-gram 重叠系数 ≥0.8）：同一句各插不同垃圾字符、重复写两遍都算同一段；归一会吃掉 emoji、标点与大小写
               </td>
               <td>0 请求</td>
             </tr>
@@ -361,13 +361,13 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
             <tr>
               <td>单元测试</td>
               <td><code>npm test</code></td>
-              <td>136 个通过（协议契约、类别闸门与开关、预筛、农场、图片像素、黑名单、审计、流水线）</td>
+              <td>143 个通过（协议契约、类别闸门与开关、预筛、农场、图片像素、黑名单、审计、流水线）</td>
             </tr>
             <tr>
               <td>真实 Chrome 端到端</td>
               <td><code>npm run verify</code></td>
               <td>
-                75 项通过：CDP 加载扩展 → 仿 X 夹具页（色情/显示名引流/emoji 拆字/农场/诈骗/标题党共 12 条）
+                76 项通过：CDP 加载扩展 → 仿 X 夹具页（色情/显示名引流/emoji 拆字/农场/诈骗/标题党共 12 条）
                 → 判定 → 隐藏 → 点菜单（含 UI 陷阱与「隐藏档也静音」边界）
               </td>
             </tr>
@@ -380,7 +380,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
               <td>真实模型验证</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                27 条真站样本、27/27 符合设计（安全底线 0 违反）：色情引流与诈骗被拦下，
+                30 条真站样本、安全底线 0 违反（安全底线 0 违反）：色情引流与诈骗被拦下，
                 标题党/低质只隐藏，日常/治理新闻/性教育/泳装/健身全部放行
               </td>
             </tr>
@@ -392,10 +392,15 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <strong>完全不含关键词的骚式自夸</strong>（乱码账号名）、
           <strong>回复区文案农场</strong>（同一句被 4 个账号同一分钟刷出），以及
           <strong>关键字中间插 emoji</strong>（显示名写 <code>❤️处男免费❤️</code>、正文写
-          <code>处🐕男</code>）。
+          <code>处🐕男</code>），以及
+          <strong>同一句各插不同垃圾字符的农场变体</strong>（<code>…没我骚蝎🐾…</code> /
+          <code>…没我骚🐾💩…</code>）。
           其中两个是<strong>架构性</strong>漏洞：关键词表一旦成为「要不要问模型」的门槛，
           表外的写法模型永远看不到 —— 这正是新增「预检（模型先行）」的原因；
-          插 emoji 那一条则促成了<strong>去符号匹配</strong>与<strong>农场阈值降到 2 个账号</strong>。
+          插 emoji 那一条促成了<strong>去符号匹配</strong>与<strong>农场阈值降到 2 个账号</strong>；
+          农场变体那一条把农场从「精确相同文案」改成<strong>近似去重</strong>，
+          并暴露出 <strong>MV3 Service Worker 回收会清空运行态</strong>（含限速预算）—— 现在用
+          <code>chrome.storage.session</code> 跨重启恢复。
           v0.3.0 把「只认色情」的闸门改成<strong>类别化</strong>：能不能动账号由类别决定。
         </p>
       </section>
@@ -486,7 +491,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -504,7 +509,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          信息过滤器 · Jev v0.3.0 · Chrome MV3 · 页面最后更新 2026-09-24 ·
+          信息过滤器 · Jev v0.3.1 · Chrome MV3 · 页面最后更新 2026-09-24 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>

@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.3.0",
+  "softwareVersion": "0.3.1",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -183,12 +183,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/jev-x-filter-0.3.0.zip"
-            >Download v0.3.0 (zip, 123.4 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip"
+            >Download v0.3.1 (zip, 128.1 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.3.0 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.3.1 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -371,13 +371,13 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td>136 passing (wire contract, category gates and switches, pre-screen, farm, image pixels, blocklist, audit, pipeline)</td>
+              <td>143 passing (wire contract, category gates and switches, pre-screen, farm, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                75 passing: load the extension over CDP → fake-X fixture page (12 posts: adult, display-name
+                76 passing: load the extension over CDP → fake-X fixture page (12 posts: adult, display-name
                 solicitation, emoji evasion, farm, scam, clickbait) → decide → hide → click the menu (including
                 UI traps and the "mute hidden band too" boundary)
               </td>
@@ -391,7 +391,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
               <td>Real-model check</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                27 real-world samples, 27/27 as designed (0 safety violations): adult solicitation and scams are
+                30 real-world samples, 0 safety violations (0 safety violations): adult solicitation and scams are
                 caught, clickbait and low-quality filler are hidden only, while everyday posts, moderation news,
                 sex education, swimwear and fitness posts all pass
               </td>
@@ -404,12 +404,16 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           text), the <strong>keyword-free suggestive brag</strong> from a gibberish account name, the
           <strong>reply-section text farm</strong> (one line posted by four accounts within a minute), and
           <strong>emoji inserted inside keywords</strong> (display name <code>❤️处男免费❤️</code>, post text
-          <code>处🐕男</code>). Two of them were <strong>architectural</strong> misses: as soon as keyword
+          <code>处🐕男</code>), and
+          <strong>farm variants that each insert different junk characters</strong>
+          (<code>…没我骚蝎🐾…</code> / <code>…没我骚🐾💩…</code>). Two of them were <strong>architectural</strong> misses: as soon as keyword
           matching decides whether the model is asked at all, phrasings outside the table are unreachable for the
           model — which is exactly why the model-first triage tier exists. The emoji case then led to
-          symbol-stripping matches and to dropping the farm threshold to two accounts, and v0.3.0 turned the
-          adult-only gate into a <strong>category-based</strong> one: whether an account can be touched is decided
-          by the category.
+          symbol-stripping matches and to dropping the farm threshold to two accounts; the farm variants then
+          turned exact-match farming into <strong>near-duplicate clustering</strong> and exposed that
+          <strong>MV3 worker recycling clears runtime state</strong> (including rate limits) — now restored via
+          <code>chrome.storage.session</code>. v0.3.0 turned the adult-only gate into a
+          <strong>category-based</strong> one: whether an account can be touched is decided by the category.
         </p>
       </section>
 
@@ -510,7 +514,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -528,7 +532,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.3.0 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.3.1 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
