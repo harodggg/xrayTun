@@ -40,10 +40,10 @@
   "name": "信息过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.3.1",
+  "softwareVersion": "0.4.0",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -60,6 +60,22 @@
   "@type": "FAQPage",
   "inLanguage": "zh-Hans",
   "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "β（贝塔信息）和 α（阿尔法信息）分别是什么？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "β 把重复 / 类似 / 语义相同的信息折叠，时间线里只显示一次 （同一件事的翻译、改写、复述都算同一，判定在模型那一层，不是字符串相等），细条上可直接「展开」。 α 把回复区里与多数评论观点明显不同的特殊观点标出来 —— 只标记，不隐藏，免得你错过少数派信息。两者都是纯展示：不改变隐藏与账号动作，可以各自关掉。"
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "自动静音/拉黑有时会失败吗？失败了会怎样？",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "会 —— X 改版、菜单文案换语言、或者你手动开着别的推文的菜单，都可能让自动化找不到目标项。 遇到这种情况它放弃并留痕：判定条上写「自动动作失败：… · 可点『立即静音』重试」， 鼠标悬停能看到「菜单里实际有哪些项」，同一条诊断也会进审计日志。它不会去猜一个 语义不明的菜单项 —— 误点「取消静音」或者点到别人的账号，比失败更糟。 v0.4.0 修掉了最常见的那类失败（隐藏推文后 ⋯ 按钮没有盒子 → 菜单不渲染）。"
+      }
+    },
     {
       "@type": "Question",
       "name": "它能过滤哪几类信息？",
@@ -156,6 +172,7 @@
           <a href="#what">这是什么</a>
           <a href="#categories">过滤类别</a>
           <a href="#decide">判定方式</a>
+          <a href="#semantics">重复与特殊</a>
           <a href="#install">安装</a>
           <a href="#verify">验证状态</a>
           <a href="#limits">已知边界</a>
@@ -178,16 +195,18 @@
           拿到<strong>类别、概率与置信度</strong>之后才决定动作：命中即隐藏；
           <strong>只有高置信度的类别才会动账号</strong>（静音/拉黑），而且默认只演练、不真的点。
           它不是关键词黑名单 —— 判定在模型那一层，关键词只用来决定「值不值得花一次调用」。
+          除过滤外它还做两件<strong>整理</strong>的事：<strong>β（贝塔信息）</strong>把重复/类似/语义相同的内容
+          折叠成一条，<strong>α（阿尔法信息）</strong>把「与评论区多数观点明显不同」的特殊观点标出来（只标记、不隐藏）。
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip"
-            >下载 v0.3.1（zip，128.1 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip"
+            >下载 v0.4.0（zip，158.7 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.3.1 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.4.0 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -320,6 +339,45 @@
         </p>
       </section>
 
+      <section class="wrap prose" id="semantics">
+        <h2>除过滤之外：β 折叠重复、α 标出特殊（v0.4.0 新增）</h2>
+        <p>
+          过滤是「把噪音拿掉」，这两件事是「把信息理清」—— 它们<strong>纯展示</strong>，
+          任何情况下都不改变隐藏判定与账号动作（不变量 I① 不变），可以各自关掉。
+        </p>
+        <table class="facts-table">
+          <thead>
+            <tr><th>概念</th><th>它做什么</th><th>边界</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>β · 贝塔信息</strong></td>
+              <td>
+                重复 / 类似 / <strong>语义相同</strong>的信息 → 折叠，时间线里只显示一次。
+                不是字符串相等：先按本地近似度（3-gram，同线程/同农场簇也算候选）挑最多 6 条，
+                再<strong>一次</strong> Jev 批量调用问「是否表达同一信息/同一主张」（翻译、改写、转述都算同一），
+                命中的那条折叠成细条：<code>与 @… 的内容相同 · 还有 N 条相似内容 · [展开]</code>，点「展开」可还原。
+              </td>
+              <td>代表条不折叠；只折叠「同一件事」，同线程的不同观点不算</td>
+            </tr>
+            <tr>
+              <td><strong>α · 阿尔法信息</strong></td>
+              <td>
+                回复区里，若一条回复的观点与<strong>多数评论明显不同</strong>、且是有实质内容的观点，
+                加一枚 <code>α · 与评论区多数观点不同</code> 徽标。
+              </td>
+              <td><strong>只标记，不隐藏、不折叠</strong>；默认只在回复区判定</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          成本可以自己量：本地没有候选就<strong>不调用</strong>；每次推文最多 1 次语义调用，
+          实测单次约 <strong>536 输入 token</strong>（34 条真实样本里 11 次语义调用、共 5898 输入 / 330 输出）。
+          设置页 1.6 节可调阈值、候选数与参考评论条数，弹窗有「折叠重复信息（β）」「标记特殊观点（α）」两个开关；
+          超预算或调用失败只跳过整理并计数，过滤结果照常返回。
+        </p>
+      </section>
+
       <section class="wrap prose" id="install">
         <h2>安装与配置</h2>
         <p>扩展不需要构建，下载 zip 解压就是一个可直接加载的目录：</p>
@@ -361,14 +419,15 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
             <tr>
               <td>单元测试</td>
               <td><code>npm test</code></td>
-              <td>143 个通过（协议契约、类别闸门与开关、预筛、农场、图片像素、黑名单、审计、流水线）</td>
+              <td><strong>228 个通过</strong>（协议契约、类别闸门与开关、预筛、农场、α/β 语义层、菜单识别与对抗、图片像素、黑名单、审计、流水线）</td>
             </tr>
             <tr>
               <td>真实 Chrome 端到端</td>
               <td><code>npm run verify</code></td>
               <td>
-                76 项通过：CDP 加载扩展 → 仿 X 夹具页（色情/显示名引流/emoji 拆字/农场/诈骗/标题党共 12 条）
-                → 判定 → 隐藏 → 点菜单（含 UI 陷阱与「隐藏档也静音」边界）
+                <strong>107 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
+                触发按钮无盒子、菜单异步渲染、多语言菜单项、菜单里确实没有目标项）→ 判定 → 隐藏 →
+                α 徽标 / β 折叠 → 点菜单（含「隐藏档也静音」边界与「绝不猜点 + 留下诊断」）
               </td>
             </tr>
             <tr>
@@ -380,7 +439,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
               <td>真实模型验证</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                30 条真站样本、安全底线 0 违反（安全底线 0 违反）：色情引流与诈骗被拦下，
+                <strong>34 条真站样本</strong>、安全底线 0 违反、期望隐藏 0 未命中；β 折叠 10 · α 标记 1 · 语义调用 11：色情引流与诈骗被拦下，
                 标题党/低质只隐藏，日常/治理新闻/性教育/泳装/健身全部放行
               </td>
             </tr>
@@ -402,6 +461,11 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           并暴露出 <strong>MV3 Service Worker 回收会清空运行态</strong>（含限速预算）—— 现在用
           <code>chrome.storage.session</code> 跨重启恢复。
           v0.3.0 把「只认色情」的闸门改成<strong>类别化</strong>：能不能动账号由类别决定。
+          v0.4.0 又抓了两条<strong>真实站点</strong>的坑：<strong>β 一次都不触发</strong>（窗口条目拿不到推文 id，
+          候选锚点全被跳过 —— 现在缺 id 时用「作者 + 文案」哈希兜底），以及
+          <strong>自动动作失败 <code>menu_item_not_found:mute</code></strong>（根因是先隐藏再点 <code>⋯</code>，
+          而 <code>⋯</code> 也在被 <code>display:none</code> 的子节点里 → 按钮 rect 是 0×0 → X 的菜单浮层拿不到锚点，
+          菜单根本不渲染）。两处都做了回归：把修复关掉重跑端到端，相关场景立刻变红。
         </p>
       </section>
 
@@ -423,7 +487,8 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           </li>
           <li>
             <strong>依赖 X 的 DOM。</strong>X 改版可能让菜单自动化失效；此时动作会记
-            <code>action_failed</code> 到审计日志，不会静默乱点。选择器集中在一个文件里，便于跟随更新。
+            <code>action_failed</code> 到审计日志，不会静默乱点：失败提示里会写明「菜单里实际有哪些项」
+            （鼠标悬停可见），拿它就能定位选择器漂移。选择器集中在一个文件里，便于跟随更新。
           </li>
           <li>
             <strong>需要你自己的模型额度。</strong>候选推文与预检各花一次调用，扩展内有限速与每日预算，
@@ -438,6 +503,23 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
 
       <section class="wrap prose" id="faq">
         <h2>常见问题</h2>
+
+        <h3>β（贝塔信息）和 α（阿尔法信息）分别是什么？</h3>
+        <p>
+          <strong>β</strong> 把<strong>重复 / 类似 / 语义相同</strong>的信息折叠，时间线里只显示一次
+          （同一件事的翻译、改写、复述都算同一，判定在模型那一层，不是字符串相等），细条上可直接「展开」。
+          <strong>α</strong> 把回复区里<strong>与多数评论观点明显不同</strong>的特殊观点标出来 ——
+          <strong>只标记，不隐藏</strong>，免得你错过少数派信息。两者都是纯展示：不改变隐藏与账号动作，可以各自关掉。
+        </p>
+
+        <h3>自动静音/拉黑有时会失败吗？失败了会怎样？</h3>
+        <p>
+          会 —— X 改版、菜单文案换语言、或者你手动开着别的推文的菜单，都可能让自动化找不到目标项。
+          遇到这种情况它<strong>放弃并留痕</strong>：判定条上写「自动动作失败：… · 可点『立即静音』重试」，
+          鼠标悬停能看到「菜单里实际有哪些项」，同一条诊断也会进审计日志。它<strong>不会去猜</strong>一个
+          语义不明的菜单项 —— 误点「取消静音」或者点到别人的账号，比失败更糟。
+          v0.4.0 修掉了最常见的那类失败（隐藏推文后 <code>⋯</code> 按钮没有盒子 → 菜单不渲染）。
+        </p>
 
         <h3>它能过滤哪几类信息？</h3>
         <p>
@@ -491,7 +573,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -509,7 +591,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          信息过滤器 · Jev v0.3.1 · Chrome MV3 · 页面最后更新 2026-09-24 ·
+          信息过滤器 · Jev v0.4.0 · Chrome MV3 · 页面最后更新 2026-09-24 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>

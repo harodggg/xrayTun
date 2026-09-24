@@ -23,10 +23,11 @@
 - [信息过滤器 · Jev 页面（中文）](https://xraytun.top/jev-x-filter/)：Chrome MV3 扩展，用 **Jev（TypeSafe System One）**
   的类型化决策（单选类别 + 三条 noul 证据 + 危害评分）判定 x.com 时间线、回复区与推荐流里的**垃圾信息**：
   色情/性交易引流、诈骗/博彩/荐股、广告导流、标题党、低质 AI、重复文案农场六类，各自可开关；
-  命中即隐藏，只有**可动账号的类别**在高置信度时才会静音/拉黑，且**默认演练模式只记录不执行**
+  命中即隐藏，只有**可动账号的类别**在高置信度时才会静音/拉黑，且**默认演练模式只记录不执行**；
+  v0.4.0 起还做两件**纯展示**的整理：**β** 折叠重复/类似/语义相同的信息只显示一次，**α** 标出「与评论区多数观点明显不同」的特殊观点（不隐藏）
 - [Info Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
-- 下载 v0.3.1：<https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip>（MIT，Chrome 120+）
+- 下载 v0.4.0：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip>（MIT，Chrome 120+）
 
 ## 相关项目：素颜镜 · 美颜程度检测（**独立项目，与 XrayTun 无关**）
 

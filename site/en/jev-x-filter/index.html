@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.3.1",
+  "softwareVersion": "0.4.0",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -60,6 +60,22 @@
   "@type": "FAQPage",
   "inLanguage": "en",
   "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What are β (beta) and α (alpha)?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "β folds repeated / similar / semantically identical items so the timeline shows them once (a translation, a rewrite or a paraphrase of the same thing counts as identical; the judgement is made by the model, not by string equality), and the thin bar can be expanded. α flags a reply that clearly departs from the majority view — flag only, never hidden, so you do not miss the minority report. Both are presentation only: they never change hiding or account actions, and each has its own switch."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can auto-mute / auto-block fail, and what happens then?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes — an X redesign, a different UI language, or a menu you already opened on another post can all make the automation fail to find its target. When that happens it gives up and leaves a trace: the filter bar says “action failed … click ‘mute now’ to retry”, hovering shows the menu entries that were actually present, and the same diagnosis goes to the audit log. It never guesses at an ambiguous entry — clicking “unmute”, or acting on someone else’s account, is worse than failing. v0.4.0 fixed the most common cause (hidden post → ⋯ trigger had no box → the menu never rendered)."
+      }
+    },
     {
       "@type": "Question",
       "name": "Which kinds of information can it filter?",
@@ -156,6 +172,7 @@
           <a href="#what">What it is</a>
           <a href="#categories">Categories</a>
           <a href="#decide">How it decides</a>
+          <a href="#semantics">Duplicates &amp; outliers</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
           <a href="#limits">Limits</a>
@@ -179,16 +196,18 @@
           <strong>category, probability and confidence</strong>: a hit is hidden;
           <strong>only high-confidence categories can touch the account</strong> (mute/block), and by default it
           only <strong>dry-runs</strong>. It is not a keyword blocklist: the decision is made by the model,
-          keywords only decide whether a call is worth paying for.
+          keywords only decide whether a call is worth paying for. Beyond filtering it also <strong>tidies up</strong>:
+          <strong>β (beta)</strong> folds repeated / similar / <em>semantically identical</em> items into one, and
+          <strong>α (alpha)</strong> flags a reply that clearly departs from the majority view (flag only, never hidden).
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip"
-            >Download v0.3.1 (zip, 128.1 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip"
+            >Download v0.4.0 (zip, 158.7 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.3.1 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.0 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -328,11 +347,52 @@
         </p>
       </section>
 
+      <section class="wrap prose" id="semantics">
+        <h2>Beyond filtering: β folds duplicates, α flags outliers (new in v0.4.0)</h2>
+        <p>
+          Filtering removes noise; these two <strong>organise</strong> what is left. Both are
+          <strong>presentation only</strong>: they never change the hide decision or any account action,
+          and each can be switched off.
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>Concept</th><th>What it does</th><th>Boundaries</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><strong>β · beta</strong></td>
+              <td>
+                Repeated / similar / <strong>semantically identical</strong> items are folded so the timeline shows
+                them once. Not string equality: local near-duplicate screening picks up to six candidates
+                (3-gram similarity, same thread or same farm cluster), then <strong>one</strong> batched Jev call asks
+                whether they carry the same information or claim (paraphrase, translation and rewrite all count).
+                Folds collapse to a thin bar: <code>same content as @… · N more similar · [expand]</code>.
+              </td>
+              <td>The first item stays; only “the same thing” folds — different opinions in one thread do not</td>
+            </tr>
+            <tr>
+              <td><strong>α · alpha</strong></td>
+              <td>
+                In reply threads, a reply whose view clearly <strong>departs from the majority</strong> and still makes
+                a substantive point gets an <code>α · differs from the majority</code> badge.
+              </td>
+              <td><strong>Flagged only — never hidden or folded</strong>; replies only by default</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Cost is bounded and measurable: no local candidate means <strong>no call at all</strong>, at most one
+          semantic call per post, measured at about <strong>536 input tokens</strong> per call
+          (11 semantic calls across 34 real samples: 5,898 in / 330 out). Section 1.6 of the options page exposes the
+          thresholds, candidate count and reference count; the popup has “fold duplicates (β)” and
+          “flag outliers (α)” switches. Over budget or a failed call only skips the tidy-up and is counted —
+          filtering is unaffected.
+        </p>
+      </section>
+
       <section class="wrap prose" id="install">
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.3.0.zip -d info-filter
+unzip jev-x-filter-0.4.0.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -371,15 +431,17 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td>143 passing (wire contract, category gates and switches, pre-screen, farm, image pixels, blocklist, audit, pipeline)</td>
+              <td><strong>228 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                76 passing: load the extension over CDP → fake-X fixture page (12 posts: adult, display-name
-                solicitation, emoji evasion, farm, scam, clickbait) → decide → hide → click the menu (including
-                UI traps and the "mute hidden band too" boundary)
+                <strong>107 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
+                anti-item menu entries, a stale Dropdown, a trigger with no layout box, async menu rendering,
+                localised menu entries, and a menu that genuinely lacks the target item) → decide → hide →
+                α badge / β fold → click the menu (including the “mute hidden band too” boundary and
+                “never guess-click: leave a diagnosis”)
               </td>
             </tr>
             <tr>
@@ -391,7 +453,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
               <td>Real-model check</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                30 real-world samples, 0 safety violations (0 safety violations): adult solicitation and scams are
+                <strong>34 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 10 · α flags 1 · semantic calls 11: adult solicitation and scams are
                 caught, clickbait and low-quality filler are hidden only, while everyday posts, moderation news,
                 sex education, swimwear and fitness posts all pass
               </td>
@@ -414,6 +476,12 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <strong>MV3 worker recycling clears runtime state</strong> (including rate limits) — now restored via
           <code>chrome.storage.session</code>. v0.3.0 turned the adult-only gate into a
           <strong>category-based</strong> one: whether an account can be touched is decided by the category.
+          v0.4.0 caught two more <strong>live-site</strong> traps: <strong>β never fired at all</strong> (window entries had no
+          tweet id, so every β candidate anchor was skipped — now a stable author+text hash stands in when the id is
+          missing) and <strong>auto-actions failing with <code>menu_item_not_found:mute</code></strong> (root cause: the
+          extension hides the post first and only then clicks <code>⋯</code>, which therefore had a 0×0 bounding rect,
+          so X’s menu layer had no anchor and never rendered). Both got regressions: disabling the fix turns the
+          relevant end-to-end scenarios red immediately.
         </p>
       </section>
 
@@ -439,7 +507,8 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           </li>
           <li>
             <strong>It depends on X’s DOM.</strong> A redesign can break the menu automation; failures are logged
-            as <code>action_failed</code> in the audit log instead of silently mis-clicking. All selectors live in
+            as <code>action_failed</code> in the audit log instead of silently mis-clicking: the failure note names the
+            menu entries that were actually present (hover to read it), which is what you need when a selector drifts. All selectors live in
             one file so they can be updated quickly.
           </li>
           <li>
@@ -456,6 +525,25 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
 
       <section class="wrap prose" id="faq">
         <h2>FAQ</h2>
+
+        <h3>What are β (beta) and α (alpha)?</h3>
+        <p>
+          <strong>β</strong> folds <strong>repeated / similar / semantically identical</strong> items so the timeline shows
+          them once (a translation, a rewrite or a paraphrase of the same thing counts as identical; the judgement is
+          made by the model, not by string equality), and the thin bar can be expanded. <strong>α</strong> flags a reply that
+          clearly <strong>departs from the majority view</strong> — <strong>flag only, never hidden</strong>, so you do not miss the
+          minority report. Both are presentation only: they never change hiding or account actions, and each has its own switch.
+        </p>
+
+        <h3>Can auto-mute / auto-block fail, and what happens then?</h3>
+        <p>
+          Yes — an X redesign, a different UI language, or a menu you already opened on another post can all make the
+          automation fail to find its target. When that happens it <strong>gives up and leaves a trace</strong>: the filter bar
+          says “action failed … click ‘mute now’ to retry”, hovering shows the menu entries that were actually present, and the
+          same diagnosis goes to the audit log. It <strong>never guesses</strong> at an ambiguous entry — clicking “unmute”, or
+          acting on someone else’s account, is worse than failing. v0.4.0 fixed the most common cause (hidden post →
+          <code>⋯</code> trigger had no box → the menu never rendered).
+        </p>
 
         <h3>Which kinds of information can it filter?</h3>
         <p>
@@ -514,7 +602,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -532,7 +620,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.3.1 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.4.0 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
