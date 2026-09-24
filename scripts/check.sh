@@ -255,9 +255,11 @@ echo
 echo "✓ 与 CI 相同的全部检查通过"
 
 # 一行提示（只在没人设这两个变量时打一次）：
-# `BUILD_LOCK_STRICT=1` 会在「探测到未持锁的 cargo/rustc」时**明确失败**，而不是可能在
-# 并发下给出一场假红（实例：Doc-tests 报 E0463 can't find crate）。发版前建议用它。
+# `BUILD_LOCK_STRICT=1` 只在「探测到**与我们同一个 target dir** 的未持锁 cargo/rustc」时
+# **明确失败**（跨 target dir 的并发只提示 —— per-target-dir 锁本来就不互斥，见
+# scripts/build-lock.sh 头部），而不是可能在并发下给出一场假红（实例：Doc-tests 报 E0463
+# can't find crate）。发版前建议用它。
 # CI 是隔离 runner、没有并发，所以这个变量在 CI 上无害（不设即可）。
 if [ "${BUILD_LOCK_STRICT:-0}" != "1" ] && [ "${BUILD_LOCK_FOREIGN_WAIT:-0}" = "0" ]; then
-  echo "  提示：发版前建议用 BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build（并发编译会明确失败，而不是给出假红）"
+  echo "  提示：发版前建议用 BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build（**同一 target dir** 的并发编译会明确失败，而不是给出假红）"
 fi

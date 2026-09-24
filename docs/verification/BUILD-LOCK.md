@@ -61,24 +61,49 @@
 | `BUILD_LOCK_WAIT` | `3600` | 拿不到锁时最长等待秒数；超时 ⇒ 退出码 75 |
 | `BUILD_LOCK_STALE_MAX` | `14400` | 超过这么久的持有视为 stale（挂死/被 kill -9） |
 | `BUILD_LOCK_DIR` | `${CARGO_TARGET_DIR}.lock.d` | 直接指定锁目录 |
-| `BUILD_LOCK_STRICT` | `0` | `1` ⇒ 探测到**未持锁的 cargo** 时直接失败（75），不带着未知并发跑门禁 |
-| `BUILD_LOCK_FOREIGN_WAIT` | `0` | `>0` ⇒ 可视地等未持锁的 cargo 结束，最多等这么久，仍不结束则失败（75） |
+| `BUILD_LOCK_STRICT` | `0` | `1` ⇒ 探测到**与我们同一个 target dir**（或拿不到 target dir，保守）的未持锁 cargo/rustc 时直接失败（75）；**跨 target dir 只提示**（见 §4.2） |
+| `BUILD_LOCK_FOREIGN_WAIT` | `0` | `>0` ⇒ **可视地等同一 target dir 的**未持锁编译进程结束（每 5 秒一行、带已等秒数），等不到仍 75；**不等**别的 target dir（见 §4.2） |
 | `BUILD_LOCK_DISABLE` | — | **只用于敏感性验证**：跳过锁并打印醒目警告（默认不开） |
 
-## 4. ⚠️ 诚实的边界：这把锁**挡不住裸 `cargo`**
+## 4. ⚠️ 诚实的边界：这把锁**挡不住裸 `cargo`**，而且**一把锁只管一个 target dir**
 
 那次假红的对手是**裸 `cargo test`**（两个人各跑一条，都没走这把锁）。
-⇒ 锁只能串行化**愿意用锁的**进程。对裸 cargo，机制至少做到**说话**：
-拿到锁时会 `pgrep` 探测未持锁的 `cargo`/`rustc`，打印 **pid + 命令（截断到 140 字符，最多列 5 个）**
-与那句「这会让门禁**假红**（实例：`Doc-tests` 报 E0463）」的建议。
+⇒ 锁只能串行化**愿意用锁的**进程。对裸 cargo，机制至少做到**说话**。
 
-* 想让它变成硬失败：`BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build`
-  （发版前推荐；消息会明确写「检测到未持锁的 cargo ⇒ 明确失败」，不会与「产品坏了」混淆）；
-* 想让它自动等：`BUILD_LOCK_FOREIGN_WAIT=1800`（每 5 秒打一行，等不到就失败）。
+### 4.1 per-target-dir ⇒ **隔离 worktree 与主树不互斥**（这是刻意的）
+
+锁目录 = `${CARGO_TARGET_DIR}.lock.d`。所以主树（`.cargo-target`）与隔离 worktree
+（`scripts/wt.sh` 给的 `.cargo-target.wt/<名字>`）**各持各的锁，同时编译不互相阻塞** ——
+那是 `task-112` 刻意建立的隔离，两者产物身份互不影响。
+**推论**：任何「系统上有一个 cargo 在跑就拦」的判据都必然误报，见 §4.2。
+
+### 4.2 strict 的**精确语义**（`task-162` 收窄）
+
+`BUILD_LOCK_STRICT=1` **只对「与我们同一个 target dir（或拿不到 target dir）的未持锁编译进程」失败（75）**；
+**跨 target dir 的并发只提示**，并在提示里打印对方的 target dir。
+
+判定顺序（证据越弱，结论越保守）：
+
+| # | 证据 | 结论 |
+|---|---|---|
+| 1 | 命令行里的 `CARGO_TARGET_DIR=<dir>` / `--target-dir <dir>` / rustc 的 `--out-dir <dir>`（按 `<target>/debug|release` 折算） | 明确 |
+| 2 | `ps eww -p <pid>` 里的 `CARGO_TARGET_DIR=<dir>`（**有些环境禁止 `ps`**） | 明确 |
+| 3 | `lsof -p <pid>` 里形如 `<target>/debug|release/…` 的**打开文件** ⇒ 反推 target dir（**不依赖 `ps`、也不依赖环境变量**） | 明确 |
+| 4 | 以上都没有，但**可执行体确实是** `cargo`/`rustc` | `unknown` ⇒ **保守当作同一 target dir**（仍然 75） |
+| 5 | **可执行体不是**编译进程（`bash`/`sh`/`env`/`python3`…，只是**命令行里含** `cargo` 字样） | **不计入**（只提示） |
+
+两条真实事故（都是**旧**判据造成的，且都已进本文件的验证用例）：
+
+* **v0.8.36**：隔离 worktree 里 tester 在编译 ⇒ 主树发版门禁**空跑 75**（10 秒退出，没跑任何检查）；
+* **v0.8.37**：`pgrep -f` 匹配的是**命令行文本** —— 一个「内容里写着 `cargo test …` 的 heredoc
+  包装进程」被当成并发构建 ⇒ 再次 75。
+
+* 硬失败：`BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build`（发版前推荐；消息会点名
+  「**与我们同一个 target dir**」以及数量，不会与「产品坏了」混淆）；
+* **可见等待**：`BUILD_LOCK_FOREIGN_WAIT=<秒>` —— **只等**同一 target dir（含 `unknown`）的进程，
+  每 5 秒打一行（带已等秒数）；等不到仍然 75；**不等**别的 target dir
+  （等一个与我们无关的构建没有意义，也正是一次「假红」的来源）；
 * **把裸 cargo 变成走锁的**才是根治：请用 `./scripts/build-lock.sh run -- …`。
-
-CI 上（隔离 runner、无并发）这把锁是**无害的 no-op**：拿到即放，不改变任何检查与退出码语义
-（全绿 0 / 有失败非 0；锁相关的明确失败用 75）。
 
 ## 5. 验证（原始输出见 `/tmp/ops-lock-verify-*.log`，命令可复跑）
 
@@ -88,20 +113,56 @@ $ ./scripts/verify-build-lock.sh
   [2] 持锁时再启动一个真的 check.sh              → 退 75，且**没有越过锁**（未出现第一步）
   [3] 两个 CLI 排队：执行区间不许重叠              → 时序文件显示 start/end/start/end（串行）
   [4] stale 锁必须能自救（假持有者 pid 已死）      → 打印 stale 并接管，命令正常执行
-  [5] 结束后锁必须已释放（无残留）                 → 锁目录已清理
-  pass=12 fail=0   ✓ 构建锁验证通过
+  [5] strict 判据只对**同一个 target dir** 失败（task-162）→ 5a–5e 五种情形（见下）
+  [6] 结束后锁必须已释放（无残留）                 → 锁目录已清理
+  pass=21 fail=0   ✓ 构建锁验证通过
 
-$ ./scripts/verify-build-lock.sh --sensitivity     # 把锁拿掉（副本去掉 acquire；CLI 用 BUILD_LOCK_DISABLE=1）
+$ ./scripts/verify-build-lock.sh --sensitivity     # 拿掉机制（副本去掉 acquire / 突变判据）
   ✗（敏感性/预期的红）第二个进程确实一起跑了
   ✗（敏感性/预期的红）去掉锁后 check.sh 越过锁开始跑
   ✗（敏感性/预期的红）去掉锁后两个 CLI 的区间重叠
-  pass=2 fail=5   ✓ 敏感性成立：同一批断言出现 5 条红 ⇒ 验证真的在验锁
+  ✗ 5a 跨 target dir 被判 75（期望 0）        ← MUT-B：分类恒为 same（= 不看 target dir）
+  ✗ 5c 只靠 lsof 证据时被判 75（期望 0）      ← 同上
+  ✗ 5d 包装进程被判 75（期望 0）              ← MUT-A：可执行体判定恒真（= 回到匹配命令行文本）
+  pass=8 fail=8   ✓ 敏感性成立：出现 8 条红 ⇒ 验证真的在验锁
 ```
+
+### 5.1 `[5]` 的五种情形（`task-162` 的双向敏感性）
+
+| 用例 | 夹具（注入 `BUILD_LOCK_PROC_TABLE` / `BUILD_LOCK_ENV_TABLE` / `BUILD_LOCK_LSOF_TABLE`） | 期望 |
+|---|---|---|
+| 5a | 真 cargo + `CARGO_TARGET_DIR=/tmp/some-other-target` | **不** 75，提示里点名「别的 target dir」 |
+| 5b | 真 cargo + `CARGO_TARGET_DIR=<我们的 target dir>` | **75**，报错点名「同一 target dir」（`task-109` 的安全属性） |
+| 5c | 真 cargo + **只有 lsof 证据**（`…/debug/deps/…`），没有环境变量 | **不** 75 |
+| 5d | `/bin/bash -c '… cargo test …'`（命令行含 `cargo`，可执行体是 bash） | **不** 75，并说明「不是编译进程 ⇒ 不计入」 |
+| 5e | 真 cargo，**任何证据都拿不到** | **75**（保守当作同一 target dir） |
+
+> 这些夹具走的是脚本里**明确登记的测试缝**（`BUILD_LOCK_PROC_TABLE` / `BUILD_LOCK_ENV_TABLE` /
+> `BUILD_LOCK_LSOF_TABLE`，只在 `scripts/verify-build-lock.sh` 里设置）；生产路径不设它们。
+> 用缝而不是真起进程，是因为「造一个别的 target dir 的真 cargo」既慢又不可控（还要动真 target dir）。
 
 > 敏感性模式下，**去掉锁的 `check.sh` 一旦越过锁点就被 kill** —— 既证明「锁没了就真会一起跑」，
 > 又不真的在生产机上并发编译。
 
-### 5.1 完整门禁（干净修订 + 无并发）
+### 5.3 诚实清单（`task-162` 的判据**覆盖不到**的）
+
+* **拿不到对方的 target dir 时，我们保守地当它「与我们同一个 target dir」**（仍然 75）。
+  这不是缺陷而是取舍：**安全属性（同一 target dir 的并发不许静默通过）优先于「少一次误报」**。
+  能少误报的证据依次是：命令行 → `ps eww` 环境 → `lsof` 打开文件；三条都拿不到才会保守 75
+  （真构建几乎总能在 `lsof` 里看到 `<target>/debug|release/…`）。
+* **`ps` 在某些受限环境会被禁止**（本机 ops 沙箱就是：`/bin/ps: Operation not permitted`）⇒ 第 2 条证据
+  会直接跳过；**这也正是要加 `lsof` 那条证据的原因**。脚本对 `ps` 不可用是**静默降级到下一证据**，
+  不会失败；
+* **`lsof` 也可能被禁止/超时**：拿不到就同样降级；
+* **「同一 tag / 同一 target dir」这类身份判断只看本机进程表**：如果对方的 cargo 起在一个**我们看不见的
+  环境**（别的容器/VM、别的用户且 `lsof` 无权限），我们只能保守判 75；
+* **测试缝**（`BUILD_LOCK_PROC_TABLE` / `BUILD_LOCK_ENV_TABLE` / `BUILD_LOCK_LSOF_TABLE`）是**生产
+  代码里的注入点**：它们只在 `scripts/verify-build-lock.sh` 中被设置；如果有人误在生产里设置，
+  就会把「进程表」换成文件内容 —— 这是**已知的、登记的**代价（换来的是判据可离线、可双向敏感性验证）；
+* 判据**不检查锁归属**（谁持有锁）：它只看「有编译进程没走锁 + 是否同一个 target dir」。
+  真正的串行化仍然只对**愿意走锁的**进程生效（§4 第一段）。
+
+### 5.2 完整门禁（干净修订 + 无并发）
 
 在**隔离 worktree**（`git worktree add --detach /tmp/wt-lock109 6144d3c`，再放进本卡的 4 个文件；
 主工作区里当时有别人的 `crates/xt-core/src/store.rs` 在途改动，所以不在主工作区跑）上，

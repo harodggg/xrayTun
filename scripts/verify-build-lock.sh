@@ -235,8 +235,70 @@ else
   echo "     （敏感性模式下跳过：stale 自救验证的是锁自身，禁用后无意义）"
 fi
 
-# ------------------------------------------------------------------ 5) 收尾无残留
-hdr "[5] 结束后锁必须已释放（无残留）"
+# ------------------------------------------------------------------ 5) strict 判据收窄（task-162）
+hdr "[5] strict 判据：只对**同一个 target dir** 的未持锁编译进程失败（task-162）"
+
+# 夹具：本仓库的 target dir（同样的规范化路径），以及三类"进程表"
+OUR_TD="$( ( export CARGO_TARGET_DIR; source "$LOCK_SH"; _build_lock_our_target_dir ) )"
+PT_REAL="$TMP/proc-real"; PT_WRAP="$TMP/proc-wrap"
+ENV_OTHER="$TMP/env-other"; ENV_SAME="$TMP/env-same"; LSOF_OTHER="$TMP/lsof-other"
+printf '93885 /usr/local/bin/cargo clippy --workspace --all-targets\n' >"$PT_REAL"
+printf '97564 /bin/bash -c cd repo && cargo test --workspace\n' >"$PT_WRAP"
+printf '93885=/tmp/some-other-target\n' >"$ENV_OTHER"
+printf '93885=%s\n' "$OUR_TD" >"$ENV_SAME"
+printf '93885=/tmp/some-other-target/debug/deps/libfoo.rlib\n' >"$LSOF_OTHER"
+echo "     我们的 target dir（规范化）=$OUR_TD"
+
+# --sensitivity：把两条机制各自拿掉（**后定义覆盖前定义**）
+MUT_LOCK="$TMP/build-lock-$MODE.sh"
+cp "$LOCK_SH" "$MUT_LOCK"
+if [ "$MODE" = "unlocked" ]; then
+  {
+    echo ''
+    echo '# MUT-A：可执行体判定恒真（≡ 回到「匹配命令行文本」的旧行为）'
+    echo '_build_lock_is_compiler() { return 0; }'
+    echo '# MUT-B：分类恒为 same（≡ 完全不看 target dir）'
+    echo '_build_lock_classify_rows() { _build_lock_scan_procs | while IFS= read -r l; do [ -n "$l" ] || continue; printf "same|%s||%s\n" "${l%% *}" "${l#* }"; done; }'
+  } >>"$MUT_LOCK"
+  echo "     （敏感性模式：用突变副本 —— MUT-A 不看可执行体、MUT-B 不看 target dir）"
+fi
+
+# 跑一次判据：$1 = 描述，其余为 env 赋值；输出 -> OUT，退出码 -> RC
+strict_case() {
+  local desc="$1"; shift
+  OUT="$(env "$@" BUILD_LOCK_STRICT=1 CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+    bash -c 'source "$1"; _build_lock_warn_foreign' _ "$MUT_LOCK" 2>&1)"
+  RC=$?
+  echo "     [$desc] RC=$RC"
+  printf '%s\n' "$OUT" | sed -n '1,2p' | sed 's/^/       /'
+}
+
+# 5a 跨 target dir（环境变量证据）⇒ 不得 75
+strict_case "5a 跨 target dir（ENV 证据）" BUILD_LOCK_PROC_TABLE="$PT_REAL" BUILD_LOCK_ENV_TABLE="$ENV_OTHER"
+[ "$RC" = "0" ] && ok "5a 跨 target dir 的未持锁 cargo ⇒ **不** 75（只提示）" || no "5a 跨 target dir 被判 ${RC}（期望 0）"
+case "$OUT" in *"别的 target dir"*) ok "5a 提示里点名了「别的 target dir」（含对方 target dir）" ;; *) no "5a 没有点名「别的 target dir」" ;; esac
+
+# 5b **同一** target dir ⇒ 必须 75（task-109 的安全属性）
+strict_case "5b 同一 target dir（ENV 证据）" BUILD_LOCK_PROC_TABLE="$PT_REAL" BUILD_LOCK_ENV_TABLE="$ENV_SAME"
+[ "$RC" = "75" ] && ok "5b 同一 target dir 的未持锁 cargo ⇒ **75**（安全属性保留）" || no "5b 同一 target dir 只给了 ${RC}（期望 75）"
+case "$OUT" in *"同一 target dir"*) ok "5b 报错点名了「同一 target dir」" ;; *) no "5b 没有点名「同一 target dir」" ;; esac
+
+# 5c 跨 target dir，但**没有环境变量证据**（只有 lsof 打开文件证据）⇒ 仍然不得 75
+strict_case "5c 跨 target dir（仅 lsof 证据）" BUILD_LOCK_PROC_TABLE="$PT_REAL" BUILD_LOCK_LSOF_TABLE="$LSOF_OTHER"
+[ "$RC" = "0" ] && ok "5c 不依赖 \`ps\`/环境变量也能判出「别的 target dir」⇒ 不 75" || no "5c 只靠 lsof 证据时被判 ${RC}（期望 0）"
+
+# 5d heredoc 包装进程（**命令行里含 cargo 字样，可执行体是 bash**）⇒ 不得 75
+strict_case "5d heredoc 包装进程" BUILD_LOCK_PROC_TABLE="$PT_WRAP"
+[ "$RC" = "0" ] && ok "5d 命令行含 cargo 字样但不是编译进程 ⇒ **不** 75（v0.8.37 那次 75 的形状）" || no "5d 包装进程被判 ${RC}（期望 0）"
+case "$OUT" in *"不是编译进程"*) ok "5d 提示里说明了「不是编译进程 ⇒ 不计入」" ;; *) no "5d 没有说明为什么不计入" ;; esac
+
+# 5e 真 cargo，但任何证据都拿不到 ⇒ **保守**当作同一 target dir ⇒ 75
+strict_case "5e 真 cargo 但拿不到 target dir" BUILD_LOCK_PROC_TABLE="$PT_REAL"
+[ "$RC" = "75" ] && ok "5e 拿不到 target dir ⇒ 保守 75（安全优先，诚实清单里写明）" || no "5e 拿不到 target dir 却给了 ${RC}（期望 75）"
+case "$OUT" in *"保守"*) ok "5e 报错说明了「保守当作同一 target dir」" ;; *) no "5e 没有说明保守策略" ;; esac
+
+# ------------------------------------------------------------------ 6) 收尾无残留
+hdr "[6] 结束后锁必须已释放（无残留）"
 if [ -d "$(lock_dir)" ]; then no "锁目录仍然存在：$(lock_dir)"; else ok "锁目录已清理"; fi
 
 hdr "结果"
