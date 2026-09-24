@@ -882,6 +882,27 @@ def self_test():
         for _field in ("root_cause", "upstream", "trigger", "impact"):
             check(f"噪音 `{_n}` 的 {_field} 不能为空", bool(_meta.get(_field)), True)
 
+    # ---- F-5：ID -> 现场（临时 home，不碰真实目录）----
+    print("\n=== F-5：--lookup 的「找得到 / 找不到」 ===")
+    check("ID 解析：合法", incident_id_parts("INC-20260924-104548-abca"), ("20260924", "104548"))
+    check("ID 解析：非法", incident_id_parts("20260924-104548"), None)
+    check("ID 解析：去空白", incident_id_parts("  INC-20260924-104548-abca  "), ("20260924", "104548"))
+
+    fake_home = os.path.join(tmp, "home")
+    os.makedirs(os.path.join(fake_home, "Desktop"), exist_ok=True)
+    made = os.path.join(fake_home, "Desktop", "xraytun-incident-20260924T1045Z.abcd.zip")
+    with open(made, "w", encoding="utf-8") as f:
+        f.write("x")
+    f1, _ = lookup_incident_at("INC-20260924-104548-abca", fake_home)
+    check("lookup：能按采集时刻推出包名并找到", [x[0] for x in f1], [made])
+
+    os.remove(made)
+    f2, checked2 = lookup_incident_at("INC-20260924-104548-abca", fake_home)
+    check("lookup：找不到时 found 必须为空（**不许猜**）", f2, [])
+    check("lookup：找不到时也要报告查过哪些位置", len(checked2) >= 4, True)
+    f3, _ = lookup_incident_at("INC-20991231-235959-ffff", fake_home)
+    check("lookup：别的机器的 ID 也找不到", f3, [])
+
     print("=== 每条 signature 的 fixture ⇒ 期望命中 ===")
     for name, root in fixtures.items():
         tri = triage(load_bundle(root))
@@ -1006,6 +1027,108 @@ def self_test():
 # ---------------------------------------------------------------- CLI
 
 
+# ---------------------------------------------------------------- F-5：ID → 现场
+#
+# 「给了我一个 incident ID，但本机没有对应现场」这件事原本**没有可执行的下一步**（F-5）。
+# 这一节把它变成一条命令：`--lookup <INC-ID>`。
+#
+# 关键：**ID 里的时间戳就是采集时刻（UTC）**，而包名是
+# `xraytun-incident-<UTC ISO>.zip` —— 所以拿 ID 的 `YYYYMMDD-HHMMSS` 就能推出包名前缀，
+# 在常见落点里**找得到**，而不是让人再 find 一遍全盘。
+
+INCIDENT_ID_RE = re.compile(r"^INC-(\d{8})-(\d{6})-([0-9a-fA-F]{4,16})$")
+
+
+def incident_id_parts(incident_id):
+    """`INC-20260924-104548-abca` -> `("20260924", "104548")`；不合法返回 None。"""
+    m = INCIDENT_ID_RE.match(incident_id.strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def lookup_candidates(incident_id, home=None):
+    """按**优先级**给出候选位置 `(path, kind)`。
+
+    顺序有意义：**已入库**（说明这份现场已被处理过）先被看到，其次 app 数据目录，
+    最后才是桌面/下载这类人工落点。
+    """
+    home = home or os.path.expanduser("~")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = [
+        (os.path.join(repo, "docs", "incidents", incident_id), "已入库现场（仓库里）"),
+        (os.path.join(home, "Library", "Application Support", "com.xraytun.desktop",
+                      "incidents", incident_id), "app 数据目录"),
+        (os.path.join(home, "Desktop", incident_id), "桌面"),
+        (os.path.join(home, "Downloads", incident_id), "下载"),
+    ]
+    parts = incident_id_parts(incident_id)
+    if parts:
+        date, clock = parts
+        # 包名的 ISO 是 YYYYMMDDTHHMMSSZ；用**到分钟**做前缀，容掉秒的差异。
+        prefix = f"xraytun-incident-{date}T{clock[:4]}"
+        for d in ("Desktop", "Downloads", "Documents"):
+            base = os.path.join(home, d)
+            if os.path.isdir(base):
+                try:
+                    for name in sorted(os.listdir(base)):
+                        if name.startswith(prefix) or incident_id in name:
+                            out.append((os.path.join(base, name), f"{d}（按采集时刻推出的包名）"))
+                except OSError:
+                    pass
+    out.append((os.path.join(tempfile.gettempdir(), f"incident-{incident_id}.zip"), "本机临时目录"))
+    return out
+
+
+def lookup_incident(incident_id):
+    """找现场（真实 home）。返回 `(found, checked)`。"""
+    return lookup_incident_at(incident_id, os.path.expanduser("~"))
+
+
+def lookup_incident_at(incident_id, home):
+    """同上，但 home 可注入 —— 自测用临时目录，**不碰用户真实目录**。
+
+    **找不到时不猜**：调用方负责打印"本机没有这个现场"+ 重新采集的命令。
+    """
+    checked, found = [], []
+    for path, kind in lookup_candidates(incident_id, home):
+        checked.append((path, kind))
+        if os.path.exists(path):
+            found.append((path, kind))
+    return found, checked
+
+
+def lookup_main(incident_id):
+    """`--lookup`：找现场；**找不到就是找不到**，并给出可执行的下一步。"""
+    if incident_id_parts(incident_id) is None:
+        print(f"x `{incident_id}` 不像 incident ID（期望 INC-YYYYMMDD-HHMMSS-xxxx）")
+        return 2
+    found, checked = lookup_incident(incident_id)
+    if found:
+        print(f"找到 {len(found)} 处：")
+        for path, kind in found:
+            print(f"  * {path}  （{kind}）")
+        print()
+        print("下一步：--bundle <上面的路径>（目录或 zip 都行）")
+        return 0
+    # **明说没有**，并给出**可直接粘贴**的重新采集命令。
+    print(f"**本机没有这个现场**：{incident_id}")
+    print()
+    print(f"查过的 {len(checked)} 处：")
+    for path, kind in checked:
+        print(f"  * {path}  （{kind}）")
+    print()
+    print("可能的原因（今天无法从 ID 区分）：(1) 现场在另一台机器上采集；"
+          "(2) GUI 落点与这里列的不同；(3) 包已被清理。")
+    print()
+    print("要往下走，二选一：")
+    print("  1) 把那份包放到上面任一位置，或直接 --bundle <路径>；")
+    print("  2) 采一份**当下**的现场（注意：当下现场 != 那份现场，别混为一谈）：")
+    print()
+    print("     ./scripts/incident-bundle.sh --out /tmp/inc.zip --keep-dir")
+    print("     python3 scripts/triage-incident.py --bundle /tmp/inc.zip --md-out /tmp/SUMMARY.md")
+    print()
+    return 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="把现场包自动分诊成 signature + 证据（只读）",
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1017,6 +1140,8 @@ def main(argv=None):
                     help="上传前的隐私闸：扫包内文本的密钥模式，命中即**非 0 退出**（fail closed）")
     ap.add_argument("--privacy-json", action="store_true",
                     help="配合 --privacy-check：以 JSON 输出（给流水线/服务端用）；命中仍非 0")
+    ap.add_argument("--lookup", metavar="INC-ID",
+                    help="按 incident ID 找现场（ID 里的时间戳可推出包名）；找不到就明说并给出重采命令")
     ap.add_argument("--self-test", action="store_true", help="fixture + 双向敏感性（不读真实数据）")
     a = ap.parse_args(argv)
 
@@ -1026,8 +1151,10 @@ def main(argv=None):
         rc = self_test()
         rc2 = privacy_self_test()
         return rc or rc2
+    if a.lookup:
+        return lookup_main(a.lookup)
     if not a.bundle:
-        ap.error("需要 --bundle、--privacy-check 或 --self-test")
+        ap.error("需要 --bundle、--privacy-check、--lookup 或 --self-test")
 
     b = load_bundle(a.bundle)
     tri = triage(b)
