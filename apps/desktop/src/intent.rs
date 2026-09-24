@@ -32,6 +32,7 @@ use std::time::Duration;
 use xt_core::model::AppSettings;
 use xt_core::xray::access_log::ConnectionRecord;
 use xt_intent::engine::{ClassifyReport, EngineStats, IntentEngine};
+use xt_intent::rules::IntentRules;
 // `describe` 来自这个 trait —— 忘了它时编译器只会说"没有这个方法"。
 use xt_intent::gateway::Gateway;
 use xt_intent::transport::TlsTransport;
@@ -63,6 +64,13 @@ pub struct IntentRuntime {
     pub last_error: Option<String>,
     /// 引擎建起来的时刻。
     pub built_at_unix: Option<u64>,
+    /// **上一次真正下发给核心**的规则集合哈希。
+    ///
+    /// 它和当前的 `rules_hash()` 不一样，就说明"判决变了但还没生效" ——
+    /// 界面该显示"有 N 条待生效"，而不是假装已经拦住了。
+    applied_hash: Option<String>,
+    /// 上一次下发规则的时刻。
+    pub applied_at_unix: Option<u64>,
 }
 
 impl std::fmt::Debug for IntentRuntime {
@@ -87,6 +95,8 @@ impl IntentRuntime {
             notes: Vec::new(),
             last_error: None,
             built_at_unix: None,
+            applied_hash: None,
+            applied_at_unix: None,
         }
     }
 
@@ -225,6 +235,9 @@ impl IntentRuntime {
             };
         };
         let stats = self.last_stats.clone();
+        // 规则条数**现算**，不用 `stats` 里可能滞后一拍的值：
+        // 界面上"待生效 N 条"与这里的 N 必须是同一个数。
+        let rules = self.rules();
         IntentSummary {
             active: true,
             drill: engine.config().drill,
@@ -235,13 +248,50 @@ impl IntentRuntime {
             pending: engine.pending(),
             cache_len: engine.cache().len(),
             built_at_unix: self.built_at_unix,
-            block_rules: stats.as_ref().map(|s| s.block_rules).unwrap_or(0),
-            allow_rules: stats.as_ref().map(|s| s.allow_rules).unwrap_or(0),
+            block_rules: rules.block.len(),
+            allow_rules: rules.allow.len(),
+            skipped_rules: rules.skipped.len(),
+            rules_pending_apply: self.needs_apply(),
+            applied_at_unix: self.applied_at_unix,
             gateway_calls: stats.as_ref().map(|s| s.gateway_calls).unwrap_or(0),
             gateway_errors: stats.as_ref().map(|s| s.gateway_errors).unwrap_or(0),
             cache_hits: stats.as_ref().map(|s| s.cache_hits).unwrap_or(0),
             blocked: engine.cache().entries().filter(|e| e.verdict.is_block()).count(),
             note: self.last_error.clone().or_else(|| self.notes.first().cloned()),
+        }
+    }
+
+    /// 当前**应该生效**的规则（放行带 + 拦截带）。
+    ///
+    /// * 功能关闭 ⇒ 空；
+    /// * 演练模式 ⇒ 只有用户的放行带（`engine.rules()` 的语义，见其文档）；
+    /// * 否则 ⇒ 缓存里所有 `Block` 判决 + 放行带。
+    pub fn rules(&self) -> IntentRules {
+        self.engine.as_ref().map(|e| e.rules()).unwrap_or_default()
+    }
+
+    /// 当前规则集合的哈希（`None` = 没有引擎）。
+    pub fn rules_hash(&self) -> Option<String> {
+        self.engine.as_ref().map(|e| e.applied_hash())
+    }
+
+    /// 由**启动核心的那一方**在成功下发之后调用。
+    ///
+    /// 只有它被调用过，"这条规则已经生效"才是事实；在此之前界面显示"待生效"。
+    pub fn mark_applied(&mut self, now: u64) {
+        self.applied_hash = self.rules_hash();
+        self.applied_at_unix = Some(now);
+    }
+
+    /// 判决集合变了但还没下发给核心。
+    ///
+    /// **注意**：这只是一个"需不需要动核心"的判据，不是一个自动动作 ——
+    /// 本版不会自己重启核心（那会打断用户所有连接）。界面拿它显示"待生效"，
+    /// 由用户决定何时应用。
+    pub fn needs_apply(&self) -> bool {
+        match self.rules_hash() {
+            Some(current) => self.applied_hash.as_deref() != Some(current.as_str()),
+            None => false,
         }
     }
 
@@ -272,10 +322,15 @@ pub struct IntentSummary {
     pub pending: usize,
     pub cache_len: usize,
     pub built_at_unix: Option<u64>,
-    /// **本版恒为 0**：本切片不下发规则。字段留着是为了让界面早点有地方显示它，
-    /// 而不是等规则下发那一步再加。
+    /// 当前应该生效的拦截规则条数（演练模式下恒为 0）。
     pub block_rules: usize,
+    /// 用户放行带（纠正误杀）的条数。
     pub allow_rules: usize,
+    /// 因为域名形状非法而被丢掉的条数（要能被看见，不许静默）。
+    pub skipped_rules: usize,
+    /// 判决集合变了但还没下发给核心 —— 界面该显示"待生效"。
+    pub rules_pending_apply: bool,
+    pub applied_at_unix: Option<u64>,
     pub gateway_calls: u64,
     pub gateway_errors: u64,
     pub cache_hits: u64,
@@ -402,6 +457,77 @@ mod tests {
         assert!(rt.tick(2).is_none(), "没引擎就没有一轮账");
         assert!(!rt.allow_now("ads.example"));
         assert!(rt.explain("ads.example").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // 规则集合与"待生效"（本版不自动动核心，但界面要知道该不该提示）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_fresh_engine_has_rules_pending_until_the_core_applies_them() {
+        let dir = root("pending");
+        let mut rt = IntentRuntime::new(dir.clone());
+        rt.follow_settings(&zen_settings(), 100);
+
+        // 还没启动过核心 ⇒ 当前规则集合没被下发过 ⇒ 待生效。
+        assert!(rt.needs_apply(), "刚建起来的规则集合必须算作待生效");
+        let s = rt.summary();
+        assert!(s.rules_pending_apply);
+        assert_eq!(s.block_rules, 0, "演练模式下没有拦截规则");
+        assert_eq!(s.applied_at_unix, None);
+
+        // 核心带着这份规则起来了。
+        rt.mark_applied(110);
+        assert!(!rt.needs_apply(), "下发之后不该再显示待生效");
+        assert_eq!(rt.summary().applied_at_unix, Some(110));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_user_override_changes_the_rule_set_and_marks_it_pending_again() {
+        let dir = root("override-pending");
+        let mut rt = IntentRuntime::new(dir.clone());
+        rt.follow_settings(&zen_settings(), 100);
+        rt.mark_applied(110);
+        assert!(!rt.needs_apply());
+        assert_eq!(rt.summary().allow_rules, 0);
+
+        // 用户点"这个拦错了" ⇒ 放行带多一条 ⇒ 规则集合变了。
+        assert!(rt.allow_now("cdn.news.example"));
+        let s = rt.summary();
+        assert_eq!(s.allow_rules, 1, "放行纠正必须真的进规则集合");
+        assert!(s.rules_pending_apply, "集合变了就必须重新下发");
+        let rules = rt.rules();
+        assert_eq!(rules.allow.len(), 1);
+        assert!(rules.block.is_empty());
+        // 放行带的动作是用户选的（这里测试用的是 Direct）。
+        assert_eq!(rules.allow[0].then, xt_core::routing::RuleAction::Direct);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_engine_means_no_rules_and_no_pending_flag() {
+        let dir = root("no-engine-rules");
+        let rt = IntentRuntime::new(dir.clone());
+        assert!(rt.rules().is_empty());
+        assert!(rt.rules_hash().is_none());
+        assert!(!rt.needs_apply(), "没有引擎时不该提示'待生效'");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn turning_the_feature_off_clears_the_rules_and_the_pending_flag() {
+        let dir = root("off-rules");
+        let mut rt = IntentRuntime::new(dir.clone());
+        rt.follow_settings(&zen_settings(), 100);
+        rt.allow_now("cdn.news.example");
+        rt.mark_applied(110);
+        rt.follow_settings(&AppSettings::default(), 120);
+        // 关掉之后：没有引擎、没有规则、也不该再说"待生效"。
+        assert!(rt.rules().is_empty());
+        assert!(rt.rules_hash().is_none());
+        assert!(!rt.needs_apply());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

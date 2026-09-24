@@ -472,6 +472,22 @@ pub struct Supervisor {
     /// `start()` 返回后由调用方（`commands/core.rs`）`take_route_audits()` 统一落盘 ——
     /// 这样**成功与失败两条路径都会记**，日志里也带得上采样时点。
     route_audits: RouteAuditLog,
+    /// 下一次 [`Supervisor::start`] 要用的意图过滤规则（放行带 + 拦截带）。
+    ///
+    /// # 为什么是 setter 而不是 `start()` 的参数
+    ///
+    /// `start()` 有 5 个调用点（1 个生产 + 4 个测试）。规则属于"这一次启动"，
+    /// 而生成配置的地方就是 `start()` 自己 —— 用 setter 让既有测试一行都不用改。
+    ///
+    /// # 不变量（两条都不是可选的）
+    ///
+    /// * **不 `take`**：规则留在 supervisor 上，直到下一次 `set_intent_rules`。
+    ///   看门狗重建会重新调 `start()`；若这里把规则取空，重建之后拦截就静默失效，
+    ///   而用户看到的只是"广告又回来了"（没有任何报错）。
+    /// * **调用方每次 `start()` 前都应重新 set**：设置与判决缓存都可能变，
+    ///   这两个字段只是"上次给过来的快照"。
+    intent_allow: Vec<xt_core::routing::RoutingRule>,
+    intent_block: Vec<xt_core::routing::RoutingRule>,
 }
 
 impl Supervisor {
@@ -517,6 +533,33 @@ impl Supervisor {
 
     pub fn physical_interface(&self) -> Option<&str> {
         self.physical_interface.as_deref()
+    }
+
+    /// 设置下一次启动要用的意图规则（覆盖式）。
+    ///
+    /// 传空 `Vec` 表示"这次不要意图规则" —— 功能关闭或演练模式下就是这种形态。
+    pub fn set_intent_rules(
+        &mut self,
+        allow: Vec<xt_core::routing::RoutingRule>,
+        block: Vec<xt_core::routing::RoutingRule>,
+    ) {
+        self.intent_allow = allow;
+        self.intent_block = block;
+    }
+
+    /// 当前挂着的意图规则条数 `(放行, 拦截)`（诊断与测试用）。
+    pub fn intent_rule_counts(&self) -> (usize, usize) {
+        (self.intent_allow.len(), self.intent_block.len())
+    }
+
+    /// **`start()` 实际使用的那一个**规则表（预设 + 意图 + 自定义，已排序）。
+    ///
+    /// 抽出来是为了让"意图规则真的进了配置"这件事**能被单测钉住**：
+    /// 否则只能靠"启动一次核心、把 config.json 读出来看"这种重验收，
+    /// 而那种验收在没有核心二进制的机器上会静默跳过。
+    pub fn rules_for_config(&self, settings: &AppSettings) -> Vec<xt_core::routing::RoutingRule> {
+        // 顺序由 `merge_rules_with_intent` 一处表达，避免"每个调用点各排一遍"。
+        xray::merge_rules_with_intent(settings, &self.intent_allow, &self.intent_block)
     }
 
     /// 启动核心（含可选的 TUN）。
@@ -571,7 +614,7 @@ impl Supervisor {
         // ---- 2) 生成并落盘配置 ----
         let profile: InboundProfile =
             profile_for(settings, self.physical_interface.as_deref(), native_tun);
-        let rules = xray::merge_rules(settings);
+        let rules = self.rules_for_config(settings);
         let config = xray::build_pretty(&CoreConfigInput {
             settings,
             nodes,
@@ -1361,6 +1404,57 @@ mod tests {
         // 版本过老的核心也不该被启动
         assert!(!sup.is_running(), "被拒绝的启动不该留下运行中的核心");
         let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 意图规则必须**真的**进到 supervisor 生成的那份规则表里，而且位置正确。
+    ///
+    /// 这条测试钉的是"接线"这一层：`set_intent_rules` → `rules_for_config`。
+    /// 配置级别（真实核心 exit 0、重复 ruleTag 被拒）由
+    /// `crates/xt-intent/tests/real_core.rs` 覆盖 —— 那条更强，但它需要核心二进制。
+    #[test]
+    fn intent_rules_reach_the_rule_table_the_supervisor_builds() {
+        use xt_core::model::RoutingPreset;
+        use xt_core::routing::{MatchCondition, RuleAction, RoutingRule};
+
+        fn domain_rule(id: &str, host: &str, then: RuleAction) -> RoutingRule {
+            RoutingRule::new(
+                id,
+                format!("测试 {id}"),
+                MatchCondition { domains: vec![format!("full:{host}")], ..Default::default() },
+                then,
+            )
+        }
+
+        let mut sup = Supervisor::default();
+        assert_eq!(sup.intent_rule_counts(), (0, 0), "默认没有任何意图规则");
+        let settings = AppSettings { routing_preset: RoutingPreset::BypassMainland, ..Default::default() };
+        assert!(
+            !sup.rules_for_config(&settings).iter().any(|r| r.id.starts_with("intent-")),
+            "没设过就不该凭空出现意图规则"
+        );
+
+        sup.set_intent_rules(
+            vec![domain_rule("intent-allow-ok.example", "ok.example", RuleAction::Direct)],
+            vec![domain_rule("intent-block-ads.example", "ads.example", RuleAction::Block)],
+        );
+        assert_eq!(sup.intent_rule_counts(), (1, 1));
+
+        let rules = sup.rules_for_config(&settings);
+        let pos = |id: &str| {
+            rules
+                .iter()
+                .position(|r| r.id == id)
+                .unwrap_or_else(|| panic!("规则表里没有 {id}"))
+        };
+        assert!(pos("preset-private") < pos("intent-allow-ok.example"), "私有直连必须最先");
+        assert!(pos("intent-allow-ok.example") < pos("intent-block-ads.example"), "放行早于拦截");
+        assert!(pos("intent-block-ads.example") < pos("preset-ads"), "意图拦截早于静态广告名单");
+        assert!(pos("intent-block-ads.example") < pos("preset-cn-domain"), "意图拦截早于大陆直连");
+
+        // 覆盖式：再设一次空 ⇒ 回到"没有意图规则"（这就是关闭功能/演练模式的形态）。
+        sup.set_intent_rules(vec![], vec![]);
+        assert_eq!(sup.intent_rule_counts(), (0, 0));
+        assert!(!sup.rules_for_config(&settings).iter().any(|r| r.id.starts_with("intent-")));
     }
 
     /// 同一个 `Supervisor` 上重复 `start` -> 幂等守卫必须拦下。

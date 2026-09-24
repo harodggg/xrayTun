@@ -746,19 +746,35 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P2a 设置 + 规则排序 | ✅ 完成 | `cargo test -p xt-core --lib` ⇒ **252 passed**（含 7 条意图规则顺序测试 + 8 条设置测试）；`cargo test -p xraytun-desktop --test type_contract` ⇒ **6 passed**；`apps/ui`：`vitest run` ⇒ **366 passed**，`tsc --noEmit` ⇒ clean |
 | P1 传输层（提前做，P2b 的前置） | ✅ 完成 | `cargo test -p xt-intent` ⇒ **127 passed**（新增 `transport` 的 14 条 + `jev` 网关的 14 条：URL/请求组包/头注入防护/`Content-Length`/`chunked`/三种状态映射/退避与 `Retry-After`/抖动上界/不重试的 4xx）；在线用例见上 |
 | P2b-1 桌面接线（**只观察/判定/审计**） | ✅ 完成 | `cargo test --workspace` ⇒ **770 passed**（含 `apps/desktop/src/intent.rs` 的 21 条）；`clippy --workspace --all-targets -D warnings` 干净；UI `vitest` 366 passed |
-| P2b-2 规则下发（注入 `merge_rules_with_intent` + 重启/热加） | ⏳ 未开始 | 这一版**一条规则都不生成**：`IntentSummary.block_rules` 恒为 0，且引擎在非演练模式下会明说"本版不下发规则" |
+| P2b-2 规则物化进配置 | ✅ 完成 | `IntentRuntime::rules()` → `Supervisor::set_intent_rules` → `start()` 生成配置时走 `merge_rules_with_intent`。单测钉住"意图规则真的进了那份规则表"及位置（`preset-private` → 放行 → 拦截 → `preset-ads` → `cn`）；配置级别由 `real_core.rs` 用真实核心验收 |
+| P2b-3 生效时机与自动应用 | ⏳ 未开始 | 见下面「P2b-2 的边界」：规则**在下次核心启动时生效**，本版**不自动重启核心**；`needs_apply()` 已经能报"待生效"，但还没有界面去消费它 |
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
 | P4 MITM | ⏳ 未开始 | 目标：helper 装信任锚（进快照）、`freedom.redirect` 引导、ALPN 只 h1、`strip_json` 的 `Content-Length` 一致性 |
 
+### P2b-2 的边界：规则**什么时候**生效
+
+* 规则在 **核心启动时**随配置一起下发（`Supervisor::start` → `merge_rules_with_intent`）。
+  用户连上/重连/看门狗重建都会带上**当下**的规则集合。
+* 运行中判决集合变了（新拦了一个域名、用户点了一次放行），**不会自动重启核心** ——
+  那会打断用户所有连接，而这个功能的收益远不值得一次静默断流。
+  `IntentRuntime::needs_apply()` / `IntentSummary.rules_pending_apply` 就是给界面用的
+  "有 N 条待生效，点这里应用到核心"。
+* 于是有一个**已知且刻意**的行为：关掉演练模式之后，已经攒下的判决要等下一次核心启动才拦得住。
+  这在 P2b-3（用 `RoutingService.AddRule` 免重启热加）里消掉；在那之前，界面上必须
+  把它说成"待生效"，不能显示成"已在拦截"。
+* 另外：`block_rules` 的条数是**现算**的（不是取自可能滞后一拍的统计），
+  因为界面上"待生效 N 条"里的 N 与它必须是同一个数。
+
 ### P2b-1 的刻意边界（写清楚，免得被当成"已经能拦广告了"）
 
-* 桌面端只接了**观察 → 判定 → 缓存 → 审计**这条链：`commands/core.rs` 的日志单点
+* P2b-1 只接了**观察 → 判定 → 缓存 → 审计**这条链：`commands/core.rs` 的日志单点
   多挂一个 `observe_with_record`，后台 10 秒节拍跑 `classify_pending`，缓存每 6 拍落盘一次。
-* **不下发路由规则、不重启核心、不改任何系统网络配置。** 所以这一版即使打开功能，
-  也不可能影响用户的网。界面摘要里的 `block_rules` 恒为 0，非演练模式下引擎会在说明里
-  明确写"本版只观察不拦截"。
+* **P2b-1 不下发规则、不重启核心、不改任何系统网络配置**；`block_rules` 当时恒为 0。
+* P2b-2 把规则接进了**核心启动**这条既有路径（仍然不碰系统路由/DNS/helper 快照）——
+  过滤只往 Xray 配置里加 `blackhole` 规则，所以"唯一会改系统状态的是 MITM 的根证书"
+  这条 §0 的结论不变。
 * 密钥：本切片只支持免密钥的 Zen 预设。需要密钥的预设会以**可读原因**被拒绝
   （`config_from_settings` 里），而不是发一个必然 401 的请求。Keychain 读写是独立一步。
 

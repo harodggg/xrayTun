@@ -163,6 +163,20 @@ pub(crate) async fn start_core(
         return Ok(());
     }
 
+    // 意图过滤：把**这一次应该生效**的规则交给 supervisor（它在生成配置时用）。
+    //
+    // 放在 `start()` 之前是必须的：配置在 `start()` 里一次性生成，
+    // 之后再设就来不及了。而"规则从哪来"这里只问一次 —— 判决缓存、演练模式、
+    // 用户放行纠正都在 `IntentRuntime::rules()` 里合成完毕。
+    //
+    // 传空两带是完全正常的形态（功能关闭 / 演练模式 / 还没有判决）。
+    if let Some((allow, block)) = state.with(|i| {
+        let r = i.intent.rules();
+        (r.allow, r.block)
+    }) {
+        supervisor.set_intent_rules(allow, block);
+    }
+
     let result = supervisor
         .start(
             &state.store,
@@ -199,6 +213,28 @@ pub(crate) async fn start_core(
     // 新核心起来了：启动它的监控（换网检测 / 连通性检查 / 看门狗）。
     // 与「已经在跑」那条路径共用同一个入口，避免两处各写一份。
     spawn_monitors(app, egress_before, runtime.pid);
+
+    // 核心已经用这份规则起来了 ⇒ 记下"这一版已经生效"。
+    // 放在**成功之后**是关键：起不来的时候界面必须继续显示"待生效"，
+    // 否则就是在骗人（配置没被加载过，规则却显示已生效）。
+    let now = xt_core::util::now_unix();
+    let applied = state.with(|i| {
+        let count = {
+            let r = i.intent.rules();
+            (r.allow.len(), r.block.len())
+        };
+        i.intent.mark_applied(now);
+        count
+    });
+    if let Some((allow, block)) = applied {
+        if allow + block > 0 {
+            state.log(
+                "intent",
+                "info",
+                format!("意图规则已随核心启动生效：放行 {allow} 条 / 拦截 {block} 条"),
+            );
+        }
+    }
 
     state.with(|i| {
         i.runtime = runtime.clone();

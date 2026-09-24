@@ -693,7 +693,33 @@ mod tests {
         assert_eq!(a.snapshot(), b.snapshot(), "出口计数必须一致");
         assert_eq!(stats(&a).paired, stats(&b).paired);
         assert_eq!(stats(&a).unpaired, stats(&b).unpaired);
-        assert_eq!(items(&a, 10), items(&b, 10), "连接记录必须逐条相同");
+        // **不能直接比整条记录**：`ts_ms` 取自本进程的墙钟（`now_unix_ms()`），
+        // 两条日志是先后构建的，差一毫秒就整条不等 —— 那样写出来的是一条会
+        // 间歇失败（"在单跑时通过、全量跑时红"）的假测试。这里只比**语义字段**：
+        // 网络层、目标、入站/出站、以及配对结果。
+        /// 只保留**语义字段**（`ts_ms` 是墙钟，见上面的注释）。
+        type Semantic = (String, String, Option<u16>, String, String, Option<String>, bool);
+        let semantic = |records: Vec<ConnectionRecord>| -> Vec<Semantic> {
+            records
+                .into_iter()
+                .map(|r| {
+                    (
+                        r.network,
+                        r.target_host,
+                        r.target_port,
+                        r.inbound_tag,
+                        r.outbound_tag,
+                        r.domain,
+                        r.domain_paired,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            semantic(items(&a, 10)),
+            semantic(items(&b, 10)),
+            "两边的连接记录（语义字段）必须逐条相同"
+        );
 
         // 返回值本身：sniffed 行没有出口、也没有记录。
         assert!(observed[0].outbound.is_none() && observed[0].record.is_none());
