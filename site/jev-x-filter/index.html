@@ -40,10 +40,10 @@
   "name": "信息过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.6",
+  "softwareVersion": "0.4.8",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/jev-x-filter-0.4.8.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/jev-x-filter-0.4.8.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -206,13 +206,13 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip"
-            >下载 v0.4.6（zip，175.8 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/jev-x-filter-0.4.8.zip"
+            >下载 v0.4.8（zip，186.0 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.4.6 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.4.8 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -445,7 +445,7 @@
         </p>
       </section>
       <section class="wrap prose" id="emotion-feed">
-        <h2>v0.4.5：情绪整理现在也管时间线（并扩到 11 类）</h2>
+        <h2>v0.4.5：情绪整理现在也管时间线（现已扩到 12 类）</h2>
         <p>
           反馈：时间线上的 <code>交朋友</code> / <code>美女啊</code> / <code>👍好</code> / <code>我也想去🥺</code> / <code>Gm</code> / <code>太美了</code> 一条都没折叠。
           原因是此前情绪整理<strong>只在回复区</strong>生效。现在：
@@ -454,17 +454,82 @@
           <thead><tr><th>范围</th><th>行为</th></tr></thead>
           <tbody>
             <tr><td>时间线 / 推荐流</td><td>没有线程语义 → <strong>每条情绪言论各自折叠</strong>，条上写 <code>情绪 · 赞美：美女啊（已折叠）</code>，点「展开」看原文</td></tr>
-            <tr><td>回复区</td><td>按「同线程 + 同类」只留一条代表（挂「情绪 · XX」徽标），其余折叠</td></tr>
+            <tr><td>回复区</td><td><strong>同一条推文下的低信息量附和合并成一条</strong>（v0.4.7 起）：只留最早一条当代表（挂「情绪 · XX」徽标），其余不分类别全部折叠，条上写明合并了几条什么</td></tr>
           </tbody>
         </table>
         <p>
-          类别扩到 <strong>11 类</strong>：愤怒 / 喜悦 / 支持 / 反对 / 悲伤 / 确认 / 赞美 / 期待 / 问候 / 社交 / 表情（纯 emoji）；
+          类别在 v0.4.8 起收敛为 <strong>10 类</strong>（见下节）：愤怒 / 喜悦 / 支持 / 反对 / 悲伤 / 确认 / 赞美 / 期待 / 问候 / 社交 / <strong>参与</strong> / 表情（纯 emoji）；
           开关仍是设置页 1.6 节的「整理情绪言论」+ 折叠/隐藏模式（时间线折叠复用既有的「时间线折叠」开关）。
         </p>
         <p>
           同版还修掉了独立验证发现的 <strong>4 处误伤 + 2 处过窄</strong>：<code>不入生活</code> 单独出现不再定罪、
           <code>看福</code> 不再命中「看福建舰 / 看福彩开奖」、科普与医学语境引用会被降级、医学描述「针只进入身体…」不再命中；
           <code>我服了</code> / <code>难过死了</code> / <code>真好看</code> 这类加强语与程度补语也都能正确归类了。
+        </p>
+      </section>
+      <section class="wrap prose" id="classes10">
+        <h2>v0.4.8：全量信息 → 固定 10 类 → 折叠这几类</h2>
+        <p>
+          用户又发来一条抽奖帖的 8 条回复（<code>哇塞，参与啦，佳佳姐</code>、<code>报告，我想参加，可是没有周边🥺</code>、
+          <code>中秋快乐梦想成真</code>、<code>佳佳姐真的需要一份周边参加活动</code>、<code>我是真没有周边，咋搞</code>、
+          <code>中秋快乐，非常喜欢今年okx的周边，太爱了！</code>、<code>首先得有周边</code>、
+          <code>Okx的活动太高级了，周边也很漂亮</code>）——<strong>一条都没被折叠</strong>，并给定口径：
+          「应该获得全量的信息，然后分类成几类。折叠几类就行了。<strong>最多 10 类</strong>。」
+        </p>
+        <p>
+          旧做法是「给每条截图配一个专属句式」，真实评论区的写法无穷，永远追不上；而且类别当时已经涨到 13 个。
+          这一版换成<strong>分类</strong>：
+        </p>
+        <ul>
+          <li><strong>类别固定 10 个</strong>：愤怒 / 喜悦 / 问候祝福 / 支持认同 / 反对 / 悲伤 / 赞美 / 期待求取 / 参与 / 表情
+            （原「确认」并入支持认同、「祝福」并入问候祝福、「社交」并入期待求取）。</li>
+          <li><strong>三级分类，逐级放宽</strong>：① 核心短语（≤12 字）→ ② 整串锚定模板（≤20 字）→
+            ③ <strong>全量文本覆盖率判定</strong>（≤60 字）：整条回复里<strong>落在低信息量词表里的字 ≥70%</strong>
+            且某一类证据 ≥2 字就算那一类。上面那 8 条里没有专属句式的（例如 <code>哇塞，参与啦，佳佳姐</code>）
+            靠这一步归类。</li>
+          <li><strong>否决闸门</strong>：含数字/链接、含实质词（因为/但是/其实/数据/规则/时间/价格/放弃/太少/不划算…）、
+            含劝告否定（<code>别</code>/<code>不要</code>/<code>不用</code>/<code>请勿</code>/<code>记得</code>）
+            一律不折叠 —— <code>这个活动名额太少，我放弃了</code>、<code>我没有时间参加这个活动</code>、
+            <code>最好别来</code> 都是安全的。</li>
+          <li>折叠行为不变：同一条推文下的低信息量附和<strong>合并成一条</strong>（只留最早一条代表，条上写各类别人数），
+            详情页主帖本身永不折叠。</li>
+        </ul>
+        <p>
+          验证：真实 Chrome 端到端 <strong>162/162</strong>（新增场景 K：8 条 → 1 条代表 + 7 折叠 +
+          「低信息量附和 8 条：期待求取 4 · 问候祝福 2 · 赞美 1 · 参与 1」）；单元测试 <strong>330/330</strong>。
+          独立对抗审计抓到并已修掉 3 个缺陷：<code>这个活动名额太少，我放弃了</code> 误伤、
+          <code>已经报名了，坐等开奖</code> 漏判、<code>求转发</code> 漏判。
+        </p>
+      </section>
+      <section class="wrap prose" id="merge">
+        <h2>v0.4.7：这些东西为什么不能折叠合并成同一条</h2>
+        <p>
+          用户圈出一条活动帖下面连着的 6 条回复 —— <code>佳佳妹妹最好，最美！</code>、<code>好事多磨，什么时候可以来一份</code>、
+          <code>已三连！！！</code>、<code>这个活动好啊</code>、<code>都来参加</code>、<code>三连了，希望能中🙏</code> ——
+          问：这些东西为什么不能折叠合并成同一条？实测根因有两层：
+        </p>
+        <ul>
+          <li><strong>这 6 条一条都没被识别</strong>（本地分类器对 6 条全部返回 null）：旧短语表里没有「三连 / 参加 / 活动 / 来一份」
+            这类参与句；判定要求「整串恰好等于某条核心短语」，带称呼或宾语的赞美（<code>这个活动好啊</code>）落空；
+            <code>希望</code> 还被当成「讲理由」的词，<code>希望能中</code> 直接放弃。</li>
+          <li><strong>就算识别了也只会得到 3 条代表条</strong>（赞美 / 期待 / 参与各一条）—— 旧归组键按<em>类别</em>分组，等于没合并。</li>
+        </ul>
+        <p>这一版两处一起改：</p>
+        <ul>
+          <li>新增「<strong>参与</strong>」类别（三连 / 一键三连 / 参加 / 报名 / 打卡 / 签到 / 走起…），并新增
+            <strong>整串锚定的附和模板</strong>覆盖带称呼、带宾语、带前缀的短句。护栏三条：整串 <code>^…$</code> 锚定 + 固定小词表、
+            归一化后 ≤14 字且无数字/链接、自由前缀另做实质词过滤（<code>成本太高可以来一份</code> 不会被误折）。</li>
+          <li>同一条推文下面的低信息量附和<strong>合并成一条</strong>：fold 模式只留最早一条当代表，其余不分类别全部折叠，
+            条上写清合并了什么 —— <code>情绪 · 参与（低信息量附和 6 条：参与 3 · 赞美 2 · 期待 1）</code>，
+            同时保留本条自己的类别标签（愤怒 / 喜悦 / 支持 / 反对 照旧能读到）。</li>
+          <li>详情页（<code>/status/&lt;id&gt;</code>）上所有推文共用 threadId，而 X 现在常不渲染「回复」文案，
+            所以改为 <strong>threadId 非空即按线程语义合并</strong>（时间线 URL 没有 <code>/status/</code>，行为不变）；
+            被打开的那条<strong>主帖本身永不折叠</strong>，也不会当代表条。</li>
+        </ul>
+        <p>
+          真实 Chrome 端到端 <strong>154/154</strong>（新增场景 J：截图这 6 条 → 1 条代表 + 5 折叠 + 「还有 5 条」+ 主帖不折叠 + 零脚本异常）；
+          单元测试 <strong>319/319</strong>。独立对抗审计（另一位开发者另写 27 条用例）报出并已修掉 4 个缺陷：
+          <code>今天天气最好</code> 这类被误判成赞美、<code>合同什么时候可以给我</code> 被误判成许愿、默认作用域与规格不一致、参与类过窄。
         </p>
       </section>
       <section class="wrap prose" id="errors">
@@ -507,7 +572,7 @@
         <h2>安装与配置</h2>
         <p>扩展不需要构建，下载 zip 解压就是一个可直接加载的目录：</p>
         <pre class="code"><code># 1) 下载并解压
-unzip jev-x-filter-0.3.0.zip -d info-filter
+unzip jev-x-filter-0.4.8.zip -d info-filter
 
 # 2) 打开 chrome://extensions → 右上角打开「开发者模式」
 #    → 「加载已解压的扩展程序」→ 选中解压出来的 info-filter 目录
@@ -698,7 +763,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -716,7 +781,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          信息过滤器 · Jev v0.4.6 · Chrome MV3 · 页面最后更新 2026-09-24 ·
+          信息过滤器 · Jev v0.4.8 · Chrome MV3 · 页面最后更新 2026-09-25 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>
