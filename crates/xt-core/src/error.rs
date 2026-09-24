@@ -65,4 +65,11 @@ pub enum Error {
 
     #[error("配置读写失败: {0}")]
     Store(String),
+
+    /// 运行期改路由规则（`RoutingService`）失败。
+    ///
+    /// 与 `Routing`（读规则集）分开：那条是"读 geosite/geoip"，这条是"往运行中的
+    /// 核心增删规则"，排障时看的日志与失败模式都不一样。
+    #[error("运行期修改路由规则失败: {0}")]
+    RoutingApi(String),
 }

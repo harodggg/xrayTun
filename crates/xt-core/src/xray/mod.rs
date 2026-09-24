@@ -4,6 +4,7 @@ pub mod config;
 pub mod probe;
 pub mod process;
 pub mod access_log;
+pub mod routing_api;
 pub mod stats;
 
 pub use config::{
@@ -12,6 +13,9 @@ pub use config::{
     RuleTagConflict, TunInboundSpec, API_PORT, MIN_CORE_VERSION_NATIVE_TUN,
 };
 pub use probe::{probe_nodes, ProbeOptions, ProbeResult, DEFAULT_PROBE_URL};
+pub use routing_api::{
+    add_rules, list_rules, remove_rules, replace_rules, sync_intent_rules, ApiRule, ListRuleItem,
+};
 pub use stats::{
     parse_traffic_counter, query_stats, traffic_by_tag, traffic_from_stats, CounterParts,
     StatEntry, TrafficCounters, QUERY_STATS_PATH,
