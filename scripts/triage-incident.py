@@ -70,24 +70,19 @@ from helper_tristate import classify as _classify_helper  # noqa: E402
 # ---------------------------------------------------------------- 已知上游噪音
 #
 # 这里列的不是"忽略"，而是**已经定过根因、且不是我们的问题**的 signature。
-# 为什么要单独一张表，而不是直接从 SIGNATURES 里删掉：
-#
+# 为什么不直接从 SIGNATURES 里删掉：
 # * 删掉 ⇒ 它再来时**没人看得见**（下次真坏了也分不清）；
-# * 留成普通命中 ⇒ 它会把**每一份**现场包都染成它（本机实测 6/min，恒命中），
+# * 留成普通命中 ⇒ 它会把**每一份**现场包都染成它（本机实测 6/min 恒命中），
 #   分诊就退化成橡皮图章 —— 那正是这张信号表想避免的事。
-#
 # 所以：**照常判定、照常写原始行**，但在「判定」里与可操作项**分开列**；
-# 并且**没出现时要显式说"没出现"** —— 一个恒命中的项忽然消失，本身就是信号
-# （上游修了 / 触发条件变了 / 采集口径变了），必须有人能看见。
-#
-# 每一条都必须写清：根因、上游位置、触发条件。
+# 并且**没出现时要显式说"没出现"** —— 一个恒命中的项忽然消失本身就是信号。
 KNOWN_UPSTREAM_NOISE = {
     "tun-iface-einval": {
         "root_cause": "上游 darwin 的 setinterface() 用了 fallthrough："
                       "对 IPv6 socket 也设了一次 IPv4 的 IP_BOUND_IF ⇒ EINVAL",
         "upstream": "XTLS/Xray-core v26.9.9 proxy/tun/tun_darwin.go:596",
         "trigger": "darwin + autoOutboundsInterface 非空 + 任意 IPv6 出站拨号",
-        "impact": "只多一行 [Info]，IPV6_BOUND_IF 本身是成功的 —— 功能不受影响",
+        "impact": "只多一行 [Info]；IPV6_BOUND_IF 本身成功 ⇒ 功能不受影响",
         "since": "2026-09-24",
     },
 }
@@ -709,15 +704,13 @@ def to_markdown(bundle, tri, caliber):
         L.append(f"**命中 {len(actionable)} 条**：{', '.join('`' + h + '`' for h in actionable)}")
         if noise_hits:
             L.append("")
-            L.append(f"（另有 {len(noise_hits)} 条**已知上游噪音**，见下节：" +
-                     "、".join('`' + h + '`' for h in noise_hits) + "）")
+            L.append(f"（另有 {len(noise_hits)} 条**已知上游噪音**，见下节："
+                     + "、".join('`' + h + '`' for h in noise_hits) + "）")
     elif noise_hits:
-        # 只有噪音命中 ⇒ **不是 `unknown`**：我们知道它是什么。
         L.append("**没有可操作的命中**；本包命中的是**已知上游噪音**："
                  + "、".join('`' + h + '`' for h in noise_hits))
         L.append("")
-        L.append("⇒ 这份包**没有指向本项目的缺陷**。若要继续查，请以「逐条判据」里"
-                 "**未命中**的那些为准（它们带着最像的排序）。")
+        L.append("⇒ 这份包没有指向本项目的缺陷。要接着查，请以「逐条判据」里**未命中**的那些为准。")
     else:
         L.append("**未命中任何 signature ⇒ `unknown`**（不猜根因）。最像的三条：")
         for n in tri["closest"]:
@@ -736,7 +729,6 @@ def to_markdown(bundle, tri, caliber):
             elif r.get("unavailable"):
                 state = "不可用"
             else:
-                # **恒命中的项没出现 ⇒ 必须有人看得见**（上游修了 / 触发条件变了 / 口径变了）。
                 state = "**未出现**（若本机满足触发条件 ⇒ 行为变了，值得看一眼）"
             L.append(f"| `{name}` | {state} | {meta['root_cause']} | `{meta['upstream']}` | "
                      f"{meta['trigger']} | {meta['impact']} |")
@@ -885,10 +877,10 @@ def self_test():
         events=[], core=[_core_line(t0, "一切正常")],
         network="## route -n get 127.0.0.2\n  interface: lo0\n")
 
-    # 噪音表的每条都必须写清四个字段 —— 空字段会让它变成"闭嘴清单"。
-    for n, meta in KNOWN_UPSTREAM_NOISE.items():
-        for field in ("root_cause", "upstream", "trigger", "impact"):
-            check(f"噪音 `{n}` 的 {field} 不能为空", bool(meta.get(field)), True)
+    # 噪音表每条都必须写清四个字段 —— 空字段会让它变成"闭嘴清单"。
+    for _n, _meta in KNOWN_UPSTREAM_NOISE.items():
+        for _field in ("root_cause", "upstream", "trigger", "impact"):
+            check(f"噪音 `{_n}` 的 {_field} 不能为空", bool(_meta.get(_field)), True)
 
     print("=== 每条 signature 的 fixture ⇒ 期望命中 ===")
     for name, root in fixtures.items():
@@ -898,15 +890,14 @@ def self_test():
         else:
             check(f"fixture `{name}` ⇒ 命中 `{name}`", name in tri["hits"], True)
             # 已知上游噪音必须**照常命中**，但要被分到噪音清单、不进可操作项。
-            # 挂在正循环里是刻意的：复用同一份 `tri`，不再自己构造一遍（那样两条路径会漂移）。
+            # 挂在正循环里是刻意的：复用同一份 `tri`，不再自己构造一遍（那样会漂移）。
             if name in KNOWN_UPSTREAM_NOISE:
                 check(f"噪音 `{name}` 必须进噪音清单",
                       [h for h in tri["hits"] if h in KNOWN_UPSTREAM_NOISE], [name])
                 check(f"噪音 `{name}` 不许算成可操作项",
                       [h for h in tri["hits"] if h not in KNOWN_UPSTREAM_NOISE], [])
             else:
-                # 反向对照：**非**噪音的 fixture 不许被误归进噪音清单，
-                # 否则"分开"就成了空话。
+                # 反向对照：非噪音不许被误归进噪音清单，否则"分开"是空话。
                 check(f"非噪音 `{name}` 不许进噪音清单",
                       [h for h in tri["hits"] if h in KNOWN_UPSTREAM_NOISE], [])
 
@@ -1001,720 +992,8 @@ def self_test():
     b = load_bundle(fixtures["unknown"])
     tri = triage(b)
     check("unknown 时 signature = unknown", tri["signature"], "unknown")
-    shutil.rmtree(tmp, ignore_errors=True)
-    print()
-    if fails:
-        print(f"privacy self-test：**失败**（{len(fails)} 项）：{fails}")
-        return 1
-    print("privacy self-test：**全部通过**（真值 11 类全中 / 干净零中 / 逐条谓词双向敏感性）")
-    return 0
+    check("unknown 时给出最像的三条", len(tri["closest"]), 3)
 
-
-# ---------------------------------------------------------------- 分诊 + 输出
-
-
-def triage(bundle):
-    results = {}
-    for name in SIGNATURES:
-        try:
-            r = PREDICATES[name](bundle)
-        except Exception as e:  # noqa: BLE001  —— 判据自己崩了要说出来，不能假装没命中
-            r = {"hit": False, "unavailable": f"判据抛异常：{e}", "near_miss": 0.0, "samples": []}
-        results[name] = r
-    hits = [n for n in SIGNATURES if results[n].get("hit")]
-    if hits:
-        signature = hits[0] if len(hits) == 1 else "multiple"
-    else:
-        signature = "unknown"
-    # 「最像的三条」：未命中里 near_miss 最高的三条（**只是排序启发式**）
-    closest = sorted((n for n in SIGNATURES if not results[n].get("hit")),
-                     key=lambda n: results[n].get("near_miss", 0.0), reverse=True)[:3]
-    return {"signature": signature, "hits": hits, "results": results, "closest": closest}
-
-
-def caliber_block(bundle, path):
-    m = bundle.get("manifest") or {}
-    files = bundle["files"]
-    return {
-        "tool": TOOL_VERSION,
-        "bundle": os.path.basename(os.path.abspath(path)),
-        "bundle_files": files,
-        "manifest_sha256": files.get("manifest.json", {}).get("sha256"),
-        "window": m.get("window"),
-        "app_version": ((m.get("versions") or {}).get("app") or {}).get("value"),
-        "core_version": ((m.get("versions") or {}).get("core") or {}).get("value"),
-        "helper_check": ((m.get("versions") or {}).get("helper") or {}).get("check"),
-        "thresholds": {
-            "tun_einval_per_min": TUN_EINVAL_PER_MIN_THRESHOLD,
-            "watchdog_window_secs": WATCHDOG_WINDOW_SECS,
-            "write_interleave_fixed_version": ".".join(map(str, WRITE_INTERLEAVE_FIXED_VERSION)),
-        },
-        "notes": bundle.get("notes", []),
-        "boundary": "命中是**症状**不是根因；只看包里有的东西",
-    }
-
-
-def to_markdown(bundle, tri, caliber):
-    L = []
-    L.append(f"# 现场分诊：{tri['signature']}")
-    L.append("")
-    L.append("## 口径头（引用任何命中都要带上这一段）")
-    L.append("")
-    L.append(f"* 工具：`{caliber['tool']}`")
-    L.append(f"* 包：`{caliber['bundle']}`；`manifest.json` sha256 = `{caliber['manifest_sha256']}`")
-    w = caliber["window"] or {}
-    L.append(f"* 窗口：{w.get('since_local')} → {w.get('until_local')}"
-             f"（来源：{w.get('source')}；degraded={w.get('degraded')}）")
-    hc = caliber["helper_check"] or {}
-    L.append(f"* 版本：App {caliber['app_version']} / 核心 {caliber['core_version']} / "
-             f"helper 三态 {hc.get('state')}（判据：{hc.get('criterion') or '旧格式未记录'}）")
-    L.append(f"* 阈值：{json.dumps(caliber['thresholds'], ensure_ascii=False)}")
-    L.append(f"* 包内文件（bytes/sha256）：")
-    for name, meta in caliber["bundle_files"].items():
-        L.append(f"  * `{name}` {meta['bytes']} B `{meta['sha256'][:16]}…`")
-    if caliber["notes"]:
-        L.append(f"* ⚠️ 读包时的说明：{'；'.join(caliber['notes'])}")
-    L.append("")
-    L.append("## 判定")
-    L.append("")
-    noise_hits = [h for h in tri["hits"] if h in KNOWN_UPSTREAM_NOISE]
-    actionable = [h for h in tri["hits"] if h not in KNOWN_UPSTREAM_NOISE]
-    if actionable:
-        L.append(f"**命中 {len(actionable)} 条**：{', '.join('`' + h + '`' for h in actionable)}")
-        if noise_hits:
-            L.append("")
-            L.append(f"（另有 {len(noise_hits)} 条**已知上游噪音**，见下节：" +
-                     "、".join('`' + h + '`' for h in noise_hits) + "）")
-    elif noise_hits:
-        # 只有噪音命中 ⇒ **不是 `unknown`**：我们知道它是什么。
-        L.append("**没有可操作的命中**；本包命中的是**已知上游噪音**："
-                 + "、".join('`' + h + '`' for h in noise_hits))
-        L.append("")
-        L.append("⇒ 这份包**没有指向本项目的缺陷**。若要继续查，请以「逐条判据」里"
-                 "**未命中**的那些为准（它们带着最像的排序）。")
-    else:
-        L.append("**未命中任何 signature ⇒ `unknown`**（不猜根因）。最像的三条：")
-        for n in tri["closest"]:
-            r = tri["results"][n]
-            L.append(f"* `{n}`（near_miss={r.get('near_miss', 0):.2f}）：{json.dumps(r.get('evidence'), ensure_ascii=False)}")
-    L.append("")
-    if KNOWN_UPSTREAM_NOISE:
-        L.append("## 已知上游噪音（**照常判定，但与可操作项分开**）")
-        L.append("")
-        L.append("| signature | 本包 | 根因 | 上游位置 | 触发条件 | 影响 |")
-        L.append("|---|---|---|---|---|---|")
-        for name, meta in KNOWN_UPSTREAM_NOISE.items():
-            r = tri["results"].get(name, {})
-            if r.get("hit"):
-                state = f"**出现**（{json.dumps((r.get('evidence') or {}).get('次数'), ensure_ascii=False)} 次）"
-            elif r.get("unavailable"):
-                state = "不可用"
-            else:
-                # **恒命中的项没出现 ⇒ 必须有人看得见**（上游修了 / 触发条件变了 / 口径变了）。
-                state = "**未出现**（若本机满足触发条件 ⇒ 行为变了，值得看一眼）"
-            L.append(f"| `{name}` | {state} | {meta['root_cause']} | `{meta['upstream']}` | "
-                     f"{meta['trigger']} | {meta['impact']} |")
-        L.append("")
-        L.append("> 这张表的作用是**不让噪音盖住信号**：删掉它会让下次真坏了没人知道；"
-                 "把它当普通命中会让每份包都被染成它。")
-        L.append("")
-    L.append("## 逐条判据")
-    L.append("")
-    L.append("| signature | 结果 | 关键数字 | 判据 |")
-    L.append("|---|---|---|---|")
-    for n in SIGNATURES:
-        r = tri["results"][n]
-        state = "**命中**" if r.get("hit") else ("不可用" if r.get("unavailable") else "未命中")
-        ev = r.get("evidence") or {}
-        pred = ev.get("predicate", r.get("unavailable", ""))
-        key = {k: v for k, v in ev.items() if k not in ("predicate", "细节")}
-        L.append(f"| `{n}` | {state} | {json.dumps(key, ensure_ascii=False)[:220]} | {pred} |")
-    L.append("")
-    L.append("## 原始行（能自己看，不用信我）")
-    L.append("")
-    any_sample = False
-    for n in SIGNATURES:
-        for s in (tri["results"][n].get("samples") or []):
-            L.append(f"* `{n}`：{s}")
-            any_sample = True
-    if not any_sample:
-        L.append("* （本次判据没有附带原始行 —— 因为它们都是**计数型**判据，原始行见包内文件）")
-    L.append("")
-    L.append("## 边界（本流程不能证明什么）")
-    L.append("")
-    L.append("* 命中是**症状**不是根因（例：`v6-rewrite` 只说明「有 v6 改写且有失败」）。")
-    L.append("* 包里没有的东西看不到：真机 WKWebView、GFW 侧行为、App 内部读侧统计。")
-    L.append("* `unknown` 只表示「这些谓词都没命中」，**不表示没有问题**。")
-    L.append("")
-    return "\n".join(L)
-
-
-# ---------------------------------------------------------------- --self-test（fixture + 双向敏感性）
-
-
-def _write_fixture(root, manifest, metrics=None, events=None, core=None, network=None):
-    os.makedirs(root, exist_ok=True)
-    with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False)
-    if metrics is not None:
-        with open(os.path.join(root, "metrics.json"), "w", encoding="utf-8") as f:
-            json.dump(metrics, f, ensure_ascii=False)
-    if events is not None:
-        with open(os.path.join(root, "events.jsonl"), "w", encoding="utf-8") as f:
-            for e in events:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
-    if core is not None:
-        with open(os.path.join(root, "core-tail.txt"), "w", encoding="utf-8") as f:
-            for ln in core:
-                f.write(ln + "\n")
-    if network is not None:
-        with open(os.path.join(root, "network.txt"), "w", encoding="utf-8") as f:
-            f.write(network)
-    return root
-
-
-def _core_line(ts, msg):
-    return json.dumps({"ts_unix": ts, "source": "core", "level": "info",
-                       "message": f"2026/09/22 19:00:00.000000 [Info] {msg}"}, ensure_ascii=False)
-
-
-def _base_manifest(app="0.8.34"):
-    return {"bundle_format": "xraytun-incident/1",
-            "window": {"since_local": "2026-09-22 18:00:00", "until_local": "2026-09-22 19:00:00",
-                       "source": "self-test 人造", "degraded": False},
-            "versions": {"app": {"value": app}, "core": {"value": "26.9.9"},
-                         "helper": {"check": {"state": "Match", "version": app}}}}
-
-
-def self_test():
-    fails = []
-    tmp = tempfile.mkdtemp(prefix="triage-selftest-")
-    t0 = 1790070000
-
-    def check(name, got, want):
-        ok = got == want
-        print(f"  {'✓' if ok else '✗'} {name}: got={got!r} want={want!r}")
-        if not ok:
-            fails.append(name)
-
-    # --- 每条 signature 一条 fixture：期望「命中」
-    fixtures = {}
-    fixtures["v6-rewrite"] = _write_fixture(
-        os.path.join(tmp, "v6"), _base_manifest(),
-        metrics={"stats": {}, "task97": {"v6_rewrite_lines": 12,
-                                         "classes": {"v6_only": {"connections": 5, "failed": 4},
-                                                     "mixed": {"connections": 2, "failed": 1}}},
-                 "probes": {}, "selfheal": {}},
-        core=[_core_line(t0, "[123456789] replace destination with tcp:[240e:1::1]:80"),
-              _core_line(t0 + 1, "[123456789] failed to open connection")])
-
-    fixtures["watchdog-false-positive"] = _write_fixture(
-        os.path.join(tmp, "wd"), _base_manifest(),
-        events=[{"ts_unix": t0, "source": "app", "level": "info",
-                 "message": "已作废「自动重连」意图（看门狗重建隧道失败，已退回直连）"}],
-        core=[_core_line(t0 + 5, "[999999999] proxy/vless/outbound: tunneling request to tcp:x:80")])
-
-    fixtures["probe-false-negative"] = _write_fixture(
-        os.path.join(tmp, "probe"), _base_manifest(),
-        metrics={"stats": {}, "task97": {}, "selfheal": {},
-                 "probes": {"total_connections": 10, "success": 7, "failed_line": 2, "no_outcome_line": 1,
-                            "rounds": 5}})
-
-    fixtures["log-read-loss"] = _write_fixture(
-        os.path.join(tmp, "readloss"), _base_manifest(),
-        metrics={"stats": {"truncated_lines": 1, "non_json_lines": 0, "blank_lines": 0},
-                 "task97": {}, "probes": {}, "selfheal": {}})
-
-    fixtures["log-write-interleave"] = _write_fixture(
-        os.path.join(tmp, "interleave"), _base_manifest(app="0.8.34"),
-        core=[_core_line(t0, "x") + _core_line(t0, "y")])   # 一行两个对象（中间无换行）
-
-    # 正 fixture（task-171 起）：**协议号不同** ⇒ 按产品口径 Mismatch（新格式带 protocol 字段）
-    fixtures["helper-mismatch"] = _write_fixture(
-        os.path.join(tmp, "helper"),
-        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.34"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "criterion": "protocol",
-                                           "installed": "0.8.33", "bundled": "0.8.34",
-                                           "installed_protocol": 1, "bundled_protocol": 2,
-                                           "state_by_product_rule": "Mismatch"}}}})
-
-    fixtures["loopback-hole"] = _write_fixture(
-        os.path.join(tmp, "loop"), _base_manifest(),
-        network="## route -n get 127.0.0.2      （判据：interface 必须是 lo0）\n"
-                "   route to: 127.0.0.2\n"
-                "destination: default\n"
-                "       mask: 128.0.0.0\n"
-                "    gateway: 192.168.0.1\n"
-                "  interface: en0\n")
-
-    fixtures["tun-iface-einval"] = _write_fixture(
-        os.path.join(tmp, "tun"), _base_manifest(),
-        core=[_core_line(t0 + i * 10, "[tun] falied to set interface > invalid argument") for i in range(6)])
-
-    fixtures["unknown"] = _write_fixture(
-        os.path.join(tmp, "unknown"), _base_manifest(),
-        metrics={"stats": {}, "task97": {"v6_rewrite_lines": 0, "classes": {}},
-                 "probes": {}, "selfheal": {}},
-        events=[], core=[_core_line(t0, "一切正常")],
-        network="## route -n get 127.0.0.2\n  interface: lo0\n")
-
-    print("=== 每条 signature 的 fixture ⇒ 期望命中 ===")
-    for name, root in fixtures.items():
-        tri = triage(load_bundle(root))
-        if name == "unknown":
-            check("fixture `unknown` ⇒ 没有任何 signature 命中", tri["hits"], [])
-        else:
-            check(f"fixture `{name}` ⇒ 命中 `{name}`", name in tri["hits"], True)
-
-    # --- 边界 fixture：**必须不命中**。它们才是「谓词被改坏」的探测器：
-    #     每一份都带着「像命中但其实不该命中」的那一半特征（少一个关键条件）。
-    edge = {}
-    edge["v6-rewrite"] = _write_fixture(
-        os.path.join(tmp, "v6-edge"), _base_manifest(),
-        metrics={"stats": {}, "task97": {"v6_rewrite_lines": 12,
-                                         "classes": {"v6_only": {"connections": 5, "failed": 0},
-                                                     "mixed": {"connections": 2, "failed": 0}}},
-                 "probes": {}, "selfheal": {}},
-        core=[_core_line(t0, "[123456789] replace destination with tcp:[240e:1::1]:80")])
-    edge["watchdog-false-positive"] = _write_fixture(
-        os.path.join(tmp, "wd-edge"), _base_manifest(),
-        events=[{"ts_unix": t0, "source": "app", "level": "info",
-                 "message": "已作废「自动重连」意图（看门狗重建隧道失败，已退回直连）"}],
-        core=[_core_line(t0 + 3600, "[999999999] proxy/vless/outbound: tunneling request to tcp:x:80")])
-    edge["probe-false-negative"] = _write_fixture(
-        os.path.join(tmp, "probe-edge"), _base_manifest(),
-        metrics={"stats": {}, "task97": {}, "selfheal": {},
-                 "probes": {"total_connections": 10, "success": 10, "failed_line": 0,
-                            "no_outcome_line": 0, "rounds": 5}})
-    edge["log-read-loss"] = _write_fixture(
-        os.path.join(tmp, "readloss-edge"), _base_manifest(),
-        metrics={"stats": {"truncated_lines": 0, "non_json_lines": 0, "blank_lines": 3},
-                 "task97": {}, "probes": {}, "selfheal": {}})
-    edge["log-write-interleave"] = _write_fixture(
-        os.path.join(tmp, "interleave-edge"), _base_manifest(app="0.8.33"),   # **修复前**的版本
-        core=[_core_line(t0, "x") + _core_line(t0, "y")])
-    # 边界 fixture（= 真实现场包 INC-20260923-123641-af29 的形状）：**老格式**只有包版本，
-    # 旧脚本写了 Mismatch；产品口径是协议号 ⇒ 分诊**不许**直接判成不一致（如实标为无法判定）
-    edge["helper-mismatch"] = _write_fixture(
-        os.path.join(tmp, "helper-edge"),
-        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.36"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "installed": "0.8.35", "bundled": "0.8.36"}}}})
-    edge["loopback-hole"] = _write_fixture(
-        os.path.join(tmp, "loop-edge"), _base_manifest(),
-        network="## route -n get 127.0.0.2\n   route to: 127.0.0.2\n"
-                "destination: 127.0.0.2\n  interface: lo0\n")
-    edge["tun-iface-einval"] = _write_fixture(
-        os.path.join(tmp, "tun-edge"), _base_manifest(),
-        core=[_core_line(t0 + i * 120, "[tun] falied to set interface > invalid argument") for i in range(5)])
-
-    print("\n=== 边界 fixture：正确口径必须**不**命中（谓词太松就会在这里翻车）===")
-    for name, root in edge.items():
-        r = PREDICATES[name](load_bundle(root))
-        check(f"边界 fixture `{name}` ⇒ 不命中", r.get("hit"), False)
-
-    # --- 双向敏感性：把每条谓词**改坏**（去掉那个关键条件），再拿**同一条边界 fixture** 跑：
-    #     改坏后的谓词**必须**会命中 ⇒ 说明「边界 fixture + 这条断言」真的能挡住这种改坏。
-    #     （注意：这些是**在真实读数上**判断的弱化版谓词，不是把结果写死。）
-    mutants = {
-        "v6-rewrite": lambda ev: ev["replace_v6_lines"] > 0,                                # 丢掉失败要求
-        "watchdog-false-positive": lambda ev: ev["已作废"] > 0,                              # 丢掉 ±60s 转发要求
-        "probe-false-negative": lambda ev: (ev["失败·有 failed 行"] + ev["失败·无结局行"]) >= 0,  # 恒真
-        "log-read-loss": lambda ev: ev["截断·残缺行"] + ev["非 JSON 行"] >= 0,                 # 恒真
-        "log-write-interleave": lambda ev: ev["多对象行"] > 0,                              # 丢掉版本要求
-        "helper-mismatch": lambda ev: ev["installed"] != ev["bundled"],                     # 旧口径：包版本相等（就是被修掉的那条）
-        "loopback-hole": lambda ev: ev["interface"] is not None,                            # 两个方向都算命中
-        "tun-iface-einval": lambda ev: ev["次数"] > 0,                                      # 丢掉每分钟阈值
-    }
-    print("\n=== 双向敏感性：谓词改坏 ⇒ 边界 fixture 被误判为命中（= 原断言变红）===")
-    for name in SIGNATURES:
-        edge_ev = PREDICATES[name](load_bundle(edge[name]))["evidence"]
-        pos_ev = PREDICATES[name](load_bundle(fixtures[name]))["evidence"]
-        check(f"改坏 `{name}` 后边界 fixture 会被误判命中（⇒ 原断言红）", bool(mutants[name](edge_ev)), True)
-        check(f"（对照）同一改坏版在正 fixture 上也为真：`{name}`", bool(mutants[name](pos_ev)), True)
-
-
-    # --- helper 三态（task-171）：协议号口径的额外断言 + 老格式的如实说明
-    print("\n=== helper 三态（协议号口径）额外断言 ===")
-    ev_old = PREDICATES["helper-mismatch"](load_bundle(edge["helper-mismatch"]))["evidence"]
-    check("老格式 manifest（只有包版本）⇒ **不判成不一致**，标为无法判定",
-          ev_old["state_by_product_rule"], "unknown")
-    check("老格式：判据里必须点出「产品口径是协议号」", "协议号" in (ev_old.get("判据") or ""), True)
-    check("老格式：说明里必须写明「旧脚本的包版本判据 ≠ 不兼容」",
-          "旧脚本的包版本判据" in (ev_old.get("说明") or ""), True)
-    fx_eq = _write_fixture(os.path.join(tmp, "helper-eq-proto"),
-        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.36"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "criterion": "protocol",
-                                           "installed": "0.8.35", "bundled": "0.8.36",
-                                           "installed_protocol": 1, "bundled_protocol": 1,
-                                           "state_by_product_rule": "Match"}}}})
-    check("协议号相同 + 包版本不同 ⇒ **不命中**（产品口径 Match；PROTOCOL 命中 0）",
-          PREDICATES["helper-mismatch"](load_bundle(fx_eq))["hit"], False)
-
-    # --- unknown 的「最像三条」必须给出，且不猜根因
-    print("\n=== unknown 行为 ===")
-    b = load_bundle(fixtures["unknown"])
-    tri = triage(b)
-    check("unknown 时 signature = unknown", tri["signature"], "unknown")
-    shutil.rmtree(tmp, ignore_errors=True)
-    print()
-    if fails:
-        print(f"privacy self-test：**失败**（{len(fails)} 项）：{fails}")
-        return 1
-    print("privacy self-test：**全部通过**（真值 11 类全中 / 干净零中 / 逐条谓词双向敏感性）")
-    return 0
-
-
-# ---------------------------------------------------------------- 分诊 + 输出
-
-
-def triage(bundle):
-    results = {}
-    for name in SIGNATURES:
-        try:
-            r = PREDICATES[name](bundle)
-        except Exception as e:  # noqa: BLE001  —— 判据自己崩了要说出来，不能假装没命中
-            r = {"hit": False, "unavailable": f"判据抛异常：{e}", "near_miss": 0.0, "samples": []}
-        results[name] = r
-    hits = [n for n in SIGNATURES if results[n].get("hit")]
-    if hits:
-        signature = hits[0] if len(hits) == 1 else "multiple"
-    else:
-        signature = "unknown"
-    # 「最像的三条」：未命中里 near_miss 最高的三条（**只是排序启发式**）
-    closest = sorted((n for n in SIGNATURES if not results[n].get("hit")),
-                     key=lambda n: results[n].get("near_miss", 0.0), reverse=True)[:3]
-    return {"signature": signature, "hits": hits, "results": results, "closest": closest}
-
-
-def caliber_block(bundle, path):
-    m = bundle.get("manifest") or {}
-    files = bundle["files"]
-    return {
-        "tool": TOOL_VERSION,
-        "bundle": os.path.basename(os.path.abspath(path)),
-        "bundle_files": files,
-        "manifest_sha256": files.get("manifest.json", {}).get("sha256"),
-        "window": m.get("window"),
-        "app_version": ((m.get("versions") or {}).get("app") or {}).get("value"),
-        "core_version": ((m.get("versions") or {}).get("core") or {}).get("value"),
-        "helper_check": ((m.get("versions") or {}).get("helper") or {}).get("check"),
-        "thresholds": {
-            "tun_einval_per_min": TUN_EINVAL_PER_MIN_THRESHOLD,
-            "watchdog_window_secs": WATCHDOG_WINDOW_SECS,
-            "write_interleave_fixed_version": ".".join(map(str, WRITE_INTERLEAVE_FIXED_VERSION)),
-        },
-        "notes": bundle.get("notes", []),
-        "boundary": "命中是**症状**不是根因；只看包里有的东西",
-    }
-
-
-def to_markdown(bundle, tri, caliber):
-    L = []
-    L.append(f"# 现场分诊：{tri['signature']}")
-    L.append("")
-    L.append("## 口径头（引用任何命中都要带上这一段）")
-    L.append("")
-    L.append(f"* 工具：`{caliber['tool']}`")
-    L.append(f"* 包：`{caliber['bundle']}`；`manifest.json` sha256 = `{caliber['manifest_sha256']}`")
-    w = caliber["window"] or {}
-    L.append(f"* 窗口：{w.get('since_local')} → {w.get('until_local')}"
-             f"（来源：{w.get('source')}；degraded={w.get('degraded')}）")
-    hc = caliber["helper_check"] or {}
-    L.append(f"* 版本：App {caliber['app_version']} / 核心 {caliber['core_version']} / "
-             f"helper 三态 {hc.get('state')}（判据：{hc.get('criterion') or '旧格式未记录'}）")
-    L.append(f"* 阈值：{json.dumps(caliber['thresholds'], ensure_ascii=False)}")
-    L.append(f"* 包内文件（bytes/sha256）：")
-    for name, meta in caliber["bundle_files"].items():
-        L.append(f"  * `{name}` {meta['bytes']} B `{meta['sha256'][:16]}…`")
-    if caliber["notes"]:
-        L.append(f"* ⚠️ 读包时的说明：{'；'.join(caliber['notes'])}")
-    L.append("")
-    L.append("## 判定")
-    L.append("")
-    noise_hits = [h for h in tri["hits"] if h in KNOWN_UPSTREAM_NOISE]
-    actionable = [h for h in tri["hits"] if h not in KNOWN_UPSTREAM_NOISE]
-    if actionable:
-        L.append(f"**命中 {len(actionable)} 条**：{', '.join('`' + h + '`' for h in actionable)}")
-        if noise_hits:
-            L.append("")
-            L.append(f"（另有 {len(noise_hits)} 条**已知上游噪音**，见下节：" +
-                     "、".join('`' + h + '`' for h in noise_hits) + "）")
-    elif noise_hits:
-        # 只有噪音命中 ⇒ **不是 `unknown`**：我们知道它是什么。
-        L.append("**没有可操作的命中**；本包命中的是**已知上游噪音**："
-                 + "、".join('`' + h + '`' for h in noise_hits))
-        L.append("")
-        L.append("⇒ 这份包**没有指向本项目的缺陷**。若要继续查，请以「逐条判据」里"
-                 "**未命中**的那些为准（它们带着最像的排序）。")
-    else:
-        L.append("**未命中任何 signature ⇒ `unknown`**（不猜根因）。最像的三条：")
-        for n in tri["closest"]:
-            r = tri["results"][n]
-            L.append(f"* `{n}`（near_miss={r.get('near_miss', 0):.2f}）：{json.dumps(r.get('evidence'), ensure_ascii=False)}")
-    L.append("")
-    if KNOWN_UPSTREAM_NOISE:
-        L.append("## 已知上游噪音（**照常判定，但与可操作项分开**）")
-        L.append("")
-        L.append("| signature | 本包 | 根因 | 上游位置 | 触发条件 | 影响 |")
-        L.append("|---|---|---|---|---|---|")
-        for name, meta in KNOWN_UPSTREAM_NOISE.items():
-            r = tri["results"].get(name, {})
-            if r.get("hit"):
-                state = f"**出现**（{json.dumps((r.get('evidence') or {}).get('次数'), ensure_ascii=False)} 次）"
-            elif r.get("unavailable"):
-                state = "不可用"
-            else:
-                # **恒命中的项没出现 ⇒ 必须有人看得见**（上游修了 / 触发条件变了 / 口径变了）。
-                state = "**未出现**（若本机满足触发条件 ⇒ 行为变了，值得看一眼）"
-            L.append(f"| `{name}` | {state} | {meta['root_cause']} | `{meta['upstream']}` | "
-                     f"{meta['trigger']} | {meta['impact']} |")
-        L.append("")
-        L.append("> 这张表的作用是**不让噪音盖住信号**：删掉它会让下次真坏了没人知道；"
-                 "把它当普通命中会让每份包都被染成它。")
-        L.append("")
-    L.append("## 逐条判据")
-    L.append("")
-    L.append("| signature | 结果 | 关键数字 | 判据 |")
-    L.append("|---|---|---|---|")
-    for n in SIGNATURES:
-        r = tri["results"][n]
-        state = "**命中**" if r.get("hit") else ("不可用" if r.get("unavailable") else "未命中")
-        ev = r.get("evidence") or {}
-        pred = ev.get("predicate", r.get("unavailable", ""))
-        key = {k: v for k, v in ev.items() if k not in ("predicate", "细节")}
-        L.append(f"| `{n}` | {state} | {json.dumps(key, ensure_ascii=False)[:220]} | {pred} |")
-    L.append("")
-    L.append("## 原始行（能自己看，不用信我）")
-    L.append("")
-    any_sample = False
-    for n in SIGNATURES:
-        for s in (tri["results"][n].get("samples") or []):
-            L.append(f"* `{n}`：{s}")
-            any_sample = True
-    if not any_sample:
-        L.append("* （本次判据没有附带原始行 —— 因为它们都是**计数型**判据，原始行见包内文件）")
-    L.append("")
-    L.append("## 边界（本流程不能证明什么）")
-    L.append("")
-    L.append("* 命中是**症状**不是根因（例：`v6-rewrite` 只说明「有 v6 改写且有失败」）。")
-    L.append("* 包里没有的东西看不到：真机 WKWebView、GFW 侧行为、App 内部读侧统计。")
-    L.append("* `unknown` 只表示「这些谓词都没命中」，**不表示没有问题**。")
-    L.append("")
-    return "\n".join(L)
-
-
-# ---------------------------------------------------------------- --self-test（fixture + 双向敏感性）
-
-
-def _write_fixture(root, manifest, metrics=None, events=None, core=None, network=None):
-    os.makedirs(root, exist_ok=True)
-    with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False)
-    if metrics is not None:
-        with open(os.path.join(root, "metrics.json"), "w", encoding="utf-8") as f:
-            json.dump(metrics, f, ensure_ascii=False)
-    if events is not None:
-        with open(os.path.join(root, "events.jsonl"), "w", encoding="utf-8") as f:
-            for e in events:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
-    if core is not None:
-        with open(os.path.join(root, "core-tail.txt"), "w", encoding="utf-8") as f:
-            for ln in core:
-                f.write(ln + "\n")
-    if network is not None:
-        with open(os.path.join(root, "network.txt"), "w", encoding="utf-8") as f:
-            f.write(network)
-    return root
-
-
-def _core_line(ts, msg):
-    return json.dumps({"ts_unix": ts, "source": "core", "level": "info",
-                       "message": f"2026/09/22 19:00:00.000000 [Info] {msg}"}, ensure_ascii=False)
-
-
-def _base_manifest(app="0.8.34"):
-    return {"bundle_format": "xraytun-incident/1",
-            "window": {"since_local": "2026-09-22 18:00:00", "until_local": "2026-09-22 19:00:00",
-                       "source": "self-test 人造", "degraded": False},
-            "versions": {"app": {"value": app}, "core": {"value": "26.9.9"},
-                         "helper": {"check": {"state": "Match", "version": app}}}}
-
-
-def self_test():
-    fails = []
-    tmp = tempfile.mkdtemp(prefix="triage-selftest-")
-    t0 = 1790070000
-
-    def check(name, got, want):
-        ok = got == want
-        print(f"  {'✓' if ok else '✗'} {name}: got={got!r} want={want!r}")
-        if not ok:
-            fails.append(name)
-
-    # --- 每条 signature 一条 fixture：期望「命中」
-    fixtures = {}
-    fixtures["v6-rewrite"] = _write_fixture(
-        os.path.join(tmp, "v6"), _base_manifest(),
-        metrics={"stats": {}, "task97": {"v6_rewrite_lines": 12,
-                                         "classes": {"v6_only": {"connections": 5, "failed": 4},
-                                                     "mixed": {"connections": 2, "failed": 1}}},
-                 "probes": {}, "selfheal": {}},
-        core=[_core_line(t0, "[123456789] replace destination with tcp:[240e:1::1]:80"),
-              _core_line(t0 + 1, "[123456789] failed to open connection")])
-
-    fixtures["watchdog-false-positive"] = _write_fixture(
-        os.path.join(tmp, "wd"), _base_manifest(),
-        events=[{"ts_unix": t0, "source": "app", "level": "info",
-                 "message": "已作废「自动重连」意图（看门狗重建隧道失败，已退回直连）"}],
-        core=[_core_line(t0 + 5, "[999999999] proxy/vless/outbound: tunneling request to tcp:x:80")])
-
-    fixtures["probe-false-negative"] = _write_fixture(
-        os.path.join(tmp, "probe"), _base_manifest(),
-        metrics={"stats": {}, "task97": {}, "selfheal": {},
-                 "probes": {"total_connections": 10, "success": 7, "failed_line": 2, "no_outcome_line": 1,
-                            "rounds": 5}})
-
-    fixtures["log-read-loss"] = _write_fixture(
-        os.path.join(tmp, "readloss"), _base_manifest(),
-        metrics={"stats": {"truncated_lines": 1, "non_json_lines": 0, "blank_lines": 0},
-                 "task97": {}, "probes": {}, "selfheal": {}})
-
-    fixtures["log-write-interleave"] = _write_fixture(
-        os.path.join(tmp, "interleave"), _base_manifest(app="0.8.34"),
-        core=[_core_line(t0, "x") + _core_line(t0, "y")])   # 一行两个对象（中间无换行）
-
-    # 正 fixture（task-171 起）：**协议号不同** ⇒ 按产品口径 Mismatch（新格式带 protocol 字段）
-    fixtures["helper-mismatch"] = _write_fixture(
-        os.path.join(tmp, "helper"),
-        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.34"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "criterion": "protocol",
-                                           "installed": "0.8.33", "bundled": "0.8.34",
-                                           "installed_protocol": 1, "bundled_protocol": 2,
-                                           "state_by_product_rule": "Mismatch"}}}})
-
-    fixtures["loopback-hole"] = _write_fixture(
-        os.path.join(tmp, "loop"), _base_manifest(),
-        network="## route -n get 127.0.0.2      （判据：interface 必须是 lo0）\n"
-                "   route to: 127.0.0.2\n"
-                "destination: default\n"
-                "       mask: 128.0.0.0\n"
-                "    gateway: 192.168.0.1\n"
-                "  interface: en0\n")
-
-    fixtures["tun-iface-einval"] = _write_fixture(
-        os.path.join(tmp, "tun"), _base_manifest(),
-        core=[_core_line(t0 + i * 10, "[tun] falied to set interface > invalid argument") for i in range(6)])
-
-    fixtures["unknown"] = _write_fixture(
-        os.path.join(tmp, "unknown"), _base_manifest(),
-        metrics={"stats": {}, "task97": {"v6_rewrite_lines": 0, "classes": {}},
-                 "probes": {}, "selfheal": {}},
-        events=[], core=[_core_line(t0, "一切正常")],
-        network="## route -n get 127.0.0.2\n  interface: lo0\n")
-
-    print("=== 每条 signature 的 fixture ⇒ 期望命中 ===")
-    for name, root in fixtures.items():
-        tri = triage(load_bundle(root))
-        if name == "unknown":
-            check("fixture `unknown` ⇒ 没有任何 signature 命中", tri["hits"], [])
-        else:
-            check(f"fixture `{name}` ⇒ 命中 `{name}`", name in tri["hits"], True)
-
-    # --- 边界 fixture：**必须不命中**。它们才是「谓词被改坏」的探测器：
-    #     每一份都带着「像命中但其实不该命中」的那一半特征（少一个关键条件）。
-    edge = {}
-    edge["v6-rewrite"] = _write_fixture(
-        os.path.join(tmp, "v6-edge"), _base_manifest(),
-        metrics={"stats": {}, "task97": {"v6_rewrite_lines": 12,
-                                         "classes": {"v6_only": {"connections": 5, "failed": 0},
-                                                     "mixed": {"connections": 2, "failed": 0}}},
-                 "probes": {}, "selfheal": {}},
-        core=[_core_line(t0, "[123456789] replace destination with tcp:[240e:1::1]:80")])
-    edge["watchdog-false-positive"] = _write_fixture(
-        os.path.join(tmp, "wd-edge"), _base_manifest(),
-        events=[{"ts_unix": t0, "source": "app", "level": "info",
-                 "message": "已作废「自动重连」意图（看门狗重建隧道失败，已退回直连）"}],
-        core=[_core_line(t0 + 3600, "[999999999] proxy/vless/outbound: tunneling request to tcp:x:80")])
-    edge["probe-false-negative"] = _write_fixture(
-        os.path.join(tmp, "probe-edge"), _base_manifest(),
-        metrics={"stats": {}, "task97": {}, "selfheal": {},
-                 "probes": {"total_connections": 10, "success": 10, "failed_line": 0,
-                            "no_outcome_line": 0, "rounds": 5}})
-    edge["log-read-loss"] = _write_fixture(
-        os.path.join(tmp, "readloss-edge"), _base_manifest(),
-        metrics={"stats": {"truncated_lines": 0, "non_json_lines": 0, "blank_lines": 3},
-                 "task97": {}, "probes": {}, "selfheal": {}})
-    edge["log-write-interleave"] = _write_fixture(
-        os.path.join(tmp, "interleave-edge"), _base_manifest(app="0.8.33"),   # **修复前**的版本
-        core=[_core_line(t0, "x") + _core_line(t0, "y")])
-    # 边界 fixture（= 真实现场包 INC-20260923-123641-af29 的形状）：**老格式**只有包版本，
-    # 旧脚本写了 Mismatch；产品口径是协议号 ⇒ 分诊**不许**直接判成不一致（如实标为无法判定）
-    edge["helper-mismatch"] = _write_fixture(
-        os.path.join(tmp, "helper-edge"),
-        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.36"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "installed": "0.8.35", "bundled": "0.8.36"}}}})
-    edge["loopback-hole"] = _write_fixture(
-        os.path.join(tmp, "loop-edge"), _base_manifest(),
-        network="## route -n get 127.0.0.2\n   route to: 127.0.0.2\n"
-                "destination: 127.0.0.2\n  interface: lo0\n")
-    edge["tun-iface-einval"] = _write_fixture(
-        os.path.join(tmp, "tun-edge"), _base_manifest(),
-        core=[_core_line(t0 + i * 120, "[tun] falied to set interface > invalid argument") for i in range(5)])
-
-    print("\n=== 边界 fixture：正确口径必须**不**命中（谓词太松就会在这里翻车）===")
-    for name, root in edge.items():
-        r = PREDICATES[name](load_bundle(root))
-        check(f"边界 fixture `{name}` ⇒ 不命中", r.get("hit"), False)
-
-    # --- 双向敏感性：把每条谓词**改坏**（去掉那个关键条件），再拿**同一条边界 fixture** 跑：
-    #     改坏后的谓词**必须**会命中 ⇒ 说明「边界 fixture + 这条断言」真的能挡住这种改坏。
-    #     （注意：这些是**在真实读数上**判断的弱化版谓词，不是把结果写死。）
-    mutants = {
-        "v6-rewrite": lambda ev: ev["replace_v6_lines"] > 0,                                # 丢掉失败要求
-        "watchdog-false-positive": lambda ev: ev["已作废"] > 0,                              # 丢掉 ±60s 转发要求
-        "probe-false-negative": lambda ev: (ev["失败·有 failed 行"] + ev["失败·无结局行"]) >= 0,  # 恒真
-        "log-read-loss": lambda ev: ev["截断·残缺行"] + ev["非 JSON 行"] >= 0,                 # 恒真
-        "log-write-interleave": lambda ev: ev["多对象行"] > 0,                              # 丢掉版本要求
-        "helper-mismatch": lambda ev: ev["installed"] != ev["bundled"],                     # 旧口径：包版本相等（就是被修掉的那条）
-        "loopback-hole": lambda ev: ev["interface"] is not None,                            # 两个方向都算命中
-        "tun-iface-einval": lambda ev: ev["次数"] > 0,                                      # 丢掉每分钟阈值
-    }
-    print("\n=== 双向敏感性：谓词改坏 ⇒ 边界 fixture 被误判为命中（= 原断言变红）===")
-    for name in SIGNATURES:
-        edge_ev = PREDICATES[name](load_bundle(edge[name]))["evidence"]
-        pos_ev = PREDICATES[name](load_bundle(fixtures[name]))["evidence"]
-        check(f"改坏 `{name}` 后边界 fixture 会被误判命中（⇒ 原断言红）", bool(mutants[name](edge_ev)), True)
-        check(f"（对照）同一改坏版在正 fixture 上也为真：`{name}`", bool(mutants[name](pos_ev)), True)
-
-
-    # --- helper 三态（task-171）：协议号口径的额外断言 + 老格式的如实说明
-    print("\n=== helper 三态（协议号口径）额外断言 ===")
-    ev_old = PREDICATES["helper-mismatch"](load_bundle(edge["helper-mismatch"]))["evidence"]
-    check("老格式 manifest（只有包版本）⇒ **不判成不一致**，标为无法判定",
-          ev_old["state_by_product_rule"], "unknown")
-    check("老格式：判据里必须点出「产品口径是协议号」", "协议号" in (ev_old.get("判据") or ""), True)
-    check("老格式：说明里必须写明「旧脚本的包版本判据 ≠ 不兼容」",
-          "旧脚本的包版本判据" in (ev_old.get("说明") or ""), True)
-    fx_eq = _write_fixture(os.path.join(tmp, "helper-eq-proto"),
-        {"bundle_format": "xraytun-incident/1", "window": {"since_local": "a", "until_local": "b", "source": "s"},
-         "versions": {"app": {"value": "0.8.36"}, "core": {"value": "26.9.9"},
-                      "helper": {"check": {"state": "Mismatch", "criterion": "protocol",
-                                           "installed": "0.8.35", "bundled": "0.8.36",
-                                           "installed_protocol": 1, "bundled_protocol": 1,
-                                           "state_by_product_rule": "Match"}}}})
-    check("协议号相同 + 包版本不同 ⇒ **不命中**（产品口径 Match；PROTOCOL 命中 0）",
-          PREDICATES["helper-mismatch"](load_bundle(fx_eq))["hit"], False)
-
-    # --- unknown 的「最像三条」必须给出，且不猜根因
-    print("\n=== unknown 行为 ===")
-    b = load_bundle(fixtures["unknown"])
-    tri = triage(b)
-    check("unknown 时 signature = unknown", tri["signature"], "unknown")
     shutil.rmtree(tmp, ignore_errors=True)
     print()
     if fails:
@@ -1753,13 +1032,11 @@ def main(argv=None):
     b = load_bundle(a.bundle)
     tri = triage(b)
     caliber = caliber_block(b, a.bundle)
-    # 把"已知上游噪音"与"可操作命中"**分开给机器读**：
-    # 只有 `hits` 的话，自动化只能看到"有命中"，而本机实测噪音是**恒命中**的 ⇒ 分诊退化成橡皮图章。
-    # **不改 `signature` 的语义**（那会悄悄改变既有消费方的判断），只**新增**两个字段。
+    # 把"已知上游噪音"与"可操作命中"**分开给机器读**：只有 `hits` 的话，自动化只能
+    # 看到"有命中"，而噪音是恒命中的 ⇒ 分诊退化成橡皮图章。**不改 `signature` 语义**。
     noise_hits = [h for h in tri["hits"] if h in KNOWN_UPSTREAM_NOISE]
-    actionable_hits = [h for h in tri["hits"] if h not in KNOWN_UPSTREAM_NOISE]
     incident = {"caliber": caliber, "signature": tri["signature"], "hits": tri["hits"],
-                "actionable_hits": actionable_hits,
+                "actionable_hits": [h for h in tri["hits"] if h not in KNOWN_UPSTREAM_NOISE],
                 "noise_hits": noise_hits,
                 "known_noise": {n: KNOWN_UPSTREAM_NOISE[n] for n in noise_hits},
                 "noise_absent": [n for n in KNOWN_UPSTREAM_NOISE if n not in tri["hits"]],
