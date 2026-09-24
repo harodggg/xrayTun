@@ -24,6 +24,7 @@ pub mod helper_client;
 pub mod intent;
 pub mod helper_install;
 pub mod login_item;
+pub mod mitm;
 pub mod state;
 pub mod supervisor;
 pub mod traffic;
@@ -126,6 +127,10 @@ pub fn run() {
             commands::intent_audit,
             commands::intent_explain,
             commands::intent_apply,
+            commands::mitm_status,
+            commands::mitm_ca_install,
+            commands::mitm_ca_remove,
+            commands::mitm_apply,
             commands::routing_topology,
             commands::explain_dest,
             commands::recent_connections,

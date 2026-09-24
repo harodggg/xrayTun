@@ -4866,6 +4866,7 @@ dependencies = [
  "url",
  "xt-core",
  "xt-intent",
+ "xt-mitm",
  "xt-proto",
  "xt-tun",
 ]
@@ -4947,6 +4948,7 @@ name = "xt-tun"
 version = "0.8.37"
 dependencies = [
  "libc",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

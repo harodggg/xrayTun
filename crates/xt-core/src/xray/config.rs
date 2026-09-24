@@ -1425,6 +1425,52 @@ mod tests {
         assert!(zero.validate().iter().any(|e| e.contains("不能为 0")));
     }
 
+    /// 响应体裁剪的设置校验：**每一种"半填"都要有自己的说法**。
+    ///
+    /// 这条测试存在的理由：指针与字段名是两个必需项，任何一项缺了都只能
+    /// "不裁剪"，而用户会以为"我配了"。默认（`None`）必须什么都不报。
+    #[test]
+    fn body_strip_settings_are_validated_item_by_item() {
+        let mut s = MitmSettings { enabled: true, domains: vec!["a.example".into()], ..Default::default() };
+        assert!(s.validate().is_empty(), "默认（不裁剪）不该报任何毛病");
+
+        s.body_strip = Some(crate::model::MitmBodyStrip {
+            pointer: "/data/items".into(),
+            field: "promoted".into(),
+        });
+        assert!(s.validate().is_empty(), "{:?}", s.validate());
+        assert!(s.body_strip.as_ref().unwrap().is_configured());
+
+        // 有字段名、没指针
+        s.body_strip = Some(crate::model::MitmBodyStrip {
+            pointer: String::new(),
+            field: "promoted".into(),
+        });
+        assert!(s.validate().iter().any(|e| e.contains("请补上指针")), "{:?}", s.validate());
+        assert!(!s.body_strip.as_ref().unwrap().is_configured());
+
+        // 有指针、没字段名
+        s.body_strip = Some(crate::model::MitmBodyStrip {
+            pointer: "/data/items".into(),
+            field: String::new(),
+        });
+        assert!(s.validate().iter().any(|e| e.contains("没有字段名")), "{:?}", s.validate());
+
+        // 指针不是 RFC 6901 的形状 ⇒ 一定指不到东西，早点说
+        s.body_strip = Some(crate::model::MitmBodyStrip {
+            pointer: "data.items".into(),
+            field: "promoted".into(),
+        });
+        assert!(s.validate().iter().any(|e| e.contains("必须以 '/' 开头")), "{:?}", s.validate());
+
+        // 字段名里有空格 ⇒ 大概率是用户把说明文字填进来了
+        s.body_strip = Some(crate::model::MitmBodyStrip {
+            pointer: "/data/items".into(),
+            field: "promoted item".into(),
+        });
+        assert!(s.validate().iter().any(|e| e.contains("不像一个 JSON 键")), "{:?}", s.validate());
+    }
+
     #[test]
     fn an_enabled_mitm_with_an_empty_list_is_reported_by_validate() {
         let s = MitmSettings { enabled: true, domains: Vec::new(), ..Default::default() };

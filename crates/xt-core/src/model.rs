@@ -1072,6 +1072,41 @@ pub struct MitmSettings {
     /// 对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP（QUIC 拆不了）。
     #[serde(default)]
     pub block_quic: bool,
+    /// **可选**的响应体裁剪（设计 §8.5 那一行）。
+    ///
+    /// 默认 `None` = 不碰任何响应体。它不是"顺手多做的优化"，而是**语义改动**：
+    /// 我们要从别人的响应里删掉条目，所以必须由用户单独点开，而且只支持
+    /// 一种窄口径动作（见 [`MitmBodyStrip`]）。
+    #[serde(default)]
+    pub body_strip: Option<MitmBodyStrip>,
+}
+
+/// 响应体裁剪的**唯一**支持口径：删掉 JSON 里某个数组内、某个布尔字段为 `true` 的元素。
+///
+/// # 为什么只有这一种
+///
+/// 设计里明确"不做 HTML DOM 重写、不注入脚本、不改响应语义" —— 那等于在里面
+/// 再写一个 AdGuard，风险与工程量都不成比例。而"删掉一个 JSON 数组元素"能覆盖
+/// 同一站点接口内的推广条目，且**副作用可穷举**：
+/// 我们只把某些元素摘出去，其余字节由 `serde_json` 原样重写。
+///
+/// 代价要如实写：**重写会改变响应体字节**（键顺序、空白都可能不同），
+/// 所以只对用户点过名的域名生效，且失败一律放行（见 `xt-mitm` 的 `DeclineReason`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MitmBodyStrip {
+    /// 要裁剪的数组，RFC 6901 JSON 指针（例如 `/data/items`；`""` = 根数组）。
+    #[serde(default)]
+    pub pointer: String,
+    /// 数组元素里必须为布尔 `true` 才删除的字段名（例如 `promoted`）。
+    #[serde(default)]
+    pub field: String,
+}
+
+impl MitmBodyStrip {
+    /// 两项都填了才算配置好。空字符串是"没配"，不是"配了空指针"。
+    pub fn is_configured(&self) -> bool {
+        !self.pointer.is_empty() && !self.field.is_empty()
+    }
 }
 
 fn default_mitm_port() -> u16 {
@@ -1089,6 +1124,7 @@ impl Default for MitmSettings {
             upstream_port: default_mitm_upstream_port(),
             domains: Vec::new(),
             block_quic: false,
+            body_strip: None,
         }
     }
 }
@@ -1112,6 +1148,30 @@ impl MitmSettings {
         }
         if self.listen_port == self.upstream_port {
             errs.push("MITM 的监听端口与回连端口不能相同（会自己连自己）".into());
+        }
+        if let Some(strip) = &self.body_strip {
+            if strip.pointer.is_empty() && !strip.field.is_empty() {
+                errs.push(
+                    "响应体裁剪填了字段名但没有 JSON 指针：请补上指针（根数组要显式写指针），\
+                     或把整项清空"
+                        .into(),
+                );
+            }
+            if strip.field.is_empty() && !strip.pointer.is_empty() {
+                errs.push("响应体裁剪填了 JSON 指针但没有字段名（不知道要删哪些元素）".into());
+            }
+            if strip.field.contains('/') || strip.field.contains(' ') {
+                errs.push(format!(
+                    "响应体裁剪的字段名 {:?} 不像一个 JSON 键（不能含空格或斜杠）",
+                    strip.field
+                ));
+            }
+            if !strip.pointer.is_empty() && !strip.pointer.starts_with('/') {
+                errs.push(format!(
+                    "响应体裁剪的 JSON 指针 {:?} 必须以 '/' 开头（RFC 6901）",
+                    strip.pointer
+                ));
+            }
         }
         errs
     }

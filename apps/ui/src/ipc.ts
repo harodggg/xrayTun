@@ -14,6 +14,7 @@ import type {
   IntentAuditRecord,
   IntentExplain,
   IntentSummary,
+  MitmStatus,
   RecoveryState,
   NodeExport,
   RecentConnections,
@@ -62,6 +63,19 @@ export const api = {
     invoke<IntentSummary>("intent_allow", { host, action }),
   intentClearCache: () => invoke<number>("intent_clear_cache"),
   intentApply: () => invoke<IntentSummary>("intent_apply"),
+
+  // ---- MITM（可选的内容级判定）------------------------------------------
+  //
+  // **装根证书与起代理是两件事**：装证书会改系统钥匙串（唯一会改系统状态的动作），
+  // 起代理只在本机监听。而引导规则要等**核心重连**才生效 —— 状态里的
+  // `core_restart_required` 就是那一步的判据。
+  mitmStatus: () => invoke<MitmStatus>("mitm_status"),
+  /** 把本会话的根证书装进系统钥匙串（经特权 helper；失败会返回可读原因）。 */
+  mitmInstallCa: () => invoke<MitmStatus>("mitm_ca_install"),
+  /** 从系统钥匙串撤掉本会话的根证书（幂等），并停掉代理。 */
+  mitmRemoveCa: () => invoke<MitmStatus>("mitm_ca_remove"),
+  /** 按当前设置起/停本地 MITM 代理。 */
+  mitmApply: () => invoke<MitmStatus>("mitm_apply"),
 
   setMode: (mode: ProxyMode) => invoke<AppSnapshot>("set_mode", { mode }),
 

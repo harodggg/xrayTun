@@ -157,6 +157,26 @@ pub fn is_trusted(fingerprint: &str) -> Result<bool> {
         .any(|v| normalize_fingerprint(v) == want))
 }
 
+/// 一段 DER 的 **SHA-1 指纹**（大写、冒号分隔，形如 `AB:CD:...`）。
+///
+/// # 为什么是 SHA-1
+///
+/// 不是我们选的：`security delete-certificate -Z` 与
+/// `security find-certificate -Z` 用的就是 SHA-1，而删证书**必须**用同一个值
+/// 才能删对（[`delete_args`]）。所以这里的算法由 `security(1)` 决定。
+///
+/// 这不是签名，也不承担防碰撞职责：它只是一个**钥匙串条目的定位符**，
+/// 证书本身的可信性由钥匙串里的 DER 决定。
+pub fn sha1_fingerprint(der: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, der);
+    digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 /// 统一成大写无冒号形式，避免"同一个指纹两种写法"被当成两个。
 pub fn normalize_fingerprint(fingerprint: &str) -> String {
     fingerprint
@@ -375,6 +395,28 @@ mod tests {
             existed_before: false,
         };
         assert!(rollback(&broken).is_err());
+    }
+
+    /// SHA-1 指纹：**用公开测试向量钉住**（不是"跑一遍看输出"）。
+    ///
+    /// 这条同时钉住三件事：算法是 SHA-1、格式是大写冒号分隔、而且真的过了
+    /// [`validate_fingerprint`]（helper 会拿它当文件名，格式不对就是提权面）。
+    #[test]
+    fn the_sha1_fingerprint_matches_a_published_test_vector() {
+        // SHA-1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
+        let fp = sha1_fingerprint(b"abc");
+        assert_eq!(
+            fp,
+            "A9:99:3E:36:47:06:81:6A:BA:3E:25:71:78:50:C2:6C:9C:D0:D8:9D"
+        );
+        validate_fingerprint(&fp).expect("我们自己产出的指纹必须能通过校验");
+        assert_eq!(normalize_fingerprint(&fp).len(), 40);
+        // 负对照：改一个字节就必须变（否则"指纹"定位不到条目）。
+        let mut other = b"abd".to_vec();
+        other[2] = b'd';
+        assert_ne!(sha1_fingerprint(&other), fp);
+        // 也与"另一张 CA"不同：DER 前缀一样但内容不同。
+        assert_ne!(sha1_fingerprint(&[]), fp);
     }
 
     /// **需要 root 的真实用例。** 默认 `#[ignore]` —— 没跑就是没跑，不许假装跑过。

@@ -121,7 +121,10 @@ impl ProxyStats {
 }
 
 /// 计数的只读快照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 带 `Serialize`：桌面的 `mitm_status` 命令把它直接送给界面 ——
+/// 这些数字是"MITM 到底干了什么"的唯一证据，中间不该再有第二份转写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ProxyStatsSnapshot {
     pub accepted: u64,
     pub blocked: u64,
