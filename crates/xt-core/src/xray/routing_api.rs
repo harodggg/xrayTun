@@ -56,26 +56,68 @@ pub const PATH_LIST_RULE: &str =
 /// `TypedMessage.type` 的取值：我们要发的是一份 `xray.app.router.Config`。
 pub const CONFIG_TYPE_URL: &str = "xray.app.router.Config";
 
-/// `Domain.Type.Full` = 3（`geodat.proto`）。
-const DOMAIN_TYPE_FULL: u64 = 3;
+/// 域名匹配项（对应 `DomainRule` 的两种 oneof 分支与 `Domain.Type` 的四种取值）。
+///
+/// **一定要按 Xray 的语义分型**：`full:` 是精确匹配，裸域名与 `domain:` 是
+/// **子域也匹配**。上一版把两者都编成 `Full(3)` —— 那会把"子域匹配"静默收紧成
+/// "精确匹配"，是典型的"看起来成功、匹配范围却变了"。有一条测试专门钉这个。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiDomain {
+    /// `full:` —— 精确匹配（`Domain.Type.Full = 3`）。
+    Full(String),
+    /// 裸域名或 `domain:` —— 子域也匹配（`Domain.Type.Domain = 2`）。
+    Domain(String),
+    /// `regexp:` —— 正则（`Domain.Type.Regex = 1`）。
+    Regex(String),
+    /// `geosite:code` / `ext:file:code`（`DomainRule.geosite`）。
+    GeoSite { file: String, code: String, attrs: String },
+}
 
-/// 一条运行期规则的字段（我们的 `RoutingRule` 里这一层用得上的那些）。
+/// IP 匹配项（`IPRule` 的两种 oneof 分支）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiIp {
+    /// `geoip:cn` / `ext:file:code`（`IPRule.geoip`）。
+    GeoIp { file: String, code: String, reverse: bool },
+    /// `1.2.3.0/24`（`IPRule.custom = CIDRRule{ cidr }`）。
+    Cidr { ip: Vec<u8>, prefix: u32 },
+}
+
+/// 一条运行期规则（`ApiRule`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiRule {
     /// `ruleTag`：排障与删除都靠它，必须全局唯一。
     pub rule_tag: String,
     /// 目标出站 tag（本功能是 `block`）。
     pub outbound_tag: String,
-    /// **完整域名**（不带 `full:` 前缀 —— 前缀是 Xray 配置语法的糖，protobuf 里靠
-    /// `Domain.Type.Full` 表达）。
-    pub full_domains: Vec<String>,
+    pub domains: Vec<ApiDomain>,
+    pub ip: Vec<ApiIp>,
+    /// `port`：`(from, to)`，闭区间。单个端口是 `(p, p)`。
+    pub ports: Vec<(u32, u32)>,
+    pub source_ip: Vec<ApiIp>,
     /// 限定入站（本功能要显式列，否则 MITM 的回连会命中自己的规则）。
     pub inbound_tags: Vec<String>,
     /// 限定网络层：`2` = TCP，`3` = UDP（**枚举里没有 1**）。
-    ///
-    /// 空 = 不限。只有整份替换（[`replace_rules`]）需要它 —— 因为替换要用**完整**的
-    /// 规则集，而 catch-all 那条靠的就是 `tcp,udp`。
     pub networks: Vec<u64>,
+    pub process_names: Vec<String>,
+    pub protocols: Vec<String>,
+}
+
+impl ApiRule {
+    /// 只带"目标出站 + 规则标识"的最小构造（测试与简单场景用）。
+    pub fn new(rule_tag: impl Into<String>, outbound_tag: impl Into<String>) -> Self {
+        Self {
+            rule_tag: rule_tag.into(),
+            outbound_tag: outbound_tag.into(),
+            domains: Vec::new(),
+            ip: Vec::new(),
+            ports: Vec::new(),
+            source_ip: Vec::new(),
+            inbound_tags: Vec::new(),
+            networks: Vec::new(),
+            process_names: Vec::new(),
+            protocols: Vec::new(),
+        }
+    }
 }
 
 /// `ListRuleResponse.rules[]` 的一条。
@@ -116,18 +158,80 @@ fn put_u64(field: u32, value: u64, out: &mut Vec<u8>) {
     put_varint(value, out);
 }
 
-/// `Domain{ type = Full, value = host }`。
-pub fn encode_domain_full(host: &str) -> Vec<u8> {
+/// `Domain{ type, value }`。`type` 必须是 1/2/3（`Substr=0` 是子串匹配，我们不用）。
+pub fn encode_domain(domain_type: u64, value: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    put_u64(1, DOMAIN_TYPE_FULL, &mut out);
-    put_string(2, host, &mut out);
+    put_u64(1, domain_type, &mut out);
+    put_string(2, value, &mut out);
     out
 }
 
-/// `DomainRule{ custom = Domain{…} }`（oneof 的 `custom` 是字段 2）。
-pub fn encode_domain_rule_full(host: &str) -> Vec<u8> {
+/// `full:` 精确匹配的 `Domain`（`Domain.Type.Full = 3`）。
+///
+/// 保留这个薄封装是因为它是最常用的一种，而且**误用 `Substr(0)` 的后果特别隐蔽**
+/// （一条规则会变成子串匹配、拦掉一堆无关域名），所以有一条专测盯着它。
+pub fn encode_domain_full(host: &str) -> Vec<u8> {
+    encode_domain(3, host)
+}
+
+/// `DomainRule`（oneof：`geosite = 1` / `custom = 2`）。
+pub fn encode_domain_rule(domain: &ApiDomain) -> Vec<u8> {
     let mut out = Vec::new();
-    put_bytes(2, &encode_domain_full(host), &mut out);
+    match domain {
+        ApiDomain::Full(v) => put_bytes(2, &encode_domain(3, v), &mut out),
+        ApiDomain::Domain(v) => put_bytes(2, &encode_domain(2, v), &mut out),
+        ApiDomain::Regex(v) => put_bytes(2, &encode_domain(1, v), &mut out),
+        ApiDomain::GeoSite { file, code, attrs } => {
+            let mut g = Vec::new();
+            if !file.is_empty() {
+                put_string(1, file, &mut g);
+            }
+            put_string(2, code, &mut g);
+            if !attrs.is_empty() {
+                put_string(3, attrs, &mut g);
+            }
+            put_bytes(1, &g, &mut out);
+        }
+    }
+    out
+}
+
+/// `IPRule`（oneof：`geoip = 1` / `custom = 2`）。
+pub fn encode_ip_rule(ip: &ApiIp) -> Vec<u8> {
+    let mut out = Vec::new();
+    match ip {
+        ApiIp::GeoIp { file, code, reverse } => {
+            let mut g = Vec::new();
+            if !file.is_empty() {
+                put_string(1, file, &mut g);
+            }
+            put_string(2, code, &mut g);
+            if *reverse {
+                put_u64(3, 1, &mut g);
+            }
+            put_bytes(1, &g, &mut out);
+        }
+        ApiIp::Cidr { ip, prefix } => {
+            let mut c = Vec::new();
+            put_bytes(1, ip, &mut c);
+            put_u64(2, u64::from(*prefix), &mut c);
+            let mut rule = Vec::new();
+            put_bytes(1, &c, &mut rule);
+            put_bytes(2, &rule, &mut out);
+        }
+    }
+    out
+}
+
+/// `PortList{ repeated PortRange range = 1 }`。
+fn encode_port_list(ports: &[(u32, u32)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (from, to) in ports {
+        let mut r = Vec::new();
+        put_u64(1, u64::from(*from), &mut r);
+        put_u64(2, u64::from(*to), &mut r);
+        put_bytes(1, &r, &mut out);
+    }
     out
 }
 
@@ -139,8 +243,20 @@ pub fn encode_routing_rule(rule: &ApiRule) -> Vec<u8> {
     if !rule.outbound_tag.is_empty() {
         put_string(1, &rule.outbound_tag, &mut out);
     }
-    for host in &rule.full_domains {
-        put_bytes(2, &encode_domain_rule_full(host), &mut out);
+    for d in &rule.domains {
+        put_bytes(2, &encode_domain_rule(d), &mut out);
+    }
+    for p in &rule.process_names {
+        put_string(21, p, &mut out);
+    }
+    for p in &rule.protocols {
+        put_string(9, p, &mut out);
+    }
+    for i in &rule.ip {
+        put_bytes(10, &encode_ip_rule(i), &mut out);
+    }
+    for i in &rule.source_ip {
+        put_bytes(11, &encode_ip_rule(i), &mut out);
     }
     for inbound in &rule.inbound_tags {
         put_string(8, inbound, &mut out);
@@ -148,6 +264,9 @@ pub fn encode_routing_rule(rule: &ApiRule) -> Vec<u8> {
     // networks = 13（repeated enum ⇒ 每个元素一个 varint 字段）
     for n in &rule.networks {
         put_u64(13, *n, &mut out);
+    }
+    if !rule.ports.is_empty() {
+        put_bytes(14, &encode_port_list(&rule.ports), &mut out);
     }
     put_string(19, &rule.rule_tag, &mut out);
     out
@@ -465,64 +584,58 @@ pub async fn remove_rules(
 ///
 /// 见 [`replace_rules`] 的文档：追加的规则会被 catch-all 吃掉，所以运行期改规则
 /// **只能整份替换** —— 而整份替换要求把**每一条**规则都表达出来。
-/// 做不到这一点的场合，正确的动作是**拒绝**并回落"重启核心"，
+/// 表达不了就**拒绝**（返回 `Err`），由调用方回落"重启核心"，
 /// 而不是把一份缺了几条的规则表塞进去（那会静默丢掉用户的预设与自定义规则）。
 ///
-/// # 目前能表达 / 不能表达
+/// # 覆盖范围
 ///
-/// | 能 | 不能（返回在 `Err` 里，一条一句人话） |
-/// |---|---|
-/// | `full:` / `domain:` / 裸域名 | `geosite:` / `regexp:` / `ext:` |
-/// | `inbound_tags` | `ip` / `source_ip` |
-/// | `network`（Both / Tcp / Udp） | `ports` / `process_names` / `protocols` |
-/// | `RuleAction::{Block, Direct, Proxy{Some,None}}` | —— |
+/// `MatchCondition` 的**全部字段**都能表达：域名（`full:` / `domain:` / 裸域名 /
+/// `regexp:` / `geosite:` / `ext:`）、`ip`、`source_ip`、`ports`、
+/// `inbound_tags`、`network`、`process_names`、`protocols`。
 ///
-/// 新支持一项时**同时**改这张表：它是调用方决定"能不能热加"的唯一依据。
+/// `Err` 只剩**输入本身不合法**这一种：空域名、认不出的 CIDR、
+/// 解析不了的端口表达式。此时同样拒绝，因为吞掉它就等于放宽/收紧匹配。
 pub fn to_api_rules(
     rules: &[crate::routing::RoutingRule],
     selected_tag: &str,
 ) -> Result<Vec<ApiRule>, Vec<String>> {
     use crate::routing::{Network, RuleAction};
 
-    let mut unsupported: Vec<String> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
     let mut out: Vec<ApiRule> = Vec::with_capacity(rules.len());
 
     for rule in rules.iter().filter(|r| r.enabled) {
         let when = &rule.when;
-        let mut full_domains = Vec::new();
 
+        let mut domains = Vec::new();
         for d in &when.domains {
-            // 顺序很重要：`geosite:` / `regexp:` / `ext:` 都要先判掉，
-            // 否则会被当成裸域名写进去 —— 那是**静默放宽**匹配条件。
-            if d.starts_with("geosite:") || d.starts_with("ext:") || d.starts_with("regexp:") {
-                unsupported.push(format!("{}：域名表达式 {d}", rule.id));
-                continue;
+            match parse_domain(d) {
+                Ok(x) => domains.push(x),
+                Err(e) => problems.push(format!("{}：{e}", rule.id)),
             }
-            let host = d
-                .strip_prefix("full:")
-                .or_else(|| d.strip_prefix("domain:"))
-                .unwrap_or(d.as_str());
-            if host.is_empty() {
-                unsupported.push(format!("{}：空域名", rule.id));
-                continue;
+        }
+        let mut ip = Vec::new();
+        for i in &when.ip {
+            match parse_ip(i) {
+                Ok(x) => ip.push(x),
+                Err(e) => problems.push(format!("{}：{e}", rule.id)),
             }
-            full_domains.push(host.to_string());
         }
-
-        if !when.ip.is_empty() {
-            unsupported.push(format!("{}：ip（{} 条）", rule.id, when.ip.len()));
+        // `source_ip` 已经是结构化的 `Cidr`，交给同一个解析器（它实现 Display）。
+        let mut source_ip = Vec::new();
+        for c in &when.source_ip {
+            match parse_ip(&c.to_string()) {
+                Ok(x) => source_ip.push(x),
+                Err(e) => problems.push(format!("{}：source_ip {e}", rule.id)),
+            }
         }
-        if !when.source_ip.is_empty() {
-            unsupported.push(format!("{}：source_ip（{} 条）", rule.id, when.source_ip.len()));
-        }
+        let mut ports = Vec::new();
         if !when.ports.is_empty() {
-            unsupported.push(format!("{}：port（{} 条）", rule.id, when.ports.len()));
-        }
-        if !when.process_names.is_empty() {
-            unsupported.push(format!("{}：process", rule.id));
-        }
-        if !when.protocols.is_empty() {
-            unsupported.push(format!("{}：protocol", rule.id));
+            let text = when.ports.iter().map(|p| p.as_xray()).collect::<Vec<_>>().join(",");
+            match parse_ports(&text) {
+                Ok(x) => ports = x,
+                Err(e) => problems.push(format!("{}：port {e}", rule.id)),
+            }
         }
 
         let networks = match when.network {
@@ -541,17 +654,151 @@ pub fn to_api_rules(
         out.push(ApiRule {
             rule_tag: rule.id.clone(),
             outbound_tag,
-            full_domains,
+            domains,
+            ip,
+            ports,
+            source_ip,
             inbound_tags: when.inbound_tags.clone(),
             networks,
+            process_names: when.process_names.clone(),
+            protocols: when.protocols.clone(),
         });
     }
 
-    if unsupported.is_empty() {
+    if problems.is_empty() {
         Ok(out)
     } else {
-        Err(unsupported)
+        Err(problems)
     }
+}
+
+/// 域名表达式 → [`ApiDomain`]。
+///
+/// **前缀决定匹配语义**，不能一律当精确匹配：
+/// * `full:` 精确；`domain:` 与**裸域名**都是"子域也匹配"（Xray 的既有语义）；
+/// * `geosite:` / `ext:` 是规则集；`regexp:` 是正则。
+pub fn parse_domain(raw: &str) -> Result<ApiDomain, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("空域名表达式".into());
+    }
+    if let Some(code) = raw.strip_prefix("geosite:") {
+        let (code, attrs) = split_attrs(code);
+        if code.is_empty() {
+            return Err("geosite: 后面没有类别名".into());
+        }
+        return Ok(ApiDomain::GeoSite { file: String::new(), code, attrs });
+    }
+    if let Some(rest) = raw.strip_prefix("ext:") {
+        let (file, code) = rest
+            .split_once(':')
+            .ok_or_else(|| format!("ext: 需要 file:code 形式（现在是 {raw}）"))?;
+        let (code, attrs) = split_attrs(code);
+        if file.is_empty() || code.is_empty() {
+            return Err(format!("ext: 的 file 或 code 为空（{raw}）"));
+        }
+        return Ok(ApiDomain::GeoSite { file: file.to_string(), code, attrs });
+    }
+    if let Some(v) = raw.strip_prefix("regexp:") {
+        if v.is_empty() {
+            return Err("regexp: 后面没有表达式".into());
+        }
+        return Ok(ApiDomain::Regex(v.to_string()));
+    }
+    if let Some(v) = raw.strip_prefix("full:") {
+        if v.is_empty() {
+            return Err("full: 后面没有域名".into());
+        }
+        return Ok(ApiDomain::Full(v.to_string()));
+    }
+    if let Some(v) = raw.strip_prefix("domain:") {
+        if v.is_empty() {
+            return Err("domain: 后面没有域名".into());
+        }
+        return Ok(ApiDomain::Domain(v.to_string()));
+    }
+    Ok(ApiDomain::Domain(raw.to_string()))
+}
+
+/// `code@attr1@attr2` → `(code, "attr1,attr2")`（geosite 的属性过滤）。
+fn split_attrs(raw: &str) -> (String, String) {
+    match raw.split_once('@') {
+        Some((code, attrs)) => (code.to_string(), attrs.replace('@', ",")),
+        None => (raw.to_string(), String::new()),
+    }
+}
+
+/// IP 表达式 → [`ApiIp`]。
+pub fn parse_ip(raw: &str) -> Result<ApiIp, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("空 IP 表达式".into());
+    }
+    if let Some(code) = raw.strip_prefix("geoip:") {
+        if code.is_empty() {
+            return Err("geoip: 后面没有国家码".into());
+        }
+        return Ok(ApiIp::GeoIp { file: String::new(), code: code.to_string(), reverse: false });
+    }
+    if let Some(rest) = raw.strip_prefix("ext:") {
+        let (file, code) = rest
+            .split_once(':')
+            .ok_or_else(|| format!("ext: 需要 file:code 形式（现在是 {raw}）"))?;
+        if file.is_empty() || code.is_empty() {
+            return Err(format!("ext: 的 file 或 code 为空（{raw}）"));
+        }
+        return Ok(ApiIp::GeoIp { file: file.to_string(), code: code.to_string(), reverse: false });
+    }
+    // CIDR 或裸地址。**只接受 IPv4/IPv6 字面量** —— 认不出来就报错，不猜。
+    let (addr_text, prefix) = match raw.split_once('/') {
+        Some((a, p)) => {
+            let prefix: u32 = p.parse().map_err(|_| format!("前缀不是数字（{raw}）"))?;
+            (a, Some(prefix))
+        }
+        None => (raw, None),
+    };
+    let addr: std::net::IpAddr = addr_text
+        .parse()
+        .map_err(|_| format!("认不出这个 IP/CIDR：{raw}"))?;
+    let (bytes, max) = match addr {
+        std::net::IpAddr::V4(v4) => (v4.octets().to_vec(), 32u32),
+        std::net::IpAddr::V6(v6) => (v6.octets().to_vec(), 128u32),
+    };
+    let prefix = prefix.unwrap_or(max);
+    if prefix > max {
+        return Err(format!("前缀 {prefix} 超过 {max}（{raw}）"));
+    }
+    Ok(ApiIp::Cidr { ip: bytes, prefix })
+}
+
+/// `"80,443"` / `"1000-2000"` → `[(from, to)]`。闭区间；单端口是 `(p, p)`。
+pub fn parse_ports(raw: &str) -> Result<Vec<(u32, u32)>, String> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let item = match part.split_once('-') {
+            Some((a, b)) => {
+                let from: u32 = a.trim().parse().map_err(|_| format!("端口不是数字：{part}"))?;
+                let to: u32 = b.trim().parse().map_err(|_| format!("端口不是数字：{part}"))?;
+                (from, to)
+            }
+            None => {
+                let p: u32 = part.parse().map_err(|_| format!("端口不是数字：{part}"))?;
+                (p, p)
+            }
+        };
+        if item.0 > item.1 || item.1 > 65535 {
+            return Err(format!("端口区间不合法：{part}"));
+        }
+        out.push(item);
+    }
+    if out.is_empty() {
+        return Err(format!("端口表达式为空：{raw}"));
+    }
+    Ok(out)
 }
 
 /// 把**当前规则表**与**我们想要的那一组**对齐：多删少加。
@@ -602,9 +849,9 @@ mod tests {
         ApiRule {
             rule_tag: "intent-block-ads.example".into(),
             outbound_tag: "block".into(),
-            full_domains: vec!["ads.example".into()],
+            domains: vec![ApiDomain::Full("ads.example".into())],
             inbound_tags: vec!["tun".into()],
-            networks: Vec::new(),
+            ..ApiRule::new("", "")
         }
     }
 
@@ -617,6 +864,7 @@ mod tests {
     fn a_routing_rule_encodes_to_the_documented_bytes() {
         let host = "ads.example";
         let rule_tag = "intent-block-ads.example";
+        // 这条用例覆盖的是 `Domain.Type.Full = 3` 的那条分支（精确匹配）。
 
         let mut expect = Vec::new();
         // tag = 1, wire 2（oneof target_tag）
@@ -764,7 +1012,7 @@ mod tests {
     }
 
     #[test]
-    fn a_minimal_supported_rule_set_converts() {
+    fn a_minimal_rule_set_converts() {
         use crate::routing::{MatchCondition, RuleAction};
         let rules = vec![
             ir(
@@ -787,13 +1035,16 @@ mod tests {
         assert_eq!(api.len(), 3);
         assert_eq!(api[0].outbound_tag, "api");
         assert_eq!(api[0].inbound_tags, vec!["api".to_string()]);
-        assert_eq!(api[1].full_domains, vec!["ads.example".to_string()]);
+        assert_eq!(api[1].domains, vec![ApiDomain::Full("ads.example".into())]);
         assert_eq!(api[1].outbound_tag, "block");
         assert_eq!(api[2].networks, vec![2, 3], "catch-all 必须带 tcp,udp");
     }
 
+    /// **上一版这里有个真 bug**：裸域名与 `domain:` 都被编成 `Full(3)`，
+    /// 而 Xray 的语义是"子域也匹配"（`Domain.Type.Domain = 2`）。
+    /// 那会把匹配范围静默收紧 —— 用户规则少命中一批域名，却没有任何报错。
     #[test]
-    fn bare_and_domain_prefixed_hosts_become_full_domains() {
+    fn bare_and_domain_prefixed_hosts_keep_subdomain_semantics() {
         use crate::routing::{MatchCondition, RuleAction};
         let rules = vec![ir(
             "r",
@@ -805,78 +1056,161 @@ mod tests {
         )];
         let api = to_api_rules(&rules, "n").unwrap();
         assert_eq!(
-            api[0].full_domains,
-            vec!["ads.example".to_string(), "sub.example".into(), "exact.example".into()]
+            api[0].domains,
+            vec![
+                ApiDomain::Domain("ads.example".into()),   // 裸域名 = 子域匹配
+                ApiDomain::Domain("sub.example".into()),   // domain: = 子域匹配
+                ApiDomain::Full("exact.example".into()),   // full: = 精确
+            ]
+        );
+        // 字节层面也确认一次：type 字段（`08 02`）与 Full 的（`08 03`）不同。
+        let domain_bytes = encode_domain_rule(&ApiDomain::Domain("a.example".into()));
+        let full_bytes = encode_domain_rule(&ApiDomain::Full("a.example".into()));
+        assert_ne!(domain_bytes, full_bytes, "Domain 与 Full 编出来的字节必须不同");
+        // 内层 `Domain` 消息的第一个字段就是 type：`08 02` / `08 03`。
+        assert!(
+            domain_bytes.windows(2).any(|w| w == [0x08, 0x02]),
+            "Domain 分支应当是 type=2（子域匹配）：{domain_bytes:?}"
+        );
+        assert!(
+            full_bytes.windows(2).any(|w| w == [0x08, 0x03]),
+            "Full 分支应当是 type=3（精确匹配）：{full_bytes:?}"
         );
     }
 
+    /// `geosite:` / `ext:` / `regexp:` 各自编成**对应的那种**规则，不能混。
+    /// 上一版把它们整个拒绝（那时确实表达不了）；现在能表达了，
+    /// 但"编成什么类型"仍然是最容易错的地方 —— 所以逐项断言。
     #[test]
-    fn proxy_without_an_outbound_uses_the_selected_tag() {
+    fn geosite_ext_and_regexp_are_encoded_by_kind() {
         use crate::routing::{MatchCondition, RuleAction};
-        let rules = vec![ir("r", MatchCondition::default(), RuleAction::Proxy { outbound: None })];
-        assert_eq!(to_api_rules(&rules, "node-abc").unwrap()[0].outbound_tag, "node-abc");
+        let rules = vec![ir(
+            "r",
+            MatchCondition {
+                domains: vec![
+                    "geosite:cn".into(),
+                    "geosite:category-ads-all@cn".into(),
+                    "ext:mine.dat:mycode".into(),
+                    "regexp:^a.*bz$".into(),
+                ],
+                ..Default::default()
+            },
+            RuleAction::Block,
+        )];
+        let api = to_api_rules(&rules, "n").unwrap();
+        assert_eq!(
+            api[0].domains,
+            vec![
+                ApiDomain::GeoSite { file: String::new(), code: "cn".into(), attrs: String::new() },
+                ApiDomain::GeoSite {
+                    file: String::new(),
+                    code: "category-ads-all".into(),
+                    attrs: "cn".into(),
+                },
+                ApiDomain::GeoSite { file: "mine.dat".into(), code: "mycode".into(), attrs: String::new() },
+                ApiDomain::Regex("^a.*bz$".into()),
+            ]
+        );
     }
 
-    /// **最能骗过人的一种错**：`geosite:cn` 被当成裸域名写进去 ⇒ 那条规则从
-    /// "整个大陆域名表" 缩成 "一个叫 geosite:cn 的主机名" ⇒ 静默放宽/收紧匹配。
-    /// 所以必须**拒绝**，并指名是哪一条规则。
+    /// `MatchCondition` 里每个字段都要被编出来（漏一个就是静默放宽匹配）。
     #[test]
-    fn geosite_regexp_and_ext_are_refused_by_name() {
-        use crate::routing::{MatchCondition, RuleAction};
-        let rules = vec![
-            ir("preset-cn-domain", MatchCondition { domains: vec!["geosite:cn".into()], ..Default::default() }, RuleAction::Direct),
-            ir("user-re", MatchCondition { domains: vec!["regexp:^a.*".into()], ..Default::default() }, RuleAction::Block),
-            ir("user-ext", MatchCondition { domains: vec!["ext:mine.dat:code".into()], ..Default::default() }, RuleAction::Block),
-        ];
-        let errs = to_api_rules(&rules, "n").unwrap_err();
-        assert_eq!(errs.len(), 3, "{errs:?}");
-        assert!(errs.iter().any(|e| e.contains("preset-cn-domain") && e.contains("geosite:cn")), "{errs:?}");
-        assert!(errs.iter().any(|e| e.contains("regexp:")), "{errs:?}");
-        assert!(errs.iter().any(|e| e.contains("ext:")), "{errs:?}");
-    }
-
-    #[test]
-    fn every_field_we_cannot_encode_is_reported_not_dropped() {
+    fn every_match_field_is_encoded() {
         use crate::routing::{MatchCondition, PortMatcher, RuleAction};
         let rules = vec![ir(
             "busy",
             MatchCondition {
                 domains: vec!["full:a.example".into()],
-                ip: vec!["geoip:cn".into()],
-                ports: vec![PortMatcher::Single(443)],
+                ip: vec!["geoip:cn".into(), "10.0.0.0/8".into()],
+                ports: vec![PortMatcher::Raw("80,443,1000-2000".into())],
                 process_names: vec!["Safari".into()],
                 protocols: vec!["tls".into()],
+                inbound_tags: vec!["tun".into()],
+                network: crate::routing::Network::Tcp,
                 ..Default::default()
             },
             RuleAction::Block,
         )];
-        let errs = to_api_rules(&rules, "n").unwrap_err();
-        // ip / port / process / protocol 各一条。
-        assert_eq!(errs.len(), 4, "{errs:?}");
-        for key in ["ip", "port", "process", "protocol"] {
-            assert!(errs.iter().any(|e| e.contains(key)), "缺 {key}：{errs:?}");
+        let api = to_api_rules(&rules, "n").unwrap();
+        let r = &api[0];
+        assert_eq!(r.domains.len(), 1);
+        assert_eq!(
+            r.ip,
+            vec![
+                ApiIp::GeoIp { file: String::new(), code: "cn".into(), reverse: false },
+                ApiIp::Cidr { ip: vec![10, 0, 0, 0], prefix: 8 },
+            ]
+        );
+        assert_eq!(r.ports, vec![(80, 80), (443, 443), (1000, 2000)]);
+        assert_eq!(r.process_names, vec!["Safari".to_string()]);
+        assert_eq!(r.protocols, vec!["tls".to_string()]);
+        assert_eq!(r.inbound_tags, vec!["tun".to_string()]);
+        assert_eq!(r.networks, vec![2], "Tcp ⇒ 只有 2");
+
+        // 字节里确实出现了 port_list(14) / ip(10) / process(21) / protocol(9)。
+        let bytes = encode_routing_rule(r);
+        for (field, hint) in [(14u8, "port_list"), (10, "ip"), (21, "process"), (9, "protocol")] {
+            let key = field << 3 | 2;
+            assert!(
+                bytes.contains(&key),
+                "{hint}（字段 {field}，键 0x{key:02x}）没被编进去"
+            );
         }
     }
 
-    /// 一份**真实预设**（bypass_mainland）今天必然无法热加 —— 这条断言的作用是
-    /// 让"生产里回落重启"这件事有据可依，而不是一个说不清原因的静默行为。
+    /// 真实预设现在**可以**热加了 —— 这条断言的作用是：一旦有人把某类编码弄丢，
+    /// 它会立刻红，而不是等到生产上"热加悄悄少了几条规则"。
     #[test]
-    fn the_real_bypass_mainland_preset_is_not_yet_hot_swappable() {
+    fn the_real_bypass_mainland_preset_is_hot_swappable() {
         let rules = crate::routing::preset_rules(crate::model::RoutingPreset::BypassMainland);
-        let errs = to_api_rules(&rules, "node-x").unwrap_err();
+        let api = to_api_rules(&rules, "node-x").expect("真实预设必须能整份编码");
+        assert_eq!(api.len(), rules.len());
+        // 预设里必然有 geosite: 与 geoip:；它们要出现在对应的分支里。
         assert!(
-            errs.iter().any(|e| e.contains("geosite:") || e.contains("geoip") || e.contains("ip（")),
-            "预设里必然有规则集/ip 表达式：{errs:?}"
+            api.iter().flat_map(|r| &r.domains).any(|d| matches!(d, ApiDomain::GeoSite { .. })),
+            "geosite 规则集没被编出来"
+        );
+        assert!(
+            api.iter().flat_map(|r| &r.ip).any(|i| matches!(i, ApiIp::GeoIp { .. })),
+            "geoip 规则集没被编出来"
         );
     }
 
     #[test]
-    fn disabled_rules_are_skipped() {
+    fn malformed_values_are_refused_with_the_offending_text() {
+        use crate::routing::{MatchCondition, PortMatcher, RuleAction};
+        let cases: Vec<(MatchCondition, &str)> = vec![
+            (MatchCondition { domains: vec!["".into()], ..Default::default() }, "空域名"),
+            (MatchCondition { domains: vec!["geosite:".into()], ..Default::default() }, "类别名"),
+            (
+                MatchCondition { domains: vec!["ext:nocolon".into()], ..Default::default() },
+                "file:code",
+            ),
+            (MatchCondition { ip: vec!["geoip:".into()], ..Default::default() }, "国家码"),
+            (MatchCondition { ip: vec!["not-an-ip".into()], ..Default::default() }, "认不出"),
+            (MatchCondition { ip: vec!["10.0.0.0/99".into()], ..Default::default() }, "前缀"),
+            (
+                MatchCondition { ports: vec![PortMatcher::Raw("70000".into())], ..Default::default() },
+                "端口区间",
+            ),
+        ];
+        for (when, needle) in cases {
+            let rules = vec![ir("bad", when.clone(), RuleAction::Block)];
+            let errs = to_api_rules(&rules, "n")
+                .expect_err(&format!("{when:?} 应当被拒绝"));
+            assert!(
+                errs.iter().any(|e| e.contains(needle)),
+                "{needle} 没出现在错误里：{errs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_is_now_empty_but_disabled_rules_are_still_skipped() {
         use crate::routing::{MatchCondition, RuleAction};
-        let mut r = ir("off", MatchCondition { domains: vec!["full:a.example".into()], ..Default::default() }, RuleAction::Block);
-        r.enabled = false;
-        let api = to_api_rules(&[r], "n").unwrap();
-        assert!(api.is_empty(), "禁用的规则不该被下发");
+        let mut off = ir("off", MatchCondition { domains: vec!["full:a.example".into()], ..Default::default() }, RuleAction::Block);
+        off.enabled = false;
+        assert!(to_api_rules(&[off], "n").unwrap().is_empty());
     }
 
     #[test]

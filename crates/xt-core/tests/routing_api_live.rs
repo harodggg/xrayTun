@@ -25,10 +25,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use xt_core::xray::routing_api::{add_rules, list_rules, remove_rules, replace_rules, ApiRule};
+use xt_core::xray::routing_api::{
+    add_rules, list_rules, remove_rules, replace_rules, ApiDomain, ApiRule,
+};
 
 const TCP: u64 = 2;
 const UDP: u64 = 3;
+
+/// 只带域名的一条规则（其余字段留空 = 不匹配）。
+fn domain_rule(rule_tag: &str, outbound: &str, domain: &str, inbounds: &[&str]) -> ApiRule {
+    ApiRule {
+        domains: vec![ApiDomain::Full(domain.to_string())],
+        inbound_tags: inbounds.iter().map(|s| s.to_string()).collect(),
+        ..ApiRule::new(rule_tag, outbound)
+    }
+}
 
 const ALLOWED: &str = "allowed.intent-live";
 const BLOCKED: &str = "blocked.intent-live";
@@ -347,13 +358,7 @@ async fn adding_and_removing_rules_live_never_drops_an_existing_connection() {
     // 这不是"实现没写好"，而是机制本身的约束：生成的配置末尾永远有一条
     // `internal-fallback`（catch-all），而 `AddRule` 是**追加**。把这一点钉成
     // 可复跑的断言，比在文档里写一句"注意顺序"有用得多。
-    let rule = ApiRule {
-        rule_tag: RULE_TAG.into(),
-        outbound_tag: "block".into(),
-        full_domains: vec![BLOCKED.into()],
-        inbound_tags: vec!["socks".into()],
-        networks: Vec::new(),
-    };
+    let rule = domain_rule(RULE_TAG, "block", BLOCKED, &["socks"]);
     add_rules(api_addr, std::slice::from_ref(&rule), budget)
         .await
         .expect("AddRule 必须成功");
@@ -396,27 +401,12 @@ async fn adding_and_removing_rules_live_never_drops_an_existing_connection() {
     // domain(full:) / inbound_tag / networks / outbound（见 `replace_rules` 文档）。
     let full = vec![
         ApiRule {
-            rule_tag: "internal-api".into(),
-            outbound_tag: "api".into(),
-            full_domains: Vec::new(),
             inbound_tags: vec!["api-in".into()],
-            networks: Vec::new(),
+            ..ApiRule::new("internal-api", "api")
         },
         rule.clone(),
-        ApiRule {
-            rule_tag: "test-allow".into(),
-            outbound_tag: "direct".into(),
-            full_domains: vec![ALLOWED.into()],
-            inbound_tags: Vec::new(),
-            networks: Vec::new(),
-        },
-        ApiRule {
-            rule_tag: "internal-fallback".into(),
-            outbound_tag: "direct".into(),
-            full_domains: Vec::new(),
-            inbound_tags: Vec::new(),
-            networks: vec![TCP, UDP],
-        },
+        domain_rule("test-allow", "direct", ALLOWED, &[]),
+        ApiRule { networks: vec![TCP, UDP], ..ApiRule::new("internal-fallback", "direct") },
     ];
     replace_rules(api_addr, &full, budget)
         .await

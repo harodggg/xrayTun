@@ -758,7 +758,7 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P1 传输层（提前做，P2b 的前置） | ✅ 完成 | `cargo test -p xt-intent` ⇒ **127 passed**（新增 `transport` 的 14 条 + `jev` 网关的 14 条：URL/请求组包/头注入防护/`Content-Length`/`chunked`/三种状态映射/退避与 `Retry-After`/抖动上界/不重试的 4xx）；在线用例见上 |
 | P2b-1 桌面接线（**只观察/判定/审计**） | ✅ 完成 | `cargo test --workspace` ⇒ **770 passed**（含 `apps/desktop/src/intent.rs` 的 21 条）；`clippy --workspace --all-targets -D warnings` 干净；UI `vitest` 366 passed |
 | P2b-2 规则物化进配置 | ✅ 完成 | `IntentRuntime::rules()` → `Supervisor::set_intent_rules` → `start()` 生成配置时走 `merge_rules_with_intent`。单测钉住"意图规则真的进了那份规则表"及位置（`preset-private` → 放行 → 拦截 → `preset-ads` → `cn`）；配置级别由 `real_core.rs` 用真实核心验收 |
-| P2b-3 免重启改规则 | 🟡 机制已验证 + 生产路径已接（带安全回落） | `crates/xt-core/src/xray/routing_api.rs`（手写 protobuf + h2c 一元调用，12 单测）+ `tests/routing_api_live.rs` 对**真实核心**验证：`ListRule` 读到 3 条真实规则；`AddRule` 3→4 且**未整份替换**；**追加的规则被 catch-all 吃掉**（附录 A 第 7 条，本机实测）；`replace_rules` 之后新连接被拦、**已建立的连接仍然 200**（DoD）、负对照恢复可达。**生产路径已接**：`intent_apply` 先算整份规则表 → `to_api_rules`（19 条单测）→ 能忠实表达就 `replace_rules` 热加（**不断流**），不能就**指名原因**回落重启。今天真实预设（`bypass_mainland` 含 `geosite:`/`geoip:`）必然走回落 —— 这是**正确的拒绝**，不是静默丢规则；补齐 `geosite:`/`regexp:`/`ip`/`port` 编码后会自动开始热加 |
+| P2b-3 免重启改规则 | ✅ **可用**（真实预设能整份编码并热加） | `crates/xt-core/src/xray/routing_api.rs`（手写 protobuf + h2c 一元调用，12 单测）+ `tests/routing_api_live.rs` 对**真实核心**验证：`ListRule` 读到 3 条真实规则；`AddRule` 3→4 且**未整份替换**；**追加的规则被 catch-all 吃掉**（附录 A 第 7 条，本机实测）；`replace_rules` 之后新连接被拦、**已建立的连接仍然 200**（DoD）、负对照恢复可达。**全覆盖编码**：`ApiDomain`（`Full`/`Domain`/`Regex`/`GeoSite`）+ `ApiIp`（`GeoIp`/`Cidr`）+ `PortList` + `process`/`protocol` ⇒ `MatchCondition` 的**每个字段**都能表达，真实 `bypass_mainland` 预设**可以整份热加**（有测试断言它返回 `Ok` 且含 geosite/geoip 两类）。`Err` 只剩"输入本身不合法"（空域名/认不出的 CIDR/坏端口表达式），同样**拒绝而不吞掉**。`intent_apply` 的顺序不变：能编就热加（不断流），编不动或调用失败就**指名原因**回落重启 |
 | P3a 界面入口（6 个命令 + 契约） | ✅ 完成 | `commands/intent.rs` + `ipc.ts`；契约测试的**两把哨兵**（Rust 注册数、TS 字面量数）都同步到 43 |
 | P3b 意图过滤页 | ✅ 完成 | 导航新增「意图过滤」；`cargo test --workspace` 797 passed、`vitest` **39 文件 / 381 passed**、`tsc --noEmit` 干净 |
 | **数据面验收（真实核心 + 真实 TCP）** | ✅ 完成 | `cargo test -p xt-intent --test real_core_dataplane` ⇒ **2 passed**：对照组 `allowed.intent-dataplane` 拿到 **200**，实验组 `blocked.intent-dataplane` 拿到 **403**（blackhole 的响应）；全离线（本地 HTTP 服务 + `dns.hosts` 映射 + 全部现取端口），不打扰机器上正在跑的 xray |
@@ -903,6 +903,13 @@ enum Network { Unknown = 0; TCP = 2; UDP = 3; UNIX = 4; }   // **没有 1**
 5. **运行期加的规则不在生成的 `config.json` 里** ⇒ 核心一重启就没了。
    所以"重启后重新下发"必须由调用方保证（`start_core` 成功之后那一处）。
 6. **`AddRule` 引用不存在的 balancer 会失败**，而我们不用 balancer。
+8. **⚠️ 域名前缀决定匹配语义，不能一律按精确匹配编。**
+   `full:` = `Domain.Type.Full(3)`（精确）；**裸域名与 `domain:` = `Domain.Type.Domain(2)`**
+   （子域也匹配）；`regexp:` = `Regex(1)`；`geosite:`/`ext:` = `GeositeRule`。
+   把裸域名编成 `Full` 会**静默收紧**匹配 —— 用户规则少命中一批域名，且没有任何报错。
+   本项目**真的犯过这个错**（第一版 `to_api_rules` 一律用 `full_domains`），
+   现在由 `bare_and_domain_prefixed_hosts_keep_subdomain_semantics` 钉住。
+
 7. **⚠️ 追加的规则会被 `internal-fallback` 吃掉（本机实测）。**
    本项目生成的配置**永远**以一条 catch-all 结尾（`network: tcp,udp → 当前节点`），
    而 `AddRule` 是**追加** ⇒ 运行期加的规则排在它之后，**永远不会命中**。
@@ -917,10 +924,8 @@ enum Network { Unknown = 0; TCP = 2; UDP = 3; UNIX = 4; }   // **没有 1**
    再证明整份替换才生效）。⇒ 运行期改规则**只有整份替换一条路**：
    `shouldAppend:false` + **完整**规则集（顺序由我们自己排，拦截规则放在 catch-all 之前）。
 
-   代价是：调用方必须能把 `build_routing` 的产物**逐条**编码成 protobuf，
-   而目前的 `ApiRule` 只覆盖 `domain(full:)` / `inbound_tag` / `networks` / `outbound` ——
-   `geosite:` / `regexp:` / `ip` / `port` / `process` **还没编码**。
-   把这些补齐之前，**不允在生产里用整份替换**（会静默丢掉用户的预设与自定义规则）。
+   代价是：调用方必须能把 `build_routing` 的产物**逐条**编码成 protobuf。
+   **这一环已经补齐**（见下一条）：`MatchCondition` 的**全部字段**都能表达了。
 
 ### A.5 验收判据（P2b-3 的 Definition of Done）
 
