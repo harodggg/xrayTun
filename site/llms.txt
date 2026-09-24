@@ -25,7 +25,7 @@
   只有高置信度才会动账号（静音/拉黑），且**默认演练模式只记录不执行**
 - [Porn-tweet Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
 - [黄推过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**）
-- 下载 v0.2.0：<https://github.com/harodggg/jev-x-filter/releases/download/v0.2.0/jev-x-filter-0.2.0.zip>（MIT，Chrome 120+）
+- 下载 v0.2.1：<https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip>（MIT，Chrome 120+）
 
 ## 下载
 

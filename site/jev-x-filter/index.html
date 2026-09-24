@@ -40,10 +40,10 @@
   "name": "黄推过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.2.0",
+  "softwareVersion": "0.2.1",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.2.0/jev-x-filter-0.2.0.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.2.0/jev-x-filter-0.2.0.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -172,13 +172,13 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.2.0/jev-x-filter-0.2.0.zip"
-            >下载 v0.2.0（zip，113.7 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/jev-x-filter-0.2.1.zip"
+            >下载 v0.2.1（zip，115.7 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.2.0 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.2.1 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -308,13 +308,13 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
             <tr>
               <td>单元测试</td>
               <td><code>npm test</code></td>
-              <td>126 个通过（协议契约、闸门不变量、预筛、农场、图片像素、黑名单、审计、流水线）</td>
+              <td>131 个通过（协议契约、闸门不变量、预筛、农场、图片像素、黑名单、审计、流水线）</td>
             </tr>
             <tr>
               <td>真实 Chrome 端到端</td>
               <td><code>npm run verify</code></td>
               <td>
-                69 项通过：CDP 加载扩展 → 仿 X 夹具页 → 判定 → 隐藏 → 点菜单（含两个陷阱：
+                71 项通过：CDP 加载扩展 → 仿 X 夹具页 → 判定 → 隐藏 → 点菜单（含两个陷阱：
                 菜单里的 Unmute/Unblock 反义项、页面里预先存在的同名确认按钮）
               </td>
             </tr>
@@ -327,7 +327,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
               <td>真实模型验证</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                19 条真站样本、19/19 符合设计（安全底线 0 违反）：黄推拦下、日常/治理新闻/性教育/泳装全部放行
+                22 条真站样本、22/22 符合设计（安全底线 0 违反）：黄推拦下、日常/治理新闻/性教育/泳装全部放行
               </td>
             </tr>
           </tbody>
@@ -336,9 +336,12 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
           真站反馈驱动了三轮修正，每一轮都留下了回归用例：<strong>显示名引流</strong>
           （<code>🍑真实同城约p🍑主页联系🔞免费</code> + 无害正文）、
           <strong>完全不含关键词的骚式自夸</strong>（<code>比我好看的没我骚🔧👏</code>，乱码账号名）、
-          <strong>回复区文案农场</strong>（同一句被 4 个账号同一分钟刷出）。
+          <strong>回复区文案农场</strong>（同一句被 4 个账号同一分钟刷出），以及
+          <strong>关键字中间插 emoji</strong>（显示名写 <code>❤️处男免费❤️</code>、正文写
+          <code>处🐕男</code>）。
           其中两个是<strong>架构性</strong>漏洞：关键词表一旦成为「要不要问模型」的门槛，
-          表外的写法模型永远看不到 —— 这正是新增「预检（模型先行）」的原因。
+          表外的写法模型永远看不到 —— 这正是新增「预检（模型先行）」的原因；
+          插 emoji 那一条则促成了<strong>去符号匹配</strong>与<strong>农场阈值降到 2 个账号</strong>。
         </p>
       </section>
 
@@ -420,7 +423,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.2.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.2.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -438,7 +441,7 @@ unzip jev-x-filter-0.2.0.zip -d jev-x-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          黄推过滤器 · Jev v0.2.0 · Chrome MV3 · 页面最后更新 2026-09-23 ·
+          黄推过滤器 · Jev v0.2.1 · Chrome MV3 · 页面最后更新 2026-09-23 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>
