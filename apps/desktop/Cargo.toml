@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 xt-proto.workspace = true
 xt-core.workspace = true
+xt-intent.workspace = true
 xt-tun.workspace = true
 
 tauri = { version = "2", features = ["tray-icon", "image-png"] }

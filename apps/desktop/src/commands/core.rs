@@ -253,8 +253,18 @@ pub(crate) async fn start_core(
                         // 为什么需要连接数：`dns-out`（UDP）与 `api`（本机回环）的
                         // 字节计数器恒为 0，那是测量盲区 —— 只显示 `0 B` 会让人以为
                         // 这两个出口没在用（本机实测各有 4769 / 5374 条连接）。
+                        // 同一行日志喂两处：出口连接计数（既有）与意图过滤的候选观察。
+                        // 放在同一个位置是刻意的 —— 核心 stdout 是**单点**，再开一个
+                        // tail 会得到两份对不齐的时间线（`xt_core::xray::access_log`
+                        // 的模块文档已经把这条理由写死了）。
+                        //
+                        // 意图侧只做"去重 + 过滤掉不该问的"，**判定在后台节拍里**：
+                        // 这条循环在数据面路径上，任何阻塞都会拖慢日志转发。
                         state.with(|i| {
-                            i.connections.observe(&event.line);
+                            let observed = i.connections.observe_with_record(&event.line);
+                            if let Some(record) = observed.record.as_ref() {
+                                i.intent.observe(record, xt_core::util::now_unix());
+                            }
                         });
                         // **原文照旧完整落盘 + 进环形缓冲**：限流只影响下面那条界面事件。
                         state.log("core", level, event.line.clone());

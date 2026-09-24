@@ -745,11 +745,22 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P1 真实核心验收 | ✅ 完成 | `cargo test -p xt-intent --test real_core` ⇒ **5 passed**：意图配置被真实核心接受（`exit 0`）、人为重复 `ruleTag` 被拒且**指名冲突**、规则位置（私有 → 放行 → 拦截 → `preset-ads` → `preset-cn-domain`）逐条断言、空意图层配置**逐字节不变** |
 | P2a 设置 + 规则排序 | ✅ 完成 | `cargo test -p xt-core --lib` ⇒ **252 passed**（含 7 条意图规则顺序测试 + 8 条设置测试）；`cargo test -p xraytun-desktop --test type_contract` ⇒ **6 passed**；`apps/ui`：`vitest run` ⇒ **366 passed**，`tsc --noEmit` ⇒ clean |
 | P1 传输层（提前做，P2b 的前置） | ✅ 完成 | `cargo test -p xt-intent` ⇒ **127 passed**（新增 `transport` 的 14 条 + `jev` 网关的 14 条：URL/请求组包/头注入防护/`Content-Length`/`chunked`/三种状态映射/退避与 `Retry-After`/抖动上界/不重试的 4xx）；在线用例见上 |
-| P2b 桌面接线 | ⏳ 未开始 | 目标：`commands/core.rs` 的日志单点挂 `IntentEngine::observe`；后台节拍跑 `classify_pending`；规则注入 `merge_rules_with_intent`；只在生效集合哈希变化时动核心 |
+| P2b-1 桌面接线（**只观察/判定/审计**） | ✅ 完成 | `cargo test --workspace` ⇒ **770 passed**（含 `apps/desktop/src/intent.rs` 的 21 条）；`clippy --workspace --all-targets -D warnings` 干净；UI `vitest` 366 passed |
+| P2b-2 规则下发（注入 `merge_rules_with_intent` + 重启/热加） | ⏳ 未开始 | 这一版**一条规则都不生成**：`IntentSummary.block_rules` 恒为 0，且引擎在非演练模式下会明说"本版不下发规则" |
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
 | P4 MITM | ⏳ 未开始 | 目标：helper 装信任锚（进快照）、`freedom.redirect` 引导、ALPN 只 h1、`strip_json` 的 `Content-Length` 一致性 |
+
+### P2b-1 的刻意边界（写清楚，免得被当成"已经能拦广告了"）
+
+* 桌面端只接了**观察 → 判定 → 缓存 → 审计**这条链：`commands/core.rs` 的日志单点
+  多挂一个 `observe_with_record`，后台 10 秒节拍跑 `classify_pending`，缓存每 6 拍落盘一次。
+* **不下发路由规则、不重启核心、不改任何系统网络配置。** 所以这一版即使打开功能，
+  也不可能影响用户的网。界面摘要里的 `block_rules` 恒为 0，非演练模式下引擎会在说明里
+  明确写"本版只观察不拦截"。
+* 密钥：本切片只支持免密钥的 Zen 预设。需要密钥的预设会以**可读原因**被拒绝
+  （`config_from_settings` 里），而不是发一个必然 401 的请求。Keychain 读写是独立一步。
 
 ### 已落地的文件
 
@@ -758,6 +769,10 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 * `crates/xt-core/src/xray/config.rs`：`merge_rules_with_intent()`（`merge_rules()` 变成零意图包装）
 * `crates/xt-core/src/routing/mod.rs`：修掉 `.srs` 的错误注释（§15.2）
 * `apps/ui/src/types.ts` + `previewSnapshot.ts`：设置形状与预览快照同步（合同测试要求）
+* `apps/desktop/src/intent.rs`：桌面运行态（重建式 `follow_settings` / `observe` / `tick` / `summary`）
+* `apps/desktop/src/{lib,state}.rs` + `commands/core.rs` + `commands/settings.rs`：接线
+* `crates/xt-core/src/xray/access_log.rs`：新增 `observe_with_record()`（`observe()` 变成薄封装，
+  两边的计数与配对行为有对照测试钉住）
 
 ### 一条仍然悬着、且**必须先量**的东西
 

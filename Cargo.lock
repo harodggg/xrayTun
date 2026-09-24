@@ -4842,6 +4842,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "xt-core",
+ "xt-intent",
  "xt-proto",
  "xt-tun",
 ]

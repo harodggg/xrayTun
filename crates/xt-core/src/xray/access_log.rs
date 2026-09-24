@@ -335,6 +335,18 @@ pub struct ConnectionRecord {
     pub sniff_id: Option<String>,
 }
 
+/// 一行日志的观察结果。
+///
+/// `record` 为 `None` 的三种情况：`sniffed` 行、解析失败的行、
+/// 以及根本不是连接行的行。三种都**不产生连接记录**，与既有行为一致。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObservedLine {
+    /// 命中并被计数的出口 tag（`sniffed` 行与无关行都是 `None`）。
+    pub outbound: Option<String>,
+    /// 结构化连接记录（**配对之后**的状态）。
+    pub record: Option<ConnectionRecord>,
+}
+
 /// 解析后的一条连接，外加只用于配对的时间。
 struct ParsedConnection {
     record: ConnectionRecord,
@@ -499,7 +511,24 @@ impl ConnectionLog {
     ///
     /// 返回 `String` 而不是 `&str`：解析结果借用的是**入参** `line`，
     /// 而方法同时可变借用 `self`，两者生命周期无法统一。
+    ///
+    /// 需要**结构化记录**的调用方用 [`Self::observe_with_record`]。
     pub fn observe(&mut self, line: &str) -> Option<String> {
+        self.observe_with_record(line).outbound
+    }
+
+    /// 观察一行日志，并把结构化连接记录一并交出来。
+    ///
+    /// # 为什么加这个方法而不是改 `observe` 的返回值
+    ///
+    /// `observe` 有两个既有调用点（出口计数、拓扑），它们的语义是"这一行算哪个出口"，
+    /// 不需要记录。意图过滤需要记录（域名 / 端口 / 入站）。改签名会把两个调用点
+    /// 一起卷进来，而这个 crate 的规矩是**新增入口而不是改既有语义**
+    /// （`observe` 现在是本方法的薄封装，两边的计数与配对行为逐字相同）。
+    ///
+    /// `record` 是**配对之后**的记录：`domain` 可能来自 `sniffed` 时序配对，
+    /// 也可能仍是 `None`（实测约一半的 accepted 行配不到域名）。
+    pub fn observe_with_record(&mut self, line: &str) -> ObservedLine {
         // `sniffed` 行：只更新待配对的域名，不产生连接记录。
         if let Some(sniff) = parse_sniffed(line) {
             if self.pending.is_some() {
@@ -507,21 +536,21 @@ impl ConnectionLog {
             }
             self.pending = Some(sniff);
             self.stats.sniffed += 1;
-            return None;
+            return ObservedLine::default();
         }
 
         // 连接行：先计数（与旧行为一致），再尝试记录。
-        let tag = parse_outbound_tag(line)?.to_string();
+        let Some(tag) = parse_outbound_tag(line).map(str::to_string) else {
+            return ObservedLine::default();
+        };
         *self.per_outbound.entry(tag.clone()).or_insert(0) += 1;
 
-        if let Some(parsed) = parse_connection(line, now_unix_ms()) {
-            self.push(parsed);
-        }
-        Some(tag)
+        let record = parse_connection(line, now_unix_ms()).map(|parsed| self.push(parsed));
+        ObservedLine { outbound: Some(tag), record }
     }
 
-    /// 把一条解析好的连接配对、入环形缓冲。
-    fn push(&mut self, parsed: ParsedConnection) {
+    /// 把一条解析好的连接配对、入环形缓冲，并**返回配对后的记录**。
+    fn push(&mut self, parsed: ParsedConnection) -> ConnectionRecord {
         let mut record = parsed.record;
         self.stats.accepted += 1;
 
@@ -550,11 +579,12 @@ impl ConnectionLog {
             self.stats.unpaired += 1;
         }
 
-        self.records.push_back(record);
+        self.records.push_back(record.clone());
         if self.records.len() > self.capacity {
             self.records.pop_front();
             self.dropped += 1;
         }
+        record
     }
 
     /// 最近连接（最新在前），按 `filter` 过滤并限制条数。
@@ -636,6 +666,74 @@ mod tests {
 
     fn stats(log: &ConnectionLog) -> PairingStats {
         log.recent(&ConnectionFilter::new(0)).pairing
+    }
+
+    // -----------------------------------------------------------------------
+    // observe_with_record：与 observe 逐字同源，只是把记录也交出来
+    // -----------------------------------------------------------------------
+
+    /// `observe` 必须是 `observe_with_record` 的薄封装 —— 两边的**计数与配对
+    /// 行为**要逐字相同，否则「界面看到的连接数」与「意图过滤看到的候选」
+    /// 会来自两套不同的配对结果。这条测试直接对照同一条日志序列。
+    #[test]
+    fn observe_and_observe_with_record_agree_on_counts_and_pairing() {
+        let lines: Vec<String> = vec![
+            sniffed("2026/09/20 11:15:13.100000", "www.google.com"),
+            accepted("2026/09/20 11:15:13.100030", "tcp:198.18.0.1:1", "tcp:1.2.3.4:443", "tun -> node-a"),
+            accepted("2026/09/20 11:15:14.000000", "tcp:198.18.0.1:2", "tcp:5.6.7.8:443", "tun -> direct"),
+        ];
+
+        let mut a = ConnectionLog::new();
+        for l in &lines {
+            a.observe(l);
+        }
+        let mut b = ConnectionLog::new();
+        let observed: Vec<ObservedLine> = lines.iter().map(|l| b.observe_with_record(l)).collect();
+
+        assert_eq!(a.snapshot(), b.snapshot(), "出口计数必须一致");
+        assert_eq!(stats(&a).paired, stats(&b).paired);
+        assert_eq!(stats(&a).unpaired, stats(&b).unpaired);
+        assert_eq!(items(&a, 10), items(&b, 10), "连接记录必须逐条相同");
+
+        // 返回值本身：sniffed 行没有出口、也没有记录。
+        assert!(observed[0].outbound.is_none() && observed[0].record.is_none());
+        // accepted 行有出口，并且记录里带着配对到的域名。
+        assert_eq!(observed[1].outbound.as_deref(), Some("node-a"));
+        let rec = observed[1].record.as_ref().expect("accepted 行必须给出记录");
+        assert_eq!(rec.domain.as_deref(), Some("www.google.com"));
+        assert!(rec.domain_paired);
+        // 没有前导 sniffed 的那条：有出口、有记录、但**没有域名**（宁缺勿错）。
+        assert_eq!(observed[2].outbound.as_deref(), Some("direct"));
+        assert_eq!(observed[2].record.as_ref().unwrap().domain, None);
+    }
+
+    /// 不是连接行的输入：出口为 `None`、记录为 `None`，且**不改变出口计数**。
+    #[test]
+    fn observe_with_record_ignores_lines_that_are_not_connections() {
+        let mut log = ConnectionLog::new();
+        // ① 真的 sniffed 行（带时间戳）—— 只进待配对队列，不是连接；
+        // ② 与本次无关的日志行；
+        // ③ 空行。
+        let noise = [
+            sniffed("2026/09/20 11:15:13.100000", "only-sniff.example"),
+            "2026/09/20 11:15:13.000000 some unrelated log line".to_string(),
+            String::new(),
+        ];
+        for l in &noise {
+            let o = log.observe_with_record(l);
+            assert!(o.record.is_none(), "{l:?} 不该产生记录");
+            assert!(o.outbound.is_none(), "{l:?} 不该被算到任何出口");
+        }
+        // sniffed 行进了待配对队列（这是既有语义），但没有 accepted 行来消费它。
+        assert_eq!(stats(&log).sniffed, 1);
+        assert_eq!(stats(&log).accepted, 0);
+        assert!(log.snapshot().is_empty(), "没有连接行 ⇒ 出口计数为空");
+
+        // 一个**看起来像**但缺时间戳的 sniffed 行不会被认（这条断言是上一版
+        // 我写错的那一处：我以为 parse_sniffed 不要求前缀，实测要求）。
+        let mut bare = ConnectionLog::new();
+        assert!(bare.observe_with_record("[Info] app/dispatcher: sniffed domain: x.example").record.is_none());
+        assert_eq!(stats(&bare).sniffed, 0);
     }
 
     // -----------------------------------------------------------------------

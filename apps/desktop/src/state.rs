@@ -217,6 +217,12 @@ pub struct Inner {
     /// 没有连接 ID；域名靠 `sniffed` 时序配对，是**近似**。
     /// 详见 [`xt_core::xray::access_log`] 模块头注释。
     pub connections: xt_core::xray::access_log::ConnectionLog,
+    /// 意图过滤的运行态（判定引擎 + 缓存 + 审计）。
+    ///
+    /// **它不下发路由规则、不碰系统网络配置**：本版只观察与判定，见
+    /// [`crate::intent`] 的模块文档。所以把它挂在 `Inner` 上是安全的 ——
+    /// 数据面路径（核心日志转发）只做一次 `observe`，判定在后台节拍里跑。
+    pub intent: crate::intent::IntentRuntime,
 }
 
 /// DNS 探测状态。
@@ -351,6 +357,7 @@ impl Inner {
             last_notice: None,
             logs_dir: store.logs_dir(),
             connections: xt_core::xray::access_log::ConnectionLog::new(),
+            intent: crate::intent::IntentRuntime::new(store.root().to_path_buf()),
         }
     }
 
@@ -419,6 +426,30 @@ impl AppState {
             logs_dir_ready: std::sync::atomic::AtomicBool::new(false),
             geo: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// 意图过滤的后台节拍：判定积压的候选、周期性落盘。
+    ///
+    /// 由 `lib.rs` 的一个 10 秒定时任务调用。**没有引擎时是空操作**，
+    /// 所以"功能没开"与"引擎建不起来"这两种状态都不需要额外分支。
+    ///
+    /// 返回这一轮判定的一轮账（日志用）；没引擎时 `None`。
+    pub fn tick_intent(&self, now: u64) -> Option<xt_intent::engine::ClassifyReport> {
+        let report = self.with(|i| i.intent.tick(now))?;
+        if let Some(r) = &report {
+            // 只在这轮真的做了事的时候记日志 —— 每 10 秒一条空账会把日志刷成噪音。
+            if r.asked > 0 || r.blocked > 0 || r.gateway_errors > 0 || r.budget_denied > 0 {
+                self.log(
+                    "intent",
+                    "info",
+                    format!(
+                        "意图判定：问 {} 次（缓存命中 {}）⇒ 拦 {} / 放行 {} / 延后 {}，网关错误 {}，预算拒绝 {}",
+                        r.asked, r.cache_hits, r.blocked, r.allowed, r.deferred, r.gateway_errors, r.budget_denied
+                    ),
+                );
+            }
+        }
+        report
     }
 
     /// 记一条日志并落盘 —— **写文件在锁外**。

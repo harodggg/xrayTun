@@ -51,6 +51,17 @@ pub async fn save_settings(
 
     persist_settings(&state, &settings)?;
 
+    // 意图过滤按新设置重建（换预设/模型/阈值 ⇒ 判决缓存整库作废）。
+    // **不重启核心**：本版不下发任何路由规则，所以这里只有内存与磁盘上的判定状态
+    // 会变。规则下发那一步才需要决定"重启还是 AddRule 热加"。
+    let now = xt_core::util::now_unix();
+    let intent_notes = state
+        .with(|i| i.intent.follow_settings(&settings, now))
+        .unwrap_or_default();
+    for note in intent_notes {
+        state.log("intent", "info", note);
+    }
+
     // 「显示网速」是个纯展示开关，不该为了它重启核心。这里立刻按新设置
     // 重画一次标题；核心没在跑时用全 0 的采样，等价于恢复成 App 名字。
     let (traffic, show) = state

@@ -21,6 +21,7 @@
 pub mod commands;
 pub mod events;
 pub mod helper_client;
+pub mod intent;
 pub mod helper_install;
 pub mod login_item;
 pub mod state;
@@ -61,6 +62,36 @@ pub fn run() {
             // 托盘是可选能力：构建失败不应该让整个 App 起不来。
             if let Err(e) = tray::build(&handle) {
                 tracing::warn!(error = %e, "菜单栏图标创建失败，功能不受影响");
+            }
+
+            // 意图过滤：按当前设置（重建）运行态。
+            //
+            // **这一步不碰核心、不碰系统网络配置** —— 它只是把判定引擎建起来，
+            // 让核心日志里的连接记录有人接手。规则下发给核心是下一步。
+            if let Some(state) = handle.try_state::<AppState>() {
+                let now = xt_core::util::now_unix();
+                let settings = state.with(|i| i.settings.clone());
+                if let Some(settings) = settings {
+                    let notes = state
+                        .with(|i| i.intent.follow_settings(&settings, now))
+                        .unwrap_or_default();
+                    for note in notes {
+                        state.log("intent", "info", note);
+                    }
+                }
+                // 判定节拍：与看门狗一样 10 秒一跳。没有引擎时它什么都不做。
+                let tick_handle = handle.clone();
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(crate::intent::TICK_INTERVAL);
+                    // 第一跳立刻发生（interval 的默认行为）—— 跳过它，避免刚启动就白跑一轮。
+                    ticker.tick().await;
+                    loop {
+                        ticker.tick().await;
+                        if let Some(state) = tick_handle.try_state::<AppState>() {
+                            state.tick_intent(xt_core::util::now_unix());
+                        }
+                    }
+                });
             }
 
             // 启动时做一次「健康检查 + 遗留清理」，并把结果写进日志与提示条。

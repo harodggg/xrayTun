@@ -42,6 +42,7 @@ pub mod jev;
 pub mod observer;
 pub mod question;
 pub mod rules;
+pub mod settings;
 pub mod shape;
 pub mod transport;
 pub mod verdict;
@@ -57,6 +58,7 @@ pub use transport::{HttpRequest, HttpResponse, TlsTransport, Transport, Transpor
 pub use observer::{Candidate, Observer, ObserverStats};
 pub use question::{domain_request, FlowContext, IntentRequest, Question};
 pub use rules::{materialize, AllowAction, AllowOverride, IntentRules, RuleOptions};
+pub use settings::{config_from_settings, readiness_note};
 pub use shape::FlowShape;
 pub use verdict::{AllowReason, BlockVerdict, Category, DeferReason, Thresholds, Verdict};
 
