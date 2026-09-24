@@ -73,6 +73,19 @@ jobs:
             echo "  ✓ CSS 里没有根绝对 url(/)"
           fi
 
+          # 2.5) 相关项目页必须留在「发现入口」里。
+          #   v0.8.38 的发版提交手工重写了 sitemap.xml / llms.txt / llms-full.txt，
+          #   把「信息过滤器 · Jev」的收录整段删掉了（线上表现为：站点摘要里少一个项目、
+          #   sitemap 少两条 URL），而且是**静默**的。这里把它变成会失败的门禁。
+          for f in sitemap.xml llms.txt llms-full.txt; do
+            if grep -q 'jev-x-filter/' "site/$f"; then
+              echo "  ✓ site/$f 收录了 /jev-x-filter/"
+            else
+              echo "  ✗ site/$f 缺少 /jev-x-filter/ 收录（发版重写这几个文件时容易漏）" >&2
+              fail=1
+            fi
+          done
+
           # 3) 英文页在 /en/ 下，资源必须是 ../ 开头（写成本地相对会被解析到 /en/assets/…）
           if grep -qE '(href|src)="assets/' site/en/index.html; then
             echo "  ✗ en/index.html 用了 'assets/…'（应为 '../assets/…'）" >&2
