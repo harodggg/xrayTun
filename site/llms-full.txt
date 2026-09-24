@@ -3,7 +3,8 @@
 > 站点：https://xraytun.top/ ｜ 版本：v0.8.37（2026-09-23）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
 > 结构化数据见各页面 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是 SoftwareApplication，
-> xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与 `/en/wasm/`
+> xray-wasm 页面是 SoftwareSourceCode，黄推过滤器 · Jev 页面是 SoftwareApplication）
+> + FAQPage + WebSite；`/wasm/`、`/en/wasm/`、`/jev-x-filter/` 与 `/en/jev-x-filter/`
 > 另有 BreadcrumbList。
 >
 > **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**官网所有页面的完整正文**
@@ -15,13 +16,19 @@
 > **`xray-wasm` 的仓库是另一个**：<https://github.com/harodggg/xray-wasm>
 > 它是同一作者的**独立项目**（纯 Rust 实现 VLESS + XTLS-Vision + REALITY，编译到 wasm32-wasip2），
 > **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。
+>
+> **`黄推过滤器 · Jev` 的仓库也是另一个**：<https://github.com/harodggg/jev-x-filter>
+> 它是同一作者的另一个**独立项目**（Chrome MV3 扩展，过滤 x.com 上的色情推广），
+> **与 XrayTun 无任何集成关系** —— 既不能用它配置 Xray，也不能用 XrayTun 管理它。
 
-收录页面（4 个，中英各 2）：
+收录页面（6 个，中英各 3）：
 
 - 中文：XrayTun 主页面 → https://xraytun.top/
 - 中文：xray-wasm（同一作者的另一个项目） → https://xraytun.top/wasm/
+- 中文：黄推过滤器 · Jev（同一作者的另一个项目） → https://xraytun.top/jev-x-filter/
 - English: XrayTun home → https://xraytun.top/en/
 - English: xray-wasm (a separate project by the same author) → https://xraytun.top/en/wasm/
+- English: Porn-tweet Filter · Jev (a separate project by the same author) → https://xraytun.top/en/jev-x-filter/
 
 ---
 
@@ -141,6 +148,24 @@ v0.8.37（2026-09-23 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dm
 **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。 两者面向的场景不同：XrayTun 是 macOS 图形客户端，xray-wasm 面向容器与服务端。
 
 [xray-wasm 是什么、怎么用 →](wasm/)
+
+## 相关项目：黄推过滤器 · Jev
+
+**黄推过滤器 · Jev** 是**同一个作者的另一个项目**（独立仓库，不在这里）：一个 **Chrome MV3 扩展**，
+用 **Jev（TypeSafe System One）** 的类型化决策（是/否、单选、评分）在本地判定 x.com 时间线、回复区与
+推荐流里的色情推广。命中即隐藏；只有 Jev 四问的强类别判定加上两道置信度闸门都通过，才可能触发账号动作
+（静音/拉黑），而且**默认是演练模式**（只把「本应静音谁」记进审计日志，不点任何菜单）。
+
+关键词只用来决定「值不值得花一次调用」，真正的判定在模型那一层：没被关键词命中的推文也会走一次
+**预检单问**（模型先行，≥0.75 升级完整四问、≥0.65 只隐藏成待确认），另有**文案农场检测** —— 同一段
+无实质内容的话被 ≥3 个不同账号在 30 分钟内复制时全部隐藏（含更早出现、当时被判放行的那几条）。
+Jev 是纯文本模型、**看不了图**：图片只走本地肤色像素启发式，单独出现最多隐藏成待确认，永不因此静音账号。
+
+**它与 XrayTun 无关** —— 不是同一个产品、不共享代码、不能互相配置；放在同站只是因为出自同一作者。
+要求 Chrome 120+；API Key 只保存在 chrome.storage.local 且只在后台 Service Worker 使用；许可证 MIT。
+验证：126 个单测 / 69 项真实 Chrome 端到端 / 19 条真实模型样本（安全底线 0 违反）。
+
+[黄推过滤器 · Jev 是什么、怎么用 →](jev-x-filter/)
 
 ## 下载
 

@@ -18,6 +18,15 @@
 - [xray-wasm page (English)](https://xraytun.top/en/wasm/)：与中文页逐段等价
 - [xray-wasm 仓库](https://github.com/harodggg/xray-wasm)（**另一个仓库**，不是本仓库的子目录）
 
+## 相关项目：黄推过滤器 · Jev（**独立项目，与 XrayTun 无关**）
+
+- [黄推过滤器 · Jev 页面（中文）](https://xraytun.top/jev-x-filter/)：Chrome MV3 扩展，用 **Jev（TypeSafe System One）**
+  的类型化决策（是/否、单选、评分）判定 x.com 时间线、回复区与推荐流里的色情推广；命中即隐藏，
+  只有高置信度才会动账号（静音/拉黑），且**默认演练模式只记录不执行**
+- [Porn-tweet Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
+- [黄推过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**）
+- 下载 v0.2.0：<https://github.com/harodggg/jev-x-filter/releases/download/v0.2.0/jev-x-filter-0.2.0.zip>（MIT，Chrome 120+）
+
 ## 下载
 
 - [XrayTun_0.8.37_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases/download/v0.8.37/XrayTun_0.8.37_x86_64_arm64.dmg)：47,469,092 字节（45.3 MiB），主下载

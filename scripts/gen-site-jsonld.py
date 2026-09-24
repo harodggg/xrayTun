@@ -49,6 +49,14 @@ XRAYTUN_DL = (
 
 WASM_REPO = "https://github.com/harodggg/xray-wasm"
 
+# 相关项目：黄推过滤器 · Jev（同一个作者的独立项目，页面在 site/jev-x-filter/）。
+# 它与 XrayTun **不是同一个产品**：下载地址、Release、许可证都指向它自己的仓库，
+# 所以 SoftwareApplication 分支允许逐页覆盖这些字段（默认值仍是 XrayTun 的那套）。
+JEVX_REPO = "https://github.com/harodggg/jev-x-filter"
+JEVX_VERSION = "0.2.0"
+JEVX_RELEASES = f"{JEVX_REPO}/releases"
+JEVX_DL = f"{JEVX_REPO}/releases/download/v{JEVX_VERSION}/jev-x-filter-{JEVX_VERSION}.zip"
+
 PAGES = [
     {
         "path": SITE / "index.html",
@@ -109,6 +117,46 @@ PAGES = [
         "repo": WASM_REPO,
         "runtime": "wasmtime (WASI Preview 2)",
         "must_contain": ["does not use xray-wasm", "LICENSE.meow-rs"],
+    },
+    {
+        # 相关项目页：黄推过滤器 · Jev。与 xray-wasm 同一套做法 ——
+        # 独立仓库 + 独立页面，下载/Release/许可证全部指向它自己的仓库。
+        "path": SITE / "jev-x-filter" / "index.html",
+        "pair": "jev-x-filter",
+        "lang": "zh-Hans",
+        "url": f"{BASE}/jev-x-filter/",
+        "type": "SoftwareApplication",
+        "name": "黄推过滤器 · Jev",
+        "version": JEVX_VERSION,
+        # 必须与页面 <meta name="description"> 逐字一致 —— 由 check() 强制。
+        "description": "黄推过滤器 · Jev 是一个 Chrome MV3 扩展：用 Jev（TypeSafe System One）的类型化决策在本地判定 x.com 时间线、回复区与推荐流里的色情推广，高置信度才隐藏并可选静音账号，附模型先行预检、文案农场检测与黑名单导入导出。它与 XrayTun 是同一个作者的两个独立项目。",
+        "os": "Chrome 120 or later (Manifest V3)",
+        "application_category": "BrowserApplication",
+        "help_url": f"{BASE}/jev-x-filter/",
+        "download_url": JEVX_DL,
+        "install_url": JEVX_DL,
+        "release_notes": JEVX_RELEASES,
+        "license_url": f"{JEVX_REPO}/blob/main/LICENSE",
+        # 红线：必须写明它与 XrayTun 是两个独立项目（不许暗示集成）。
+        "must_contain": ["独立项目"],
+    },
+    {
+        "path": SITE / "en" / "jev-x-filter" / "index.html",
+        "pair": "jev-x-filter",
+        "lang": "en",
+        "url": f"{BASE}/en/jev-x-filter/",
+        "type": "SoftwareApplication",
+        "name": "Porn-tweet Filter · Jev",
+        "version": JEVX_VERSION,
+        "description": "Porn-tweet Filter · Jev is a Chrome MV3 extension that uses Jev (TypeSafe System One) typed decisions to judge adult promotion in your x.com timeline, replies and recommendations locally: hide on a hit, mute or block only at high confidence, with a model-first triage tier, a repeated-text farm detector and blocklist import/export. It is a separate project by the same author as XrayTun.",
+        "os": "Chrome 120 or later (Manifest V3)",
+        "application_category": "BrowserApplication",
+        "help_url": f"{BASE}/en/jev-x-filter/",
+        "download_url": JEVX_DL,
+        "install_url": JEVX_DL,
+        "release_notes": JEVX_RELEASES,
+        "license_url": f"{JEVX_REPO}/blob/main/LICENSE",
+        "must_contain": ["separate project"],
     },
 ]
 
@@ -173,14 +221,16 @@ def build_ld(page: dict, faqs: list[tuple[str, str]]) -> list[dict]:
             "@type": "SoftwareApplication",
             "name": page["name"],
             "operatingSystem": page["os"],
-            "applicationCategory": "UtilitiesApplication",
+            # 逐页覆盖：默认仍是 XrayTun 自己；独立项目页必须指向自己的仓库/Release，
+            # 否则结构化数据会声称「这个扩展的下载地址是 XrayTun 的 dmg」—— 那是不实陈述。
+            "applicationCategory": page.get("application_category", "UtilitiesApplication"),
             "softwareVersion": page["version"],
-            "softwareHelp": f"{BASE}/",
-            "downloadUrl": XRAYTUN_DL,
-            "installUrl": XRAYTUN_DL,
-            "releaseNotes": "https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md",
+            "softwareHelp": page.get("help_url", f"{BASE}/"),
+            "downloadUrl": page.get("download_url", XRAYTUN_DL),
+            "installUrl": page.get("install_url", page.get("download_url", XRAYTUN_DL)),
+            "releaseNotes": page.get("release_notes", "https://github.com/harodggg/xrayTun/blob/main/CHANGELOG.md"),
             # 仓库已有 LICENSE（MIT）→ 指向它（2026-09-20 用户决定补上，commit 12c523d）
-            "license": "https://github.com/harodggg/xrayTun/blob/main/LICENSE",
+            "license": page.get("license_url", "https://github.com/harodggg/xrayTun/blob/main/LICENSE"),
             "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
             "description": page["description"],
             "inLanguage": page["lang"],
@@ -353,6 +403,10 @@ def check() -> int:
             for s in page.get("faq_must_contain", []):
                 if s not in faq_text:
                     problems.append(f"FAQ 里必须写明 {s}")
+            # 页面里必须逐字出现的红线（与 SoftwareSourceCode 同一套机制）
+            for s in page.get("must_contain", []):
+                if s not in visible:
+                    problems.append(f"页面里必须有这句话：{s}")
         else:
             # 红线：不能声称某个操作系统 —— 它跑在 wasmtime / 容器里。
             if "operatingSystem" in software:
