@@ -4,6 +4,7 @@ members = [
     "crates/xt-proto",
     "crates/xt-core",
     "crates/xt-intent",
+    "crates/xt-mitm",
     "crates/xt-tun",
     "crates/xt-helper",
     "apps/desktop",
@@ -70,6 +71,7 @@ clap = { version = "4", features = ["derive"] }
 xt-proto = { path = "crates/xt-proto" }
 xt-core = { path = "crates/xt-core" }
 xt-intent = { path = "crates/xt-intent" }
+xt-mitm = { path = "crates/xt-mitm" }
 xt-tun = { path = "crates/xt-tun" }
 
 [profile.release]

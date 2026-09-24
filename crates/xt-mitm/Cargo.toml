@@ -1,0 +1,18 @@
+[package]
+name = "xt-mitm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MITM 内容级判定通道：TLS 终结（仅 http/1.1）、请求判定、响应体裁剪"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+rcgen = "0.13"
+rustls = { workspace = true }
+tokio = { workspace = true }
