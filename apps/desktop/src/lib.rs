@@ -28,6 +28,8 @@ pub mod state;
 pub mod supervisor;
 pub mod traffic;
 pub mod tray;
+/// 客户端版本自动检测（task-188）。只检测，不下载、不安装。
+pub mod version_check;
 
 use tauri::{Manager, WindowEvent};
 
@@ -99,6 +101,12 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 bootstrap(handle).await;
             });
+
+            // 客户端版本自动检测（task-188）：**排在 `bootstrap` 之后**，
+            // 并且自己再延迟 20 秒才联网（`version_check::INITIAL_DELAY`）——
+            // 它最不急，不该和「找核心 / 探 helper / 回滚遗留 / 探 DNS」抢启动窗口与网络。
+            // 之后每 6 小时复查一次；用户不点开设置也能知道有新版本。
+            crate::version_check::watch(app.handle().clone());
 
             Ok(())
         })
