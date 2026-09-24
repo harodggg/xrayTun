@@ -73,4 +73,22 @@
     <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/beauty-meter/"/>
     <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/beauty-meter/"/>
   </url>
+  <url>
+    <loc>https://xraytun.top/speed-read/</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/speed-read/"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/speed-read/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/speed-read/"/>
+  </url>
+  <url>
+    <loc>https://xraytun.top/en/speed-read/</loc>
+    <lastmod>2026-09-24</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/speed-read/"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/speed-read/"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/speed-read/"/>
+  </url>
 </urlset>

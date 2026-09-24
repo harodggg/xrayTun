@@ -82,6 +82,14 @@ jobs:
               && echo "  ✓ site/$f 收录了 /beauty-meter/" \
               || { echo "  ✗ site/$f 缺少 /beauty-meter/ 收录（发版重写时容易漏）" >&2; fail=1; }
           done
+          # 「一目十行 · SpeedRead」（2026-09-24 新增的第三个外部项目页）。同一套机制：
+          # sitemap / llms.txt 按归属保留，llms-full.txt 的正文分节与头部提示放在
+          # `external:body` / `external:header` 区间里（见 docs/verification/SITE-SPEED-READ-PAGE.md）。
+          for f in sitemap.xml llms.txt llms-full.txt; do
+            grep -q 'speed-read/' "site/$f" \
+              && echo "  ✓ site/$f 收录了 /speed-read/" \
+              || { echo "  ✗ site/$f 缺少 /speed-read/ 收录（发版重写时容易漏）" >&2; fail=1; }
+          done
           # Cloudflare Pages 的单文件上限是 25 MiB（官方 Limits 文档），超过就部署失败。
           # 2026-09-24 就差点把 50MB 的扩展包放进 site/ —— 大文件走 GitHub Releases
           # （例：/beauty-meter/ 的完整版，见 docs/verification/SITE-BEAUTY-METER-PAGE.md）。
@@ -94,7 +102,9 @@ jobs:
           fi
           # 相关项目页自身与它的下载件必须存在（页面上的「下载」按钮不能指向空气）。
           for f in beauty-meter/index.html en/beauty-meter/index.html \
-                   beauty-meter/beauty-meter-extension-1.0.0.zip beauty-meter/LICENSE; do
+                   beauty-meter/beauty-meter-extension-1.0.0.zip beauty-meter/LICENSE \
+                   speed-read/index.html en/speed-read/index.html \
+                   speed-read/speed-read-extension-0.1.0.zip speed-read/LICENSE; do
             [ -e "site/$f" ] && echo "  ✓ site/$f" || { echo "  ✗ 缺 site/$f" >&2; fail=1; }
           done
           [ "$fail" = 0 ] || exit 1

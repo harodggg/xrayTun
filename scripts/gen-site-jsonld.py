@@ -72,6 +72,15 @@ BM_DL = (f"https://github.com/harodggg/xrayTun/releases/download/{BM_RELEASE_TAG
 BM_DL_LIGHT = f"{BM_PAGE}beauty-meter-extension-{BM_LIGHT_VERSION}.zip"
 BM_LICENSE = f"{BM_PAGE}LICENSE"
 
+# 一目十行 · SpeedRead：与素颜镜同一套做法（**没有独立仓库**，包直接由本站分发在
+# site/speed-read/ 下），因此下载与 license 都指向本站自己的资产，绝不落到 XrayTun 的 dmg / LICENSE
+# —— 把本站的 dmg 说成这个扩展的下载地址是不实陈述。
+SR_VERSION = "0.1.0"
+SR_PAGE = f"{BASE}/speed-read/"
+SR_EN_PAGE = f"{BASE}/en/speed-read/"
+SR_DL = f"{SR_PAGE}speed-read-extension-{SR_VERSION}.zip"
+SR_LICENSE = f"{SR_PAGE}LICENSE"
+
 PAGES = [
     {
         "path": SITE / "index.html",
@@ -213,6 +222,45 @@ PAGES = [
         "install_url": BM_DL,
         "release_notes": BM_EN_PAGE,
         "license_url": BM_LICENSE,
+        "must_contain": ["separate project"],
+    },
+    {
+        # 相关项目页：一目十行 · SpeedRead（Chrome MV3 扩展：把整页压成 3 条）。
+        # 与素颜镜同一套做法：**没有独立仓库**，下载与许可证都指向本站自己的资产。
+        # 红线：页面必须写明它与 XrayTun 是两个独立项目（不许暗示集成）。
+        "path": SITE / "speed-read" / "index.html",
+        "pair": "speed-read",
+        "lang": "zh-Hans",
+        "url": SR_PAGE,
+        "type": "SoftwareApplication",
+        "name": "一目十行 · SpeedRead",
+        "version": SR_VERSION,
+        "description": "一目十行是一个 Chrome MV3 扩展：把整个网页的正文压成恰好 3 条信息 —— α 阿尔法（全文最重要的核心结论）、β 贝塔（第二关键信息：支撑证据或代价/风险/限制/反面观点）、γ 人说最多（全页被重复强调最多的议题，附高频词证据）。摘要由你自己配置的 OpenAI 兼容大模型接口生成，Key 只存在本机、只由扩展的 Service Worker 发送；没有 Key 或调用失败时自动降级为本地词频加句子打分，仍然给满 3 条。页面一变就自动重算：DOM 变化、SPA 路由、切回标签页、兜底轮询四路触发；内容指纹没变则命中缓存、不重复调用模型。它与 XrayTun 是同一个作者的两个独立项目。",
+        "os": "Chrome 110 or later (Manifest V3)",
+        "application_category": "BrowserApplication",
+        "help_url": SR_PAGE,
+        "download_url": SR_DL,
+        "install_url": SR_DL,
+        "release_notes": SR_PAGE,
+        "license_url": SR_LICENSE,
+        "must_contain": ["独立项目"],
+    },
+    {
+        "path": SITE / "en" / "speed-read" / "index.html",
+        "pair": "speed-read",
+        "lang": "en",
+        "url": SR_EN_PAGE,
+        "type": "SoftwareApplication",
+        "name": "SpeedRead",
+        "version": SR_VERSION,
+        "description": "SpeedRead is a Chrome MV3 extension that compresses the body of a whole web page into exactly 3 items: alpha (the single most important conclusion), beta (the second key fact: supporting evidence, or the cost, risk, limit or counterpoint) and gamma (the topic the page repeats and emphasises most, with high-frequency terms as evidence). Summaries come from your own OpenAI-compatible endpoint; the API key stays on your machine and is only ever read by the extension service worker. With no key, or when a call fails, it falls back to local term-frequency plus sentence scoring and still returns 3 items. It recomputes automatically whenever the page changes: DOM mutations, SPA routes, returning to the tab, and a fallback poll; a content fingerprint means unchanged pages hit the cache instead of the model. It is a separate project by the same author as XrayTun.",
+        "os": "Chrome 110 or later (Manifest V3)",
+        "application_category": "BrowserApplication",
+        "help_url": SR_EN_PAGE,
+        "download_url": SR_DL,
+        "install_url": SR_DL,
+        "release_notes": SR_EN_PAGE,
+        "license_url": SR_LICENSE,
         "must_contain": ["separate project"],
     },
 ]
