@@ -58,4 +58,19 @@
 
 ## 线上验收
 
-见下节「线上验收结果」（部署完成后回填）。
+推送 `e79a735` 后 Cloudflare Pages 部署成功（run 35974564225 / job `deploy` = success），
+GitHub Pages 镜像同版本也成功。**只看内容，不看状态码**（apex 的 200 可能是兜底）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `https://xraytun.top/beauty-meter/` | 200 `text/html`，正文含页面专属标题，sha 与首页不同（不是兜底），含 canonical + JSON-LD |
+| `https://xraytun.top/en/beauty-meter/` | 同上（英文页） |
+| 下载件 `/beauty-meter/beauty-meter-extension-1.0.0.zip` | 200 `application/zip`，**75,943 字节**，与提交的 zip 逐字节一致 |
+| `/beauty-meter/LICENSE` | 200 **`text/plain; charset=utf-8`**（`_headers` 覆写生效），正文是 MIT 全文 |
+| 三张截图 | 200 `image/png`，字节数与提交一致 |
+| `/sitemap.xml`、`/llms.txt`、首页中英导航 | 均含 `/beauty-meter/` 入口 |
+| 正文完整性 | 线上 HTML 去掉 zone 级注入后与提交逐行一致（**唯一的差异是 Cloudflare Web Analytics 的 `beacon.min.js`**，zone 级注入，首页同样有，367 字节） |
+| GitHub Pages 镜像（子路径 `/xrayTun/`） | 两个页面 200 且字节数与提交一致（31,205B / 32,393B），zip / PNG / LICENSE 也一致 —— 说明没有引入根绝对路径 |
+
+对照组：`/beauty-meter/__does_not_exist__` 返回 **404**（本 zone 未开 SPA 兜底），因此上面的
+「200 + content-type + 正文指纹」三重判据成立。
