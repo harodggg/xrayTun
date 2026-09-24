@@ -87,3 +87,47 @@ B 级里值得优先看的几条：`Nodes.tsx:270`「点击切换到该节点」
    A10/A13/A20/A21 见本次同步）；复核方法 = 读它给出的 `file:line` 并核对结论是否仍成立。
 4. 未覆盖的界面表面：`ipc.ts` 的 notice 文本、`store.tsx` 的 `errorText`（内部错误串）、
    `preview*.ts`（非生产路径）。
+
+## 五、待修的 7 条（A10–A13/A17/A20/A21）：落地状态（Lead 复核，2026-09-24）
+
+审计时这张表标「待修 7 行」。现在**六条已落地、A10 在进行中**；每条都给出当前 `HEAD` 的证据位置，
+不引用记忆：
+
+| 编号 | 状态 | 落地位置 / 证据 |
+|---|---|---|
+| **A10** | **进行中**（`task-183`） | 见下方「A10：结论对、处方错」—— 原处方被推翻，已换成安装产物判据 |
+| **A11** | 已解决（`task-142`；Lead 裁决：**删掉该档**） | `Settings.tsx:663-693`：注释与界面文案自述「原来三个选项里『禁用 IPv6』是一句没实现的话」；`crates/xt-tun/src/plan.rs:236-243` 现在只有 `Override` 与 `Passthrough`/`Disabled` 合流分支 + 取舍说明；裁决全文 `docs/design/DECISION-A11-A12.md` |
+| **A12** | 已解决 | `Settings.tsx:335` `sniffingEffective = settings.dns.sniffing || fakednsOn`（展示与生成配置**同源**），`:790` 注释指向 `crates/xt-core/src/xray/config.rs:346`；裁决同 `DECISION-A11-A12.md` |
+| **A13** | 已解决（`task-152`） | `Settings.tsx:147-166` 写明「为什么不能只看 `stale_session`」，`:918-919` 用 `legacySessionView(stale_session, tun_active, runtime.running)` 三输入派生 |
+| **A17** | 已解决（`task-153`，**机制式**） | `commands/snapshot.rs` 三条更新路径都挂 `ProgressGuard`（`:273` / `:379` / `:426`）并在 `build_snapshot` 前显式收尾；`:839-990` 的测试含机制断言与「**删掉那行 guard ⇒ 必须红**」的突变验证 |
+| **A20** | 已解决（`task-179` + UI `task-181`） | `globe.rs` 归属改为**只认选中节点的 `outbound_tag()`**，认不出 ⇒ `unattributed`（bytes=0 且 `reason` 必填）—— 即「取最大」那个**假设**已删除 |
+| **A21** | 已解决（`task-179` + UI `task-181`） | `SelfCheck{ip, bound_interface, trusted, reason}` 三态来源；UI `originLabel`/`originCaveat` 按 `trusted` 分支 |
+
+⇒ 这张「先判定」卡的目的已达成：七条**都有了判定与落地**（`task-125` 以 complete 收口）。
+
+> ⚠️ **陈述强度**：上表 A11–A13/A17 是**我读当前 `HEAD` 的代码得到的**（位置已给出），
+> A20/A21 的「已解决」是**代码已落地**（`c45a12c` / `7deedb9`），其**独立验证**（`task-184`）**正在进行** ——
+> 若验证推翻，回来改这一行。A10 的「进行中」指 `task-183`，**尚未提交**。
+
+### A10：审计的**结论**对，**处方**错（这条值得单独记）
+
+* **审计结论成立**：`availability()` 在 `!socket_present` 时提前返回，`state` 留在
+  `HelperState::default()` = **`Unknown`**（`helper_client.rs:220-228` + `state.rs:663-664`），
+  而按钮文案 `state === "not_installed" ? "安装 helper" : "重新安装 helper"`
+  （`Settings.tsx:989`）⇒ 全新机器显示「状态未知 + **重新**安装 helper」。
+* **原处方不成立**：最初的任务卡（与审计的隐含修法）是「`!socket_present` ⇒ `NotInstalled`」。
+  但——socket 文件是**守护进程启动时**才 bind 的（`crates/xt-helper/src/server.rs:114`，
+  路径定义 `crates/xt-proto/src/lib.rs:38`），并且**在任何出口都被删掉**（`server.rs:120-125`）。
+  ⇒ `socket_present == false` 的真实含义是「**此刻没有守护进程在跑**」，
+  「装了但没在跑」（刚登录、launchd 未拉起、刚退出、上次异常退出）时**同样为 false**。
+  按原处方会把「装了没跑」说成「从没装过」——**换了一种假话，不是修正**。
+* **正确判据 = 安装产物**（`helper_install.rs:9` / `:64`：
+  `/Library/LaunchDaemons/com.xraytun.helper.plist` 与 `/Library/PrivilegedHelperTools/com.xraytun.helper`）：
+  产物在 ⇒ **`NotRunning`**；都不在 ⇒ **`NotInstalled`**；读不出来 ⇒ **`Unknown`**（不许猜）。
+  UI 侧无需改动：`Settings.tsx:190` 的文案表已有 `not_running: "已安装但进程未运行"`，
+  且「重启 helper」按钮就挂在 `not_running` 上。
+* **同族第三处（卡外发现，已并入 `task-183`）**：`commands/diagnostics.rs:203-205` 把
+  `socket_present` 直接打印成诊断文本里的「**已安装=**」—— 用户排障时看到的第一手材料里的一句假话。
+
+**教训（与本项目一贯口径一致）**：审计能指出「这个状态不可达」，但**不可达的原因**要另找证据；
+「A ⇒ B」的处方必须回到产生 A 的那个机制去验证，否则修完只是把错误挪了个位置。
