@@ -6,6 +6,7 @@ pub mod fdpass;
 pub mod netif;
 pub mod route;
 pub mod snapshot;
+pub mod trust;
 pub mod utun;
 
 use std::process::Command;

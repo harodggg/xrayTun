@@ -84,6 +84,13 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub pending_routes: Vec<InstalledRoute>,
     pub dns_backups: Vec<DnsBackup>,
+    /// MITM 阶段安装过的**信任锚**（本地根证书）。
+    ///
+    /// `#[serde(default)]` **不能省**：磁盘上已有的快照没有这个字段，
+    /// 少了它会让"升级后第一次启动"读不出旧快照 —— 而那正是回滚最需要它的时候。
+    /// （有测试专门用一份**没有该字段**的旧快照 JSON 断言这一点。）
+    #[serde(default)]
+    pub trust_anchors: Vec<crate::macos::trust::TrustAnchorBackup>,
 }
 
 impl SessionSnapshot {
@@ -100,6 +107,7 @@ impl SessionSnapshot {
             installed_routes: Vec::new(),
             pending_routes: Vec::new(),
             dns_backups: Vec::new(),
+            trust_anchors: Vec::new(),
         }
     }
 
@@ -192,13 +200,42 @@ mod tests {
             search_domains: vec![],
         });
 
+        snap.trust_anchors.push(crate::macos::trust::TrustAnchorBackup {
+            fingerprint: "AB:CD".into(),
+            cert_path: "/tmp/x.pem".into(),
+            existed_before: false,
+        });
+
         let json = serde_json::to_string(&snap).unwrap();
         let back: SessionSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back.session_id, "s-1");
+        assert_eq!(back.trust_anchors.len(), 1, "信任锚要能roundtrip");
+        assert!(!back.trust_anchors[0].existed_before);
         assert_eq!(back.interface, "utun4");
         assert_eq!(back.installed_routes.len(), 1);
         assert_eq!(back.dns_backups[0].servers, vec!["1.1.1.1"]);
         assert_eq!(back.physical.service.as_deref(), Some("Wi-Fi"));
+    }
+
+    /// **升级后的第一次启动**：磁盘上的旧快照没有 `trust_anchors` 字段。
+    /// 少了 `#[serde(default)]`，这里会直接解析失败 —— 而那一刻正是崩溃回滚的现场。
+    #[test]
+    fn an_old_snapshot_without_trust_anchors_still_loads() {
+        let old = serde_json::json!({
+            "session_id": "s-old",
+            "created_at": 1,
+            "updated_at": 2,
+            "state": "up",
+            "interface": "utun4",
+            "datapath_pid": null,
+            "physical": { "interface": "en0", "gateway": "192.168.1.1", "service": "Wi-Fi" },
+            "installed_routes": [],
+            "dns_backups": []
+        });
+        let back: SessionSnapshot =
+            serde_json::from_value(old).expect("旧快照必须能读（缺字段走 default）");
+        assert!(back.trust_anchors.is_empty());
+        assert!(back.pending_routes.is_empty(), "pending_routes 也应当有 default");
     }
 
     #[test]
