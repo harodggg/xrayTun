@@ -27,7 +27,8 @@
   v0.4.0 起还做两件**纯展示**的整理：**β** 折叠重复/类似/语义相同的信息只显示一次，**α** 标出「与评论区多数观点明显不同」的特殊观点（不隐藏）
 - [Info Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
-- 下载 v0.4.6：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip>（MIT，Chrome 120+）
+- 下载 v0.4.7：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip>（MIT，Chrome 120+）
+- v0.4.7 起：同一条推文下面的**低信息量附和**（附和/赞美/期待/参与/情绪，本地 0 次调用）**合并成一条**，只留最早一条当代表 + 条上写明合并了几条什么；详情页主帖本身永不折叠。验证：单测 319/319、真实 Chrome 端到端 154/154。
 
 ## 相关项目：素颜镜 · 美颜程度检测（**独立项目，与 XrayTun 无关**）
 

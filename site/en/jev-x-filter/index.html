@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.6",
+  "softwareVersion": "0.4.7",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -208,12 +208,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip"
-            >Download v0.4.6 (zip, 175.8 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip"
+            >Download v0.4.7 (zip, 181.2 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.4.6 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.7 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -459,12 +459,12 @@
           It is deliberately conservative: only a short, exact emotional phrase counts.
           Replies that argue &mdash; <code>I disagree, the public data actually says otherwise</code> &mdash; questions,
           numbers and links are <strong>never folded</strong>: what gets folded is emotion, not argument.
-          Each kind groups separately (2 angry + 2 happy &rarr; two representatives + two folds), only inside reply threads,
+          Reply threads merge every low-information kind into one line (2 angry + 2 happy &rarr; one representative + three folds, as of v0.4.7),
           and it is presentation only &mdash; &ldquo;expand&rdquo; always works.
         </p>
       </section>
       <section class="wrap prose" id="emotion-feed">
-        <h2>v0.4.5: emotion tidy-up now covers the timeline too (11 kinds)</h2>
+        <h2>v0.4.5: emotion tidy-up now covers the timeline too (12 kinds now)</h2>
         <p>
           A user pointed out that timeline posts like <code>交朋友</code> / <code>美女啊</code> / <code>👍好</code> / <code>我也想去🥺</code> / <code>Gm</code> / <code>太美了</code>
           were never folded &mdash; the emotion layer was limited to reply threads. Now:
@@ -473,17 +473,54 @@
           <thead><tr><th>Scope</th><th>Behaviour</th></tr></thead>
           <tbody>
             <tr><td>Timeline / recommendations</td><td>No thread semantics &rarr; <strong>each emotional post folds on its own</strong>, with a bar reading <code>emotion · praise: 美女啊 (folded)</code>; &ldquo;expand&rdquo; shows the original</td></tr>
-            <tr><td>Reply threads</td><td>Grouped by &ldquo;same thread + same kind&rdquo;: the first stays with an &ldquo;emotion · XX&rdquo; badge, the rest fold</td></tr>
+            <tr><td>Reply threads</td><td><strong>All low-information agreement under one post is merged into a single line</strong> (v0.4.7): the earliest stays as the representative with an &ldquo;emotion · XX&rdquo; badge, every other one folds regardless of kind, and the bar says how many of which kinds were merged</td></tr>
           </tbody>
         </table>
         <p>
-          Kinds are now <strong>11</strong>: anger, joy, support, opposition, sadness, confirmation, <strong>praise, wish, greeting, social</strong> and emoji-only.
+          Kinds are now <strong>12</strong>: anger, joy, support, opposition, sadness, confirmation, <strong>praise, wish, greeting, social, participation</strong> and emoji-only.
           Same switches as before (options section 1.6: on/off + fold/hide; the timeline fold honours the existing &ldquo;fold in feed&rdquo; switch).
         </p>
         <p>
           The same release fixes <strong>4 false positives and 2 misses</strong> found by independent verification: a bare
           &ldquo;不入生活&rdquo; no longer convicts, the hook no longer matches &ldquo;看福建舰/看福彩开奖&rdquo;, science/medical context is downgraded,
           and phrases such as &ldquo;我服了&rdquo; / &ldquo;难过死了&rdquo; / &ldquo;真好看&rdquo; are now classified correctly.
+        </p>
+      </section>
+      <section class="wrap prose" id="merge">
+        <h2>v0.4.7: why can&rsquo;t these be folded into a single line?</h2>
+        <p>
+          A user circled six consecutive replies under one giveaway post &mdash; <code>佳佳妹妹最好，最美！</code>,
+          <code>好事多磨，什么时候可以来一份</code>, <code>已三连！！！</code>, <code>这个活动好啊</code>, <code>都来参加</code>,
+          <code>三连了，希望能中🙏</code> &mdash; and asked why they cannot be folded into a single line. There were two root causes:
+        </p>
+        <ul>
+          <li><strong>None of the six was recognised</strong> (the local classifier returned null for all six): the phrase table had no
+            participation sentences (&ldquo;三连 / 参加 / 活动 / 来一份&rdquo;); matching required the <em>entire</em> string to equal a core
+            phrase, so praise carrying a vocative or an object (<code>这个活动好啊</code>) fell through; and &ldquo;希望&rdquo; was treated as
+            a substantive word, discarding <code>希望能中</code> outright.</li>
+          <li><strong>Even if recognised, they would have produced three representatives</strong> (praise / wish / participation) &mdash;
+            the old group key was per <em>kind</em>, which is no merge at all.</li>
+        </ul>
+        <p>Both are fixed in this release:</p>
+        <ul>
+          <li>A new <strong>participation</strong> kind (三连 / 一键三连 / 参加 / 报名 / 打卡 / 签到 / 走起…), plus
+            <strong>whole-string anchored templates</strong> that cover short replies with a vocative, an object or a free prefix.
+            Three guard rails: anchored <code>^…$</code> with a fixed small vocabulary, &le;14 normalised characters with no digits or
+            links, and substantive-word filtering for the free prefix (<code>成本太高可以来一份</code> is not folded).</li>
+          <li>All low-information agreement under one post is now <strong>merged into a single line</strong>: in fold mode the earliest one
+            stays as the representative and every other one folds regardless of kind, with the bar stating what was merged &mdash;
+            <code>emotion · participation (low-information agreement, 6 items: participation 3 · praise 2 · wish 1)</code> &mdash;
+            while each item still keeps its own kind label (anger / joy / support / opposition are still readable).</li>
+          <li>On a status page (<code>/status/&lt;id&gt;</code>) every article shares a threadId, while X often no longer renders the
+            &ldquo;Reply&rdquo; label, so <strong>a non-empty threadId is enough to use thread semantics</strong> (timeline URLs have no
+            <code>/status/</code> and are unchanged); and <strong>the focused post itself is never folded</strong> or used as a representative.</li>
+        </ul>
+        <p>
+          Real-Chrome end-to-end: <strong>154/154</strong> (new scenario J: those six replies &rarr; one representative + five folds +
+          &ldquo;5 more&rdquo; + the focused post untouched + zero script errors); unit tests <strong>319/319</strong>. An independent adversarial
+          audit (27 cases written by a second developer) reported four defects, all fixed: praise such as <code>今天天气最好</code> was
+          misclassified, <code>合同什么时候可以给我</code> was misread as a wish, the default scope disagreed with the spec, and the
+          participation class was too narrow.
         </p>
       </section>
       <section class="wrap prose" id="errors">
@@ -529,7 +566,7 @@
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.4.6.zip -d info-filter
+unzip jev-x-filter-0.4.7.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -739,7 +776,7 @@ unzip jev-x-filter-0.4.6.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -757,7 +794,7 @@ unzip jev-x-filter-0.4.6.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.4.6 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.4.7 · Chrome MV3 · page last updated 2026-09-25 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
