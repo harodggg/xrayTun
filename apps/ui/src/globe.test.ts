@@ -37,9 +37,20 @@ function loc(lat: number, lon: number): GeoLocation {
 
 function data(from: GeoLocation, to: GeoLocation, bytes: number): GlobeData {
   return {
-    route: { from, to, bytes, node_name: "n", traffic_ok: true, counter_resets: 0 },
+    route: {
+      from,
+      to,
+      bytes,
+      node_name: "n",
+      traffic_ok: true,
+      counter_resets: 0,
+      // task-179：归属字段（未归属时 `verified=false` + `reason`）；夹具给「已验证到节点」
+      traffic: { tag: "node-n1", is_node_outbound: true, verified: true, reason: null },
+    },
     origin: from,
     error: null,
+    // task-179：本机身份字段；夹具给「可信」
+    self_check: { ip: from.ip, bound_interface: "en0", trusted: true, reason: null },
   };
 }
 
@@ -68,7 +79,12 @@ describe("地球仪视角", () => {
   });
 
   it("航线缺失时也能给出一个位置（只有本机位置）", () => {
-    const d: GlobeData = { route: null, origin: loc(10, 20), error: null };
+    const d: GlobeData = {
+      route: null,
+      origin: loc(10, 20),
+      error: null,
+      self_check: { ip: "1.2.3.4", bound_interface: "en0", trusted: true, reason: null },
+    };
     expect(focusPoint(d)).toEqual({ lat: 10, lon: 20 });
   });
 
@@ -171,11 +187,13 @@ describe("地球仪视角：居中与自转", () => {
         bytes: 9_000_000,
         node_name: "n",
         traffic_ok: true,
+        traffic: { tag: "node-n1", is_node_outbound: true, verified: true, reason: null },
         counter_resets: 0,
       },
       origin: loc(23.1317, 113.266),
       error: null,
-    };
+    self_check: { ip: "1.2.3.4", bound_interface: "en0", trusted: true, reason: null },
+};
     const v = viewFor(data0);
     expect(v).not.toBeNull();
     // 复刻 rotY / rotX / toVec（与 Globe.tsx 同一套）
@@ -211,13 +229,17 @@ describe("地球仪视角：居中与自转", () => {
   it("近距离航线放大后必须关闭自转，远距离仍可自转", () => {
     const near = viewFor({
       route: { from: loc(23.1317, 113.266), to: loc(22.3193, 114.169), bytes: 1, node_name: "n",
-               traffic_ok: true, counter_resets: 0 },
+               traffic_ok: true, counter_resets: 0,
+               traffic: { tag: "node-n1", is_node_outbound: true, verified: true, reason: null } },
       origin: loc(23.1317, 113.266), error: null,
+      self_check: { ip: "1.2.3.4", bound_interface: "en0", trusted: true, reason: null },
     })!;
     const far = viewFor({
       route: { from: loc(23.13, 113.27), to: loc(40.7, -74.0), bytes: 1, node_name: "n",
-               traffic_ok: true, counter_resets: 0 },
+               traffic_ok: true, counter_resets: 0,
+               traffic: { tag: "node-n1", is_node_outbound: true, verified: true, reason: null } },
       origin: loc(23.13, 113.27), error: null,
+      self_check: { ip: "1.2.3.4", bound_interface: "en0", trusted: true, reason: null },
     })!;
 
     expect(near.auto).toBe(false);      // 129km、放大到 34.5× → 不能自转
@@ -228,7 +250,12 @@ describe("地球仪视角：居中与自转", () => {
 
   /** 没有航线时按「看整球」处理，自转无妨，且不能抛错。 */
   it("没有航线时不抛错、允许自转", () => {
-    const v = viewFor({ route: null, origin: loc(10, 20), error: null });
+    const v = viewFor({
+      route: null,
+      origin: loc(10, 20),
+      error: null,
+      self_check: { ip: "1.2.3.4", bound_interface: "en0", trusted: true, reason: null },
+    });
     expect(v).not.toBeNull();
     expect(v!.auto).toBe(true);
   });

@@ -31,7 +31,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "../ipc";
 import { LAND_MASK_HEX, decodeLandMaskFlat, sampleLand } from "../landmask";
 import { formatBytes } from "../types";
-import type { GeoLocation, GlobeData } from "../types";
+import type { GeoLocation, GlobeData, GlobeSelfCheck, GlobeTrafficProvenance } from "../types";
 
 const DEG = Math.PI / 180;
 
@@ -143,41 +143,75 @@ export default function Globe() {
   );
 }
 
+/**
+ * A21：起点那张卡片该叫什么。
+ *
+ * `self_check.trusted === false` ⇒ **不许**写「本机」：读不到物理默认路由时那次查询走的是
+ * 系统默认路由，**隧道开着查到的就是节点出口**（`globe.rs` 的 `SelfCheck::judge`）。
+ */
+export function originLabel(self: GlobeSelfCheck): string {
+  if (self.ip === null) return "本机位置未知";
+  return self.trusted ? "本机出口" : "未验证的出口";
+}
+
+/** A21：起点卡片下面的那句解释（可信/不可信两套；不可信时**必须**带上后端给的原因）。 */
+export function originCaveat(self: GlobeSelfCheck): string {
+  if (self.ip === null) {
+    return self.reason ?? "没问到本机的出口 IP（两个数据源都没返回）";
+  }
+  if (!self.trusted) {
+    return `未验证：${self.reason ?? "不知道这次查询有没有绑到物理网卡"}`;
+  }
+  return `按物理网卡 ${self.bound_interface ?? "?"} 直查得到；多网卡/多出口时你的公网 IP 可能不同`;
+}
+
+/** A20：出口流量那一段该怎么说（数字只在这两种「已验证」的情形下显示）。 */
+export function trafficLabel(t: GlobeTrafficProvenance): string {
+  if (!t.verified) return "出口流量归属未验证（不显示数字）";
+  if (t.is_node_outbound) return `节点出站累计（出站 ${t.tag ?? "?"}）`;
+  return `出站 ${t.tag ?? "?"} 的累计流量（不是节点出站）`;
+}
+
 /** 航线两端的事实卡片。 */
 function RouteFacts({ data }: { data: GlobeData }) {
   const r = data.route!;
   const km = greatCircleKm(r.from, r.to);
+  const self = data.self_check;
   return (
     <div className="facts">
-      <Fact label="起点" loc={r.from} />
+      <Fact label={originLabel(self)} loc={r.from} caveat={originCaveat(self)} />
       <div className="facts__mid">
         <div className="facts__km">{Math.round(km).toLocaleString()} km</div>
         <div className="facts__hint">大圆距离</div>
-        {/* task-120：`GlobeRoute.traffic_ok === false` 时 `bytes` 是**占位 0**，
-            不是真实读数（`globe.rs:35`/`types.ts:664` 都写明了），而这里原来无条件
-            写「0 B（实测）」—— 正是本项目在流量那一族问题里反复禁止的
-            「把没查到画成 0」。判据就是同一个结构体上的 `traffic_ok`。 */}
-        {r.traffic_ok ? (
+        {/* task-179 / A20（本卡 task-181）：数字的**归属**决定它能不能显示、该挂在谁名下。
+            `verified === false` ⇒ `bytes` 是占位、且不知道来自哪个出站 ⇒ **不显示数字**，
+            只展示后端给的原因。`verified && !is_node_outbound` ⇒ 数字是那个出站（例如
+            `direct`）的，**不许**算到节点头上。 */}
+        {r.traffic.verified ? (
           <>
             <div className="facts__km facts__km--small">{formatBytes(r.bytes)}</div>
             <div className="facts__hint">
-              出口累计流量（实测）
+              {trafficLabel(r.traffic)}
               {r.counter_resets > 0 ? ` · 核心重启过 ${r.counter_resets} 次，累计值已续接` : ""}
             </div>
           </>
         ) : (
           <>
             <div className="facts__km facts__km--small">—</div>
-            <div className="facts__hint">出口流量读不到（不是 0）</div>
+            <div className="facts__hint">{trafficLabel(r.traffic)}</div>
+            {r.traffic.reason && <div className="fact__warn">{r.traffic.reason}</div>}
           </>
         )}
       </div>
-      <Fact label={`出口 · ${r.node_name}`} loc={r.to} />
+      {/* 这一端说的是**航线指向的节点**（几何），不是上面那个数字的归属 ——
+          task-181 把标签从「出口 · <节点名>」改成「出口节点 · <节点名>」，
+          就是为了不让它在「归属未验证」时被读成「数字是这台节点的」。 */}
+      <Fact label={`出口节点 · ${r.node_name}`} loc={r.to} />
     </div>
   );
 }
 
-function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
+function Fact({ label, loc, caveat }: { label: string; loc: GeoLocation; caveat?: string }) {
   return (
     <div className="fact">
       <div className="fact__label">{label}</div>
@@ -195,6 +229,8 @@ function Fact({ label, loc }: { label: string; loc: GeoLocation }) {
       {loc.consistent === false && (
         <div className="fact__warn">数据源判定不一致，仅按 IP 归属估算</div>
       )}
+      {/* task-181：这句是「这张卡片可不可信」的说明（A21 的身份 / 接口绑定） */}
+      {caveat && <div className="fact__src">{caveat}</div>}
       <div className="fact__src">
         位置来源：{loc.sources.length > 0 ? loc.sources.join(" · ") : loc.source}
       </div>
@@ -661,7 +697,16 @@ function drawScene(
     // 标记上写**具体地点**（城市 + 国别），而不是「本机」这种看不出去哪儿的词；
     // 第二行小字给 IP。城市的缺失（有些 IP 查不到城市）用国别兜底。
     const placed: { x: number; y: number; w: number; h: number }[] = [];
-    marker(ctx, project, route.from, "#34d399", placeLabel(route.from), "本机 · " + route.from.ip, placed);
+    // task-181 / A21：不可信时**不许**写「本机 · 」——那正是用户读错的来源。
+    marker(
+      ctx,
+      project,
+      route.from,
+      "#34d399",
+      placeLabel(route.from),
+      data.self_check.trusted ? "本机 · " + route.from.ip : "未验证的出口 · " + route.from.ip,
+      placed,
+    );
     marker(ctx, project, route.to, "#4f8ef7", placeLabel(route.to), route.node_name, placed);
   }
 }

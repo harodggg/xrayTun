@@ -121,9 +121,23 @@ export function installPreviewBridge(): () => void {
               to: { ip: "45.207.197.185", country: "香港", city: "香港", lat: 22.3193, lon: 114.169, isp: "Vapeline Technology", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 22.28", "ip-api.com: 22.32"] },
               bytes: 9_846_000_000,
               node_name: "Xray-45.207.197.185",
+              // task-179 的字段：预览也要同形，否则预览里的「未验证/未归属」分支
+              // 永远看不到（这也是唯一能截图核对这两种降级文案的路径）。
+              traffic: {
+                tag: "node-n1d232c6b8c7a5004",
+                is_node_outbound: true,
+                verified: true,
+                reason: null,
+              },
             },
             origin: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 25.61", "ip-api.com: 25.69"] },
             error: null,
+            self_check: {
+              ip: "39.144.146.165",
+              bound_interface: "en0",
+              trusted: true,
+              reason: null,
+            },
           };
         case "explain_dest": {
           // 判定用真实规则会命中哪条 —— 预览里给一个**与真实配置同形**的结果，

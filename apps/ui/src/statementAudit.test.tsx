@@ -336,26 +336,46 @@ describe("task-120 · 地球仪「出口累计流量（实测）」必须看 tra
     consistent: true,
   });
 
+  // task-181：`task-179` 把 `self_check` / `route.traffic` 变成**真类型的必填字段**
+  // ⇒ 夹具必须同形（否则读到 `undefined.verified` 会抛，而不是「显示旧文案」）。
   const globeWith = (route: Record<string, unknown>) => ({
-    route: { from: geo(), to: geo(), node_name: "XrayTun-US", ...route },
+    route: {
+      from: geo(),
+      to: geo(),
+      node_name: "XrayTun-US",
+      traffic: { tag: "node-n1", is_node_outbound: true, verified: true, reason: null },
+      ...route,
+    },
     origin: geo(),
     error: null,
+    self_check: { ip: "203.0.113.1", bound_interface: "en0", trusted: true, reason: null },
   });
 
-  it("traffic_ok === false ⇒ 不得显示「0 B（实测）」，必须说读不到", async () => {
+  // task-181 更新口径：判据从 `traffic_ok` 换成 `traffic.verified`（task-179 的字段是它的超集：
+  // 「查统计失败」也在 `verified === false` 里，并带具体 `reason`）。断言强度不变 ——
+  // 仍然是「**不许**显示数字、必须说出来」，只是文案换成新口径那句。
+  it("归属未验证 ⇒ 不得显示「0 B（实测）」，必须说清并不显示数字", async () => {
     mocks.snapshot.mockResolvedValue(snap());
     mocks.tailLogs.mockResolvedValue([]);
-    mocks.globeData.mockResolvedValue(globeWith({ bytes: 0, traffic_ok: false, counter_resets: 0 }));
+    mocks.globeData.mockResolvedValue(
+      globeWith({
+        bytes: 0,
+        traffic_ok: false,
+        counter_resets: 0,
+        traffic: { tag: null, is_node_outbound: false, verified: false, reason: "查统计失败（核心没在跑）⇒ 归属未验证" },
+      }),
+    );
     render(
       <StoreProvider>
         <Globe />
       </StoreProvider>,
     );
-    await screen.findByText(/出口流量读不到/);
+    await screen.findByText(/出口流量归属未验证/);
     expect(screen.queryByText(/出口累计流量（实测）/)).toBeNull();
+    expect(screen.queryByText(/节点出站累计/)).toBeNull();
   });
 
-  it("反例：traffic_ok === true ⇒ 显示实测数字 + 续接说明", async () => {
+  it("反例：已验证到节点 ⇒ 显示数字 + 续接说明", async () => {
     mocks.snapshot.mockResolvedValue(snap());
     mocks.tailLogs.mockResolvedValue([]);
     mocks.globeData.mockResolvedValue(
@@ -366,7 +386,8 @@ describe("task-120 · 地球仪「出口累计流量（实测）」必须看 tra
         <Globe />
       </StoreProvider>,
     );
-    await screen.findByText(/出口累计流量（实测）/);
+    // task-181 新口径：已验证到节点时才说「节点出站累计（出站 <tag>）」
+    await screen.findByText(/节点出站累计（出站 node-n1）/);
     expect(screen.getByText(/核心重启过 2 次/)).toBeTruthy();
   });
 });

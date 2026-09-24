@@ -750,6 +750,41 @@ export interface GeoLocation {
 }
 
 /** 地球仪上的一条航线：本机 → 出口节点。 */
+/**
+ * 「本机 · <IP>」这条陈述的**可验证来源**（task-179 / A21，字段名与 Rust 的
+ * `commands/globe.rs` 的 `SelfCheck` 逐字一致）。
+ *
+ * `trusted === false` ⇒ 界面**不许**写「本机」：读不到物理默认路由时，那次查询走的是
+ * 系统默认路由，**隧道开着时查到的就是节点出口**。
+ */
+export interface GlobeSelfCheck {
+  /** 服务看到的那一个出口 IP（没问到 = `null`）。 */
+  ip: string | null;
+  /** **实际**绑定的物理网卡 —— 只有可信的那次查询才有值。 */
+  bound_interface: string | null;
+  /** 只有「绑了物理网卡 + 拿到了位置」才为 true。 */
+  trusted: boolean;
+  /** `trusted === false` 时必填且具体。 */
+  reason: string | null;
+}
+
+/**
+ * 出口累计流量的**归属**（task-179 / A20，字段名与 Rust 的 `TrafficProvenance` 一致）。
+ *
+ * 旧实现取「所有出站里 up+down 最大的那个」当节点 —— 那是**假设**：真凶可能是 `direct`。
+ * `verified === false` ⇒ `bytes` 不可信（占位），界面既不许显示数字、也不许挂在某个节点名下。
+ */
+export interface GlobeTrafficProvenance {
+  /** 这个数值**真正来自哪个** outbound tag（未归属 = `null`）。 */
+  tag: string | null;
+  /** 该 tag 是不是**节点出站**（`node-*`）——不是的话界面不许说「我的节点」。 */
+  is_node_outbound: boolean;
+  /** 归属是否**已验证**（拿到了具体 tag 且统计可用）。 */
+  verified: boolean;
+  /** `verified === false` 时必填且具体。 */
+  reason: string | null;
+}
+
 export interface GlobeRoute {
   from: GeoLocation;
   to: GeoLocation;
@@ -760,6 +795,8 @@ export interface GlobeRoute {
   /** 累计值跨核心重启续接时被补偿掉的归零次数。 */
   counter_resets: number;
   node_name: string;
+  /** 这条航线的流量**归属**（task-179 / A20）。 */
+  traffic: GlobeTrafficProvenance;
 }
 
 export interface GlobeData {
@@ -767,6 +804,8 @@ export interface GlobeData {
   origin: GeoLocation | null;
   /** 拿不到位置时的原因。 */
   error: string | null;
+  /** 「本机 · IP」这条陈述的**可验证来源**（task-179 / A21）。 */
+  self_check: GlobeSelfCheck;
 }
 
 // ---------------------------------------------------------------------------
