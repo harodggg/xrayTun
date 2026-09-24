@@ -17,16 +17,27 @@ import Subscriptions from "./pages/Subscriptions";
 import Routing from "./pages/Routing";
 import Globe from "./pages/Globe";
 import Topology from "./pages/Topology";
+import Intent from "./pages/Intent";
 import Logs from "./pages/Logs";
 import Settings, { categoryOfSection } from "./pages/Settings";
 
-type View = "dashboard" | "nodes" | "subscriptions" | "routing" | "topology" | "globe" | "logs" | "settings";
+type View =
+  | "dashboard"
+  | "nodes"
+  | "subscriptions"
+  | "routing"
+  | "intent"
+  | "topology"
+  | "globe"
+  | "logs"
+  | "settings";
 
 const NAV: Array<{ id: View; label: string }> = [
   { id: "dashboard", label: "仪表盘" },
   { id: "nodes", label: "节点" },
   { id: "subscriptions", label: "订阅" },
   { id: "routing", label: "规则" },
+  { id: "intent", label: "意图过滤" },
   { id: "topology", label: "拓扑" },
   { id: "globe", label: "地球仪" },
   { id: "logs", label: "日志" },
@@ -172,6 +183,7 @@ function Shell({ initialView }: { initialView?: View }) {
           {view === "nodes" && <Nodes />}
           {view === "subscriptions" && <Subscriptions />}
           {view === "routing" && <Routing />}
+          {view === "intent" && <Intent />}
         {view === "topology" && <Topology />}
         {view === "globe" && <Globe />}
           {view === "logs" && <Logs />}
