@@ -339,19 +339,16 @@ pub async fn check_updates(app: AppHandle, state: State<'_, AppState>) -> Result
     .map_err(|e| format!("检查任务失败：{e}"))?;
 
     state.with(|i| {
-        i.update.checked_at = Some(crate::state::now_unix());
-        match core {
-            Ok(a) => {
-                i.update.latest_core = Some(a);
-                i.update.check_error = None;
-            }
-            Err(e) => {
-                i.push_log("app", "warn", format!("检查核心更新失败：{e}"));
-                i.update.check_error = Some(e.to_string());
-            }
-        }
-        if let Ok(a) = geo {
-            i.update.latest_geo = Some(a);
+        // 落盘逻辑抽成纯函数（task-191）：这样「核心/geo 失败**不污染**客户端专属字段」
+        // 才能被单测直接断言，而不是靠读这个命令的肉眼看。
+        let warn = crate::version_check::apply_core_geo_check_result(
+            &mut i.update,
+            core.map_err(|e| e.to_string()),
+            geo.map_err(|e| e.to_string()),
+            crate::state::now_unix(),
+        );
+        if let Some(msg) = warn {
+            i.push_log("app", "warn", msg);
         }
     });
     build_snapshot(&app, &state).await

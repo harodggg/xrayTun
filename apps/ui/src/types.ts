@@ -544,8 +544,14 @@ export interface UpdateStatus {
   app_update_available: boolean;
   /** 正在进行的更新下载。null 表示没有在下载。 */
   progress: UpdateProgress | null;
+  /** **合并/手动路径**的检查时刻（核心/geo/客户端共用；不能代表「客户端上次检查」）。 */
   checked_at: number | null;
+  /** **合并/手动路径**的检查错误（核心/geo/客户端共用）。 */
   check_error: string | null;
+  /** **客户端专属**的上次检查时刻（只由客户端检查写入）。 */
+  checked_at_app: number | null;
+  /** **客户端专属**的检查错误（核心/geo 的失败不会写这里）。 */
+  check_error_app: string | null;
 }
 
 export interface ProbeResult {

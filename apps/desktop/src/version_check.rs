@@ -75,6 +75,36 @@ pub(crate) fn proxy_for_check(running: bool, socks_port: u16) -> Option<u16> {
 
 /// 把一次检查的结果落到 [`UpdateStatus`]，并决定要不要落日志（**纯函数**）。
 ///
+/// **核心 / geo** 检查的落盘（纯函数，便于断言「不污染客户端专属字段」）。
+///
+/// 与客户端路径 [`apply_app_check_result`] **分开**：本函数只写
+/// `checked_at` / `check_error` / `latest_core` / `latest_geo`，
+/// **绝不碰** `check_error_app` / `checked_at_app`（task-191：合并字段与客户端字段是两回事）。
+/// 返回需要落盘的那条 warn 文案（没有失败就是 `None`）。
+pub(crate) fn apply_core_geo_check_result(
+    update: &mut UpdateStatus,
+    core: Result<Available, String>,
+    geo: Result<Available, String>,
+    now: u64,
+) -> Option<String> {
+    update.checked_at = Some(now);
+    let mut warn = None;
+    match core {
+        Ok(a) => {
+            update.latest_core = Some(a);
+            update.check_error = None;
+        }
+        Err(e) => {
+            warn = Some(format!("检查核心更新失败：{e}"));
+            update.check_error = Some(e);
+        }
+    }
+    if let Ok(a) = geo {
+        update.latest_geo = Some(a);
+    }
+    warn
+}
+
 /// 三条硬规矩：
 /// 1. **失败绝不清空 `latest_app`** —— 那是**上次**查到的版本，抹掉它会让界面上的
 ///    更新按钮凭空消失（用户会因为一次网络抖动丢掉已知的新版本）；
@@ -88,11 +118,15 @@ pub(crate) fn apply_app_check_result(
     now: u64,
 ) -> LogLine {
     update.checked_at = Some(now);
+    // 失败也是一次「客户端检查」⇒ 时刻照样记（与 `checked_at` 对齐；`check_error_app` 只在失败分支写）
+    update.checked_at_app = Some(now);
     match result {
         Ok(a) => {
             // 「恢复」= 上一次是失败的。取走它，顺便把 `check_error` 清空。
             let recovered = update.check_error.take().is_some();
             update.latest_app = Some(a.clone());
+            // task-191：客户端专属字段 —— 成功 ⇒ 清错误 + 记时刻（`check_error`/`checked_at` 照旧写）
+            update.check_error_app = None;
             let msg = if recovered {
                 format!("更新检查已恢复：客户端最新版 {}", a.version)
             } else {
@@ -105,6 +139,7 @@ pub(crate) fn apply_app_check_result(
             let same = update.check_error.as_deref() == Some(e.as_str());
             // 先把文案拼好再移动 `e`，否则 `check_error` 拿走后就用不了它了。
             let line = format!("检查客户端更新失败：{e}");
+            update.check_error_app = Some(e.clone());
             update.check_error = Some(e);
             if same {
                 LogLine::Silent
@@ -427,5 +462,62 @@ mod tests {
             }
             other => panic!("期望一条日志，实际是 {other:?}"),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tester_task191 {
+    use super::*;
+
+    fn avail(v: &str) -> Available {
+        Available {
+            version: v.to_string(),
+            published_at: "2026-09-24T00:00:00Z".to_string(),
+            prerelease: false,
+            download_url: "https://example.invalid/a.zip".to_string(),
+            digest_url: None,
+            size: Some(1),
+        }
+    }
+
+    /// 核心/geo 失败 ⇒ 合并字段写、**客户端专属字段一个都不许被污染**。
+    #[test]
+    fn core_geo_failure_does_not_pollute_app_specific_fields() {
+        let mut u = UpdateStatus {
+            check_error_app: Some("上一次客户端失败".into()),
+            checked_at_app: Some(111),
+            ..UpdateStatus::default()
+        };
+        let warn = apply_core_geo_check_result(
+            &mut u, Err("core net down".into()), Err("geo net down".into()), 999);
+        assert_eq!(warn.as_deref(), Some("检查核心更新失败：core net down"));
+        assert_eq!(u.check_error.as_deref(), Some("core net down"), "合并字段照旧写");
+        assert_eq!(u.checked_at, Some(999), "合并时刻照旧写");
+        assert_eq!(u.check_error_app.as_deref(), Some("上一次客户端失败"), "客户端错误不许被核心/geo 覆盖");
+        assert_eq!(u.checked_at_app, Some(111), "客户端时刻不许被核心/geo 覆盖");
+    }
+
+    /// 客户端失败 ⇒ 写 `check_error_app`，且**不清 `latest_app`**（task-188 口径）。
+    #[test]
+    fn app_failure_sets_app_error_and_keeps_latest() {
+        let mut u = UpdateStatus { latest_app: Some(avail("0.9.0")), ..UpdateStatus::default() };
+        apply_app_check_result(&mut u, Err("net down".into()), 500);
+        assert_eq!(u.check_error_app.as_deref(), Some("net down"));
+        assert_eq!(u.latest_app.as_ref().map(|a| a.version.as_str()), Some("0.9.0"), "失败绝不清 latest_app");
+        assert_eq!(u.checked_at_app, Some(500), "失败也记一次检查时刻");
+    }
+
+    /// 客户端成功 ⇒ 清 `check_error_app` + 更新 `checked_at_app`。
+    #[test]
+    fn app_success_clears_app_error_and_stamps_time() {
+        let mut u = UpdateStatus {
+            check_error_app: Some("旧错误".into()),
+            ..UpdateStatus::default()
+        };
+        apply_app_check_result(&mut u, Ok(avail("0.9.1")), 777);
+        assert_eq!(u.check_error_app, None, "成功必须清掉客户端错误");
+        assert_eq!(u.checked_at_app, Some(777));
+        assert_eq!(u.latest_app.as_ref().map(|a| a.version.as_str()), Some("0.9.1"));
     }
 }

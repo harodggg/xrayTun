@@ -655,3 +655,91 @@ fn registered_commands_match_the_frontend_invoke_literals() {
         ts.difference(&rust).collect::<Vec<_>>()
     );
 }
+
+
+/// **task-191**：`UpdateStatus` / `AvailableUpdate` 的字段集合 **Rust ↔ TS 双向断言**。
+///
+/// 为什么必须有：`snapshot_fields_match_the_frontend_types` 只比 `AppSnapshot` 的**顶层**键，
+/// 而 `update` 只是其中一个键 —— 后端给 `UpdateStatus` 加字段而忘改 `types.ts`，
+/// **没有任何测试会红**，界面读到 `undefined`（falsy）⇒ 静默退回老路径。
+#[test]
+fn update_status_and_available_update_match_the_frontend_types() {
+    let src = types_ts();
+    let available = xt_core::update::Available {
+        version: "9.9.9".into(),
+        published_at: "2026-09-24T00:00:00Z".into(),
+        prerelease: false,
+        download_url: "https://example.invalid/a.zip".into(),
+        digest_url: None,
+        size: Some(1),
+    };
+    for (label, value, interface) in [
+        (
+            "UpdateStatus",
+            serde_json::to_value(UpdateStatus::default()).unwrap(),
+            "UpdateStatus",
+        ),
+        (
+            "AvailableUpdate",
+            serde_json::to_value(&available).unwrap(),
+            "AvailableUpdate",
+        ),
+    ] {
+        let rust = assert_ts_is_covered_by_rust(label, &value, interface, &src);
+        let ts = ts_interface_fields(&src, interface);
+        let extra: Vec<_> = rust.difference(&ts).collect();
+        assert!(
+            extra.is_empty(),
+            "\n{label}: Rust 提供了前端未声明的字段 {extra:?}\n             后端加了字段而没改 apps/ui/src/types.ts ⇒ 界面会静默读到 undefined。"
+        );
+    }
+}
+
+/// **task-191**：事件名常量集合 ↔ `ipc.ts` 的 `EVENTS` 值集合 **严格字面相等**。
+///
+/// Tauri 里事件名拼错**不报错**，只会静静地收不到 —— 那正是「自动检测了却像什么都没发生」的成因。
+/// 两侧都必须逐字相同（不引入登记表/白名单：差集已经不存在，加那种机制只会将来腐烂）。
+#[test]
+fn event_names_match_the_frontend_events_map() {
+    let src = ipc_ts();
+    let start = src.find("export const EVENTS = {").expect("ipc.ts 里必须有 EVENTS");
+    let rest = &src[start..];
+    let end = rest.find("} as const;").expect("EVENTS 必须以 `} as const;` 结尾");
+    let body = &rest[..end];
+    let mut ts: BTreeSet<String> = BTreeSet::new();
+    for line in body.lines() {
+        // 只吃 `  name: "value",` 这种形状；注释行以 * / `/**` 开头，跳过。
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('*') || t.starts_with("/**") || t.starts_with("//") {
+            continue;
+        }
+        if let Some((_, rhs)) = t.split_once(':') {
+            let v = rhs.trim().trim_end_matches(',').trim().trim_matches('"');
+            if !v.is_empty() && v.contains("://") {
+                ts.insert(v.to_string());
+            }
+        }
+    }
+    let rust: BTreeSet<String> = [
+        xraytun_desktop_lib::events::RUNTIME_CHANGED,
+        xraytun_desktop_lib::events::CORE_LOG,
+        xraytun_desktop_lib::events::LATENCY_UPDATED,
+        xraytun_desktop_lib::events::PROBE_STARTED,
+        xraytun_desktop_lib::events::NODES_CHANGED,
+        xraytun_desktop_lib::events::SUBSCRIPTIONS_CHANGED,
+        xraytun_desktop_lib::events::SETTINGS_CHANGED,
+        xraytun_desktop_lib::events::UPDATE_PROGRESS,
+        xraytun_desktop_lib::events::APP_UPDATE_CHECKED,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(ts.len(), 9, " ipc.ts 的 EVENTS 应当有 9 个值，实际：{ts:?}");
+    assert_eq!(rust.len(), 9, "events.rs 应当有 9 个事件名常量，实际：{rust:?}");
+    assert_eq!(
+        ts, rust,
+        "\n两侧事件名必须**逐字相等**（Tauri 拼错不报错，只会静默收不到）。\n         只在 ipc.ts 有：{:?}\n只在 events.rs 有：{:?}",
+        ts.difference(&rust).collect::<Vec<_>>(),
+        rust.difference(&ts).collect::<Vec<_>>()
+    );
+}

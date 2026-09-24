@@ -278,8 +278,23 @@ pub struct UpdateStatus {
     #[serde(default)]
     pub app_update_available: bool,
     pub checked_at: Option<u64>,
-    /// 检查更新时的错误（核心 / geo / 客户端共用一条）。
+    /// 检查更新时的错误（**合并/手动路径**：核心 / geo / 客户端共用一条，语义未变）。
+    ///
+    /// 仪表盘判断「客户端有没有新版」**不要**用它 —— 它可能来自核心/geo 的失败，
+    /// 那会让界面把「客户端已确认为最新」说成「不知道有没有新版本」（under-claim）。
+    /// 客户端侧请看 [`UpdateStatus::check_error_app`]。
     pub check_error: Option<String>,
+    /// **客户端专属**的检查错误：只由 `check_app_update` 与自动检测写入
+    /// （两条路共用 `version_check::apply_app_check_result`）。
+    ///
+    /// 核心 / geo 的失败**绝不**写这里（`apply_core_geo_check_result` 只碰
+    /// `check_error`/`checked_at`/`latest_core`/`latest_geo`），由 version_check.rs 的单测钉住。
+    pub check_error_app: Option<String>,
+    /// **客户端专属**的上次检查时刻：只由客户端检查写入。
+    ///
+    /// `checked_at` 仍是三路共用的旧字段（核心/geo 也会写，语义未变）；
+    /// 它**不能**代表「客户端上次检查时刻」。
+    pub checked_at_app: Option<u64>,
     /// 正在进行的下载进度。`None` 表示没有在下载。
     pub progress: Option<UpdateProgress>,
 }
