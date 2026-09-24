@@ -304,10 +304,21 @@ TLS 握手 + HTTP 请求 + 类型化错误体解析全部正常，免密钥档�
 另外两条与 MITM 无关但同样重要的事实：
 
 * **`ext:` 外部规则集只吃 `GeoSiteList`/`GeoIPList` protobuf，没有 `.srs`**（见 §15）；
-* `blackhole` 在稳定版只支持 `response.type: "none"|"http"`，`custom` 是预发布版才有的。
-  实测语义：`none` = TCP 连接成功后立刻干净 EOF（UDP 完全不回，静默丢弃）；
-  `http` = 回一段 **97 字节、只有 LF 换行**的 `HTTP/1.1 403`，1 秒后 RST。
-  **对 HTTPS 流量，`http` 形态浏览器看到的是一次 TLS 失败，不是一个 403 页面** ——
+* `blackhole` 在较旧的 stable 只支持 `response.type: "none"|"http"`，`custom` 是预发布版才有的。
+  上游研究给出 26.3.27 上的实测语义：`none` = TCP 连接成功后立刻干净 EOF
+  （UDP 完全不回，静默丢弃）；`http` = 回一段 **97 字节、只有 LF 换行**的 `HTTP/1.1 403`，
+  1 秒后 RST。
+* **本项目自己的数据面验收（26.9.9，真实核心）测到的是第三种形态**：配置里**不写**
+  `response`（本项目当前就是这样）时，客户端收到的是
+
+  ```text
+  HTTP/1.1 403 Forbidden\r\nCache-Control: max-age=3600, public\r\nConnection: close\r\nContent-Length: 0\r\n\r\n
+  ```
+
+  —— 即**默认就是 `http` 形态**，但换行是 **CRLF**（与 26.3.27 上测到的 LF-only 不一致）。
+  两个版本、两种换行，**不要把这个细节写死进断言或文案**：只断言"没有拿到 200"。
+  证据在 `crates/xt-intent/tests/real_core_dataplane.rs`。
+* 无论哪种形态，**对 HTTPS 流量浏览器看到的都是一次 TLS 失败，不是一个 403 页面** ——
   所以 UI 文案不能说"会返回一个提示页"。
 
 `ruleTag` 唯一性：复用 `config.rs` 的 `uniquify_tags()`（v0.8.37 的 P0 修复）。
@@ -748,6 +759,7 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P2b-1 桌面接线（**只观察/判定/审计**） | ✅ 完成 | `cargo test --workspace` ⇒ **770 passed**（含 `apps/desktop/src/intent.rs` 的 21 条）；`clippy --workspace --all-targets -D warnings` 干净；UI `vitest` 366 passed |
 | P2b-2 规则物化进配置 | ✅ 完成 | `IntentRuntime::rules()` → `Supervisor::set_intent_rules` → `start()` 生成配置时走 `merge_rules_with_intent`。单测钉住"意图规则真的进了那份规则表"及位置（`preset-private` → 放行 → 拦截 → `preset-ads` → `cn`）；配置级别由 `real_core.rs` 用真实核心验收 |
 | P2b-3 生效时机与自动应用 | ⏳ 未开始 | 见下面「P2b-2 的边界」：规则**在下次核心启动时生效**，本版**不自动重启核心**；`needs_apply()` 已经能报"待生效"，但还没有界面去消费它 |
+| **数据面验收（真实核心 + 真实 TCP）** | ✅ 完成 | `cargo test -p xt-intent --test real_core_dataplane` ⇒ **2 passed**：对照组 `allowed.intent-dataplane` 拿到 **200**，实验组 `blocked.intent-dataplane` 拿到 **403**（blackhole 的响应）；全离线（本地 HTTP 服务 + `dns.hosts` 映射 + 全部现取端口），不打扰机器上正在跑的 xray |
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
