@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use xt_proto::{
     DatapathPlan, DatapathStats, ErrorCode, HelperError, HelperStatus, HelloInfo, Request, Response,
-    SessionStatus, TunFdInfo, TunUpRequest, HELPER_LABEL, PROTOCOL_VERSION,
+    SessionStatus, TrustStatus, TunFdInfo, TunUpRequest, HELPER_LABEL, PROTOCOL_VERSION,
 };
 use xt_tun::macos::controller::{self, BringUpOutcome};
 use xt_tun::macos::{netif, snapshot::SessionSnapshot};
@@ -250,6 +250,14 @@ impl Helper {
         handshaken: &mut bool,
     ) -> (Response, Option<RawFd>, bool) {
         match request {
+            // 信任锚：MITM 用的本地根证书（安装/移除都要落在会话快照上）。
+            Request::InstallTrustAnchor { pem, fingerprint } => {
+                (self.install_trust_anchor(&pem, &fingerprint), None, false)
+            }
+            Request::RemoveTrustAnchor { fingerprint } => {
+                (self.remove_trust_anchor(&fingerprint), None, false)
+            }
+
             Request::Hello { client_version, protocol, client_name } => {
                 if protocol != PROTOCOL_VERSION {
                     return (
@@ -368,6 +376,119 @@ impl Helper {
             datapath_available: false,
             datapath_path: None,
         }
+    }
+
+    /// 安装信任锚（MITM 的本地根证书）。
+    ///
+    /// # 为什么**必须**有活跃 TUN 会话
+    ///
+    /// 信任锚要挂在**可回滚的快照**上：helper 被 kill -9 之后，下次启动第一件事就是
+    /// 读快照回滚，而快照是按会话存的。没有会话就没有回滚依据 ⇒ 一个"装进系统钥匙串、
+    /// 却没人记得它"的根证书会永久留下。所以这里**宁可拒绝，也不装**。
+    fn install_trust_anchor(&self, pem: &str, fingerprint: &str) -> Response {
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Response::Error(HelperError::new(ErrorCode::Internal, "状态锁中毒"));
+            }
+        };
+        let Some(session) = guard.session.as_mut() else {
+            return Response::Error(HelperError::new(
+                ErrorCode::InvalidRequest,
+                "没有正在运行的 TUN 会话：信任锚必须挂在可回滚的会话快照上，请先建立隧道",
+            ));
+        };
+        let backup = match xt_tun::macos::trust::install(pem, fingerprint) {
+            Ok(b) => b,
+            Err(e) => {
+                return Response::Error(HelperError::new(
+                    ErrorCode::NetworkConfigFailed,
+                    format!("安装信任锚失败：{e}"),
+                ));
+            }
+        };
+        session.snapshot.trust_anchors.push(backup.clone());
+        if let Err(e) = session.snapshot.save() {
+            // **落盘失败必须把已经装上的撤掉。** 否则系统里多了一个"没人记得"的根证书：
+            // helper 一重启，回滚逻辑根本不知道它存在 —— 这正是本模块最怕的状态。
+            let undone = xt_tun::macos::trust::rollback(&backup);
+            return Response::Error(HelperError::new(
+                ErrorCode::Internal,
+                format!("写快照失败（{e}）⇒ 已撤销刚装的信任锚（撤销结果 {undone:?}）"),
+            ));
+        }
+        Response::Trust(TrustStatus {
+            installed: true,
+            fingerprint: backup.fingerprint.clone(),
+            cert_path: Some(backup.cert_path.clone()),
+            existed_before: backup.existed_before,
+            note: if backup.existed_before {
+                Some("这个指纹在安装前就已被信任 —— 回滚时不会删它".into())
+            } else {
+                None
+            },
+        })
+    }
+
+    /// 移除信任锚。**幂等**：不在快照里也照样尝试删，并**如实说明**"这是没记上的一次移除"。
+    fn remove_trust_anchor(&self, fingerprint: &str) -> Response {
+        let mut guard = match self.state.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Response::Error(HelperError::new(ErrorCode::Internal, "状态锁中毒"));
+            }
+        };
+        let Some(session) = guard.session.as_mut() else {
+            return Response::Error(HelperError::new(
+                ErrorCode::InvalidRequest,
+                "没有正在运行的 TUN 会话",
+            ));
+        };
+        let normalized = xt_tun::macos::trust::normalize_fingerprint(fingerprint);
+        let recorded = session
+            .snapshot
+            .trust_anchors
+            .iter()
+            .find(|b| b.fingerprint == normalized)
+            .cloned();
+        let note = match &recorded {
+            Some(backup) => {
+                if let Err(e) = xt_tun::macos::trust::rollback(backup) {
+                    return Response::Error(HelperError::new(
+                        ErrorCode::NetworkConfigFailed,
+                        format!("移除信任锚失败：{e}"),
+                    ));
+                }
+                None
+            }
+            None => {
+                // 快照里没有 ⇒ 仍然尝试删（幂等），但**不许静默**：如实说这是没记上的一次。
+                if let Err(e) = xt_tun::macos::trust::remove(&normalized) {
+                    return Response::Error(HelperError::new(
+                        ErrorCode::NetworkConfigFailed,
+                        format!("移除信任锚失败：{e}"),
+                    ));
+                }
+                Some("这个指纹不在会话快照里（可能不是本会话装的）—— 仍然尝试删了".to_string())
+            }
+        };
+        session
+            .snapshot
+            .trust_anchors
+            .retain(|b| b.fingerprint != normalized);
+        if let Err(e) = session.snapshot.save() {
+            return Response::Error(HelperError::new(
+                ErrorCode::Internal,
+                format!("写快照失败：{e}"),
+            ));
+        }
+        Response::Trust(TrustStatus {
+            installed: false,
+            fingerprint: normalized,
+            cert_path: None,
+            existed_before: recorded.map(|b| b.existed_before).unwrap_or(false),
+            note,
+        })
     }
 
     fn tun_up(&self, req: TunUpRequest) -> Response {
@@ -849,6 +970,37 @@ pub const SPAWN_GRACE: Duration = Duration::from_secs(2);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **没有活跃会话时必须拒绝安装信任锚。**
+    ///
+    /// 这条不需要 root：拒绝发生在碰系统钥匙串**之前**。
+    /// 语义是"宁可拒绝，也不装"——因为信任锚必须挂在可回滚的会话快照上，
+    /// 否则 helper 被 kill -9 之后，系统里会永久留下一个**没人记得**的根证书。
+    #[test]
+    fn installing_a_trust_anchor_without_a_session_is_refused_before_touching_the_keychain() {
+        let helper = Helper::new(std::path::PathBuf::from("/tmp/xt-test.sock"));
+        let response = helper.install_trust_anchor(
+            "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+            "AB:CD:EF",
+        );
+        match response {
+            Response::Error(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidRequest);
+                assert!(
+                    e.message.contains("TUN 会话"),
+                    "错误必须说清为什么要先建隧道：{}",
+                    e.message
+                );
+            }
+            other => panic!("没有会话时居然不是拒绝：{other:?}"),
+        }
+
+        // 移除同理：没有会话就没有可回滚的依据，拒绝。
+        match helper.remove_trust_anchor("AB:CD:EF") {
+            Response::Error(e) => assert_eq!(e.code, ErrorCode::InvalidRequest),
+            other => panic!("没有会话时移除也不该通过：{other:?}"),
+        }
+    }
     use crate::error::invalid;
 
     #[test]

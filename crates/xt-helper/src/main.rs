@@ -257,6 +257,18 @@ fn client_call_inner(socket: &std::path::Path, request: Request) -> Result<()> {
 fn print_response(response: &Response) {
     match response {
         Response::Hello(info) => println!("{info:#?}"),
+        Response::Trust(t) => {
+            println!(
+                "信任锚 {}：指纹 {}{}{}",
+                if t.installed { "已安装" } else { "已移除" },
+                t.fingerprint,
+                t.cert_path
+                    .as_deref()
+                    .map(|p| format!("（{p}）"))
+                    .unwrap_or_default(),
+                t.note.as_deref().map(|n| format!("；{n}")).unwrap_or_default()
+            );
+        }
         Response::Ok { message } => {
             if let Some(m) = message {
                 println!("{m}");
