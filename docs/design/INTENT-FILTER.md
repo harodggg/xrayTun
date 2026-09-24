@@ -1012,6 +1012,26 @@ UI `vitest` **41 文件 / 418 通过**、`tsc --noEmit` 干净。
 `origin/main` 是 `main` 的祖先 ⇒ 之后 `git push origin main` 是 **fast-forward，不需要 force**
 （本次**没有推**：那会把另一会话的 5 个本地提交一并公开，交给他们决定）。
 
+### 16.6 再并入"最新"：远端 v0.4.7/v0.4.8 + 两个客户端结论分支
+
+`main` 继续前进到 **`84bfdda`**，又并进三样：
+
+1. **`origin/main` 的最新两个提交**（`1f93fed`/`e23a5c4`，站点页跟进 v0.4.7/v0.4.8）
+   —— 干净合并（上次抓取超时所以没拿到，`git fetch --no-tags --prune origin` 之后才看到）。
+2. **`t193-client-only-chip`**：干净合并，**零文件改动**。
+3. **`t194-settings-client-only`**：在 `Settings.tsx` / `appUpdate.test.tsx` 冲突，
+   两处都是**同一段逻辑的两个版本** —— HEAD 侧已经是 task-195 之后的形态
+   （按子系统分格 `check_error_app`/`check_error_core`/`check_error_geo`，
+   不再靠"非 app 即核心"二选一猜测，也顺手修掉 geo 失败被误标成核心），t194 侧是它之前那一版。
+
+**"取 HEAD 侧"不是拍脑袋**：`git cherry -v origin/main <branch>` 对这两个分支都返回 `-`
+（补丁等价，内容已经在主干里，本地只是各留了一个提交）。两个分支并进来只是让它们在
+`main` 的历史里**可达**，内容以主干为准 —— 这是可验证的无丢失，不是"我看了一眼觉得像"。
+
+验证（合并后的树上）：UI `vitest` **41 文件 / 418 通过** + `tsc --noEmit` 干净；
+`cargo test -p xraytun-desktop` **287 + 8 通过**（含契约测试 —— 它读 TS 形状，
+是这次 UI 改动最该跑的 Rust 侧）。
+
 ### P4 踩过的坑（每一条都有测试钉住）
 
 1. **`accept()` 从非阻塞监听套接字返回的已连接套接字也是非阻塞的。** 于是 TLS 读立刻
