@@ -1,0 +1,178 @@
+# 未签名提交留档：本会话的「无法签名」窗口 + 早期历史（**实测**）
+
+> 这是一次**环境偏差**的留档，不是代码问题。所有数字都是**用命令实测**得出的，命令随文给出、可复算。
+> 口径：`gpgsig` 存在 = 「有签名」；`git cat-file commit <sha> | grep -c '^gpgsig'` 为 **0** = 未签名。
+
+## 0. 结论摘要（先看这三条）
+
+1. **本会话窗口**：`2026-09-24 12:19:00` 起的 **6 个提交未签名**；它前面最后一个有签名的是
+   `9a24519`（`07:53:15`）⇒ 窗口起点在这两者之间（间隔 4h26m）。
+2. **「全仓签名」从来就不是事实**：早期历史里还有 **38 个未签名提交**（`2026-09-13 21:43` → `2026-09-17 12:22`），
+   而且 **所有 tag 都没有签名**（`v0.8.35/36/37` 实测 `BEGIN PGP SIGNATURE` = **0**；`tag.gpgsign` 未设）。
+   ⇒ 准确表述只能写成「**`2026-09-17 13:17:30`（`92a422efe`）起的提交**是签过名的」。
+3. **影响边界**：`gpgsig` 缺失**不改变内容**（`tree` / `parent` / 作者 / 提交信息一字不变，只有提交对象哈希不同
+   —— 见 §4 实测）。被打破的是**陈述**，不是产物。
+
+| 统计 | 值 |
+|---|---|
+| 历史提交总数（`git rev-list HEAD`） | **402** |
+| 未签名 | **44**（本会话窗口 6 + 早期历史 38） |
+| 有签名 | **358** |
+| 有签名的 tag | **0**（抽查 v0.8.35 / v0.8.36 / v0.8.37） |
+
+## 1. 实测方法与可复算命令
+
+**可靠判据（逐提交）**
+
+```bash
+git cat-file commit <sha> | grep -c '^gpgsig'      # 1 = 有签名；0 = 未签名
+```
+
+**全量扫描（一次跑完 402 个）** —— 我用的是 `git rev-list HEAD` + 一次 `git cat-file --batch`（Python 解析）。
+⚠️ **这个方法有一个陷阱，我第一版就栽了**：`--batch` 头部里的 `size` 是**字节数**，
+若用 `text=True` 把输出解码成 str 再按**字符**切片，本仓提交信息里大量中文会让偏移**逐条错位**
+⇒ 结果把 **402 个全部**判成「未签名」。**必须用 bytes 解析**（`capture_output=True` 不加 `text=True`）。
+用「逐提交」法复核后，真实结果是 44 个。
+
+**⚠️ 卡面建议的 `%G?` 在本环境**判不出来**：gpg 连不上/无 TTY ⇒ `git log --format='%G?'` 对**每个**提交都返回
+`E`（cannot check），**不会**出现 `N`。本文件一律用上面那条 `gpgsig` 判据。
+
+## 2. 未签名提交清单（实测）
+
+### 2.1 本会话窗口：6 个（2026-09-24 12:19:00 → 12:55:21）
+
+| # | hash | 主题 | 提交时间（+0800） | git 作者/提交者 | 归属（来源见 §7） |
+|---|---|---|---|---|---|
+| 1 | `b3af40c0ce52f231266a90420794ad9d21f82a66` | `feat(site)`: 「黄推过滤器」升级为多类别「信息过滤器 · Jev」（v0.3.0） | 12:55:21 | harodggg/harodggg | **未证实**（没有卡声明） |
+| 2 | `a93e5af287e054a8962cefd591459e6edb4e5e7a` | `fix(scripts)`: task-175 —— net-metrics 探针目标改读 task-106 夹具 | 12:53:39 | harodggg/harodggg | tester 报告 |
+| 3 | `a25af0fd0180b14624eceb5a4d769c8db8880883` | `fix(watchdog)`: 探针目标单真源 + 境内侧 ≥2（task-106） | 12:48:49 | harodggg/harodggg | backend-dev 报告 |
+| 4 | `e704c6343b2450a07a69cac8e1b186c102e10687` | `feat(site)`: 黄推过滤器 · Jev 页更新到 v0.2.1 | 12:32:50 | harodggg/harodggg | **未证实**（没有卡声明） |
+| 5 | `22453d6df021522057da77d95cfb39ee3c78321d` | `feat(site)`: 上线「黄推过滤器 · Jev」独立项目页（中英双语 + 导航 / sitemap / llms） | 12:23:01 | harodggg/harodggg | **未证实**（没有卡声明） |
+| 6 | `15ba08ec981deb8771f6eb1fc1d0f785f51c5e75` | `fix(build-lock)`: strict 判据收窄到「与我们同一个 target dir 的未持锁编译进程」（task-162） | 12:19:00 | harodggg/harodggg | Lead 代 ops 提交（提交信息里已写明未签名） |
+
+**它前面最后一个有签名的提交**：`9a2451942`（`test(scripts)`: task-173 三条自测进 check.sh，`07:53:15`）——
+即：**窗口起点在 07:53:15 与 12:19:00 之间**（这段时间里没有别的提交）。
+
+### 2.2 早期历史：38 个（2026-09-13 21:43:20 → 2026-09-17 12:22:19）
+
+| 项 | 值 |
+|---|---|
+| 范围（新→老） | `62c5e880c`（`v0.7.9：合盖唤醒后要手动点连接…`，09-17 12:22:19）→ `757d2e3e5`（`初始提交`，09-13 21:43:20） |
+| 作者分布 | `harodggg` 24 个 · `xraytun` 14 个 |
+| **签名从哪里开始** | 紧接其后的 `92a422efe`（`refactor(desktop)`: 消除加锁往返与错误包装重复，**09-17 13:17:30**）**有签名** |
+
+⇒ **不是「全仓签名」**：仓库最早的 38 个提交（含初始提交）就没签名。列全 38 个意义不大（它们都在
+一个连续段里、且都在 09-13～09-17），**可复算命令**：
+
+```bash
+git rev-list HEAD | while read h; do
+  n=$(git cat-file commit "$h" | grep -c '^gpgsig')
+  [ "$n" -eq 0 ] && git log -1 --format='%h %cI %an %s' "$h"
+done | tail -38          # 早期 38 个（最新的在后）
+```
+
+### 2.3 tag 也没有签名
+
+```
+$ for t in v0.8.37 v0.8.36 v0.8.35; do printf "%-8s %s\n" "$t" "$(git cat-file tag $t | grep -c 'BEGIN PGP SIGNATURE')"; done
+v0.8.37 0
+v0.8.36 0
+v0.8.35 0
+$ git config --get tag.gpgsign      # → （未设）
+```
+⇒ 「tag 是签名 tag」这句话也**不成立**（本仓的 tag 是 annotated，但**没签**）。
+
+## 3. 原因（只写能证实的部分）
+
+**配置（实测）**
+
+```
+$ git config --show-origin --get commit.gpgsign   → file:/Users/xbtg-/.gitconfig   true
+$ git config --get user.signingkey                → F40013FD658862E2
+$ git config --get gpg.program                    → /usr/local/bin/gpg
+```
+
+**直接证据（都在本环境实测）**
+
+| 探针 | 实测 |
+|---|---|
+| `touch ~/.gnupg/dsh-probe` | `touch: /Users/xbtg-/.gnupg/dsh-probe: Operation not permitted`（**沙箱拒写 `~/.gnupg`**） |
+| `tty` | `not a tty` |
+| `gpg --batch --yes -u F40013FD658862E2 --detach-sign -o /tmp/p.sig /tmp/p.txt` | **rc=2**；`gpg: 签名时失败： 超时` / `gpg: signing failed: 超时` |
+| 在 `/tmp` 的临时仓库里 `git commit`（`commit.gpgsign` 继承全局） | **rc=128**；`error: gpg failed to sign the data`；内部日志 `[GNUPG:] PINENTRY_LAUNCHED … curses 1.3.3 /dev/ttys000 dumb …` 之后 `超时`；**没有留下提交**（`git rev-list --count HEAD` = 0） |
+| 早期（同一窗口）另一次报错 | `gpg: failed to create temporary file '/Users/xbtg-/.gnupg/.#lk0x…': Operation not permitted` + `gpg: can't connect to the keyboxd: Operation not permitted` |
+| `pgrep -fl 'gpg-agent\|keyboxd'` | **两条在跑**：`keyboxd --homedir /Users/xbtg-/.gnupg --daemon`、`gpg-agent --homedir /Users/xbtg-/.gnupg --daemon` |
+| `gpg --list-secret-keys` | **rc=2**（读不到密钥库） |
+
+⇒ 可证实的机制是两条叠加：**① 沙箱禁止本进程使用 `~/.gnupg`（写临时文件/连 keyboxd 被拒）；
+② 本会话 shell 没有可用 TTY，pinentry 起得来却无法输入口令 ⇒ 超时。**
+
+**「本会话早先为何能签」——我只能证实时间边界，不能证实机制。**
+已证实：`9a24519`（07:53:15）**有**签名，`15ba08e`（12:19:00）**没有**；早期历史里签名从
+`92a422efe`（09-17 13:17:30）开始。**未证实的是「为什么早期那段能签、中间为什么变了」**。
+两个我**无法区分**的假说：
+* **H1（缓存/会话）**：此前 gpg-agent 里已有可用会话/已缓存口令，签名无需 pinentry；
+  之后 agent/keyboxd 重启或会话过期 ⇒ 每次都要 pinentry ⇒ 超时；
+* **H2（沙箱策略中途收紧）**：同一环境在不同时点对 `~/.gnupg` 的访问策略不同（早先允许、之后拒绝）。
+两种假说都与观察一致，**本文件不给出结论**（要区分它们需要当时的 agent 日志/沙箱策略记录，我拿不到）。
+
+## 4. 影响边界：`gpgsig` 缺失**不改变内容**
+
+`gpgsig` 是**提交对象头部**的一个字段；去掉它，`tree` / `parent` / `author` / `committer` / 提交信息
+**一字不变**，只有**提交对象哈希**变。实测（取一个有签名的提交 `9a24519`，在内存里剥掉 gpgsig 后用
+`git hash-object -t commit --stdin` **只算不写**）：
+
+```
+原提交 9a24519 的 tree        = tree ba4ec36e2520a499ca70c50c071c86619beb99cc
+去掉 gpgsig 后的 tree          = tree ba4ec36e2520a499ca70c50c071c86619beb99cc     ⇒ 相同
+原提交对象哈希（重算）          = 9a24519420b0… （等于 9a24519 全哈希）
+去掉签名后的提交哈希            = fbcc01276930…                                     ⇒ 只有提交哈希变
+```
+
+⇒ 代码、产物、历史**内容**都不受影响；受影响的是**陈述**：「这个仓库的提交都是签名过的」为假
+（44/402 未签名、tag 全未签名）。若将来补签，**每一次补签都会改变那一批提交及其后续的哈希**（见 §5）。
+
+## 5. 补救方式（以及**为什么现在不做**）
+
+```
+# 需要在「gpg 可用 + 有 TTY/agent 能完成签名」的环境里跑：
+git rebase --exec 'git commit --amend --no-edit -S' <第一个未签名提交>^..HEAD
+```
+
+**现在不做，三个理由**：
+
+1. **环境仍不可用**：§3 的探针刚刚实测（`gpg` rc=2 超时、`~/.gnupg` 拒写、无 TTY）⇒ 跑了也会失败；
+2. **会重写已推送历史**：补签 = 改提交对象哈希 = 必须 force-push，而本会话的**红线**是
+   「不 amend / 不 rebase / 不 force-push 任何已推送提交」；
+3. **波及面比 6 个大得多**：未签名的是**两段**（本会话 6 个 + 早期 38 个），而早期那段之后还有
+   **358 个已签名提交**；对早期段补签会把 `2026-09-17` 之后的**整条历史**换掉哈希
+   ⇒ 已发布的 **tag 会指向被替换掉的提交**（tag 不会自动跟着变），CI 缓存/引用也会失效。
+   正确做法是维护者**一次性**决定（重写 + 重打 tag + 通知所有协作者），而不是在会话里顺手做。
+
+## 6. 防再犯检查（提交时）
+
+* **可靠检查**（本环境可用）：
+  ```bash
+  git cat-file commit HEAD | grep -c '^gpgsig'     # 1 = 有签名；0 = 未签名
+  ```
+  ⚠️ 不要用 `git log -1 --format='%G?'`：本环境 gpg 不可用，它**恒返回 `E`**，看不到 `N`。
+* **一旦未签名**，在该提交信息**末尾**加固定一行（Lead 已授权口径）：
+  ```
+  本条未能签名：沙箱无法访问 ~/.gnupg（keyboxd / 无 TTY 的 pinentry），已由 Lead 授权；补救见 docs/verification/UNSIGNED-COMMITS.md
+  ```
+* **提交方式**：`git -c commit.gpgsign=false commit …`（**不改** `~/.gitconfig`、**不改**仓库 `.git/config`；
+  也**不要**把改动留在暂存区等环境 —— 等不到，而且会挡住别人）。
+
+## 7. 诚实清单（**无法**验证的部分）
+
+* **「早先为何能签」的机制未证实**：只能给时间边界（§3 末），H1/H2 两种假说**我无法区分**；
+* **没有验证 signing key 是否被吊销/过期**：`gpg --list-secret-keys` rc=2，读不到密钥库 ⇒ 我只能证明
+  「用这把 key 现在签不出来」，**不能**证明 key 本身没问题；
+* **没有检查远端分支保护是否要求签名**：本会话推 `main` 都成功，但「能推」不等于「没有策略要求签名」
+  （可能策略未启用、或对该账号不拦）——我没有查远端设置；
+* **早期 38 个未签名提交的原因未查**：只按对象里的 `gpgsig` 字段判定；作者名不同（`xraytun` 14 / `harodggg` 24），
+  我没有追查当时是否也没配签名；
+* **「谁」这一列的来源不统一**：git 元数据里作者/提交者都是同一账号 `harodggg`；成员归属来自
+  各自报告（`15ba08e`=Lead 代 ops、`a25af0f`=backend-dev、`a93e5af`=tester），
+  而 `22453d6` / `e704c63` / `b3af40c` 三笔 `feat(site)` **没有任何卡或报告声明归属，我未证实**；
+* **本文件自身的提交也是未签名的**（按 §6 带说明）——它本身就是这条环境偏差的又一例。
