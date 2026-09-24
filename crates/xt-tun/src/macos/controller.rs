@@ -258,6 +258,14 @@ fn resolve_via(via: &RouteVia, ifname: &str) -> RouteVia {
 pub fn rollback(snap: &SessionSnapshot) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
 
+    // 0) **信任锚最先撤**：它是"我们额外加进系统钥匙串的信任"，越早收回越安全。
+    //    并且**按备份记录**撤 —— 安装前就存在的证书不许删（那是用户自己的）。
+    for backup in snap.trust_anchors.iter().rev() {
+        if let Err(e) = crate::macos::trust::rollback(backup) {
+            failures.push(format!("移除信任锚 {} 失败: {e}", backup.fingerprint));
+        }
+    }
+
     // 1) DNS 先还原（见模块文档里的顺序说明）
     for backup in snap.dns_backups.iter().rev() {
         if let Err(e) = dns::restore(backup) {
