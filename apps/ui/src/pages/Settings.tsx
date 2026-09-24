@@ -1269,10 +1269,24 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           )}
         </div>
 
+        {/* task-194：这一节涵盖**核心/geo/客户端**三类，所以这里继续读**合并**字段
+            `check_error`（一次失败必须说出来，这正是它该在的位置）。但**必须标明是哪一类** ——
+            只说「检查更新失败」会被读成「客户端检查失败」而其实可能是核心：
+            * `check_error_app` 非空 ⇒ 最近一次失败来自**客户端**路径（`apply_app_check_result`
+              的 `Err` 分支同时写 `check_error_app` 与 `check_error`，`version_check.rs:142-143`）；
+            * 否则合并字段只可能来自**核心**路径（`apply_core_geo_check_result` 的 `Err` 分支，
+              `version_check.rs:97-100`）—— ⚠️ 顺带记：**geo 的失败根本没人写进任何字段**
+              （同函数 `:102-104` 只处理 `Ok`），所以这里说「核心」而不是「核心/geo」。
+            ⚠️ 已知边界（task-194 报告里如实记）：客户端与核心**都**失败时，合并字段只留最后一次
+            写入（可能被客户端覆盖），此时只报客户端那条。 */}
         {snapshot.update.check_error && (
           <div className="banner banner--warn" style={{ marginTop: 10 }}>
             <span>⚠︎</span>
-            <div>检查更新失败：{snapshot.update.check_error}</div>
+            <div>
+              {snapshot.update.check_error_app
+                ? `客户端检查更新失败：${snapshot.update.check_error_app}`
+                : `核心检查更新失败：${snapshot.update.check_error}`}
+            </div>
           </div>
         )}
 
@@ -1294,16 +1308,19 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             </div>
             <div>
               {/*
-                task-128（B8）：后端在**检查失败**时只写 `check_error`、**不清**
-                `latest_app`（`commands/snapshot.rs:238-240`），而
-                `app_update_available` 每个快照都按残留的 `latest_app` 重算
-                （`snapshot.rs:583-586`）。所以「检查更新失败」与「有一个可装的版本」
-                会同时成立，而下面那颗按钮原来只看后两者 ⇒ 用户在一次**失败的**检查之后
-                看到「更新到 X 并重启」，以为 X 就是当前最新版。
-                标签跟着 `check_error` 走：失败时如实说这是**上次**查到的。
+                task-128（B8）建了这条标签、task-194 把判据改绑到**客户端专属**字段。
+
+                口径没变：客户端在**检查失败**时后端**不清** `latest_app`
+                （`version_check.rs::apply_app_check_result` 的 `Err` 分支只写错误、`Ok` 才写
+                `latest_app`），而 `app_update_available` 每个快照都按残留的 `latest_app` 重算 ⇒
+                「客户端检查失败」与「有一个可装的版本」会同时成立，标签必须如实说这是**上次**查到的。
+
+                **改绑的理由**：原来读合并的 `check_error`，于是**核心/geo** 失败时也会说
+                「本次没查成」—— 可那次客户端检查其实是成功的（`task-194`：陈述不实）。
+                客户端专属判据与仪表盘 chip（`task-193`）同一套：`check_error_app`。
               */}
               <div className="kv__k">
-                {snapshot.update.check_error && snapshot.update.latest_app
+                {snapshot.update.check_error_app && snapshot.update.latest_app
                   ? "上次查到的最新版（本次没查成）"
                   : "GitHub 上的最新版"}
               </div>
@@ -1321,13 +1338,18 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
                 也非空，只按它判断会让按钮永远显示（用户报的「多余」就是这个）。
                 判据用后端算好的 `app_update_available`（它比过版本）。 */}
             {/*
-              上面那条判断的补充（task-128 B8）：`check_error` 非空时**不给**安装按钮 ——
-              否则就是拿一次失败检查的残留值劝用户升级。版本号本身照旧显示在右上，
-              只是标明它是上次查到的。
+              上面那条判断的补充（task-128 B8 建、task-194 改绑）：**客户端**这一次检查失败时
+              **不给**安装按钮 —— 否则就是拿一次失败检查的残留值劝用户升级。版本号本身照旧显示
+              在右上，只是标明它是上次查到的。
+
+              ⚠️ **task-194 的功能性修复**：这里原来用合并的 `check_error` ⇒ **核心/geo 检查失败**
+              会让这颗按钮**直接消失**，而客户端的结论（`app_update_available` / `latest_app`）其实
+              是**刚刚成功**那次查到的 —— 「已知有新版却无从安装」。改用 `check_error_app` 后，
+              只有**客户端**那条线失败才收按钮。
             */}
             {snapshot.update.app_update_available &&
               snapshot.update.latest_app &&
-              !snapshot.update.check_error && (
+              !snapshot.update.check_error_app && (
               <button className="btn btn--primary" disabled={busy !== null || downloading}
                       onClick={() => void run("install-app", () => api.installAppUpdate())}>
                 更新到 {snapshot.update.latest_app.version} 并重启
@@ -1335,11 +1357,13 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             )}
             {/* 查到了、但确实没有新版 → 给一句明确的反馈。
                 点了「检查客户端更新」总该有落点，否则用户会以为没生效（再去点第二次）。
-                **失败时绝不允许走到这里**：`check_error` 优先（上面的失败块），
-                因为「没查到」不等于「已是最新」。 */}
+                **失败时绝不允许走到这里**：客户端失败时优先说失败（上面的失败块），
+                因为「没查到」不等于「已是最新」。
+                ⚠️ **task-194**：判据同样只能用客户端专属字段 —— 用合并的 `check_error` 会让
+                核心/geo 的失败**顺手把这条回执也吞掉**（用户点了检查却像没生效）。 */}
             {!snapshot.update.app_update_available &&
               snapshot.update.latest_app &&
-              !snapshot.update.check_error && (
+              !snapshot.update.check_error_app && (
                 <span className="field__hint" style={{ alignSelf: "center" }}>
                   已是最新版本
                 </span>
