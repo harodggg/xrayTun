@@ -42,19 +42,21 @@ pub(crate) const TEMP_SUBDIR: &str = "xraytun-incident";
 const BUNDLE_SCRIPT: &str = "incident-bundle.sh";
 const TRIAGE_SCRIPT: &str = "triage-incident.py";
 
-/// 五类被动哨兵信号（`kind` 字段的取值）。
+/// 六类被动哨兵信号（`kind` 字段的取值）。
 ///
 /// **不许**在这里加值而不在调用点记录它：`every_anomaly_kind_is_recorded_in_production_source`
 /// 会按生产源码逐个计数（删掉任意一处调用就红）。
 // 只有测试会读这个常量（生产是各处直接写字面量）；按本仓既有做法标成
 // 「非测试构建下允许 dead_code」，而不是为了消警告把它塞给生产代码。
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const ANOMALY_KINDS: [&str; 5] = [
+pub(crate) const ANOMALY_KINDS: [&str; 6] = [
     "probe_round_failed",
     "rebuild_failed",
     "watchdog_invalidated",
     "log_read_loss",
     "self_healed",
+    // task-176：接管后缺「作用域默认路由」⇒ 绑该网卡的直连会 ENETUNREACH（task-172 的形态）
+    "route_audit",
 ];
 
 // ---------------------------------------------------------------------------

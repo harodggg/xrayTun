@@ -223,6 +223,184 @@ pub fn routes_on_interface(interface: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// 路由表审计（task-176）：**为「现场包能直接回答『那条作用域默认路由在不在』」而存在**
+// ---------------------------------------------------------------------------
+
+/// 一次路由审计的**采样时点**。
+///
+/// ⚠️ 必须写进日志本身：否则事后分不清「这条审计是哪个阶段采的」——
+/// 那正是本项目反复踩的「同一件事两个口径」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteAuditPhase {
+    /// helper 已建 utun、旁路路由已装，**默认接管还没发生**。
+    AfterTunUp,
+    /// `CommitRoutes` 之后 —— **关键时点**：此时绑卡直连必须能走通。
+    AfterCommitRoutes,
+    /// 回滚 / `TunDown` 之后。
+    AfterRollback,
+    /// 看门狗发现状态变化（含首轮基线）。
+    WatchdogChanged,
+}
+
+impl RouteAuditPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            RouteAuditPhase::AfterTunUp => "TunUp 之后（接管前）",
+            RouteAuditPhase::AfterCommitRoutes => "CommitRoutes 之后",
+            RouteAuditPhase::AfterRollback => "回滚之后",
+            RouteAuditPhase::WatchdogChanged => "看门狗状态变化",
+        }
+    }
+}
+
+/// 只读的路由表审计结果（**只看结果，不看过程**）。
+///
+/// # 它能回答什么、不能回答什么
+///
+/// * 能：`default … I … <物理网卡>`（作用域默认路由）**在不在**、`0/1`/`128/1`
+///   捕获路由指向哪个 utun、物理网卡上有几条带网关的 host 旁路（节点 `/32`）；
+/// * **不能**：这条路由是**谁**装的 —— 别的 VPN 工具也在写同一张表（诚实清单第 4 条）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteAudit {
+    /// 被审计的物理网卡名（写进日志，便于事后判读）。
+    pub physical_interface: String,
+    /// `default` 行的总数（健康会话应当是 2：系统的 + 我们那条作用域默认的）。
+    pub default_rows: usize,
+    /// `default` + flags 含 `I`(IFSCOPE) + 落在物理网卡上的那条的网关。
+    pub scoped_default_gateway: Option<String>,
+    /// `0/1` 捕获路由指向的接口（通常是 utunN）。
+    pub capture_0_1: Option<String>,
+    /// `128/1` 捕获路由指向的接口。
+    pub capture_128_1: Option<String>,
+    /// 物理网卡上带网关的 host 路由 `(目标, 网关)`：节点旁路的 `/32` 就是它们。
+    pub bypass_hosts: Vec<(String, String)>,
+}
+
+impl RouteAudit {
+    /// 作用域默认路由**缺失** —— 今天的关键盲区。
+    pub fn scoped_default_missing(&self) -> bool {
+        self.scoped_default_gateway.is_none()
+    }
+
+    /// 该采样时点下，缺这条路由是否构成**异常**。
+    ///
+    /// * `AfterTunUp`（接管前）与 `AfterRollback` 本来就不该有 ⇒ 不算异常；
+    /// * `AfterCommitRoutes` 与 `WatchdogChanged` 缺了就异常 ——
+    ///   绑了 en0 的 `direct` 出站会 `ENETUNREACH`（`task-172` 的形态）。
+    pub fn is_anomaly(&self, phase: RouteAuditPhase) -> bool {
+        self.scoped_default_missing()
+            && matches!(
+                phase,
+                RouteAuditPhase::AfterCommitRoutes | RouteAuditPhase::WatchdogChanged
+            )
+    }
+
+    /// **自包含的一行**（要求：一条日志就能判读，不必去翻别的上下文）。
+    pub fn summary(&self, phase: RouteAuditPhase) -> String {
+        let capture = format!(
+            "0/1 → {}、128/1 → {}",
+            self.capture_0_1.as_deref().unwrap_or("缺失"),
+            self.capture_128_1.as_deref().unwrap_or("缺失"),
+        );
+        let tail = format!(
+            "；旁路 host 路由 {} 条；default 行 {} 条",
+            self.bypass_hosts.len(),
+            self.default_rows
+        );
+        if let Some(gw) = &self.scoped_default_gateway {
+            format!(
+                "路由审计[{}]：{} 的作用域默认路由**在**（gateway {gw}）；{capture}{tail}",
+                phase.label(),
+                self.physical_interface,
+            )
+        } else {
+            format!(
+                "路由审计[{}]：{} 的作用域默认路由**缺失** ⇒ 绑定该网卡的直连（direct 出站）\
+                 会 ENETUNREACH（task-172 的形态）；{capture}{tail}",
+                phase.label(),
+                self.physical_interface,
+            )
+        }
+    }
+}
+
+/// 解析 `netstat -rn -f inet` 的文本（**纯函数**：真实样例可直接当测试输入）。
+///
+/// 认这三类行（其余忽略）：
+/// * `default <gw> <flags> <netif>`：数 `default` 行数；flags 含 `I` 且 netif 是物理网卡 ⇒ scoped 默认路由；
+/// * `0/1` / `128/1 ... <netif>`：捕获路由指向哪个接口；
+/// * 裸 IPv4 + flags 含 `G` 与 `H` + netif 是物理网卡：带网关的 host 路由（节点 `/32` 旁路）。
+///   （ARP 邻居那些 `UHLWI` 没有 `G`，因此不会被算成旁路。）
+pub fn parse_netstat_inet(table: &str, physical_interface: &str) -> RouteAudit {
+    let mut audit = RouteAudit {
+        physical_interface: physical_interface.to_string(),
+        ..Default::default()
+    };
+    for line in table.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 {
+            continue; // 表头 / 空行 / 统计行
+        }
+        let (dest, gateway, flags, netif) = (f[0], f[1], f[2], f[3]);
+        match dest {
+            "default" => {
+                audit.default_rows += 1;
+                if flags.contains('I') && netif == physical_interface {
+                    audit.scoped_default_gateway = Some(gateway.to_string());
+                }
+            }
+            "0/1" | "0.0.0.0/1" => audit.capture_0_1 = Some(netif.to_string()),
+            "128/1" | "128.0.0.0/1" => audit.capture_128_1 = Some(netif.to_string()),
+            _ => {
+                if dest.parse::<std::net::Ipv4Addr>().is_ok()
+                    && flags.contains('G')
+                    && flags.contains('H')
+                    && netif == physical_interface
+                {
+                    audit.bypass_hosts.push((dest.to_string(), gateway.to_string()));
+                }
+            }
+        }
+    }
+    audit
+}
+
+/// 读**当前**路由表并审计（只读：一次 `netstat -rn -f inet`）。
+pub fn current_route_audit(physical_interface: &str) -> Result<RouteAudit> {
+    validate_interface_name(physical_interface)?;
+    let out = run(crate::tools::NETSTAT, &args(&["-rn", "-f", "inet"]))?;
+    Ok(parse_netstat_inet(&out, physical_interface))
+}
+
+/// 一次 TUN 生命周期里累积的路由审计记录（按发生顺序）。
+///
+/// `None` = 这次采样**读不到**路由表（`netstat` 失败）—— 必须如实记「不可判读」，
+/// 不许静默跳过（否则现场包里会「少一段」而没人知道）。
+#[derive(Debug, Clone, Default)]
+pub struct RouteAuditLog {
+    records: Vec<(RouteAuditPhase, Option<RouteAudit>)>,
+}
+
+impl RouteAuditLog {
+    pub fn push(&mut self, phase: RouteAuditPhase, audit: Option<RouteAudit>) {
+        self.records.push((phase, audit));
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// 取走全部记录（调用方负责落盘；App 侧在 `start()` 返回后统一记）。
+    pub fn take(&mut self) -> Vec<(RouteAuditPhase, Option<RouteAudit>)> {
+        std::mem::take(&mut self.records)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +603,101 @@ destination: default
         let r = parse_route_get(sample).expect("默认路由仍应解析");
         assert_eq!(r.interface, "en0");
         assert_eq!(r.gateway, Some("192.168.0.1".parse().unwrap()));
+    }
+
+    // -----------------------------------------------------------------------
+    // task-176：路由表审计（真实样例；地址用文档网段，**结构**照抄现场）
+    // -----------------------------------------------------------------------
+
+    /// 健康会话的 `netstat -rn -f inet` 形态（结构照抄
+    /// `docs/09-network-drop/LOOPBACK-ROUTE-BASELINE.md:27-32` 的实测样例）：
+    /// **两条 default**，其中一条带 `I`(IFSCOPE) 落在物理网卡上。
+    const HEALTHY_TABLE: &str = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags        Netif Expire
+0/1                utun6              UScg                utun6
+default            192.168.0.1        UGScg                 en0
+default            192.168.0.1        UGScIg                en0
+127                192.168.0.1        UGSc                  en0
+127.0.0.1          127.0.0.1          UH                    lo0
+198.18.0.1         198.18.0.1         UH                  utun6
+";
+
+    /// 事故现场包的形态（**结构**照抄，地址换成文档网段 203.0.113.0/24）：
+    /// **只有一条 default**（系统的，没有 `I`）；`0/1` 捕获在；两条节点 `/32` 旁路仍在。
+    const INCIDENT_TABLE: &str = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags        Netif Expire
+0/1                utun6              UScg                utun6
+default            192.168.0.1        UGScg                 en0
+203.0.113.7        192.168.0.1        UGHS                  en0
+203.0.113.9        192.168.0.1        UGHS                  en0
+127.0.0.1          127.0.0.1          UH                    lo0
+198.18.0.1         198.18.0.1         UH                  utun6
+192.168.0.11       0:12:42:69:f:ca    UHLWI                 en0   1199
+192.168.0.1        f8:ce:21:e5:36:2a  UHLWIi                en0   1196
+";
+
+    #[test]
+    fn route_audit_reads_the_scoped_default_from_a_healthy_table() {
+        let a = parse_netstat_inet(HEALTHY_TABLE, "en0");
+        assert_eq!(a.default_rows, 2, "健康形态有两条 default（系统 + scoped）");
+        assert_eq!(a.scoped_default_gateway.as_deref(), Some("192.168.0.1"));
+        assert_eq!(a.capture_0_1.as_deref(), Some("utun6"));
+        assert!(!a.scoped_default_missing());
+        assert!(
+            !a.is_anomaly(RouteAuditPhase::AfterCommitRoutes),
+            "接管后这条路由在 ⇒ 不是异常"
+        );
+        let s = a.summary(RouteAuditPhase::AfterCommitRoutes);
+        assert!(s.contains("的作用域默认路由**在**"), "{s}");
+        assert!(s.contains("192.168.0.1") && s.contains("0/1 → utun6"), "{s}");
+        assert!(s.contains("CommitRoutes 之后"), "采样时点必须写进日志：{s}");
+    }
+
+    #[test]
+    fn route_audit_flags_the_missing_scoped_default_after_commit() {
+        let a = parse_netstat_inet(INCIDENT_TABLE, "en0");
+        assert_eq!(a.default_rows, 1, "事故形态只有系统的 default");
+        assert!(
+            a.scoped_default_missing(),
+            "没有带 I 标志的 default ⇒ scoped 默认路由缺失"
+        );
+        assert!(a.is_anomaly(RouteAuditPhase::AfterCommitRoutes));
+        assert!(a.is_anomaly(RouteAuditPhase::WatchdogChanged));
+        assert!(
+            !a.is_anomaly(RouteAuditPhase::AfterTunUp)
+                && !a.is_anomaly(RouteAuditPhase::AfterRollback),
+            "接管前 / 回滚后本来就不该有这条路由 ⇒ 不许报警（否则是噪声）"
+        );
+        let s = a.summary(RouteAuditPhase::AfterCommitRoutes);
+        // **自包含**：一条日志就能判读「缺了 + 后果 + 证据」
+        assert!(s.contains("的作用域默认路由**缺失**"), "{s}");
+        assert!(s.contains("ENETUNREACH"), "{s}");
+        assert!(s.contains("task-172"), "{s}");
+        assert!(s.contains("0/1 → utun6"), "{s}");
+        assert!(s.contains("旁路 host 路由 2 条"), "{s}");
+        assert!(s.contains("default 行 1 条"), "{s}");
+        assert!(s.contains("CommitRoutes 之后"), "采样时点必须写进日志：{s}");
+    }
+
+    #[test]
+    fn route_audit_reads_both_capture_routes_and_ignores_arp_neighbours() {
+        let table =
+            format!("{INCIDENT_TABLE}128/1              utun6              UScg                utun6\n");
+        let a = parse_netstat_inet(&table, "en0");
+        assert_eq!(a.capture_128_1.as_deref(), Some("utun6"));
+        // ARP 邻居（UHLWI，没有 G）不许被算成节点旁路
+        assert_eq!(a.bypass_hosts.len(), 2, "{:?}", a.bypass_hosts);
+        assert!(a.bypass_hosts.iter().all(|(_, gw)| gw == "192.168.0.1"));
+    }
+
+    #[test]
+    fn route_audit_rejects_a_bad_interface_name() {
+        assert!(current_route_audit("-rf").is_err());
     }
 }

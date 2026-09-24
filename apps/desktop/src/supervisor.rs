@@ -32,6 +32,7 @@ use xt_core::xray::{
     MIN_CORE_VERSION_NATIVE_TUN,
 };
 use xt_proto::{DatapathPlan, DefaultRouteMode, DnsMode, Request, TunUpRequest};
+use xt_tun::macos::route::{RouteAudit, RouteAuditLog, RouteAuditPhase};
 
 use crate::helper_client::HelperClient;
 use crate::state::{profile_for, CoreRuntime};
@@ -465,6 +466,12 @@ pub struct Supervisor {
     tun_fd: Option<RawFd>,
     session_id: Option<String>,
     physical_interface: Option<String>,
+    /// task-176：本次 TUN 生命周期里**按采样时点**累积的路由审计。
+    ///
+    /// 为什么不在这里直接落盘：落盘要用 `AppState`，而 `supervisor` 拿不到它。
+    /// `start()` 返回后由调用方（`commands/core.rs`）`take_route_audits()` 统一落盘 ——
+    /// 这样**成功与失败两条路径都会记**，日志里也带得上采样时点。
+    route_audits: RouteAuditLog,
 }
 
 impl Supervisor {
@@ -614,6 +621,9 @@ impl Supervisor {
             let tun_started = std::time::Instant::now();
             tun_up_with_self_heal(helper, request)?;
             self.session_id = Some(session_id.clone());
+            // task-176：**采样时点 1/3** —— utun 与旁路路由已装，默认接管还没发生。
+            // 此时「作用域默认路由」本来就不该有（接管前），所以这一条只作基线，不报警。
+            self.audit_routes(RouteAuditPhase::AfterTunUp);
 
             let (info, fd) = helper
                 .take_tun_fd(&session_id)
@@ -726,7 +736,12 @@ impl Supervisor {
                 "启动阶段耗时（含两次探测，已并行）"
             );
             match gate {
-                Ok(()) => {}
+                Ok(()) => {
+                    // task-176：**采样时点 2/3（关键）** —— 默认路由已接管、DNS 已切。
+                    // 从这里开始，绑了物理网卡的 `direct` 出站必须有一条作用域默认路由
+                    // 才能出去；缺了 ⇒ `ENETUNREACH`（task-172 的形态）。
+                    self.audit_routes(RouteAuditPhase::AfterCommitRoutes);
+                }
                 Err(GateFailure::Commit(msg)) => {
                     // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
                     // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
@@ -922,8 +937,26 @@ impl Supervisor {
             // SAFETY: fd 由本 struct 独占；关闭后 utun 接口（若无其它持有者）会消失。
             unsafe { libc::close(fd) };
         }
+        // task-176：**采样时点 3/3** —— 回滚之后（必须**先取名字再清** `physical_interface`）。
+        self.audit_routes(RouteAuditPhase::AfterRollback);
         self.physical_interface = None;
         Ok(())
+    }
+
+    /// task-176：按采样时点记一次路由审计（**只读**一次 `netstat -rn -f inet`）。
+    ///
+    /// 读不到就如实记 `None` —— 现场包里要能看出「这次没采到」，不许静默跳过。
+    fn audit_routes(&mut self, phase: RouteAuditPhase) {
+        let audit = self
+            .physical_interface
+            .as_deref()
+            .and_then(|iface| xt_tun::macos::route::current_route_audit(iface).ok());
+        self.route_audits.push(phase, audit);
+    }
+
+    /// 取走本次 TUN 生命周期累积的路由审计（由 `commands/core.rs` 统一落盘）。
+    pub fn take_route_audits(&mut self) -> Vec<(RouteAuditPhase, Option<RouteAudit>)> {
+        self.route_audits.take()
     }
 
     pub fn build_tun_request(
@@ -1983,6 +2016,35 @@ mod tests {
     }
 
     /// URL 主机判 IP 字面量必须**严格**：把域名误判成 IP，「不依赖解析」就是假的。
+    /// **task-176 守卫（L3 文本层）**：三个采样时点必须在生产源码里各出现一次，
+    /// 且都通过 `self.audit_routes(...)` 记录。
+    ///
+    /// 为什么这里只有文本层：`Supervisor::start` 要真 core/helper/root 才能跑；
+    /// **端到端行为证据**在 `commands/core.rs` 的 `log_route_audits` 行为测试
+    /// （真的写盘 + 读回）与 `xt-tun` 的解析测试（真实样例 → `Some/None`）。
+    /// 这条只负责「**别把采样点删掉**」：删任意一处 ⇒ 本测试红。
+    #[test]
+    fn every_tun_phase_is_audited_in_production_source() {
+        let prod = include_str!("supervisor.rs")
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or("");
+        for phase in ["AfterTunUp", "AfterCommitRoutes", "AfterRollback"] {
+            let needle = format!("RouteAuditPhase::{phase}");
+            assert_eq!(
+                prod.matches(&needle).count(),
+                1,
+                "{phase} 的采样点必须恰好一处（现在 {} 处）",
+                prod.matches(&needle).count()
+            );
+        }
+        assert_eq!(
+            prod.matches("self.audit_routes(").count(),
+            3,
+            "三个采样点都要走 `audit_routes`（否则不会进审计日志）"
+        );
+    }
+
     #[test]
     fn url_host_is_ip_literal_is_strict() {
         assert!(url_host_is_ip_literal("http://1.1.1.1/"));

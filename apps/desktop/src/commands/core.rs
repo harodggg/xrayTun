@@ -177,8 +177,12 @@ pub(crate) async fn start_core(
             },
         )
         .await;
+    // task-176：**先取走路由审计再 drop**（审计要落盘，不能随 supervisor 一起丢）。
+    // 放在 `match result` 之前 ⇒ **成功与失败两条路径都会记**。
+    let route_audits = supervisor.take_route_audits();
     drop(helper);
     drop(supervisor);
+    log_route_audits(state, &route_audits);
 
     let runtime = match result {
         Ok(rt) => rt,
@@ -1109,6 +1113,43 @@ pub(crate) fn spawn_monitors(app: &AppHandle, baseline: Option<Egress>, pid: Opt
     spawn_tunnel_watchdog(app, pid, guard);
 }
 
+/// task-176：把一次 TUN 生命周期里累积的**路由审计**写进可回溯的 App 日志。
+///
+/// 口径（与 `task-121` 的「事件 vs 每秒计数」一致）：
+/// * **按次**：一次会话 2–3 条（TunUp 后 / 接管后 / 回滚后），看门狗**只在状态变化时**；
+/// * `scoped_default` 缺失且时点是「接管后 / 看门狗变化」⇒ `warn` + 哨兵记录
+///   （`task-172` 的形态：绑该网卡的直连会 `ENETUNREACH`）；
+/// * 「接管前 / 回滚后」缺这条路由**本来就不该有** ⇒ 只记 `info`（否则是噪声）；
+/// * 采不到路由表（`netstat` 失败）⇒ 记一条 `warn`「不可判读」，**不许静默跳过**。
+pub(crate) fn log_route_audits(
+    state: &AppState,
+    records: &[(
+        xt_tun::macos::route::RouteAuditPhase,
+        Option<xt_tun::macos::route::RouteAudit>,
+    )],
+) {
+    for (phase, audit) in records {
+        let Some(audit) = audit else {
+            state.log(
+                "app",
+                "warn",
+                format!(
+                    "路由审计[{}]：读不到路由表（netstat 失败）⇒ 本次不可判读",
+                    phase.label()
+                ),
+            );
+            continue;
+        };
+        let message = audit.summary(*phase);
+        if audit.is_anomaly(*phase) {
+            record(state, "route_audit", "warn", &message);
+            state.log("app", "warn", message);
+        } else {
+            state.log("app", "info", message);
+        }
+    }
+}
+
 pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -1118,6 +1159,9 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
         let mut backoff_until = 0u64;
         // 上一次「只有单侧失败」的留痕文本：只在**形状变化**时落盘，避免刷屏。
         let mut last_partial: Option<String> = None;
+        // task-176：上一次观测到的「作用域默认路由在不在」（`None` = 还没采到）。
+        // **只在变化时**落盘 —— 看门狗每 10 s 一轮，每轮都记就是刷屏。
+        let mut last_scoped_default_present: Option<bool> = None;
         let mut last_mono = std::time::Instant::now();
         let mut last_wall = std::time::SystemTime::now();
         loop {
@@ -1169,6 +1213,25 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                 .unwrap_or((false, None, 10808, String::new()));
             if !watchdog_should_watch(wants, pid, pid_now) {
                 return;
+            }
+
+            // task-176：**作用域默认路由**的状态变化（每轮只读一次 `netstat`；只在
+            // 「在 ↔ 不在」（含首轮基线）时落盘 —— 口径见 `log_route_audits`）。
+            {
+                let audit = xt_tun::macos::route::default_route()
+                    .ok()
+                    .and_then(|d| xt_tun::macos::route::current_route_audit(&d.interface).ok());
+                let present = audit.as_ref().map(|a| !a.scoped_default_missing());
+                if present != last_scoped_default_present {
+                    last_scoped_default_present = present;
+                    log_route_audits(
+                        &state,
+                        &[(
+                            xt_tun::macos::route::RouteAuditPhase::WatchdogChanged,
+                            audit,
+                        )],
+                    );
+                }
             }
 
             // **国内 + 境外都要探**（与门禁同一份目标清单，见 `watchdog_probe_all`）。
@@ -3437,6 +3500,106 @@ mod tests {
             assert_eq!(streak.record(&round), 0, "未达门槛的轮不许累计");
         }
         assert!(!should_rebuild_tunnel(true, true, streak.rounds()));
+    }
+
+    // -----------------------------------------------------------------------
+    // task-176：路由审计落盘（**行为级**：真的写进 App 日志 + 哨兵）
+    // -----------------------------------------------------------------------
+
+    use xt_core::store::Store;
+
+    /// 事故形态的路由表（只有系统的 default、没有 `I` 标志；`0/1` 捕获在；两条 `/32`）。
+    fn audit_missing_scoped_default() -> xt_tun::macos::route::RouteAudit {
+        xt_tun::macos::route::parse_netstat_inet(
+            "0/1                utun6              UScg                utun6\n\
+             default            192.168.0.1        UGScg                 en0\n\
+             203.0.113.7        192.168.0.1        UGHS                  en0\n\
+             203.0.113.9        192.168.0.1        UGHS                  en0\n",
+            "en0",
+        )
+    }
+
+    fn route_audit_state(tag: &str) -> (AppState, Store) {
+        let dir = std::env::temp_dir().join(format!("xt-routeaudit-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Store::new(dir);
+        (AppState::new(store.clone()), store)
+    }
+
+    /// **L1 行为级**：接管后缺「作用域默认路由」⇒ App 落盘日志里出现**可直接判读**的
+    /// `warn`（含后果与证据），且哨兵 `logs/anomalies.jsonl` 里有一条 `route_audit`。
+    ///
+    /// **反向**：同一份缺失在「接管前」是**正常**的 ⇒ 不许报警（否则接管流程必刷屏）。
+    #[test]
+    fn a_missing_scoped_default_after_commit_is_logged_loudly() {
+        use crate::commands::incident::anomaly_file;
+        use crate::state::LogEntry;
+
+        let (state, store) = route_audit_state("commit");
+        let missing = audit_missing_scoped_default();
+        assert!(missing.scoped_default_missing(), "夹具必须是缺失形态");
+        log_route_audits(
+            &state,
+            &[(
+                xt_tun::macos::route::RouteAuditPhase::AfterCommitRoutes,
+                Some(missing.clone()),
+            )],
+        );
+
+        let lines: Vec<LogEntry> = store.tail_logs(50);
+        let warn = lines
+            .iter()
+            .find(|l| l.level == "warn" && l.message.contains("路由审计"))
+            .unwrap_or_else(|| panic!("接管后缺 scoped 默认路由必须落一条 warn：{lines:?}"));
+        assert!(warn.message.contains("的作用域默认路由**缺失**"), "{}", warn.message);
+        assert!(warn.message.contains("ENETUNREACH"), "{}", warn.message);
+        assert!(
+            warn.message.contains("CommitRoutes 之后"),
+            "采样时点必须写进日志本身：{}",
+            warn.message
+        );
+        let sentinel = std::fs::read_to_string(anomaly_file(store.root())).unwrap_or_default();
+        assert!(sentinel.contains("route_audit"), "哨兵里应有一条 route_audit：{sentinel}");
+
+        // 反向：**接管前**缺这条路由是正常的 ⇒ 只 info、不 warn、不写哨兵
+        let (state2, store2) = route_audit_state("tunup");
+        log_route_audits(
+            &state2,
+            &[(xt_tun::macos::route::RouteAuditPhase::AfterTunUp, Some(missing))],
+        );
+        let lines2: Vec<LogEntry> = store2.tail_logs(50);
+        assert!(
+            lines2.iter().any(|l| l.message.contains("路由审计")),
+            "每次采样都要留痕：{lines2:?}"
+        );
+        assert!(
+            lines2.iter().all(|l| l.level != "warn"),
+            "接管前缺这条路由是正常的，不许报警：{lines2:?}"
+        );
+        let sentinel2 = std::fs::read_to_string(anomaly_file(store2.root())).unwrap_or_default();
+        assert!(sentinel2.is_empty(), "接管前不该写哨兵：{sentinel2}");
+
+        let _ = std::fs::remove_dir_all(store.root());
+        let _ = std::fs::remove_dir_all(store2.root());
+    }
+
+    /// **L1 行为级**：采不到路由表时**如实记「不可判读」**，不许静默跳过。
+    #[test]
+    fn an_unreadable_route_table_is_recorded_as_unavailable() {
+        use crate::state::LogEntry;
+        let (state, store) = route_audit_state("unavailable");
+        log_route_audits(
+            &state,
+            &[(xt_tun::macos::route::RouteAuditPhase::AfterRollback, None)],
+        );
+        let lines: Vec<LogEntry> = store.tail_logs(50);
+        let line = lines
+            .iter()
+            .find(|l| l.message.contains("路由审计"))
+            .unwrap_or_else(|| panic!("采样失败也要留痕：{lines:?}"));
+        assert!(line.message.contains("不可判读"), "{}", line.message);
+        assert!(line.message.contains("回滚之后"), "采样时点要写进日志：{}", line.message);
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     /// **轮内重试**是本卡最高性价比的杠杆（task-100 实测：失败后同目标下一次
