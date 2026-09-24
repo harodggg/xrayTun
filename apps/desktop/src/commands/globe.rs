@@ -41,6 +41,109 @@ pub struct GlobeRoute {
     pub counter_resets: u32,
     /// 出口节点的名字。
     pub node_name: String,
+    /// 这条航线的流量**归属**（task-179 / A20）。
+    pub traffic: TrafficProvenance,
+}
+
+/// 出口累计流量的**归属**（task-179 / A20）。
+///
+/// 旧实现取「所有出站里 up+down 最大的那个」当出口，注释自己写着
+/// 「最大的那个就是节点出站」—— **那是假设，不是验证**：真凶可能是 `direct`，
+/// 而用户会得出「我的节点扛了 8 GiB」这种数据结论。
+///
+/// 现在只认**具体 tag**：拿不到就如实 `unattributed`（`verified=false` + `reason` 必填）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrafficProvenance {
+    /// 这个数值**真正来自哪个** outbound tag（未归属 = `None`）。
+    pub tag: Option<String>,
+    /// 该 tag 是不是**节点出站**（`node-*`）——不是的话界面不许说「我的节点」。
+    pub is_node_outbound: bool,
+    /// 归属是否**已验证**（拿到了具体 tag 且统计可用）。
+    pub verified: bool,
+    /// `verified = false` 时必填且具体。
+    pub reason: Option<String>,
+}
+
+impl TrafficProvenance {
+    /// 有具体 tag ⇒ 已验证。
+    fn verified_for(tag: &str) -> Self {
+        Self {
+            tag: Some(tag.to_string()),
+            is_node_outbound: tag.starts_with("node-"),
+            verified: true,
+            reason: None,
+        }
+    }
+
+    /// 归不到任何 tag ⇒ 如实说「未归属」，并给出**具体**原因。
+    fn unattributed(reason: impl Into<String>) -> Self {
+        Self {
+            tag: None,
+            is_node_outbound: false,
+            verified: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+/// 「本机 · <IP>」这条陈述的**可验证来源**（task-179 / A21）。
+///
+/// 旧实现只在**读到**物理网卡时才加 `curl --interface`；读不到就走系统默认路由
+/// —— **隧道开着时那就是从节点出去**，服务看到的是节点出口，而界面仍写「本机」。
+/// 那是「陈述比事实强」，方向上还是隐私判断。
+///
+/// 现在把「来不来自本机」做成字段：只有**绑了物理网卡且拿到了位置**才 `trusted = true`；
+/// 否则 `trusted = false` **且 `reason` 必填**（界面据此降级文案）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SelfCheck {
+    /// 服务看到的那一个出口 IP（没问到 = `None`）。
+    pub ip: Option<String>,
+    /// **实际**绑定的物理网卡 —— 只有可信的那次查询才有值。
+    pub bound_interface: Option<String>,
+    /// 只有「绑了物理网卡 + 拿到了位置」才为 true。
+    pub trusted: bool,
+    /// `trusted = false` 时必填且具体。
+    pub reason: Option<String>,
+}
+
+impl SelfCheck {
+    /// 判据（**纯函数**：`字段 = X ⇒ 呈现 = Y` 的后端侧断言就钉在这里）。
+    fn judge(iface: Option<&str>, origin: Option<&GeoLocation>) -> Self {
+        match (iface, origin) {
+            (Some(iface), Some(loc)) => Self {
+                ip: Some(loc.ip.clone()),
+                bound_interface: Some(iface.to_string()),
+                trusted: true,
+                reason: None,
+            },
+            (Some(iface), None) => Self {
+                ip: None,
+                bound_interface: None,
+                trusted: false,
+                reason: Some(format!(
+                    "绑定 {iface} 的查询没有成功（两个数据源都没返回或绑卡失败）⇒ 本机位置未验证"
+                )),
+            },
+            (None, Some(loc)) => Self {
+                ip: Some(loc.ip.clone()),
+                bound_interface: None,
+                trusted: false,
+                reason: Some(
+                    "读不到物理默认路由 ⇒ 查询走的是系统默认路由；隧道开着时那就是节点出口，\
+                     查到的不是本机"
+                        .to_string(),
+                ),
+            },
+            (None, None) => Self {
+                ip: None,
+                bound_interface: None,
+                trusted: false,
+                reason: Some(
+                    "读不到物理默认路由，且两个数据源都没返回 ⇒ 本机位置未知".to_string(),
+                ),
+            },
+        }
+    }
 }
 
 /// 地球仪数据。
@@ -51,6 +154,8 @@ pub struct GlobeData {
     pub origin: Option<GeoLocation>,
     /// 拿不到位置时的原因，界面如实展示。
     pub error: Option<String>,
+    /// 「本机 · IP」这条陈述的**可验证来源**（task-179 / A21）。
+    pub self_check: SelfCheck,
 }
 
 /// 取物理网卡名 —— 绑它才能绕过隧道，否则查询会从节点出去、查到节点的位置。
@@ -83,13 +188,13 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
             i.nodes
                 .iter()
                 .find(|n| n.id == id)
-                .map(|n| (n.name.clone(), n.address.clone()))
+                .map(|n| (n.name.clone(), n.address.clone(), n.outbound_tag()))
         })
     });
     let node = node.flatten();
 
     // 节点地址解析成 IP（域名取第一个）
-    let exit_ip: Option<IpAddr> = node.as_ref().and_then(|(_, addr)| {
+    let exit_ip: Option<IpAddr> = node.as_ref().and_then(|(_, addr, _)| {
         xt_core::net::resolve_host(addr)
             .into_iter()
             .find(|ip| !is_private(*ip))
@@ -116,6 +221,9 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
 
     let origin = self_task.await.ok().flatten();
     let exit = exit_task.await.ok().flatten();
+    // task-179 / A21：把「来不来自本机」判出来（纯函数，见 `SelfCheck::judge`）——
+    // 读不到物理网卡时查到的是**节点出口**，界面据此降级文案，不许再说「本机」。
+    let self_check = SelfCheck::judge(iface.as_deref(), origin.as_ref());
     let error = if origin.is_none() {
         Some("查本机位置失败（两个数据源都没返回）".to_string())
     } else if exit_ip_str.is_some() && exit.is_none() {
@@ -125,15 +233,17 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
     };
     let route = match (origin.clone(), exit) {
         (Some(from), Some(to)) => {
-            // 实测流量：取当前节点的累计字节，让飞机密度有依据
-            let traffic = current_exit_traffic().await;
+            // 实测流量：**只认该节点的 outbound tag**（task-179 / A20 —— 不再取最大）
+            let node_tag = node.as_ref().map(|(_, _, tag)| tag.clone());
+            let traffic = current_exit_traffic(node_tag.as_deref()).await;
             Some(GlobeRoute {
                 from,
                 to,
                 bytes: traffic.bytes,
                 traffic_ok: traffic.ok,
                 counter_resets: traffic.resets,
-                node_name: node.map(|(n, _)| n).unwrap_or_else(|| "节点".into()),
+                node_name: node.map(|(n, _, _)| n).unwrap_or_else(|| "节点".into()),
+                traffic: traffic.provenance.clone(),
             })
         }
         _ => None,
@@ -143,6 +253,7 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
         route,
         origin,
         error,
+        self_check,
     })
 }
 
@@ -209,40 +320,57 @@ async fn query_self(interface: Option<String>) -> Option<GeoLocation> {
 ///
 /// **不用 0 表示「没查到」**：0 是合法读数（真的没有流量），混在一起会让
 /// 地球仪在查询失败时显示「出口累计 0 B」——那是假读数。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ExitTraffic {
     bytes: u64,
     ok: bool,
     /// 观察到的计数器归零次数（核心重启）。
     resets: u32,
+    /// 这个数字的**归属**（task-179 / A20）：来自哪个 tag、可不可信。
+    provenance: TrafficProvenance,
 }
 
 impl ExitTraffic {
-    /// 这次没查到：`bytes` 是占位 0，调用方必须看 `ok`。
-    fn unavailable() -> Self {
-        Self { bytes: 0, ok: false, resets: 0 }
+    /// 这次没查到 / 归不到：`bytes` 是占位 0、`provenance` 明确「未归属 + 原因」。
+    fn unattributed(reason: impl Into<String>) -> Self {
+        Self {
+            bytes: 0,
+            ok: false,
+            resets: 0,
+            provenance: TrafficProvenance::unattributed(reason),
+        }
     }
 }
 
-/// 从一次采样里算出口累计字节 —— 纯函数，便于测试（这一段的错法都是
-/// 「数字悄悄不对」）。
+/// 从一次采样里算**该节点出站**的累计字节 —— 纯函数，便于测试
+/// （这一段的错法都是「数字悄悄不对」）。
 ///
-/// 出口里流量最大的那个就是节点出站。累计值跨核心重启保持单调，
-/// 见 [`MonotonicCounters`]。
+/// # task-179 / A20：**不再用「取最大」当归属**
+///
+/// 旧实现取「所有出站里 up+down 最大的那个」，注释写着「最大的那个就是节点出站」
+/// —— 那是**假设**：真凶可能是 `direct`，用户却会得出「我的节点扛了 8 GiB」。
+/// 现在只认**具体 tag**（`node-<id>`）；拿不到就给「未归属」+ 具体原因。
+/// 累计值跨核心重启保持单调，见 [`MonotonicCounters`]。
 fn read_exit_traffic(
     stats: Option<&[StatEntry]>,
     counters: &mut MonotonicCounters,
+    node_tag: Option<&str>,
 ) -> ExitTraffic {
+    let Some(node_tag) = node_tag else {
+        return ExitTraffic::unattributed("没有选中的节点 ⇒ 归不到任何 outbound（不挑「最大的」顶上）");
+    };
     let Some(stats) = stats else {
-        return ExitTraffic::unavailable();
+        return ExitTraffic::unattributed("查统计失败（核心没在跑或 API 不可达）⇒ 归属未验证");
     };
     let (by_tag, resets) = monotonic_traffic_by_tag(counters, stats, "outbound");
-    let bytes = by_tag
-        .values()
-        .map(|(up, down)| up.saturating_add(*down))
-        .max()
-        .unwrap_or(0);
-    ExitTraffic { bytes, ok: true, resets }
+    // **只认这个 tag**：别的出站（例如 direct）流量再大也不算它的
+    let (up, down) = by_tag.get(node_tag).copied().unwrap_or((0, 0));
+    ExitTraffic {
+        bytes: up.saturating_add(down),
+        ok: true,
+        resets,
+        provenance: TrafficProvenance::verified_for(node_tag),
+    }
 }
 
 /// 进程内的出口累计读数表：把「核心重启后计数器归零」补偿掉，见 topology.rs。
@@ -250,8 +378,10 @@ static EXIT_COUNTERS: OnceLock<Mutex<MonotonicCounters>> = OnceLock::new();
 
 /// 当前出口节点的累计字节。查不到时 `ok=false`（而不是把 0 当读数）。
 ///
+/// `node_tag` 来自选中节点的 [`xt_core::model::Node::outbound_tag`]；拿不到就如实「未归属」。
+///
 /// 锁包住查询：单调化依赖「采样顺序 = 观察顺序」，理由同 topology.rs。
-async fn current_exit_traffic() -> ExitTraffic {
+async fn current_exit_traffic(node_tag: Option<&str>) -> ExitTraffic {
     let addr: std::net::SocketAddr =
         ([127, 0, 0, 1], xt_core::xray::config::API_PORT).into();
     let mut counters = EXIT_COUNTERS
@@ -261,7 +391,7 @@ async fn current_exit_traffic() -> ExitTraffic {
     let stats = xt_core::xray::query_stats(addr, Duration::from_millis(900))
         .await
         .ok();
-    read_exit_traffic(stats.as_deref(), &mut counters)
+    read_exit_traffic(stats.as_deref(), &mut counters, node_tag)
 }
 
 #[cfg(test)]
@@ -307,10 +437,16 @@ mod tests {
     /// 「出口累计 0 B」——那是一次查询失败，不是真的没有流量。
     #[test]
     fn unavailable_stats_are_flagged_rather_than_zero() {
-        let t = read_exit_traffic(None, &mut MonotonicCounters::new());
+        let t = read_exit_traffic(None, &mut MonotonicCounters::new(), Some("node-a"));
         assert!(!t.ok, "查不到必须标记为不可用");
         assert_eq!(t.bytes, 0);
         assert_eq!(t.resets, 0);
+        assert!(!t.provenance.verified, "查不到时归属也不许标成「已验证」");
+        assert!(
+            t.provenance.reason.as_deref().is_some_and(|r| !r.is_empty()),
+            "未验证必须给具体原因：{:?}",
+            t.provenance
+        );
     }
 
     /// **primary 回归**：核心重启让计数器归零，地球仪的累计字节不得回退。
@@ -321,7 +457,7 @@ mod tests {
             name: "outbound>>>node-a>>>traffic>>>downlink".into(),
             value: 8_600_000_000,
         }];
-        let first = read_exit_traffic(Some(&big), &mut counters);
+        let first = read_exit_traffic(Some(&big), &mut counters, Some("node-a"));
         assert!(first.ok);
         assert_eq!(first.bytes, 8_600_000_000);
         assert_eq!(first.resets, 0);
@@ -331,7 +467,7 @@ mod tests {
             name: "outbound>>>node-a>>>traffic>>>downlink".into(),
             value: 0,
         }];
-        let second = read_exit_traffic(Some(&reset), &mut counters);
+        let second = read_exit_traffic(Some(&reset), &mut counters, Some("node-a"));
         assert!(second.ok);
         assert_eq!(second.bytes, 8_600_000_000, "重启不得让累计值归零");
         assert_eq!(second.resets, 1);
@@ -341,14 +477,22 @@ mod tests {
             name: "outbound>>>node-a>>>traffic>>>downlink".into(),
             value: 1_024,
         }];
-        assert_eq!(read_exit_traffic(Some(&grown), &mut counters).bytes, 8_600_001_024);
+        assert_eq!(
+            read_exit_traffic(Some(&grown), &mut counters, Some("node-a")).bytes,
+            8_600_001_024
+        );
     }
 
-    /// 出口取「上下行合计最大的那个」；畸形名字不产生假值。
+    /// **task-179 / A20 主回归**：归属**只认具体 tag**，不是「上下行合计最大的那个」。
+    ///
+    /// 构造一个「`direct` 明显比节点出站大」的世界：旧实现（取最大）会报 direct 的
+    /// 18,000，新实现必须报**节点 tag 的** 1,800（并说明 tag 与是否节点出站）。
     #[test]
-    fn busiest_outbound_wins_and_junk_names_produce_no_bytes() {
+    fn attribution_follows_the_node_tag_not_the_busiest_outbound() {
         let stats = vec![
-            StatEntry { name: "outbound>>>direct>>>traffic>>>downlink".into(), value: 100 },
+            // direct 更大 —— 真凶可能是它，但**不许**因此算到节点头上
+            StatEntry { name: "outbound>>>direct>>>traffic>>>downlink".into(), value: 9_000 },
+            StatEntry { name: "outbound>>>direct>>>traffic>>>uplink".into(), value: 9_000 },
             StatEntry { name: "outbound>>>node-a>>>traffic>>>downlink".into(), value: 900 },
             StatEntry { name: "outbound>>>node-a>>>traffic>>>uplink".into(), value: 900 },
             // 畸形：不参与
@@ -356,14 +500,123 @@ mod tests {
             // 入站计数不能混进出口
             StatEntry { name: "inbound>>>tun>>>traffic>>>downlink".into(), value: 10_000 },
         ];
-        let t = read_exit_traffic(Some(&stats), &mut MonotonicCounters::new());
+        let t = read_exit_traffic(Some(&stats), &mut MonotonicCounters::new(), Some("node-a"));
         assert!(t.ok);
-        assert_eq!(t.bytes, 1_800, "取上下行合计最大的出口");
+        assert_eq!(t.bytes, 1_800, "必须报**节点 tag** 的合计，而不是最大的 direct");
+        assert_eq!(t.provenance.tag.as_deref(), Some("node-a"));
+        assert!(t.provenance.verified, "拿到了具体 tag ⇒ 归属已验证");
+        assert!(t.provenance.is_node_outbound, "`node-*` 是节点出站");
+        assert!(t.provenance.reason.is_none(), "已验证时不该有原因");
 
-        // 查到了统计但没有任何合法出口计数 = 真的 0（而不是「没查到」）
+        // 查到统计、但该 tag 没有计数 = 真的 0（不是「没查到」），且**归属仍是该 tag**
         let junk = vec![StatEntry { name: "outbound>>>node-a>>>traffic".into(), value: 7 }];
-        let none = read_exit_traffic(Some(&junk), &mut MonotonicCounters::new());
+        let none = read_exit_traffic(Some(&junk), &mut MonotonicCounters::new(), Some("node-a"));
         assert!(none.ok, "查到统计时 ok 必须为真");
         assert_eq!(none.bytes, 0);
+        assert_eq!(none.provenance.tag.as_deref(), Some("node-a"));
+        assert!(none.provenance.verified);
+
+        // 如果归属真的是 `direct`（例如直连规则在跑），**不许**把 `direct` 说成节点出站
+        let direct =
+            read_exit_traffic(Some(&stats), &mut MonotonicCounters::new(), Some("direct"));
+        assert_eq!(direct.bytes, 18_000, "tag=direct 时报的就是 direct 的数字");
+        assert_eq!(direct.provenance.tag.as_deref(), Some("direct"));
+        assert!(!direct.provenance.is_node_outbound, "`direct` 不是节点出站");
+        assert!(direct.provenance.verified, "拿到了具体 tag 仍算已验证归属");
+    }
+
+    /// **归不到 tag ⇒ 明确 unattributed**（不许挑一个顶上、也不许报数字）。
+    #[test]
+    fn without_a_node_tag_traffic_is_explicitly_unattributed() {
+        let stats = vec![StatEntry {
+            name: "outbound>>>direct>>>traffic>>>downlink".into(),
+            value: 9_000,
+        }];
+        let t = read_exit_traffic(Some(&stats), &mut MonotonicCounters::new(), None);
+        assert!(!t.ok);
+        assert_eq!(t.bytes, 0, "未归属时不许报任何数字（哪怕是最大的那个）");
+        assert!(!t.provenance.verified);
+        assert_eq!(t.provenance.tag, None);
+        assert!(!t.provenance.is_node_outbound);
+        assert!(t
+            .provenance
+            .reason
+            .as_deref()
+            .is_some_and(|r| !r.is_empty() && r.contains("节点")));
+    }
+
+    // -----------------------------------------------------------------------
+    // task-179 / A21：`SelfCheck` 的「字段 = X ⇒ 呈现 = Y」后端侧断言
+    // -----------------------------------------------------------------------
+
+    fn loc(ip: &str) -> GeoLocation {
+        GeoLocation {
+            ip: ip.into(),
+            country: "中国".into(),
+            city: "大理".into(),
+            lat: 25.6,
+            lon: 100.2,
+            isp: "电信".into(),
+            source: "ipwho.is".into(),
+            consistent: true,
+            sources: vec![],
+        }
+    }
+
+    /// 只有「**绑了物理网卡 + 拿到了位置**」才可信；任何一边缺 ⇒ `trusted=false` 且原因具体。
+    #[test]
+    fn self_check_is_trusted_only_when_the_query_was_bound_and_answered() {
+        let trusted = SelfCheck::judge(Some("en0"), Some(&loc("203.0.113.10")));
+        assert!(trusted.trusted);
+        assert_eq!(trusted.bound_interface.as_deref(), Some("en0"));
+        assert_eq!(trusted.ip.as_deref(), Some("203.0.113.10"));
+        assert!(trusted.reason.is_none());
+
+        // 读不到物理网卡 ⇒ 走系统默认路由；隧道开着时查到的是**节点出口** ⇒ 不许说「本机」
+        let unbound = SelfCheck::judge(None, Some(&loc("203.0.113.10")));
+        assert!(!unbound.trusted, "没绑卡时查到的可能是节点出口，不许说「本机」");
+        assert_eq!(unbound.bound_interface, None);
+        assert!(unbound
+            .reason
+            .as_deref()
+            .is_some_and(|r| !r.is_empty() && r.contains("节点出口")));
+
+        // 绑了却没答 ⇒ 未验证（原因里点名是哪张网卡）
+        let no_answer = SelfCheck::judge(Some("en0"), None);
+        assert!(!no_answer.trusted);
+        assert!(no_answer
+            .reason
+            .as_deref()
+            .is_some_and(|r| !r.is_empty() && r.contains("en0")));
+
+        let nothing = SelfCheck::judge(None, None);
+        assert!(!nothing.trusted && nothing.ip.is_none());
+        assert!(nothing.reason.as_deref().is_some_and(|r| !r.is_empty()));
+    }
+
+    /// **不变量**（界面据此判「能不能说『本机』」）：
+    /// `trusted = true` ⇔ 「绑了网卡 && 有 IP && 没写原因」；`trusted = false` ⇒ 原因非空。
+    /// 任何一边破掉，这条测试就红 —— 双向敏感性就钉在这里。
+    #[test]
+    fn trusted_iff_bound_interface_and_ip_and_no_reason() {
+        for (iface, origin) in [
+            (Some("en0"), Some(loc("203.0.113.10"))),
+            (None, Some(loc("203.0.113.10"))),
+            (Some("en0"), None),
+            (None, None),
+        ] {
+            let sc = SelfCheck::judge(iface, origin.as_ref());
+            assert_eq!(
+                sc.trusted,
+                sc.bound_interface.is_some() && sc.ip.is_some() && sc.reason.is_none(),
+                "trusted 必须等价于「绑了网卡 + 有 IP + 没原因」：{sc:?}"
+            );
+            if !sc.trusted {
+                assert!(
+                    sc.reason.as_deref().is_some_and(|r| !r.is_empty()),
+                    "`trusted=false` 必须给具体原因（不许留空）：{sc:?}"
+                );
+            }
+        }
     }
 }
