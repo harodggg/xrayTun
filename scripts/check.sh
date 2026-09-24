@@ -252,6 +252,19 @@ echo "  ✓ 站点声明的版本与 Cargo.toml 一致：$want"
 step "站点 GEO 产物一致性（gen-site-geo.py check）"
 python3 scripts/gen-site-geo.py check
 
+# ---------------------------------------------------------------- 站点 JSON-LD 产物
+
+# 2026-09-24 加「一目十行 · SpeedRead」相关项目页时发现的洞：`gen-site-jsonld.py` 的
+# **登记常量**（真源）与**盘上页面的 JSON-LD**（产物）会漂移 —— 当时 `JEVX_VERSION` 已经是 0.4.2，
+# 而 `site/jev-x-filter/index.html` 里的 `softwareVersion` 还停在 0.4.1，两个页面的结构化数据
+# 与自己的下载链接互相矛盾，而 CI 里没有任何一步会红。
+#
+# 这正是 `gen-site-geo.py check` 已经解决过的同一类问题（产物 != 生成器重算），
+# 只是当时没接线到 JSON-LD 这一路。同一条判据、同一种做法：**只读、不写盘、秒级**。
+step "站点 JSON-LD 产物一致性（gen-site-jsonld.py check）"
+python3 scripts/gen-site-jsonld.py check
+
+
 # ---------------------------------------------------------------- Rust
 
 step "clippy（warning 视为错误）"

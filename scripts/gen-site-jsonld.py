@@ -60,13 +60,13 @@ JEVX_DL = f"{JEVX_REPO}/releases/download/v{JEVX_VERSION}/jev-x-filter-{JEVX_VER
 # 美颜程度检测（素颜镜）：**没有独立仓库**，包直接由本站分发（site/beauty-meter/ 下），
 # 因此 license 指向本站自己发的 MIT 全文（site/beauty-meter/LICENSE），releaseNotes 指向项目页 ——
 # 不借用 XrayTun 的链接。（check() 要求 license 以 /LICENSE 结尾，所以文件就叫 LICENSE。）
-BM_VERSION = "1.2.0"
+BM_VERSION = "1.3.0"
 BM_LIGHT_VERSION = "1.0.0"   # 轻量版：只有美颜检测，无模型（页面上也提供下载）
 BM_PAGE = f"{BASE}/beauty-meter/"
 BM_EN_PAGE = f"{BASE}/en/beauty-meter/"
 # 完整版 50MB：官网（Cloudflare Pages）单文件上限 25 MiB，所以托管在仓库的 Releases（tag 不以 v 开头，
 # 不会触发 XrayTun 的发版工作流；已用 --latest=false 保证 XrayTun 仍是 Latest）。
-BM_RELEASE_TAG = "beauty-meter-v1.2.0"
+BM_RELEASE_TAG = "beauty-meter-v1.3.0"
 BM_DL = (f"https://github.com/harodggg/xrayTun/releases/download/{BM_RELEASE_TAG}"
          f"/beauty-meter-extension-{BM_VERSION}.zip")
 BM_DL_LIGHT = f"{BM_PAGE}beauty-meter-extension-{BM_LIGHT_VERSION}.zip"
@@ -195,7 +195,7 @@ PAGES = [
         "type": "SoftwareApplication",
         "name": "素颜镜 · 美颜程度检测",
         "version": BM_VERSION,
-        "description": "素颜镜是一个 Chrome MV3 扩展：用纯本地像素分析给出 0~100 的「美颜程度」评分，拆成磨皮去纹理、美白提亮、肤色均匀、去色低饱和、通透度压缩五个维度；悬停网页图片 0.3 秒看角标，点击展开完整报告，也可以拖拽、粘贴或选择本地图片分析。悬停图片时角标左上角还会直接给出「是否像 AI 生成」（本地模型，红=疑似 AI、绿=像真实拍摄），也可以在卡片/弹窗里按需检测（完整版 50MB，另有 74KB 轻量版只做美颜）。推理全在本机，不联网、不上传图片。它与 XrayTun 是同一个作者的两个独立项目。",
+        "description": "素颜镜是一个 Chrome MV3 扩展：用纯本地像素分析给出 0~100 的「美颜程度」评分，拆成磨皮去纹理、美白提亮、肤色均匀、去色低饱和、通透度压缩五个维度；悬停网页图片 0.3 秒看角标，点击展开完整报告，也可以拖拽、粘贴或选择本地图片分析。悬停图片时角标左上角先给出纯像素的「像素指纹」证据（虚线，约 30ms、无模型），再由本地模型给出「是否像 AI 生成」的判定（实心彩色，红=疑似 AI、绿=像真实拍摄）；报告里另有证据明细（完整版 50MB，另有 74KB 轻量版只做美颜）。推理全在本机，不联网、不上传图片。它与 XrayTun 是同一个作者的两个独立项目。",
         "os": "Chrome 109 or later (Manifest V3)",
         "application_category": "BrowserApplication",
         "help_url": BM_PAGE,
@@ -214,7 +214,7 @@ PAGES = [
         "type": "SoftwareApplication",
         "name": "Beauty Meter",
         "version": BM_VERSION,
-        "description": "Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. Hovering an image also shows an AI verdict right on the top-left corner of the badge (a local model: red = likely AI-generated, green = looks real), and the full build can run the detector on demand from the report card or popup (50MB; a 74KB light build does beautification only). All inference stays on your machine: no network, no uploads. It is a separate project by the same author as XrayTun.",
+        "description": "Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. Hovering an image first shows a pure-pixel “fingerprint” chip on the top-left corner of the badge (dashed, ~30ms, no model) and then the local model's AI verdict (solid colour: red = likely AI-generated, green = looks real), with the detailed evidence listed in the report (50MB; a 74KB light build does beautification only). All inference stays on your machine: no network, no uploads. It is a separate project by the same author as XrayTun.",
         "os": "Chrome 109 or later (Manifest V3)",
         "application_category": "BrowserApplication",
         "help_url": BM_EN_PAGE,
