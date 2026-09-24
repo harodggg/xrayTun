@@ -27,7 +27,7 @@
   v0.4.0 起还做两件**纯展示**的整理：**β** 折叠重复/类似/语义相同的信息只显示一次，**α** 标出「与评论区多数观点明显不同」的特殊观点（不隐藏）
 - [Info Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
-- 下载 v0.4.0：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip>（MIT，Chrome 120+）
+- 下载 v0.4.1：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip>（MIT，Chrome 120+）
 
 ## 相关项目：素颜镜 · 美颜程度检测（**独立项目，与 XrayTun 无关**）
 

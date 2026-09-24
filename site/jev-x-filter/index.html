@@ -40,10 +40,10 @@
   "name": "信息过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.0",
+  "softwareVersion": "0.4.1",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -173,6 +173,7 @@
           <a href="#categories">过滤类别</a>
           <a href="#decide">判定方式</a>
           <a href="#semantics">重复与特殊</a>
+          <a href="#samples">真站样本</a>
           <a href="#install">安装</a>
           <a href="#verify">验证状态</a>
           <a href="#limits">已知边界</a>
@@ -200,13 +201,13 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip"
-            >下载 v0.4.0（zip，158.7 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip"
+            >下载 v0.4.1（zip，161.1 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.4.0 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.4.1 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -378,6 +379,27 @@
         </p>
       </section>
 
+      <section class="wrap prose" id="samples">
+        <h2>v0.4.1：用户发来的三条真站样本，两个漏检都补上了</h2>
+        <p>
+          X 回复区里会有一段被折叠的「<strong>可能的垃圾信息</strong>」，点开才看得见。用户把里面的三条发来后，
+          真模型实测：两条被判 <code>block</code> / <code>hide</code>，第三条**连模型都没问**（正文只有三个字、无媒体 
+          → 本地跳过）。这一版补上两处：
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>样本</th><th>现在的判定</th><th>靠什么</th></tr></thead>
+          <tbody>
+            <tr><td><code>已老实</code>（X 标垃圾分区内，正文 3 字）</td><td><code>review</code>（隐藏成待确认，不动账号）</td><td><strong>X 自己的分区标题</strong>被当作结构信号 <code>x_spam_section</code></td></tr>
+            <tr><td><code>只入身体🥦🌰不入生活</code>（显示名「找炮友」）</td><td><code>block</code>（演练下 would=mute）</td><td>预检 + 五问（成人 0.94）</td></tr>
+            <tr><td><code>只入身体🦵💪不入生活</code>（同句变体）</td><td><code>hide</code></td><td><strong>文案农场</strong>：归一化后只有 8 个有效字符，阈值从 10 降到 8 才聚得起来</td></tr>
+          </tbody>
+        </table>
+        <p>
+          两条原则没有变：X 的分区标记只是<strong>结构信号</strong>，永远只到「隐藏成待确认」，绝不据此动账号；
+          8 字阈值也不会误伤 —— 2 个账号的农场命中还要过内容信号闸门（成人/欺骗/引流/本地特征/预检诱饵），
+          「两个人恰好发同一句 6–7 字寒暄」不会被隐藏。普通时间线里的 3 字推文仍然本地跳过，省下调用。
+        </p>
+      </section>
       <section class="wrap prose" id="install">
         <h2>安装与配置</h2>
         <p>扩展不需要构建，下载 zip 解压就是一个可直接加载的目录：</p>
@@ -419,13 +441,13 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
             <tr>
               <td>单元测试</td>
               <td><code>npm test</code></td>
-              <td><strong>228 个通过</strong>（协议契约、类别闸门与开关、预筛、农场、α/β 语义层、菜单识别与对抗、图片像素、黑名单、审计、流水线）</td>
+              <td><strong>234 个通过</strong>（协议契约、类别闸门与开关、预筛、农场、α/β 语义层、菜单识别与对抗、图片像素、黑名单、审计、流水线）</td>
             </tr>
             <tr>
               <td>真实 Chrome 端到端</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>107 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
+                <strong>116 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
                 触发按钮无盒子、菜单异步渲染、多语言菜单项、菜单里确实没有目标项）→ 判定 → 隐藏 →
                 α 徽标 / β 折叠 → 点菜单（含「隐藏档也静音」边界与「绝不猜点 + 留下诊断」）
               </td>
@@ -439,7 +461,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
               <td>真实模型验证</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                <strong>34 条真站样本</strong>、安全底线 0 违反、期望隐藏 0 未命中；β 折叠 10 · α 标记 1 · 语义调用 11：色情引流与诈骗被拦下，
+                <strong>37 条真站样本</strong>、安全底线 0 违反、期望隐藏 0 未命中；β 折叠 11 · α 标记 1 · 语义调用 12：色情引流与诈骗被拦下，
                 标题党/低质只隐藏，日常/治理新闻/性教育/泳装/健身全部放行
               </td>
             </tr>
@@ -573,7 +595,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -591,7 +613,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          信息过滤器 · Jev v0.4.0 · Chrome MV3 · 页面最后更新 2026-09-24 ·
+          信息过滤器 · Jev v0.4.1 · Chrome MV3 · 页面最后更新 2026-09-24 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>

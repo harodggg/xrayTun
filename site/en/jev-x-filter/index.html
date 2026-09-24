@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.0",
+  "softwareVersion": "0.4.1",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -173,6 +173,7 @@
           <a href="#categories">Categories</a>
           <a href="#decide">How it decides</a>
           <a href="#semantics">Duplicates &amp; outliers</a>
+          <a href="#samples">Live samples</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
           <a href="#limits">Limits</a>
@@ -202,12 +203,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/jev-x-filter-0.4.0.zip"
-            >Download v0.4.0 (zip, 158.7 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip"
+            >Download v0.4.1 (zip, 161.1 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.4.0 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.1 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -388,11 +389,33 @@
         </p>
       </section>
 
+      <section class="wrap prose" id="samples">
+        <h2>v0.4.1: three real-world samples, two misses closed</h2>
+        <p>
+          X folds suspicious replies into a hidden <strong>&ldquo;probable spam&rdquo;</strong> section in reply threads.
+          A user sent us three posts from it; the real model caught two and never even asked about the third
+          (a three-character post with no media, skipped locally). This release closes both gaps:
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>Sample</th><th>Verdict now</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td><code>已老实</code> (3 chars, inside X&rsquo;s spam section)</td><td><code>review</code> (hidden for confirmation, never an account action)</td><td><strong>X&rsquo;s own section heading</strong> is read as a structural signal (<code>x_spam_section</code>)</td></tr>
+            <tr><td><code>只入身体🥦🌰不入生活</code> (display name &ldquo;找炮友&rdquo;)</td><td><code>block</code> (would mute in dry-run)</td><td>triage + five questions (adult 0.94)</td></tr>
+            <tr><td><code>只入身体🦵💪不入生活</code> (same line, different emoji)</td><td><code>hide</code></td><td><strong>text farm</strong>: only 8 effective characters after normalisation, so the floor had to drop from 10 to 8</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Two rules stay intact: X&rsquo;s section marking is a <strong>structural signal</strong> &mdash; it can only hide as
+          &ldquo;review&rdquo;, never touch an account; and the 8-character floor cannot cause false positives, because a
+          two-account farm hit still has to pass the content-signal gate (adult / deception / solicitation / local features /
+          triage bait). Three-character posts elsewhere in the timeline are still skipped locally to save calls.
+        </p>
+      </section>
       <section class="wrap prose" id="install">
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.4.0.zip -d info-filter
+unzip jev-x-filter-0.4.1.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -431,13 +454,13 @@ unzip jev-x-filter-0.4.0.zip -d info-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td><strong>228 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
+              <td><strong>234 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>107 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
+                <strong>116 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
                 anti-item menu entries, a stale Dropdown, a trigger with no layout box, async menu rendering,
                 localised menu entries, and a menu that genuinely lacks the target item) → decide → hide →
                 α badge / β fold → click the menu (including the “mute hidden band too” boundary and
@@ -453,7 +476,7 @@ unzip jev-x-filter-0.4.0.zip -d info-filter
               <td>Real-model check</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                <strong>34 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 10 · α flags 1 · semantic calls 11: adult solicitation and scams are
+                <strong>37 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 11 · α flags 1 · semantic calls 12: adult solicitation and scams are
                 caught, clickbait and low-quality filler are hidden only, while everyday posts, moderation news,
                 sex education, swimwear and fitness posts all pass
               </td>
@@ -602,7 +625,7 @@ unzip jev-x-filter-0.4.0.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.0/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -620,7 +643,7 @@ unzip jev-x-filter-0.4.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.4.0 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.4.1 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
