@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.7",
+  "softwareVersion": "0.4.8",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/jev-x-filter-0.4.8.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/jev-x-filter-0.4.8.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -208,12 +208,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/jev-x-filter-0.4.7.zip"
-            >Download v0.4.7 (zip, 181.2 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/jev-x-filter-0.4.8.zip"
+            >Download v0.4.8 (zip, 186.0 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.4.7 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.8 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -477,13 +477,45 @@
           </tbody>
         </table>
         <p>
-          Kinds are now <strong>12</strong>: anger, joy, support, opposition, sadness, confirmation, <strong>praise, wish, greeting, social, participation</strong> and emoji-only.
+          As of v0.4.8 the taxonomy is trimmed to <strong>10</strong> classes (see below): anger, joy, support, opposition, sadness, confirmation, <strong>praise, wish, greeting, social, participation</strong> and emoji-only.
           Same switches as before (options section 1.6: on/off + fold/hide; the timeline fold honours the existing &ldquo;fold in feed&rdquo; switch).
         </p>
         <p>
           The same release fixes <strong>4 false positives and 2 misses</strong> found by independent verification: a bare
           &ldquo;不入生活&rdquo; no longer convicts, the hook no longer matches &ldquo;看福建舰/看福彩开奖&rdquo;, science/medical context is downgraded,
           and phrases such as &ldquo;我服了&rdquo; / &ldquo;难过死了&rdquo; / &ldquo;真好看&rdquo; are now classified correctly.
+        </p>
+      </section>
+      <section class="wrap prose" id="classes10">
+        <h2>v0.4.8: full text &rarr; a fixed 10 classes &rarr; fold those classes</h2>
+        <p>
+          A second real-world screenshot arrived &mdash; eight replies under a giveaway post
+          (<code>哇塞，参与啦，佳佳姐</code>, <code>报告，我想参加，可是没有周边🥺</code>, <code>中秋快乐梦想成真</code>,
+          <code>佳佳姐真的需要一份周边参加活动</code>, <code>我是真没有周边，咋搞</code>,
+          <code>中秋快乐，非常喜欢今年okx的周边，太爱了！</code>, <code>首先得有周边</code>,
+          <code>Okx的活动太高级了，周边也很漂亮</code>) &mdash; <strong>none of them was folded</strong>, together with an
+          explicit instruction: &ldquo;read the full text, classify it into a few categories, folding those is enough
+          &mdash; <strong>at most 10 categories</strong>.&rdquo;
+        </p>
+        <p>The old approach was one bespoke pattern per screenshot; real comment sections are endless. So now it classifies:</p>
+        <ul>
+          <li><strong>A fixed set of 10 classes</strong>: anger, joy, greeting/blessing, support/agreement, opposition, sadness,
+            praise, wish, participation, emoji (the old &ldquo;confirmation&rdquo;, &ldquo;blessing&rdquo; and &ldquo;social&rdquo;
+            classes were merged into support, greeting and wish respectively).</li>
+          <li><strong>Three tiers, each more permissive</strong>: &cir; core phrases (&le;12 chars) &rarr;
+            &cir; whole-string anchored templates (&le;20 chars) &rarr; &cir; <strong>full-text coverage</strong> (&le;60 chars):
+            if <strong>&ge;70% of the characters of the whole reply fall inside the low-information lexicon</strong> and one class
+            has &ge;2 characters of evidence, that class wins. <code>哇塞，参与啦，佳佳姐</code> is classified this way.</li>
+          <li><strong>Vetoes</strong>: digits or links, substantive words (because/however/actually/data/rules/time/price/give up/too few/not worth it&hellip;)
+            and advice/negation (&ldquo;别/不要/不用/请勿/记得&rdquo;) always block folding &mdash; <code>这个活动名额太少，我放弃了</code>,
+            <code>我没有时间参加这个活动</code> and <code>最好别来</code> stay untouched.</li>
+          <li>Folding is unchanged: all low-information agreement under one post is <strong>merged into a single line</strong>
+            (the earliest one stays as the representative, with per-kind counts on the bar), and the focused post itself is never folded.</li>
+        </ul>
+        <p>
+          Real-Chrome end-to-end: <strong>162/162</strong> (new scenario K: eight replies &rarr; one representative + seven folds +
+          &ldquo;8 items: wish 4 &middot; greeting 2 &middot; praise 1 &middot; participation 1&rdquo;); unit tests <strong>330/330</strong>.
+          The independent adversarial audit reported three defects, all fixed.
         </p>
       </section>
       <section class="wrap prose" id="merge">
@@ -566,7 +598,7 @@
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.4.7.zip -d info-filter
+unzip jev-x-filter-0.4.8.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -776,7 +808,7 @@ unzip jev-x-filter-0.4.7.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.7/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.8/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -794,7 +826,7 @@ unzip jev-x-filter-0.4.7.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.4.7 · Chrome MV3 · page last updated 2026-09-25 ·
+          Info Filter · Jev v0.4.8 · Chrome MV3 · page last updated 2026-09-25 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
