@@ -27,20 +27,22 @@
   v0.4.0 起还做两件**纯展示**的整理：**β** 折叠重复/类似/语义相同的信息只显示一次，**α** 标出「与评论区多数观点明显不同」的特殊观点（不隐藏）
 - [Info Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
-- 下载 v0.4.1：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.1/jev-x-filter-0.4.1.zip>（MIT，Chrome 120+）
+- 下载 v0.4.2：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip>（MIT，Chrome 120+）
 
 ## 相关项目：素颜镜 · 美颜程度检测（**独立项目，与 XrayTun 无关**）
 
 - [素颜镜 · 美颜程度检测 页面（中文）](https://xraytun.top/beauty-meter/)：Chrome MV3 扩展，
   用**纯本地像素分析**给一张图的「美颜程度」打 0~100 分，拆成磨皮去纹理、美白提亮、肤色均匀、
   去色低饱和、通透度压缩五个维度；悬停网页图片 0.3 秒出角标，点击展开完整报告，
-  也可以拖拽/粘贴/选择本地图片在弹窗里分析。**v1.1 起完整版还能按需判断「是否像 AI 生成」**
-  ——52.5MB 的 Swin 模型与 onnxruntime-web 的 wasm **打包在扩展里**，在 MV3 offscreen 文档里
-  本地推理，**不联网**；输出三档判定（疑似 AI 生成 / 像是真实拍摄 / 无法判断），
+  也可以拖拽/粘贴/选择本地图片在弹窗里分析。**完整版还能判断「是否像 AI 生成」**
+  ——**悬停图片时角标左上角直接给出结果**（红=疑似 AI 生成 / 绿=像真实拍摄 / 灰=无法判断；
+  首次约 1~3 秒加载 52.5MB 本地模型，之后每张新图约 0.8 秒，同一张图走缓存），
+  卡片与弹窗里也可按需检测；52.5MB 的 Swin 模型与 onnxruntime-web 的 wasm **打包在扩展里**，
+  在 MV3 offscreen 文档里本地推理，**不联网**；
   并如实标注「对更新的生成模型会漏检、对重修图的真实照片可能误报」。
   **文字的 AI 识别未集成**：实测 4 个开放模型在 HC3 上准确率仅 50%~60%
 - [Beauty Meter page (English)](https://xraytun.top/en/beauty-meter/)：与中文页逐段等价
-- 下载完整版 v1.1.0：<https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.1.0/beauty-meter-extension-1.1.0.zip>（**50,027,978 字节 / 47.7 MiB**，含 AI 识别模型与 onnxruntime-web，MIT，Chrome 109+；
+- 下载完整版 v1.2.0：<https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.2.0/beauty-meter-extension-1.2.0.zip>（**50,031,764 字节 / 47.7 MiB**，含 AI 识别模型与 onnxruntime-web，MIT，Chrome 109+；
   托管在仓库 Releases —— 官网单文件上限 25 MiB）
 - 下载轻量版 v1.0.0：<https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip>（74.2 KiB，仅美颜检测，无模型文件）
 - 许可证全文：<https://xraytun.top/beauty-meter/LICENSE>（本项目**没有独立仓库**，源码随 zip 分发）

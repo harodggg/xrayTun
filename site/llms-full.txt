@@ -187,8 +187,10 @@ Jev 是纯文本模型、**看不了图**：图片只走本地肤色像素启发
 四种用法：网页图片悬停 0.3 秒出角标、点角标展开报告卡片、图片右键菜单、弹窗里拖拽/粘贴/选择本地图片
 或「分析当前页面最大的图片」。设置项包括悬停开关、延迟、最小图片尺寸、灵敏度、权重预设与站点白名单。
 
-**v1.1 起完整版还能判断「是否像 AI 生成」**：在报告卡片或弹窗里点「检测是否 AI 生成」才触发
-（悬停不会加载模型）。52.5MB 的 Swin 分类器（SMOGY-Ai-images-detector 的 ONNX q4f16 导出，
+**完整版还能判断「是否像 AI 生成」，而且悬停就直接出结果**：鼠标停在图片上，美颜角标出现的同时，
+角标**左上角**给出 AI 标识（红=疑似 AI 生成 / 绿=像真实拍摄 / 灰=无法判断；首次加载模型约 1~3 秒，
+之后每张新图约 0.8 秒，同一张图走缓存不重复推理）。设置页可关掉「悬停时自动检测 AI」，
+回到「显示可点的 AI? 标识、点了才推理」；报告卡片与弹窗里也保留了按需检测按钮。52.5MB 的 Swin 分类器（SMOGY-Ai-images-detector 的 ONNX q4f16 导出，
 CC BY-NC 4.0 非商业）与 onnxruntime-web（MIT）的 wasm **打包在扩展里**，在 MV3 的 offscreen 文档里
 以 WebAssembly 本地推理，**全程没有网络请求**。输出「AI 生成嫌疑」百分比与三档判定
 （疑似 AI 生成 / 像是真实拍摄 / 无法判断），并显示模型名与耗时。实测：真实照片 14/15 判对、
@@ -214,7 +216,7 @@ AI 生成图 5/6 判对、合成人像（含极端美颜）3/3 判为真实拍�
 拒判；极深肤色可能只给参考值或偏保守；天生极白皙肤色天然带中等「美白」读数；大眼/瘦脸等几何形变不在
 检测范围内（需要人脸关键点模型）；分数是疑似程度而非鉴定结论。
 
-下载：完整版 v1.1.0 <https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.1.0/beauty-meter-extension-1.1.0.zip>（50,027,978 字节 / 47.7 MiB，含 AI 模型；托管在仓库 Releases，因为官网单文件上限 25 MiB）；
+下载：完整版 v1.2.0 <https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.2.0/beauty-meter-extension-1.2.0.zip>（50,031,764 字节 / 47.7 MiB，含 AI 模型；托管在仓库 Releases，因为官网单文件上限 25 MiB）；
 轻量版 v1.0.0 <https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip>（74,185 字节，仅美颜）。
 许可证全文：<https://xraytun.top/beauty-meter/LICENSE>；模型出处与改动说明随包提供
 （`src/models/ai-image/ATTRIBUTION.md`，CC BY-NC 4.0 非商业）。
