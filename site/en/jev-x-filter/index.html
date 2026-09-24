@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.4",
+  "softwareVersion": "0.4.5",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/jev-x-filter-0.4.4.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/jev-x-filter-0.4.4.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/jev-x-filter-0.4.5.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/jev-x-filter-0.4.5.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -176,6 +176,7 @@
           <a href="#lowsignal">Agreement once</a>
           <a href="#slang">Slang template</a>
           <a href="#emotion">Emotion replies</a>
+          <a href="#emotion-feed">Emotion (timeline)</a>
           <a href="#samples">Live samples</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
@@ -206,12 +207,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/jev-x-filter-0.4.4.zip"
-            >Download v0.4.4 (zip, 171.7 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/jev-x-filter-0.4.5.zip"
+            >Download v0.4.5 (zip, 174.4 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.4.4 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.5 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -461,6 +462,29 @@
           and it is presentation only &mdash; &ldquo;expand&rdquo; always works.
         </p>
       </section>
+      <section class="wrap prose" id="emotion-feed">
+        <h2>v0.4.5: emotion tidy-up now covers the timeline too (11 kinds)</h2>
+        <p>
+          A user pointed out that timeline posts like <code>交朋友</code> / <code>美女啊</code> / <code>👍好</code> / <code>我也想去🥺</code> / <code>Gm</code> / <code>太美了</code>
+          were never folded &mdash; the emotion layer was limited to reply threads. Now:
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>Scope</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>Timeline / recommendations</td><td>No thread semantics &rarr; <strong>each emotional post folds on its own</strong>, with a bar reading <code>emotion · praise: 美女啊 (folded)</code>; &ldquo;expand&rdquo; shows the original</td></tr>
+            <tr><td>Reply threads</td><td>Grouped by &ldquo;same thread + same kind&rdquo;: the first stays with an &ldquo;emotion · XX&rdquo; badge, the rest fold</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Kinds are now <strong>11</strong>: anger, joy, support, opposition, sadness, confirmation, <strong>praise, wish, greeting, social</strong> and emoji-only.
+          Same switches as before (options section 1.6: on/off + fold/hide; the timeline fold honours the existing &ldquo;fold in feed&rdquo; switch).
+        </p>
+        <p>
+          The same release fixes <strong>4 false positives and 2 misses</strong> found by independent verification: a bare
+          &ldquo;不入生活&rdquo; no longer convicts, the hook no longer matches &ldquo;看福建舰/看福彩开奖&rdquo;, science/medical context is downgraded,
+          and phrases such as &ldquo;我服了&rdquo; / &ldquo;难过死了&rdquo; / &ldquo;真好看&rdquo; are now classified correctly.
+        </p>
+      </section>
       <section class="wrap prose" id="samples">
         <h2>v0.4.1: three real-world samples, two misses closed</h2>
         <p>
@@ -487,7 +511,7 @@
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.4.4.zip -d info-filter
+unzip jev-x-filter-0.4.5.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -526,13 +550,13 @@ unzip jev-x-filter-0.4.4.zip -d info-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td><strong>252 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
+              <td><strong>289 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>133 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
+                <strong>143 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
                 anti-item menu entries, a stale Dropdown, a trigger with no layout box, async menu rendering,
                 localised menu entries, and a menu that genuinely lacks the target item) → decide → hide →
                 α badge / β fold → click the menu (including the “mute hidden band too” boundary and
@@ -697,7 +721,7 @@ unzip jev-x-filter-0.4.4.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -715,7 +739,7 @@ unzip jev-x-filter-0.4.4.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.4.4 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.4.5 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>
