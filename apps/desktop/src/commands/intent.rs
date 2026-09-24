@@ -108,17 +108,38 @@ pub async fn intent_explain(
     Ok(state.with(|i| i.intent.explain(&host)).flatten())
 }
 
-/// **把待生效的规则真正推给核心** —— 唯一会重连一次的动作。
+/// **把待生效的规则真正推给核心**。
 ///
-/// 核心没在跑时不报错：那时规则会在下次启动自然带上（并已被标记为"已应用"）。
+/// # 两条路，优先热加
+///
+/// 1. **热加**（首选）：`RoutingService.AddRule(shouldAppend:false)` 整份替换规则表，
+///    **不重启、不断连接**。前提是能把**整份**规则表忠实编码成 protobuf
+///    （`xt_core::xray::to_api_rules`）—— 因为追加会被 catch-all 吃掉，只能整份替换。
+/// 2. **回落重启**：上一条路走不通时（规则里有 `geosite:` / `ip` / `port` 等本模块
+///    还表达不了的字段），退回"重启核心"。**这一步会重连一次**，但规则一定生效。
+///
+/// 为什么回落时要把原因写进日志：静默回落会让"为什么忽然断了一下"变成一个
+/// 查不出来的问题。日志里会指名是哪条规则的哪个字段挡住了热加。
 #[tauri::command]
 pub async fn intent_apply(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::intent::IntentSummary, String> {
-    let (needs, running) = state
-        .with(|i| (i.intent.needs_apply(), i.runtime.running))
+    let now = xt_core::util::now_unix();
+    let snapshot = state
+        .with(|i| {
+            (
+                i.intent.needs_apply(),
+                i.runtime.running,
+                i.settings.clone(),
+                {
+                    let r = i.intent.rules();
+                    (r.allow, r.block)
+                },
+            )
+        })
         .ok_or_else(|| "读取状态失败".to_string())?;
+    let (needs, running, settings, (allow, block)) = snapshot;
 
     if !needs {
         state.log("intent", "info", "意图规则没有待生效的变更，未动核心");
@@ -126,14 +147,58 @@ pub async fn intent_apply(
     }
 
     if !running {
-        // 没有核心可重启 ⇒ 规则会在下次启动带上。这里只把"已应用"的账记对。
-        let now = xt_core::util::now_unix();
+        // 没有核心可改：规则会在下次启动时随配置带上。这里只把"已应用"的账记对。
         state.with(|i| i.intent.mark_applied(now));
         state.log("intent", "info", "核心未运行：意图规则将在下次连接时带上");
         return state.with(|i| i.intent.summary()).ok_or_else(|| "读取状态失败".into());
     }
 
-    // 重连一次：这是**用户明确点的动作**，不是我们自作主张（见模块文档）。
+    // 整份规则表（顺序与生成配置时**完全一致**：预设 → 意图 → 自定义 → 兜底）。
+    let rules = xt_core::xray::merge_rules_with_intent(&settings, &allow, &block);
+    let selected = settings
+        .selected_node
+        .as_ref()
+        .map(|id| format!("node-{}", id.as_str()))
+        .unwrap_or_else(|| "direct".to_string());
+
+    match xt_core::xray::to_api_rules(&rules, &selected) {
+        Ok(api_rules) => {
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], xt_core::xray::API_PORT));
+            let total = api_rules.len();
+            match xt_core::xray::replace_rules(addr, &api_rules, std::time::Duration::from_secs(5)).await {
+                Ok(()) => {
+                    state.with(|i| i.intent.mark_applied(now));
+                    state.log(
+                        "intent",
+                        "info",
+                        format!("意图规则已热加：整份替换 {total} 条，**未重启、连接未断**"),
+                    );
+                    return state.with(|i| i.intent.summary()).ok_or_else(|| "读取状态失败".into());
+                }
+                Err(e) => {
+                    state.log(
+                        "intent",
+                        "warn",
+                        format!("意图规则热加失败（{e}）⇒ 回落到重启核心（会重连一次）"),
+                    );
+                }
+            }
+        }
+        Err(unsupported) => {
+            // 一条句人话的摘要 + 完整清单进日志。
+            let first = unsupported.first().cloned().unwrap_or_default();
+            state.log(
+                "intent",
+                "info",
+                format!(
+                    "热加不可用（共 {} 项，例如：{first}）⇒ 回落到重启核心（会重连一次）",
+                    unsupported.len()
+                ),
+            );
+        }
+    }
+
+    // 回落：重启核心（这一步是**用户明确点的动作**，不是我们自作主张）。
     super::core::stop_core(&app, &state).await?;
     super::core::start_core(&app, &state, super::core::CoreStartTrigger::IntentRulesApply).await?;
     state.with(|i| i.intent.summary()).ok_or_else(|| "读取状态失败".to_string())

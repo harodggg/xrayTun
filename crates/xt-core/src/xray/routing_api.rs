@@ -459,6 +459,101 @@ pub async fn remove_rules(
     Ok(())
 }
 
+/// 把应用侧的规则 IR **忠实**翻成 `ApiRule`。
+///
+/// # 为什么需要它（而不是"只编我们想改的那几条"）
+///
+/// 见 [`replace_rules`] 的文档：追加的规则会被 catch-all 吃掉，所以运行期改规则
+/// **只能整份替换** —— 而整份替换要求把**每一条**规则都表达出来。
+/// 做不到这一点的场合，正确的动作是**拒绝**并回落"重启核心"，
+/// 而不是把一份缺了几条的规则表塞进去（那会静默丢掉用户的预设与自定义规则）。
+///
+/// # 目前能表达 / 不能表达
+///
+/// | 能 | 不能（返回在 `Err` 里，一条一句人话） |
+/// |---|---|
+/// | `full:` / `domain:` / 裸域名 | `geosite:` / `regexp:` / `ext:` |
+/// | `inbound_tags` | `ip` / `source_ip` |
+/// | `network`（Both / Tcp / Udp） | `ports` / `process_names` / `protocols` |
+/// | `RuleAction::{Block, Direct, Proxy{Some,None}}` | —— |
+///
+/// 新支持一项时**同时**改这张表：它是调用方决定"能不能热加"的唯一依据。
+pub fn to_api_rules(
+    rules: &[crate::routing::RoutingRule],
+    selected_tag: &str,
+) -> Result<Vec<ApiRule>, Vec<String>> {
+    use crate::routing::{Network, RuleAction};
+
+    let mut unsupported: Vec<String> = Vec::new();
+    let mut out: Vec<ApiRule> = Vec::with_capacity(rules.len());
+
+    for rule in rules.iter().filter(|r| r.enabled) {
+        let when = &rule.when;
+        let mut full_domains = Vec::new();
+
+        for d in &when.domains {
+            // 顺序很重要：`geosite:` / `regexp:` / `ext:` 都要先判掉，
+            // 否则会被当成裸域名写进去 —— 那是**静默放宽**匹配条件。
+            if d.starts_with("geosite:") || d.starts_with("ext:") || d.starts_with("regexp:") {
+                unsupported.push(format!("{}：域名表达式 {d}", rule.id));
+                continue;
+            }
+            let host = d
+                .strip_prefix("full:")
+                .or_else(|| d.strip_prefix("domain:"))
+                .unwrap_or(d.as_str());
+            if host.is_empty() {
+                unsupported.push(format!("{}：空域名", rule.id));
+                continue;
+            }
+            full_domains.push(host.to_string());
+        }
+
+        if !when.ip.is_empty() {
+            unsupported.push(format!("{}：ip（{} 条）", rule.id, when.ip.len()));
+        }
+        if !when.source_ip.is_empty() {
+            unsupported.push(format!("{}：source_ip（{} 条）", rule.id, when.source_ip.len()));
+        }
+        if !when.ports.is_empty() {
+            unsupported.push(format!("{}：port（{} 条）", rule.id, when.ports.len()));
+        }
+        if !when.process_names.is_empty() {
+            unsupported.push(format!("{}：process", rule.id));
+        }
+        if !when.protocols.is_empty() {
+            unsupported.push(format!("{}：protocol", rule.id));
+        }
+
+        let networks = match when.network {
+            Network::Both => vec![2, 3], // TCP, UDP
+            Network::Tcp => vec![2],
+            Network::Udp => vec![3],
+        };
+
+        let outbound_tag = match &rule.then {
+            RuleAction::Block => "block".to_string(),
+            RuleAction::Direct => "direct".to_string(),
+            RuleAction::Proxy { outbound: Some(t) } => t.clone(),
+            RuleAction::Proxy { outbound: None } => selected_tag.to_string(),
+        };
+
+        out.push(ApiRule {
+            rule_tag: rule.id.clone(),
+            outbound_tag,
+            full_domains,
+            inbound_tags: when.inbound_tags.clone(),
+            networks,
+        });
+    }
+
+    if unsupported.is_empty() {
+        Ok(out)
+    } else {
+        Err(unsupported)
+    }
+}
+
 /// 把**当前规则表**与**我们想要的那一组**对齐：多删少加。
 ///
 /// 返回 `(添加的 tag, 删除的 tag)`，让调用方能记一条可核对的日志。
@@ -658,6 +753,130 @@ mod tests {
             put_varint(v, &mut buf);
             assert_eq!(read_varint(&buf, 0).unwrap().0, v, "{v}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // to_api_rules：能表达就 Ok，不能表达就**明确拒绝**（回落到重启）
+    // -----------------------------------------------------------------------
+
+    fn ir(id: &str, when: crate::routing::MatchCondition, then: crate::routing::RuleAction) -> crate::routing::RoutingRule {
+        crate::routing::RoutingRule::new(id, id, when, then)
+    }
+
+    #[test]
+    fn a_minimal_supported_rule_set_converts() {
+        use crate::routing::{MatchCondition, RuleAction};
+        let rules = vec![
+            ir(
+                "internal-api",
+                MatchCondition { inbound_tags: vec!["api".into()], ..Default::default() },
+                RuleAction::Proxy { outbound: Some("api".into()) },
+            ),
+            ir(
+                "intent-block-ads.example",
+                MatchCondition { domains: vec!["full:ads.example".into()], inbound_tags: vec!["tun".into()], ..Default::default() },
+                RuleAction::Block,
+            ),
+            ir(
+                "internal-fallback",
+                MatchCondition { network: crate::routing::Network::Both, ..Default::default() },
+                RuleAction::Direct,
+            ),
+        ];
+        let api = to_api_rules(&rules, "node-x").expect("这三条都能表达");
+        assert_eq!(api.len(), 3);
+        assert_eq!(api[0].outbound_tag, "api");
+        assert_eq!(api[0].inbound_tags, vec!["api".to_string()]);
+        assert_eq!(api[1].full_domains, vec!["ads.example".to_string()]);
+        assert_eq!(api[1].outbound_tag, "block");
+        assert_eq!(api[2].networks, vec![2, 3], "catch-all 必须带 tcp,udp");
+    }
+
+    #[test]
+    fn bare_and_domain_prefixed_hosts_become_full_domains() {
+        use crate::routing::{MatchCondition, RuleAction};
+        let rules = vec![ir(
+            "r",
+            MatchCondition {
+                domains: vec!["ads.example".into(), "domain:sub.example".into(), "full:exact.example".into()],
+                ..Default::default()
+            },
+            RuleAction::Block,
+        )];
+        let api = to_api_rules(&rules, "n").unwrap();
+        assert_eq!(
+            api[0].full_domains,
+            vec!["ads.example".to_string(), "sub.example".into(), "exact.example".into()]
+        );
+    }
+
+    #[test]
+    fn proxy_without_an_outbound_uses_the_selected_tag() {
+        use crate::routing::{MatchCondition, RuleAction};
+        let rules = vec![ir("r", MatchCondition::default(), RuleAction::Proxy { outbound: None })];
+        assert_eq!(to_api_rules(&rules, "node-abc").unwrap()[0].outbound_tag, "node-abc");
+    }
+
+    /// **最能骗过人的一种错**：`geosite:cn` 被当成裸域名写进去 ⇒ 那条规则从
+    /// "整个大陆域名表" 缩成 "一个叫 geosite:cn 的主机名" ⇒ 静默放宽/收紧匹配。
+    /// 所以必须**拒绝**，并指名是哪一条规则。
+    #[test]
+    fn geosite_regexp_and_ext_are_refused_by_name() {
+        use crate::routing::{MatchCondition, RuleAction};
+        let rules = vec![
+            ir("preset-cn-domain", MatchCondition { domains: vec!["geosite:cn".into()], ..Default::default() }, RuleAction::Direct),
+            ir("user-re", MatchCondition { domains: vec!["regexp:^a.*".into()], ..Default::default() }, RuleAction::Block),
+            ir("user-ext", MatchCondition { domains: vec!["ext:mine.dat:code".into()], ..Default::default() }, RuleAction::Block),
+        ];
+        let errs = to_api_rules(&rules, "n").unwrap_err();
+        assert_eq!(errs.len(), 3, "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("preset-cn-domain") && e.contains("geosite:cn")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("regexp:")), "{errs:?}");
+        assert!(errs.iter().any(|e| e.contains("ext:")), "{errs:?}");
+    }
+
+    #[test]
+    fn every_field_we_cannot_encode_is_reported_not_dropped() {
+        use crate::routing::{MatchCondition, PortMatcher, RuleAction};
+        let rules = vec![ir(
+            "busy",
+            MatchCondition {
+                domains: vec!["full:a.example".into()],
+                ip: vec!["geoip:cn".into()],
+                ports: vec![PortMatcher::Single(443)],
+                process_names: vec!["Safari".into()],
+                protocols: vec!["tls".into()],
+                ..Default::default()
+            },
+            RuleAction::Block,
+        )];
+        let errs = to_api_rules(&rules, "n").unwrap_err();
+        // ip / port / process / protocol 各一条。
+        assert_eq!(errs.len(), 4, "{errs:?}");
+        for key in ["ip", "port", "process", "protocol"] {
+            assert!(errs.iter().any(|e| e.contains(key)), "缺 {key}：{errs:?}");
+        }
+    }
+
+    /// 一份**真实预设**（bypass_mainland）今天必然无法热加 —— 这条断言的作用是
+    /// 让"生产里回落重启"这件事有据可依，而不是一个说不清原因的静默行为。
+    #[test]
+    fn the_real_bypass_mainland_preset_is_not_yet_hot_swappable() {
+        let rules = crate::routing::preset_rules(crate::model::RoutingPreset::BypassMainland);
+        let errs = to_api_rules(&rules, "node-x").unwrap_err();
+        assert!(
+            errs.iter().any(|e| e.contains("geosite:") || e.contains("geoip") || e.contains("ip（")),
+            "预设里必然有规则集/ip 表达式：{errs:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_rules_are_skipped() {
+        use crate::routing::{MatchCondition, RuleAction};
+        let mut r = ir("off", MatchCondition { domains: vec!["full:a.example".into()], ..Default::default() }, RuleAction::Block);
+        r.enabled = false;
+        let api = to_api_rules(&[r], "n").unwrap();
+        assert!(api.is_empty(), "禁用的规则不该被下发");
     }
 
     #[test]

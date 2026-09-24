@@ -14,7 +14,8 @@ pub use config::{
 };
 pub use probe::{probe_nodes, ProbeOptions, ProbeResult, DEFAULT_PROBE_URL};
 pub use routing_api::{
-    add_rules, list_rules, remove_rules, replace_rules, sync_intent_rules, ApiRule, ListRuleItem,
+    add_rules, list_rules, remove_rules, replace_rules, sync_intent_rules, to_api_rules, ApiRule,
+    ListRuleItem,
 };
 pub use stats::{
     parse_traffic_counter, query_stats, traffic_by_tag, traffic_from_stats, CounterParts,
