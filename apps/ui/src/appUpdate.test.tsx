@@ -182,6 +182,26 @@ describe("task-194 · `Settings.tsx` 三处客户端结论只用 `check_error_ap
     expect(screen.getByText(/核心检查更新失败/)).toBeTruthy();
   });
 
+  it("task-195：**geo** 检查失败 ⇒ banner 必须说 geo，不许标成「核心」", async () => {
+    // 195 之前：geo 的失败没有字段可写 ⇒ 界面上根本看不到；
+    // 195 之后有了 check_error_geo，但**非 app 即核心**的二选一会把它误标成核心。
+    renderSettings({
+      check_error: "geo 下载 404",
+      check_error_app: null,
+      check_error_core: null,
+      check_error_geo: "geo 下载 404",
+      checked_at_app: 1_700_000_000,
+      latest_app: release(scenarioSnapshot().app_version),
+      app_update_available: false,
+    });
+
+    expect(await screen.findByText(/geo 数据检查更新失败：geo 下载 404/)).toBeTruthy();
+    expect(
+      screen.queryByText(/核心检查更新失败/),
+      "geo 的失败不许被标成核心（那是另一件事）",
+    ).toBeNull();
+  });
+
   it("**红线（回执）**：核心检查失败 + 客户端确证没有新版 ⇒ 「已是最新版本」回执**仍要出现**", async () => {
     renderSettings({
       check_error: "GitHub 超时",

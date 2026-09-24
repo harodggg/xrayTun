@@ -1269,23 +1269,25 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           )}
         </div>
 
-        {/* task-194：这一节涵盖**核心/geo/客户端**三类，所以这里继续读**合并**字段
-            `check_error`（一次失败必须说出来，这正是它该在的位置）。但**必须标明是哪一类** ——
-            只说「检查更新失败」会被读成「客户端检查失败」而其实可能是核心：
-            * `check_error_app` 非空 ⇒ 最近一次失败来自**客户端**路径（`apply_app_check_result`
-              的 `Err` 分支同时写 `check_error_app` 与 `check_error`，`version_check.rs:142-143`）；
-            * 否则合并字段只可能来自**核心**路径（`apply_core_geo_check_result` 的 `Err` 分支，
-              `version_check.rs:97-100`）—— ⚠️ 顺带记：**geo 的失败根本没人写进任何字段**
-              （同函数 `:102-104` 只处理 `Ok`），所以这里说「核心」而不是「核心/geo」。
-            ⚠️ 已知边界（task-194 报告里如实记）：客户端与核心**都**失败时，合并字段只留最后一次
-            写入（可能被客户端覆盖），此时只报客户端那条。 */}
+        {/* task-194 + task-195：这一节涵盖**核心/geo/客户端**三类，所以这里继续读
+            **派生**的合并字段 `check_error`（一次失败必须说出来，这正是它该在的位置）。
+            但**必须标明是哪一类** —— 只说「检查更新失败」会被读成「客户端检查失败」而其实可能是核心。
+
+            task-195 之后合并字段是**按 客户端 → 核心 → geo 取第一条非空**派生出来的，
+            而且三个子系统各有自己的格子（`check_error_app` / `check_error_core` / `check_error_geo`）
+            ⇒ 这里可以直接读**具体哪一格**来标注，不再靠「非 app 即核心」这种二选一猜测
+            （那会把 **geo** 的失败误标成核心）。 */}
         {snapshot.update.check_error && (
           <div className="banner banner--warn" style={{ marginTop: 10 }}>
             <span>⚠︎</span>
             <div>
               {snapshot.update.check_error_app
                 ? `客户端检查更新失败：${snapshot.update.check_error_app}`
-                : `核心检查更新失败：${snapshot.update.check_error}`}
+                : snapshot.update.check_error_geo
+                  ? `geo 数据检查更新失败：${snapshot.update.check_error_geo}`
+                  : `核心检查更新失败：${
+                      snapshot.update.check_error_core ?? snapshot.update.check_error
+                    }`}
             </div>
           </div>
         )}
