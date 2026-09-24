@@ -37,22 +37,4 @@
     <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/wasm/"/>
     <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/wasm/"/>
   </url>
-  <url>
-    <loc>https://xraytun.top/jev-x-filter/</loc>
-    <lastmod>2026-09-23</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.7</priority>
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/jev-x-filter/"/>
-    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/jev-x-filter/"/>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/jev-x-filter/"/>
-  </url>
-  <url>
-    <loc>https://xraytun.top/en/jev-x-filter/</loc>
-    <lastmod>2026-09-23</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.7</priority>
-    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/jev-x-filter/"/>
-    <xhtml:link rel="alternate" hreflang="en" href="https://xraytun.top/en/jev-x-filter/"/>
-    <xhtml:link rel="alternate" hreflang="x-default" href="https://xraytun.top/jev-x-filter/"/>
-  </url>
 </urlset>
