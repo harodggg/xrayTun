@@ -215,32 +215,7 @@ impl Observer {
 
     /// `Err(reason)` = 不值得花钱判定。
     fn filter(&self, host: &str, rec: &ConnectionRecord) -> Result<(), &'static str> {
-        if host.is_empty() {
-            return Err("empty_host");
-        }
-        if self.allow_hosts.contains(host) {
-            return Err("allowlisted");
-        }
-        // 内部回环（应用自己查统计）与 DoH 字面量：永远没有可判定的身份。
-        if rec.inbound_tag == "api" || host == "dns" {
-            return Err("internal");
-        }
-        if host.starts_with('[') || host.contains(':') {
-            return Err("ip_literal");
-        }
-        if host.parse::<std::net::IpAddr>().is_ok() {
-            return Err("ip_literal");
-        }
-        if is_local_name(host) {
-            return Err("local_name");
-        }
-        if !host.contains('.') {
-            return Err("single_label");
-        }
-        if rec.target_port == Some(53) {
-            return Err("dns_transport");
-        }
-        Ok(())
+        is_candidate(host, &rec.inbound_tag, rec.target_port, &self.allow_hosts)
     }
 
     /// 取最多 `max` 条待判定候选（按优先级降序、再按首次出现升序）。
@@ -298,6 +273,47 @@ fn push_capped(v: &mut Vec<u64>, now: u64, cap: usize) {
         let drop = v.len() - cap;
         v.drain(..drop);
     }
+}
+
+/// "这个主机名值得花钱判定吗？" —— **线上与离线评测的唯一实现**。
+///
+/// 抽成自由函数是为了让 `eval` 模块能复用同一套规则：如果离线评测用另一套
+/// 过滤（比如忘了排除 IP 字面量），量出来的精确率就不是线上那个系统的。
+///
+/// `Err(reason)` 里的 reason 会进统计（`ObserverStats::skipped`），
+/// 所以这些字符串是**可观测口径**，改名等于让历史数据失去意义。
+pub fn is_candidate(
+    host: &str,
+    inbound: &str,
+    port: Option<u16>,
+    allow_hosts: &std::collections::BTreeSet<String>,
+) -> Result<(), &'static str> {
+    if host.is_empty() {
+        return Err("empty_host");
+    }
+    if allow_hosts.contains(host) {
+        return Err("allowlisted");
+    }
+    // 内部回环（应用自己查统计）与 DoH 字面量：永远没有可判定的身份。
+    if inbound == "api" || host == "dns" {
+        return Err("internal");
+    }
+    if host.starts_with('[') || host.contains(':') {
+        return Err("ip_literal");
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Err("ip_literal");
+    }
+    if is_local_name(host) {
+        return Err("local_name");
+    }
+    if !host.contains('.') {
+        return Err("single_label");
+    }
+    if port == Some(53) {
+        return Err("dns_transport");
+    }
+    Ok(())
 }
 
 /// 内网 / mDNS / 保留名。**判域名分流之前必须先排除它们** ——
@@ -467,6 +483,41 @@ mod tests {
         assert!(o.tracked() <= 16, "跟踪表必须是有界的：{}", o.tracked());
         assert!(o.stats.evicted > 0);
         assert!(o.candidate("h39.example").is_some(), "最近的必须还在");
+    }
+
+    /// 自由函数与 `Observer::filter` 必须逐例一致 —— 离线评测就是靠这条
+    /// 才敢声称"量的是线上那个系统"。
+    #[test]
+    fn the_free_filter_matches_the_observer() {
+        let empty = BTreeSet::new();
+        let cases: Vec<(Option<&str>, u16, &str, Option<&'static str>)> = vec![
+            (Some("ads.example"), 443, "tun", None),
+            (Some("203.0.113.7"), 443, "tun", Some("ip_literal")),
+            (Some("localhost"), 443, "tun", Some("local_name")),
+            (Some("nas"), 445, "tun", Some("single_label")),
+            (Some("dns"), 443, "tun", Some("internal")),
+            (Some("ns.example"), 53, "tun", Some("dns_transport")),
+            (Some("x.example"), 443, "api", Some("internal")),
+            (None, 443, "tun", Some("empty_host")),
+        ];
+        for (host, port, inbound, expected) in cases {
+            let host = host.unwrap_or("");
+            let mut o = Observer::default();
+            let rec = conn(if host.is_empty() { None } else { Some(host) }, port, "tcp", inbound);
+            let via_observer = match o.observe(&rec, 0) {
+                ObserveOutcome::Skipped(r) => Some(r),
+                _ => None,
+            };
+            let via_free = is_candidate(host, inbound, Some(port), &empty).err();
+            assert_eq!(via_free, expected, "{host}");
+            if !host.is_empty() {
+                assert_eq!(via_observer, expected, "{host}：两条路径必须一致");
+            }
+            // 白名单在两个入口上都要生效。
+            let mut allow = BTreeSet::new();
+            allow.insert("ads.example".to_string());
+            assert_eq!(is_candidate("ads.example", "tun", Some(443), &allow).err(), Some("allowlisted"));
+        }
     }
 
     #[test]

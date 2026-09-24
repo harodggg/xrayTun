@@ -760,6 +760,7 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P2b-2 规则物化进配置 | ✅ 完成 | `IntentRuntime::rules()` → `Supervisor::set_intent_rules` → `start()` 生成配置时走 `merge_rules_with_intent`。单测钉住"意图规则真的进了那份规则表"及位置（`preset-private` → 放行 → 拦截 → `preset-ads` → `cn`）；配置级别由 `real_core.rs` 用真实核心验收 |
 | P2b-3 生效时机与自动应用 | ⏳ 未开始 | 见下面「P2b-2 的边界」：规则**在下次核心启动时生效**，本版**不自动重启核心**；`needs_apply()` 已经能报"待生效"，但还没有界面去消费它 |
 | **数据面验收（真实核心 + 真实 TCP）** | ✅ 完成 | `cargo test -p xt-intent --test real_core_dataplane` ⇒ **2 passed**：对照组 `allowed.intent-dataplane` 拿到 **200**，实验组 `blocked.intent-dataplane` 拿到 **403**（blackhole 的响应）；全离线（本地 HTTP 服务 + `dns.hosts` 映射 + 全部现取端口），不打扰机器上正在跑的 xray |
+| **P1.5 离线评测** | ✅ 完成（模型指标待额度） | `cargo run -p xt-intent --example eval_domains` ⇒ 本机真实语料，见 `docs/verification/INTENT-EVAL-BASELINE.md`。**已量到**：16,634 条连接 / 259 个域名，静态名单只覆盖 **0.78% 的连接**，**138 个域名无标注**（模型要判的那批），**63.2% 的连接行配不到域名**。**还量不到**：模型指标 —— 免密钥档返回 429（原因分布 `gateway_errors=12`），需要一个 Key 或额度恢复 |
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
