@@ -204,14 +204,64 @@ pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u3
 /// 地址），而不是某个网站的业务 IP（后者才是真会变的那类，也正是 `www.baidu.com`
 /// 被多轮实测筛掉的原因）。**实测**：`http://1.1.1.1/` → 301、`http://223.5.5.5/`
 /// → 404（直连与经 SOCKS 都稳定，各 10/10）。`http://8.8.8.8/` 实测 6s 超时 ⇒ **不用**。
-pub(crate) const REQUIRED_PROBE_TARGETS: &[&str] = &[
+/// 探针目标属于**哪一侧**（境内 / 境外）。
+///
+/// # 唯一真源（task-106）
+///
+/// 目标与侧写在**同一张表**里（[`REQUIRED_PROBE_TARGETS`]）：新增/修改目标时
+/// 必须在同一行表态 —— 类型上没有默认值，**漏表态编译不过**；
+/// 表里没有的目标 [`probe_side`] 返回 `None`，由测试拦住。
+///
+/// **刻意没有**「不在境内清单里就算境外」这种默认分支：那正是
+/// 「新加了一个境内目标、却被静默算成境外」的成因（现场包里 `223.5.5.5` 的
+/// 归属靠的是硬编码清单，不是机制）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeSide {
+    Domestic,
+    Overseas,
+}
+
+/// **必需探针目标的唯一真源**：`(URL, 它属于哪一侧)`。
+///
+/// 与 `scripts/fixtures/probe-targets.json` 是**同一份真源**（Python / 分诊脚本
+/// 读夹具，**Rust 是权威**）：`probe_targets_fixture_matches_authoritative_table`
+/// 钉住两者逐条一致 —— 改一边不改另一边，测试必红。
+///
+/// # 硬编码 IP 的风险与取舍
+///
+/// 一个写死的 IP 一旦失效，门禁会把**所有**用户拦在门外（失败方向错）。这里选的是
+/// **DNS 基础设施的 anycast IP**（1.1.1.1 / 223.5.5.5 / 119.29.29.29 —— 本身就是长期稳定的服务
+/// 地址），而不是某个网站的业务 IP（后者才是真会变的那类，也正是 `www.baidu.com`
+/// 被多轮实测筛掉的原因）。**实测**：`http://1.1.1.1/` → 301、`http://223.5.5.5/`
+/// → 404、`http://119.29.29.29/` → 404（直连与经 SOCKS 都稳定）。`http://8.8.8.8/`
+/// 实测 6s 超时 ⇒ **不用**；`114.114.114.114` 6s 超时、`180.76.76.76` 空回复 ⇒ 也不**用**。
+pub(crate) const REQUIRED_PROBE_TARGETS: &[(&str, ProbeSide)] = &[
     // 境外 · 传输（IP 字面量，不依赖解析）
-    "http://1.1.1.1/",
+    ("http://1.1.1.1/", ProbeSide::Overseas),
     // 境外 · 解析（域名，项目原有的探测目标）
-    xt_core::xray::DEFAULT_PROBE_URL,
+    (xt_core::xray::DEFAULT_PROBE_URL, ProbeSide::Overseas),
     // 境内 · 传输（IP 字面量，走 geoip:cn → direct）
-    "http://223.5.5.5/",
+    ("http://223.5.5.5/", ProbeSide::Domestic),
+    // 境内 · 传输（**task-106 新增**）：境内侧只有 1 个目标时，「境内全灭」最多
+    // 只贡献 1 个失败 ⇒ 永远到不了「一轮 ≥2 个失败」的门槛 ⇒ **永不重建**
+    // （用户现场包的真实实例：境内 全灭 1/1、境外 0/2 死 ⇒ 只记账不重建）。
+    // 目标选型有只读实测数据支撑：`119.29.29.29 → 404`（有真实 HTTP 状态，
+    // 满足 `responded()` 判据），`114.114.114.114` 超时、`180.76.76.76` 空回复。
+    ("http://119.29.29.29/", ProbeSide::Domestic),
 ];
+
+/// 只要 URL 的视图（启动门禁 / 看门狗循环用）。
+pub(crate) fn required_probe_urls() -> Vec<&'static str> {
+    REQUIRED_PROBE_TARGETS.iter().map(|(url, _)| *url).collect()
+}
+
+/// 目标属于哪一侧；**表里没有的返回 `None`**（不猜、不默认）。
+pub(crate) fn probe_side(target: &str) -> Option<ProbeSide> {
+    REQUIRED_PROBE_TARGETS
+        .iter()
+        .find(|(url, _)| *url == target)
+        .map(|(_, side)| *side)
+}
 
 /// URL 的主机部分是不是 **IP 字面量**（⇒ 这次探测**不需要解析**）。
 ///
@@ -230,7 +280,7 @@ pub(crate) fn url_host_is_ip_literal(url: &str) -> bool {
 /// 「传输是否通」看它们；「解析是否通」看域名目标。两者都活才算链路可用
 /// （理由见 [`REQUIRED_PROBE_TARGETS`] 的文档）。
 #[cfg(test)]
-pub(crate) fn probe_targets_without_dns(targets: &'static [&'static str]) -> Vec<&'static str> {
+pub(crate) fn probe_targets_without_dns<'a>(targets: &[&'a str]) -> Vec<&'a str> {
     targets
         .iter()
         .copied()
@@ -652,8 +702,9 @@ impl Supervisor {
             let socks_port = settings.socks_port;
             let session_id = self.session_id.clone().unwrap_or_default();
             let gate_started = std::time::Instant::now();
+            let gate_targets = required_probe_urls();
             let gate = verify_paths_then_commit(
-                REQUIRED_PROBE_TARGETS,
+                &gate_targets,
                 |target| socks_http_probe(socks_port, target, PRE_COMMIT_PROBE_TIMEOUT_SECS),
                 || async {
                     let commit_started = std::time::Instant::now();
@@ -1911,10 +1962,10 @@ mod tests {
     /// 门禁确实配了「两类职责 × 两条路径」三个目标 —— 少一类就等于把自己测盲（task-92）。
     #[test]
     fn required_probe_targets_pair_ip_literals_with_domains() {
-        let targets = REQUIRED_PROBE_TARGETS;
+        let targets = required_probe_urls();
         assert!(targets.len() >= 3, "至少要 3 条（2 个 IP 字面量 + 1 个域名），实际 {targets:?}");
         // 不依赖解析的那一半（IP 字面量）必须存在 —— 这是「传输通不通」的判据
-        let ip = probe_targets_without_dns(targets);
+        let ip = probe_targets_without_dns(&targets);
         assert!(
             ip.len() >= 2,
             "至少要有两个**不依赖解析**的目标（境内外各一），实际 {ip:?}"
@@ -1955,20 +2006,22 @@ mod tests {
         assert!(!tunnel_is_dead("404"), "IP 字面量回 404 也是活着");
         // ①b 这个场景**只有存在不依赖解析的目标**才有意义 ——
         // 把它们删掉，这条就必然红（敏感性就钉在这里，而不是靠人自觉）。
+        let urls = required_probe_urls();
         assert!(
-            probe_targets_without_dns(REQUIRED_PROBE_TARGETS).len() >= 2,
-            "「只有解析坏」的判据依赖 IP 字面量目标存在，实际清单：{REQUIRED_PROBE_TARGETS:?}",
+            probe_targets_without_dns(&urls).len() >= 2,
+            "「只有解析坏」的判据依赖 IP 字面量目标存在，实际清单：{urls:?}",
         );
 
         // ② 实际目标清单跑一遍假探测：IP 全活、域名全死
         let log = GateLog::default();
         let res = verify_paths_then_commit(
-            REQUIRED_PROBE_TARGETS,
+            &urls,
             |t: String| {
                 log.push(&format!("probe:{t}"));
                 let code = if t.contains("1.1.1.1") {
                     "301"
-                } else if t.contains("223.5.5.5") {
+                } else if t.contains("223.5.5.5") || t.contains("119.29.29.29") {
+                    // task-106：新增的境内 IP 字面量同属「不依赖解析」那一半，必须是活的
                     "404"
                 } else {
                     "000"
@@ -2003,13 +2056,14 @@ mod tests {
     #[tokio::test]
     async fn gate_still_commits_when_all_required_targets_answer() {
         let log = GateLog::default();
+        let urls = required_probe_urls();
         let res = verify_paths_then_commit(
-            REQUIRED_PROBE_TARGETS,
+            &urls,
             |t: String| {
                 log.push(&format!("probe:{t}"));
                 let code = if t.contains("1.1.1.1") {
                     "301"
-                } else if t.contains("223.5.5.5") {
+                } else if t.contains("223.5.5.5") || t.contains("119.29.29.29") {
                     "404"
                 } else {
                     "204"

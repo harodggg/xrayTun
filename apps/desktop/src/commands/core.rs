@@ -819,31 +819,17 @@ pub(crate) fn probe_dead_threshold(total_targets: usize) -> usize {
     total_targets.min(2)
 }
 
-/// 探针目标里的**境内侧**（其余必需目标算境外侧）。
+/// 探针目标属于哪一侧 —— **真源在 `supervisor.rs` 的那张表**（task-106）。
 ///
-/// 判据来自目标本身，不按返回码形状猜：`223.5.5.5` 是阿里 DNS，在境内、
-/// 也必须经物理网卡直连出去；`1.1.1.1` 与 `cp.cloudflare.com` 都要经节点。
+/// 这里只做**转发**，不再自己维护一份「境内清单」：
 ///
-/// **新增探针目标必须在这里表态**：`probe_side` 不认识的返回 `None`，
-/// 有测试（`every_required_probe_target_has_a_side`）盯着。
-pub(crate) const DOMESTIC_PROBE_TARGETS: &[&str] = &["http://223.5.5.5/"];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProbeSide {
-    Domestic,
-    Overseas,
-}
-
-/// 目标属于哪一侧；不认识的返回 `None`（测试会拦住，别默默算成某一侧）。
-pub(crate) fn probe_side(target: &str) -> Option<ProbeSide> {
-    if DOMESTIC_PROBE_TARGETS.contains(&target) {
-        Some(ProbeSide::Domestic)
-    } else if crate::supervisor::REQUIRED_PROBE_TARGETS.contains(&target) {
-        Some(ProbeSide::Overseas)
-    } else {
-        None
-    }
-}
+/// * 旧实现有一份 `DOMESTIC_PROBE_TARGETS`，`probe_side()` 用
+///   「不在境内清单 ⇒ 算境外」的默认分支兜底 —— 于是**新加一个境内目标却忘了
+///   在这里表态，就会被静默算成境外**（诊断形状错、`probe_side` 语义被污染）；
+/// * 现在目标与侧写在**同一张表**（`supervisor::REQUIRED_PROBE_TARGETS`，
+///   `&[(url, ProbeSide)]`，**没有默认值**），`probe_side()` 只读它，
+///   表里没有的目标返回 `None`（由测试拦住）。
+pub(crate) use crate::supervisor::{probe_side, ProbeSide};
 
 /// 一轮探测的汇总。
 ///
@@ -1027,7 +1013,7 @@ pub(crate) fn next_backoff_secs(failed_attempts: u32) -> u64 {
 /// 而看门狗的全部价值就是「及时发现」。
 pub(crate) async fn watchdog_probe_all(port: u16, timeout_secs: u32) -> Vec<(String, String)> {
     let mut set = tokio::task::JoinSet::new();
-    for target in crate::supervisor::REQUIRED_PROBE_TARGETS {
+    for target in crate::supervisor::required_probe_urls() {
         let target = target.to_string();
         set.spawn(async move {
             // **轮内重试**：失败后换个时间点再试一次（本卡最高性价比的杠杆，
@@ -3173,8 +3159,8 @@ mod tests {
     /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
-        let targets = crate::supervisor::REQUIRED_PROBE_TARGETS;
-        let ips = crate::supervisor::probe_targets_without_dns(targets);
+        let targets = crate::supervisor::required_probe_urls();
+        let ips = crate::supervisor::probe_targets_without_dns(&targets);
         assert!(
             ips.len() >= 2,
             "境内 + 境外各要有一个**不依赖解析**的目标：{targets:?}",
@@ -3219,17 +3205,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn targets_of_side(side: ProbeSide) -> Vec<&'static str> {
+        // 侧只从**唯一真源表**里读（task-106：不再有第二份境内清单，也没有默认侧）
         crate::supervisor::REQUIRED_PROBE_TARGETS
             .iter()
-            .copied()
-            .filter(|t| probe_side(t) == Some(side))
+            .filter(|(_, declared)| *declared == side)
+            .map(|(url, _)| *url)
             .collect()
     }
 
     /// 造一轮结果：前 `dead_count` 个目标给 `000`（死），其余 200。
     fn round_with_dead(dead_count: usize) -> Vec<(String, String)> {
-        crate::supervisor::REQUIRED_PROBE_TARGETS
-            .iter()
+        crate::supervisor::required_probe_urls()
+            .into_iter()
             .enumerate()
             .map(|(i, t)| {
                 (
@@ -3240,29 +3227,111 @@ mod tests {
             .collect()
     }
 
-    /// 每个必需探针目标都必须在 `probe_side` 里有明确归属，**且两侧都有人**。
+    /// **守卫（task-106）**：唯一真源表必须自洽 ——
+    /// ① 表里每条 `probe_side(url) == 声明侧`；② URL 不重复；③ 两侧都有人；
+    /// ④ **表里没有的目标返回 `None`**（不许再有「不在境内清单就算境外」的兜底）。
     ///
-    /// 不认识的目标会被 `classify_probe_round` 忽略（凑不出「2 个目标失败」），
-    /// 所以新增探针时必须在这里表态，而不是被默默漏掉。
+    /// **敏感性**：把 `223.5.5.5` 的声明侧改成 `Overseas`（或删掉
+    /// `119.29.29.29`）⇒ `domestic_side_has_at_least_two_targets_and_keeps_the_domestic_literal`
+    /// 必红；给 `probe_side` 加回「不在表里就算境外」⇒ 第 ④ 条必红。
     #[test]
-    fn every_required_probe_target_has_a_side_and_both_sides_exist() {
+    fn every_required_probe_target_declares_a_side_in_the_single_table() {
         let mut domestic = 0;
         let mut overseas = 0;
-        for target in crate::supervisor::REQUIRED_PROBE_TARGETS {
-            match probe_side(target) {
-                Some(ProbeSide::Domestic) => domestic += 1,
-                Some(ProbeSide::Overseas) => overseas += 1,
-                None => {
-                    panic!("新探针目标 {target} 必须在 probe_side / DOMESTIC_PROBE_TARGETS 里表态")
-                }
+        let mut seen: Vec<&str> = Vec::new();
+        for (url, declared) in crate::supervisor::REQUIRED_PROBE_TARGETS {
+            assert_eq!(
+                probe_side(url),
+                Some(*declared),
+                "表里的声明侧必须就是 probe_side 的答案：{url}"
+            );
+            assert!(!seen.contains(url), "同一个目标在表里出现了两次：{url}");
+            seen.push(url);
+            match declared {
+                ProbeSide::Domestic => domestic += 1,
+                ProbeSide::Overseas => overseas += 1,
             }
         }
         assert!(domestic >= 1, "境内侧至少一个目标，否则日志分不清两种病");
         assert!(overseas >= 1, "境外侧至少一个目标");
         assert_eq!(
-            domestic + overseas,
+            seen.len(),
             crate::supervisor::REQUIRED_PROBE_TARGETS.len(),
-            "不许有目标被漏掉"
+            "表里不许有重复项"
+        );
+        // ④ 表外目标必须返回 None（旧实现会「默认境外」——正是本卡要消除的静默误分类）
+        assert_eq!(
+            probe_side("http://203.0.113.99/"),
+            None,
+            "表里没有的目标必须返回 None：不许再有「不在境内清单就算境外」的默认分支",
+        );
+    }
+
+    /// **task-106 跨语言契约**：Python（`scripts/net-metrics.py`，task-175 起）与
+    /// 本文件**读同一份夹具** `scripts/fixtures/probe-targets.json`。
+    /// **Rust 是权威**，夹具是双方共同的真源 —— 任一侧改坏，本用例或 Python 自测必红。
+    ///
+    /// 用 `read_to_string`（不是 `include_str!`）：改夹具不必重编译就能被发现；
+    /// **文件缺失即失败**（共同真源缺了不许静默跳过）。
+    #[test]
+    fn probe_targets_fixture_matches_authoritative_table() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/fixtures/probe-targets.json");
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "读不到共享夹具 {}（共同真源，缺了必须红）：{e}",
+                path.display()
+            )
+        });
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).expect("共享夹具必须是 JSON 数组");
+        assert_eq!(
+            cases.len(),
+            crate::supervisor::REQUIRED_PROBE_TARGETS.len(),
+            "夹具与 Rust 表的条数不同：{cases:?}"
+        );
+        for (i, (url, side)) in crate::supervisor::REQUIRED_PROBE_TARGETS.iter().enumerate() {
+            let c = &cases[i];
+            assert_eq!(c["url"].as_str(), Some(*url), "夹具第 {i} 条的 url 与 Rust 表不一致");
+            let want = match side {
+                ProbeSide::Domestic => "domestic",
+                ProbeSide::Overseas => "overseas",
+            };
+            assert_eq!(
+                c["side"].as_str(),
+                Some(want),
+                "夹具第 {i} 条的 side 与 Rust 表不一致（{url}）"
+            );
+        }
+        println!("共享夹具 {} 条与 Rust 权威表逐条一致", cases.len());
+    }
+
+    /// **task-106 主判据**：境内侧必须 **≥2 个**目标。
+    ///
+    /// 理由：一轮算失败的门槛是「≥2 个目标失败」（`task-98`）。境内侧只有 1 个目标时，
+    /// 「境内全灭」最多只贡献 1 个失败 ⇒ **永不触发重建** —— 用户现场包的真实形状
+    /// （境内 全灭 1/1、境外 0/2 死 ⇒ 只记账、不重建），也正是 `task-172` 那种
+    /// 「绑卡直连全挂」不会自愈的原因。
+    ///
+    /// **敏感性**：把 `223.5.5.5` 的声明侧改成 `Overseas`（或删掉 `119.29.29.29`）
+    /// ⇒ 本测试必红。
+    #[test]
+    fn domestic_side_has_at_least_two_targets_and_keeps_the_domestic_literal() {
+        let domestic = targets_of_side(ProbeSide::Domestic);
+        assert!(
+            domestic.len() >= 2,
+            "境内侧必须 ≥2 个目标，否则「境内全灭」到不了门槛 2：{domestic:?}"
+        );
+        assert_eq!(
+            domestic,
+            vec!["http://223.5.5.5/", "http://119.29.29.29/"],
+            "境内侧就应该是这两条 anycast 字面量（顺序按表）"
+        );
+        let overseas = targets_of_side(ProbeSide::Overseas);
+        assert!(overseas.contains(&"http://1.1.1.1/"), "境外 IP 字面量不许被挪走");
+        assert!(
+            overseas.contains(&xt_core::xray::DEFAULT_PROBE_URL),
+            "域名目标必须留在境外侧（「只有解析坏」的判据）"
         );
     }
 
@@ -3317,16 +3386,15 @@ mod tests {
         assert!(!should_rebuild_tunnel(true, true, streak.rounds()));
     }
 
-    /// **境内只有 1 个目标** ⇒ 「只有国内全灭」永远到不了 2 个的门槛。
+    /// **task-106 修掉的结构性盲区**：境内全灭（现在境内侧有 2 个目标）**必须**触发重建。
     ///
-    /// 这是本卡**已知且接受**的取舍（Lead 决策：门槛按目标数，不按侧）：
-    /// 「境外好好的、国内全灭」会被**记录**（日志里有单侧失败的形状 + 分侧计数）
-    /// 但**不会**触发重建。写在这里是为了让这个边界**看得见**，
-    /// 而不是让后人以为它被覆盖了。
+    /// 修复前境内只有 1 个目标 ⇒ 「境内全灭」= 1 个失败 < 门槛 2 ⇒ **永不重建**
+    /// （旧用例 `domestic_only_total_failure_is_below_the_threshold` 曾把这个盲区
+    /// 写成「已知取舍」；用户现场包证明它真的咬到了人：境内 全灭 1/1、境外 0/2 死
+    /// ⇒ 只记账、不重建，于是 `task-172` 那种「绑卡直连全挂」一直不恢复）。
     #[test]
-    fn domestic_only_total_failure_is_below_the_threshold() {
-        let domestic = targets_of_side(ProbeSide::Domestic);
-        let mut results: Vec<(String, String)> = domestic
+    fn domestic_full_outage_reaches_the_threshold_now() {
+        let mut results: Vec<(String, String)> = targets_of_side(ProbeSide::Domestic)
             .iter()
             .map(|t| (t.to_string(), "000".to_string()))
             .collect();
@@ -3334,14 +3402,41 @@ mod tests {
             results.push((t.to_string(), "200".to_string()));
         }
         let round = classify_probe_round(&results);
-        assert!(round.domestic_is_dead(), "国内侧确实全灭");
-        assert!(!round.overseas_is_dead());
+        assert!(round.domestic_is_dead(), "境内侧确实全灭");
+        assert!(!round.overseas_is_dead(), "境外侧没事");
         assert!(
-            !round.is_dead(),
-            "但只有 {} 个目标失败 ⇒ 不触发重建（门槛 2）",
-            round.dead
+            round.is_dead(),
+            "境内 {} 个目标全灭 ≥ 门槛 2 ⇒ **必须触发重建**",
+            round.domestic_dead
         );
-        assert!(round.one_side_only(), "日志要能看出这是单侧失败");
+        assert!(round.one_side_only(), "日志仍要能看出这是单侧失败");
+    }
+
+    /// **安全属性保留（task-98）**：任一侧只死 **1 个**目标 ⇒ 仍只记账、不拆隧道。
+    ///
+    /// 与上一条是一对：**修掉盲区 ≠ 变得一惊一乍**（单条抖动拆掉正在转发流量的
+    /// 隧道是 task-95 定性过的误判）。
+    #[test]
+    fn a_single_dead_target_still_does_not_trigger_a_rebuild() {
+        let dead_target = "http://223.5.5.5/";
+        let results: Vec<(String, String)> = crate::supervisor::required_probe_urls()
+            .into_iter()
+            .map(|t| {
+                (
+                    t.to_string(),
+                    if t == dead_target { "000" } else { "200" }.to_string(),
+                )
+            })
+            .collect();
+        let round = classify_probe_round(&results);
+        assert_eq!(round.dead, 1, "只死一个（境内侧 1/2）");
+        assert!(!round.domestic_is_dead(), "境内侧没全灭");
+        assert!(!round.is_dead(), "单条失败不许拆隧道（task-95/98 的安全属性）");
+        let mut streak = ProbeStreak::new();
+        for _ in 0..100 {
+            assert_eq!(streak.record(&round), 0, "未达门槛的轮不许累计");
+        }
+        assert!(!should_rebuild_tunnel(true, true, streak.rounds()));
     }
 
     /// **轮内重试**是本卡最高性价比的杠杆（task-100 实测：失败后同目标下一次
@@ -3478,7 +3573,7 @@ mod tests {
              超时值必须走命名常量 `PROBE_TIMEOUT_SECS`（task-98：阈值要与判据分开）",
         );
         assert!(
-            prod.contains("for target in crate::supervisor::REQUIRED_PROBE_TARGETS"),
+            prod.contains("for target in crate::supervisor::required_probe_urls()"),
             "`watchdog_probe_all` 必须遍历门禁那份必需目标清单（不能只探一个）",
         );
         assert!(

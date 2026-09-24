@@ -1,0 +1,22 @@
+[
+  {
+    "url": "http://1.1.1.1/",
+    "side": "overseas",
+    "why": "境外 · 传输（IP 字面量，不依赖解析）"
+  },
+  {
+    "url": "http://cp.cloudflare.com/generate_204",
+    "side": "overseas",
+    "why": "境外 · 解析（域名，判「只有解析坏」必须靠它）"
+  },
+  {
+    "url": "http://223.5.5.5/",
+    "side": "domestic",
+    "why": "境内 · 传输（阿里 DNS anycast，走 geoip:cn → direct）"
+  },
+  {
+    "url": "http://119.29.29.29/",
+    "side": "domestic",
+    "why": "境内 · 传输（DNSPod anycast，task-106 新增：让「境内全灭」可达门槛 2）"
+  }
+]
