@@ -650,9 +650,14 @@ impl Default for HelperVersionCheck {
 pub enum HelperState {
     /// 一切正常。
     Ready,
-    /// socket 文件不存在 —— 从没装过。
+    /// **安装产物**（`/Library/LaunchDaemons/com.xraytun.helper.plist` 或
+    /// `/Library/PrivilegedHelperTools/com.xraytun.helper`）不存在 —— 从没装过。
+    ///
+    /// ⚠️ **不是**「socket 文件不存在」：socket 由守护进程 `serve()` 启动时 bind、
+    /// 退出时删除（`crates/xt-helper/src/server.rs:114`、`:120-125`），
+    /// 「装了但没跑」时它同样是 false（task-183 修正的正是这个假设）。
     NotInstalled,
-    /// socket 文件在，但连接被拒 —— 守护进程没在跑（陈旧 socket，或 launchd 没拉起来）。
+    /// **已安装但守护进程没在跑**：socket 不在（每次退出都会被删）或连接被拒。
     /// **这个状态最常见，而且最容易修好。**
     NotRunning,
     /// 连接被拒于权限 —— 当前用户不在 admin 组。

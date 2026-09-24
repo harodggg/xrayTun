@@ -171,6 +171,23 @@ pub async fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|e| format!("清空日志文件失败：{e}"))
 }
 
+/// helper 那一行诊断文本（**纯函数**，便于测：这是 task-183 的**第三处**同源假话）。
+///
+/// 明令：**不许**把 `socket_present` 写成「已安装」—— socket 由守护进程启动时 bind、
+/// 退出时删除（`crates/xt-helper/src/server.rs:114`、`:120-125`）。
+/// 这里打印**三态 `state`** + **两个独立的磁盘事实**（socket 在不在、安装产物在不在）。
+pub(crate) fn helper_diagnostics_line(helper: &crate::state::HelperAvailability) -> String {
+    format!(
+        "helper: 状态={} socket存在={} 安装产物={} 可连接={} 版本={:?} 隧道活跃={}\n",
+        crate::helper_client::state_slug(helper.state),
+        helper.socket_present,
+        crate::helper_client::artifact_slug(&crate::helper_client::probe_install_artifacts()),
+        helper.reachable,
+        helper.version,
+        helper.tun_active
+    )
+}
+
 /// 生成一份可直接贴给维护者的诊断报告。
 ///
 /// 刻意**不包含**节点地址/域名、IP、订阅 URL 凭据、UUID 等敏感信息 —— 用户会把它
@@ -199,10 +216,7 @@ pub async fn diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<S
         "内核: {:?} / {:?}（原生 TUN 支持: {}，需要 >= {}）\n",
         core_path, snap.core.version, snap.core.supports_native_tun, snap.core.min_native_tun_version
     ));
-    out.push_str(&format!(
-        "helper: 已安装={} 可连接={} 版本={:?} 隧道活跃={}\n",
-        snap.helper.socket_present, snap.helper.reachable, snap.helper.version, snap.helper.tun_active
-    ));
+    out.push_str(&helper_diagnostics_line(&snap.helper));
     if let Some(e) = &snap.helper.error {
         out.push_str(&format!("helper 错误: {e}\n"));
     }
@@ -814,6 +828,33 @@ pub struct HttpClientConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **task-183 第三处**：诊断文本**不许**把 `socket_present` 当成「已安装」，
+    /// 要打三态 `state` + 两个独立的磁盘事实。
+    #[test]
+    fn helper_diagnostics_line_reports_state_and_both_disk_facts() {
+        use crate::helper_client::{with_install_artifacts, InstallArtifacts};
+        use crate::state::{HelperAvailability, HelperState};
+        let h = HelperAvailability {
+            socket_present: false,
+            state: HelperState::NotRunning,
+            reachable: false,
+            ..Default::default()
+        };
+        let installed =
+            with_install_artifacts(InstallArtifacts::Present, || helper_diagnostics_line(&h));
+        assert!(
+            !installed.contains("已安装="),
+            "不许再把 socket 当成「已安装」：{installed}"
+        );
+        assert!(installed.contains("状态=not_running"), "{installed}");
+        assert!(installed.contains("socket存在=false"), "{installed}");
+        assert!(installed.contains("安装产物=存在"), "{installed}");
+
+        let missing =
+            with_install_artifacts(InstallArtifacts::Absent, || helper_diagnostics_line(&h));
+        assert!(missing.contains("安装产物=不存在"), "{missing}");
+    }
 
     use xt_core::model::{NodeSource, Protocol, TlsSettings};
 

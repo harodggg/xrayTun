@@ -226,23 +226,12 @@ async fn bootstrap(app: tauri::AppHandle) {
             i.push_log("app", "info", format!("已找到核心：{v}"));
         }
 
-        if !snapshot.helper.socket_present {
-            i.push_log("app", "warn", "helper 尚未安装，TUN 模式不可用（系统代理模式仍可正常使用）");
-        } else if !snapshot.helper.reachable {
-            i.push_log(
-                "app",
-                "warn",
-                format!(
-                    "helper 不可连接：{}",
-                    snapshot.helper.error.clone().unwrap_or_else(|| "未知原因".into())
-                ),
-            );
-        } else {
-            i.push_log(
-                "app",
-                "info",
-                format!("helper {} 已就绪", snapshot.helper.version.clone().unwrap_or_default()),
-            );
+        // task-183：这行日志与 UI 用**同一判据**（`helper_startup_log`）。
+        // 「没看到 socket」**不等于**「没装」—— socket 是守护进程启动时 bind、
+        // 退出时删除的（`crates/xt-helper/src/server.rs:114`、`:120-125`），
+        // 所以「装了但没跑」不许再被写成「尚未安装」。
+        if let Some((level, msg)) = crate::helper_client::helper_startup_log(&snapshot.helper) {
+            i.push_log("app", level, msg);
         }
 
         if let Some(stale) = &snapshot.helper.stale_session {
