@@ -537,9 +537,16 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 照样能学到 h3；`Alt-Svc` 也能在 TCP 上把 h3 广告出来。
 
 所以兜底手段仍要留：只对 **opt-in 名单内的域名**加一条
-`network: udp, port: "443", inboundTag: ["tun"] → block`（§6 的 `intent-quic-fallback-*`）。
-代价要如实写：`blackhole type:"none"` 对 UDP **完全不回包**，回退要等一次超时（几百 ms 到数秒），
-用户观感是"第一次连接有点卡"。不做全局。
+`network: udp, port: "443", inboundTag: ["tun"] → block`（§6 的 `mitm-quic-fallback`）。
+
+**代价要如实写 —— 而且这里更正一处曾经写错的东西。** 本项目的 `block` 出站是
+`"protocol": "blackhole", "settings": { "response": { "type": "http" } }`，于是**UDP
+客户端也会收到那个 403 应答字节**（被 SOCKS UDP 原样回传），**不是"完全不回包"**。
+"完全不回包"只在 `blackhole type:"none"` 时成立，而本项目**没有**这么配（见 §15.5 的实测）。
+对 QUIC 而言后果是：客户端收到一个解析不了的包 ⇒ 连接失败（fail-closed）；
+观感同样是"第一次连接有点卡/失败"。
+想要真正的静默丢弃，得为 UDP 单配一个 `type: "none"` 的 blackhole 出站 —— 那是独立的一步，
+本版**没做**。不做全局。
 
 ### 8.5 判定点与动作
 
@@ -588,7 +595,7 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | **P1.5** | **离线评测夹具**：本机连接日志 → 候选域名 → 标注集 → 跑 Jev → 报告 | 一份可复跑的报告（脚本 + 输出）：精确率、FP/1000 连接、按类别拆分；**判据：holdout 精确率 ≥ 0.95 且 FP ≤ 1/1000，否则不进入 P2 的默认开启路径** |
 | **P2** | 接入设置/配置/状态机；`AppSettings.intent`；去抖重启 | `cargo test` 全绿；生成配置跑 `xray run -test -c` exit 0（真实核心）；断言 intent 规则排在 `preset-cn-domain` 之前；演练模式下**断言配置里没有 block 规则**；打开后核心重启**只在集合变化时发生**（计数器断言） |
 | **P3** | UI 页（开关/演练/预算/阈值/名单/审计/解释） | UI 单测（既有 tsx 测试风格）+ 演练模式跑一天的真实审计截图 |
-| **P4** | MITM：`xt-proto` 新请求、helper 装/卸信任锚 + 快照、MITM 服务、steering 规则 | `cargo test -p xt-tun -p xt-helper`；CA 安装→**杀掉 helper**→重启→自动回滚（快照测试）；ALPN 只 h1 的断言；防自环：`TestRoute` 断言 socks 入站的回连不命中名单规则；`strip_json` 的 `Content-Length` 一致性测试；一个真实站点开关前后对比（广告请求数下降） |
+| **P4** | MITM：`xt-proto` 新请求、helper 装/卸信任锚 + 快照、MITM 服务、steering 规则 | `cargo test -p xt-tun -p xt-helper`；CA 安装→**杀掉 helper**→重启→自动回滚（快照测试）；ALPN 只 h1 的断言；防自环：`TestRoute` 断言 socks 入站的回连不命中名单规则；`strip_json` 的 `Content-Length` 一致性测试；**UDP 侧**用 SOCKS5 UDP ASSOCIATE 验"规则对 UDP 也生效且终点 0 次"（§15.5）；一个真实站点开关前后对比（广告请求数下降，**尚未做**） |
 | **P5（可选）** | 反馈回路：`jev-x-filter` 扩展 → `127.0.0.1` 本地端点 → 本机级拦截（§12.3） | 扩展侧不改隐私边界（仅 localhost）；端点只接受回环来源 + token |
 
 ---
@@ -747,6 +754,36 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 
 ---
 
+### 15.5 本次实测修正：`blackhole` 的应答**对 UDP 也生效**（不是"静默丢弃"）
+
+**曾经的写法**（本文 §8.4 早先的版本，以及不少二手资料）："`blackhole` 对 UDP 完全不回包，
+所以 QUIC 回退要等一次超时"。
+
+**实测（本机真实核心 26.9.9 + SOCKS5 UDP ASSOCIATE，见
+`crates/xt-intent/tests/real_core_udp.rs`）**：
+
+| 组 | 配置 | 客户端看到什么 | 终点（本地 UDP 回显） |
+|---|---|---|---|
+| 对照 `allowed.udp-dataplane` | 直连 | `pong` | 命中 1 次 |
+| 实验 `blocked.udp-dataplane` | 意图拦截规则（**不设 `network`**） | **`HTTP/1.1 403 Forbidden` 的字节**（当数据报回传） | **0 次** |
+| 再次对照 | 直连 | `pong` | 命中 2 次 |
+
+三条结论：
+
+1. **意图规则对 UDP 同样生效**：物化时 `MatchCondition` 不设 `network`（即
+   `Network::Both`）⇒ Xray 配置里不写 `network` ⇒ TCP+UDP 都匹配。这条以前只是
+   "读代码得出的结论"，现在是跑出来的。
+2. **真正的保证是"包没到终点"，不是"客户端收不到东西"**：实验组的终点计数仍是 0，
+   而客户端**收到了**东西。任何"用沉默证明拦截"的测试都是错的 ——
+   必须断言终点侧的计数，否则路径坏掉也能让"没收到"变绿。
+3. **回包形状由配置决定**：本项目 `block` 出站配的是 `response.type = "http"`，
+   所以 UDP 也会收到那个 403。只有 `blackhole type:"none"` 才是静默丢弃，
+   而本项目没这么配（QUIC 兜底规则也走同一个 `block` 出站）。
+
+所以 §8.4 里"完全不回包"的说法已按实测更正。
+
+---
+
 ## 16. 实施进度（滚动更新）
 
 > 只写**已经跑出来**的证据（命令 + 观察到的数字）。没跑的一律写"未开始"。
@@ -822,9 +859,12 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 
 ### 16.1 还没做的（**别当成已做**）
 
-* **UDP/QUIC 的拦截没有真实核心验收。** 规则生成了（`mitm-quic-fallback`：`network=udp` +
-  `port=443` + `inbound_tag=tun` → `blackhole type:none`），但"UDP 真的被丢掉"这件事
-  还没有一条跑真实核心的测试。TCP 侧有（`blocked.intent-dataplane` 拿到 403）。
+* **TUN 网卡本身没有被自动化验收**（建卡要 root）。TCP/UDP 两层都是在**核心的
+  数据面**上验的：TCP 走 socks（`real_core_dataplane`）、UDP 走 SOCKS5 UDP ASSOCIATE
+  （`real_core_udp`）。"从 tun 进来的包"与"从 socks 进来的包"在核心内部走的是同一套
+  路由与出站，但这一步**没有自动化覆盖**，需要手动按 §16.3 跑一次。
+* **想要 UDP 静默丢弃还得单独配**：见 §15.5 —— 现在 UDP 被拦时会收到 blackhole 的
+  403 字节。要"完全不回包"得为 UDP 单配一个 `blackhole type:"none"` 出站（本版没做）。
 * **模型指标（Jev 在域名级问题上的精确率/误杀率）仍然是空的。** 免密钥档返回 429
   （`gateway_errors=12`），需要一个 Key 或额度恢复。在这个数字出来之前：功能默认关闭，
   即使打开也是演练模式。
@@ -847,7 +887,8 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 export XT_CORE="$PWD/apps/desktop/binaries/xray"
 cargo test -p xt-core --test mitm_tls_live    -- --nocapture   # 真 MITM：TLS 终结 + steer + 回连
 cargo test -p xt-core --test mitm_steering_live -- --nocapture # 假 MITM：引导与防自环（更细的负对照）
-cargo test -p xt-intent --test real_core_dataplane             # 域名层：对照 200 / 实验 403
+cargo test -p xt-intent --test real_core_dataplane             # 域名层 TCP：对照 200 / 实验 403
+cargo test -p xt-intent --test real_core_udp  -- --nocapture   # 域名层 UDP：对照 pong / 实验 403 且终点 0 次
 cargo test -p xt-core --test routing_api_live                  # 免重启换规则：新连接被拦、旧连接不断
 cargo test -p xt-intent --test real_core                       # 意图配置被真实核心接受
 cargo test -p xt-mitm                                          # 不需要核心：31 项（34 lib + 7 e2e 里的一部分）
@@ -866,7 +907,8 @@ cargo test -p xt-mitm                                          # 不需要核心
 全都是产品代码在起作用。
 
 当前证据（本机实测）：`mitm_tls_live` 1 passed；`mitm_steering_live` 1 passed；
-`real_core_dataplane` 2 passed；`routing_api_live` 通过；`xt-mitm` 41 passed（34 lib + 7 e2e）；
+`real_core_dataplane` 2 passed；`real_core_udp` 1 passed；`routing_api_live` 通过；
+`xt-mitm` 41 passed（34 lib + 7 e2e）；
 桌面 `xraytun-desktop` 274 + 6 通过；界面 `vitest` 40 文件 / 404 通过。
 
 ### 16.3 手动验收：根证书的装 / 卸 / 过期会话回滚（**需要 root，默认不跑**）
