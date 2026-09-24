@@ -96,25 +96,63 @@ export function NoticeAction({ action }: { action: NonNullable<Notice["action"]>
  *
  * | 条件 | 结论 | 文案要能看出 |
  * |---|---|---|
- * | `check_error` 非空 | `failed` | 「**没查到**」+ 原因 —— **绝不许**写成「已是最新」 |
- * | `app_update_available === true` | `available` | 「有新版本 vX.Y.Z」 |
+ * | `check_error` + `app_update_available` + `latest_app` | `available`（带 `staleReason`） | 「有新版本 vX.Y.Z」**和**「最近一次检查没成功」**同时**说 |
+ * | `check_error`（其余） | `failed` | 「**没查到**」+ 原因 —— **绝不许**写成「已是最新」 |
+ * | `app_update_available === true`（无错） | `available` | 「有新版本 vX.Y.Z」 |
  * | 查过 + `latest_app` 有值 + 不可更新 | `latest` | 「已是最新（vX.Y.Z）」 |
  * | 查过但 `latest_app === null` | `unknown` | 「没拿到版本信息」——**不**等同于「已是最新」 |
  * | `checked_at === null` | `unknown` | 「还没检查过」——**不假装知道结果** |
  *
- * ⚠️ `check_error` 是**客户端/核心/geo 检查共用**的一个字段（`state.rs` 的注释写明），
- * 所以这里的措辞只说「更新检查没成功」，**不**替它断言是哪一个子系统失败。
+ * # 为什么第一行是「同时说」而不是「失败优先」（task-190）
+ *
+ * 后端 `commands/snapshot.rs` 的 `check_app_update`：`Err` 分支**只写** `check_error`，
+ * **不清** `latest_app`；而 `app_update_available` 是 `update_status_with` 每个快照
+ * 按 `latest_app` 与当前版本重算的（`snapshot.rs:605-620`）。所以「查到过有新版 + 这次复查
+ * 失败」是一个**真实可达**的组合态，而且 `latest_app` **只在成功分支被写入**
+ * （`snapshot.rs:234-240`）⇒ 这句话的事实基础是稳的，只是可能**已经不是最新**。
+ * 把它判成 `failed` 会把用户最该看到的那条提示（有新版本）一起藏掉。
+ *
+ * ⚠️ `check_error` 是**客户端/核心/geo 检查共用**的一个字段（`state.rs` 的注释写明；
+ * `check_updates` 的 `Err` 分支也写它），所以措辞只说「更新检查没成功」、
+ * **不**替它断言是哪一个子系统失败 —— 也因此**不**说「版本号来自上一次检查」，
+ * 只说「上次**成功**查到的」（那是 `latest_app` 唯一的写入路径）。
  */
 export type UpdateNotice =
-  | { kind: "available"; version: string }
+  | {
+      kind: "available";
+      version: string;
+      /**
+       * task-190：**这个是「上次成功检查看到的版本」**，而最近一次检查没成功。
+       *
+       * 口径：`latest_app.version` 是那次**成功**检查的事实（后端 `check_app_update` 的
+       * `Err` 分支只写 `check_error`、**不清** `latest_app`），所以「有新版本 vX」这句话
+       * 仍然成立；但复查失败意味着**可能已经不是最新**了 —— 所以必须同时带上这个限定语。
+       * 有值时渲染成「（最近一次更新检查没成功；版本号是上次成功查到的）」，`title` 里给原始原因。
+       */
+      staleReason?: string;
+    }
   | { kind: "latest"; version: string }
   | { kind: "failed"; reason: string }
   | { kind: "unknown"; reason: string };
 
 export function updateNotice(u: UpdateStatus): UpdateNotice {
-  // **失败优先**：`check_error` 非空时我们还不知道有没有新版 —— 这一支必须在
-  // 「不可更新 ⇒ 已是最新」之前，否则「没查到」会被说成「已是最新」（红线）。
-  if (u.check_error) return { kind: "failed", reason: u.check_error };
+  // **失败优先**：`check_error` 非空时，绝不能走到「不可更新 ⇒ 已是最新」（红线）。
+  // 但「失败」不等于「什么都不知道」：如果**曾经**成功查到过有新版，后端会保留
+  // `latest_app`（`commands/snapshot.rs` 的 `check_app_update`：`Err` 分支只写
+  // `check_error`，不清 `latest_app`），而 `app_update_available` 是每个快照按它重算的。
+  // ⇒ 这个组合态（查到过 + 复查失败）要**同时**说出两件事，否则就是对已知事实装瞎、
+  //   而且会把用户最该看到的那条提示（有新版本）一起藏掉。
+  if (u.check_error) {
+    if (u.app_update_available && u.latest_app) {
+      return {
+        kind: "available",
+        version: u.latest_app.version,
+        staleReason: u.check_error,
+      };
+    }
+    // 没有已知新版 ⇒ 维持 failed：不许说成「已是最新」，也不许凭空说有新版。
+    return { kind: "failed", reason: u.check_error };
+  }
   if (u.app_update_available && u.latest_app) {
     return { kind: "available", version: u.latest_app.version };
   }
@@ -243,12 +281,16 @@ export default function Dashboard({
             点一下走既有的带意图跳转（`task-48`）：`onNavigate("settings", "set-update")`。 */}
         {(() => {
           const n = updateNotice(snapshot.update);
+          const stale = n.kind === "available" ? n.staleReason : undefined;
           const [text, title, cls] =
             n.kind === "available"
               ? [
                   `有新版本 v${n.version} —— 去更新`,
-                  "打开「设置 → 核心与数据更新」查看并更新（本卡只给入口，安装仍在那一页）",
-                  "update-chip update-chip--new",
+                  stale
+                    ? `最近一次更新检查没成功（${stale}）；显示的版本号是上次成功查到的结果，` +
+                      "可能已经不是最新。打开「设置 → 核心与数据更新」可以重试并更新。"
+                    : "打开「设置 → 核心与数据更新」查看并更新（本卡只给入口，安装仍在那一页）",
+                  stale ? "update-chip update-chip--new update-chip--stale" : "update-chip update-chip--new",
                 ]
               : n.kind === "latest"
                 ? [
@@ -272,6 +314,13 @@ export default function Dashboard({
               onClick={() => onNavigate("settings", "set-update")}
             >
               {text}
+              {/* task-190：限定语必须**看得见**（不只放 title）：
+                  「有新版本」这句的事实基础是**上次成功**那次检查（见 `updateNotice` 注释）。 */}
+              {stale && (
+                <span className="update-chip__note">
+                  （最近一次更新检查没成功；版本号是上次成功查到的）
+                </span>
+              )}
             </button>
           );
         })()}

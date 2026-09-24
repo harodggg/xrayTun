@@ -933,6 +933,19 @@ input[type="checkbox"] {
   border-color: var(--accent);
 }
 
+/* task-190：组合态（查到过有新版 + 复查失败）那条限定语 —— 可见、但不抢主句 */
+.update-chip__note {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* 版本号来自**上次成功**那次检查 ⇒ 外壳也看得出「这条不是刚查到的」 */
+.update-chip--stale {
+  border-style: dashed;
+}
+
 .update-chip--fail {
   color: var(--warn);
   border-color: var(--warn);

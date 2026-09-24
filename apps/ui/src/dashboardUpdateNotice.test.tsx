@@ -8,15 +8,32 @@
  * **刻意不走 `collectNotices`**：那套按严重度只显示最急的一条，其余折进「还有 N 条提示」，
  * 新版本提示会被压住看不见 —— 那就等于没做。
  *
- * # 三态（+ 两个诚实兜底态）的判据 = `UpdateStatus` 现成字段
+ * # 判据全部来自 `UpdateStatus` 现成字段（task-190 修订了一行）
  *
  * | 条件 | 结论 |
  * |---|---|
- * | `check_error` 非空 | 「**更新检查没成功** ⇒ 不知道有没有新版本」+ 原因 |
- * | `app_update_available === true` | 「有新版本 vX.Y.Z」 |
+ * | `check_error` + `app_update_available` + `latest_app` | 「有新版本 vX.Y.Z」+「最近一次检查没成功」**同时**说 |
+ * | `check_error`（其余） | 「**更新检查没成功** ⇒ 不知道有没有新版本」+ 原因 |
+ * | `app_update_available === true`（无错） | 「有新版本 vX.Y.Z」 |
  * | 查过 + `latest_app` 有值 + 不可更新 | 「已是最新（vX.Y.Z）」 |
  * | 查过但 `latest_app === null` | 「没拿到版本信息」（**不等于**已是最新） |
  * | `checked_at === null` | 「还没检查过更新」（**不假装**知道结果） |
+ *
+ * # task-190 为什么修订了第一行
+ *
+ * 本文件原来（task-189）断言「`check_error` 非空 ⇒ 一律 failed」，其中一条用例还专门用
+ * `check_error + app_update_available: true` 去证「不能说有新版本」。**那条断言与后端事实
+ * 相冲**：`commands/snapshot.rs` 的 `check_app_update` 在 `Err` 分支只写 `check_error`、
+ * **不清** `latest_app`（`snapshot.rs:234-240`），而 `app_update_available` 是
+ * `update_status_with` 按 `latest_app` 与当前版本**每快照重算**的（`snapshot.rs:605-620`）
+ * ⇒「查到过有新版 + 这次复查失败」是真实可达的组合态，判成 failed 等于对已知事实装瞎、
+ * 并把用户最该看到的那条提示（有新版本）一起藏掉。
+ *
+ * **红线改绑**（不是删掉）：这个组合态**绝不许**说成「已是最新」，而且**必须**带上限定语
+ * 说明版本号的来源与时效；`check_error` + **没有**已知新版时仍然是 `failed`。
+ * 另：`check_error` 是客户端/核心/geo **共用**字段（`check_updates` 的 `Err` 分支也写它），
+ * 所以措辞**不**断言是哪个子系统失败、也**不**说「上一次检查」，只说「上次**成功**查到的」
+ * ——那是 `latest_app` 唯一的写入路径。
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -92,7 +109,7 @@ describe("task-189 · `updateNotice` 的五态", () => {
     );
   });
 
-  it("`check_error` 非空 ⇒ **必须**是 failed（即使 app_update_available 也是 false）", () => {
+  it("`check_error` + `app_update_available === false` ⇒ failed（**不许**改口说「已是最新」）", () => {
     const n = updateNotice(
       update({ check_error: "GitHub API 限流（60 次/小时）", checked_at: 1, latest_app: APP }),
     );
@@ -100,11 +117,34 @@ describe("task-189 · `updateNotice` 的五态", () => {
     expect(n.kind === "failed" && n.reason).toContain("限流");
   });
 
-  it("失败优先：`check_error` + `app_update_available === true` 时也不能说「有新版本」", () => {
+  // ⚠️ task-190 **修订**本条：原文是「`check_error` + `app_update_available === true` ⇒ failed，
+  // 不能说有新版本」，与后端事实相冲（见文件头）。红线改绑到「不得说成已是最新 + 必须带限定语」。
+  it("**task-190 修订**：`check_error` + 已知有新版 ⇒ available 且**必须**带 staleReason，绝不可是 latest", () => {
     const n = updateNotice(
-      update({ check_error: "网络不可达", app_update_available: true, latest_app: APP }),
+      update({ check_error: "网络不可达", app_update_available: true, latest_app: APP, checked_at: 1 }),
     );
-    expect(n.kind, "没查到就不能下任何结论").toBe("failed");
+    expect(n.kind, "曾经成功查到过有新版，不能判成「什么都不知道」").toBe("available");
+    expect(n.kind === "available" && n.staleReason, "限定语不许吞掉").toBe("网络不可达");
+    expect(n.kind, "红线：绝不许说成「已是最新」").not.toBe("latest");
+  });
+
+  it("**组合态**：查到过有新版 + 复查失败 ⇒ 仍是 available，但**带 staleReason**", () => {
+    const n = updateNotice(
+      update({
+        check_error: "GitHub 403 限流（匿名 60 次/小时，按 IP 算）",
+        app_update_available: true,
+        latest_app: APP,
+        checked_at: 1,
+      }),
+    );
+    expect(n.kind, "知道有新版就不能装瞎").toBe("available");
+    expect(n.kind === "available" && n.version).toBe("0.8.99");
+    expect(n.kind === "available" && n.staleReason).toContain("403");
+  });
+
+  it("反例一：`check_error` + **没有**已知新版 ⇒ 必须是 failed，且不是 available", () => {
+    const n = updateNotice(update({ check_error: "离线", latest_app: null, checked_at: 1 }));
+    expect(n.kind).toBe("failed");
   });
 
   it("`checked_at === null` ⇒ unknown（还没查过，不假装知道）", () => {
@@ -152,6 +192,42 @@ describe("task-189 · 仪表盘上的那条提示", () => {
     expect(screen.queryByText(/已是最新/), "红线：没查到 ≠ 已是最新").toBeNull();
     // 锚定「有新版本 v…」：否则会命中「不知道有**没有新版本**」里的子串（我自己踩到过）
     expect(screen.queryByText(/有新版本 v/)).toBeNull();
+  });
+
+  it("**组合态**渲染 ⇒ 「有新版本 vX」与限定语**同时**出现，且仍可点到 `settings#set-update`", async () => {
+    const onNavigate = await renderDash(
+      update({
+        check_error: "GitHub 403 限流（匿名 60 次/小时，按 IP 算）",
+        app_update_available: true,
+        latest_app: APP,
+        checked_at: 1,
+      }),
+    );
+    const chip = screen.getByRole("button", { name: /有新版本 v0\.8\.99/ });
+    expect(chip.textContent, "必须同时说清限定").toContain("最近一次更新检查没成功");
+    expect(chip.textContent, "说清版本号的来源（只有成功那次才会写入 latest_app）").toContain(
+      "上次成功查到的",
+    );
+    expect(chip.textContent, "不许把共用字段硬说成某个子系统失败").not.toContain("客户端检查失败");
+    expect(chip.getAttribute("title"), "原始原因要在 title 里可查").toContain("403");
+    expect(screen.queryByText(/已是最新/)).toBeNull();
+    fireEvent.click(chip);
+    expect(onNavigate).toHaveBeenCalledWith("settings", "set-update");
+  });
+
+  it("反例二：**没有** `check_error` ⇒ 不得出现任何「没成功」字样（限定语不许常驻）", async () => {
+    await renderDash(update({ app_update_available: true, latest_app: APP, checked_at: 1 }));
+    expect(screen.getByRole("button", { name: /有新版本 v0\.8\.99/ }).textContent).not.toContain(
+      "没成功",
+    );
+    expect(document.body.textContent ?? "").not.toContain("最近一次更新检查没成功");
+  });
+
+  it("反例一（渲染）：`check_error` + 无 `latest_app` ⇒ failed，且**不得**出现「有新版本 v」", async () => {
+    await renderDash(update({ check_error: "离线", latest_app: null, checked_at: 1 }));
+    expect(screen.getByRole("button", { name: /更新检查没成功/ })).toBeTruthy();
+    expect(screen.queryByText(/有新版本 v/)).toBeNull();
+    expect(screen.queryByText(/没成功/)).toBeTruthy();
   });
 
   it("已是最新 ⇒ 显示版本号（不制造焦虑、也不说「有新版本」）", async () => {
