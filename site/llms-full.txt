@@ -15,11 +15,13 @@
 > **`xray-wasm` 的仓库是另一个**：<https://github.com/harodggg/xray-wasm>
 > 它是同一作者的**独立项目**（纯 Rust 实现 VLESS + XTLS-Vision + REALITY，编译到 wasm32-wasip2），
 > **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。
+<!-- BEGIN external:header（其它工作流维护：生成器原样保留本区间，不解析、不重排） -->
 >
 > **`信息过滤器 · Jev` 的仓库也是另一个**：<https://github.com/harodggg/jev-x-filter>
 > 它是同一作者的另一个**独立项目**（Chrome MV3 扩展，过滤 x.com 时间线上的垃圾信息：
 > 色情/性交易引流、诈骗/博彩/荐股、广告导流、标题党、低质 AI、重复文案农场六类），
 > **与 XrayTun 无任何集成关系** —— 既不能用它配置 Xray，也不能用 XrayTun 管理它。
+<!-- END external:header -->
 
 收录页面（6 个，中英各 3）：
 
@@ -148,6 +150,7 @@ v0.8.37（2026-09-23 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dm
 **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。 两者面向的场景不同：XrayTun 是 macOS 图形客户端，xray-wasm 面向容器与服务端。
 
 [xray-wasm 是什么、怎么用 →](wasm/)
+<!-- BEGIN external:body（其它工作流维护：生成器原样保留本区间，不解析、不重排） -->
 
 ## 相关项目：信息过滤器 · Jev
 
@@ -169,6 +172,7 @@ Jev 是纯文本模型、**看不了图**：图片只走本地肤色像素启发
 
 [信息过滤器 · Jev 是什么、怎么用 →](jev-x-filter/)
 
+<!-- END external:body -->
 ## 下载
 
 [下载 macOS 版 v0.8.37 · dmg · 45.3 MiB](https://github.com/harodggg/xrayTun/releases/download/v0.8.37/XrayTun_0.8.37_x86_64_arm64.dmg)
