@@ -801,7 +801,7 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P3a 界面入口（6 个命令 + 契约） | ✅ 完成 | `commands/intent.rs` + `ipc.ts`；契约测试的**两把哨兵**（Rust 注册数、TS 字面量数）都同步到 43 |
 | P3b 意图过滤页 | ✅ 完成 | 导航新增「意图过滤」；`cargo test --workspace` 797 passed、`vitest` **39 文件 / 381 passed**、`tsc --noEmit` 干净 |
 | **数据面验收（真实核心 + 真实 TCP）** | ✅ 完成 | `cargo test -p xt-intent --test real_core_dataplane` ⇒ **2 passed**：对照组 `allowed.intent-dataplane` 拿到 **200**，实验组 `blocked.intent-dataplane` 拿到 **403**（blackhole 的响应）；全离线（本地 HTTP 服务 + `dns.hosts` 映射 + 全部现取端口），不打扰机器上正在跑的 xray |
-| **P1.5 离线评测** | ✅ 完成（模型指标待额度） | `cargo run -p xt-intent --example eval_domains` ⇒ 本机真实语料，见 `docs/verification/INTENT-EVAL-BASELINE.md`。**已量到**：16,634 条连接 / 259 个域名，静态名单只覆盖 **0.78% 的连接**，**138 个域名无标注**（模型要判的那批），**63.2% 的连接行配不到域名**。**还量不到**：模型指标 —— 免密钥档返回 429（原因分布 `gateway_errors=12`），需要一个 Key 或额度恢复 |
+| **P1.5 离线评测** | ✅ 完成（**模型指标已量到**，见 §16.4） | `cargo run -p xt-intent --example eval_domains` ⇒ 本机真实语料，见 `docs/verification/INTENT-EVAL-BASELINE.md`。**已量到**：16,634 条连接 / 259 个域名，静态名单只覆盖 **0.78% 的连接**，**138 个域名无标注**（模型要判的那批），**63.2% 的连接行配不到域名**。**还量不到**：模型指标 —— 免密钥档返回 429（原因分布 `gateway_errors=12`），需要一个 Key 或额度恢复 |
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
@@ -865,9 +865,13 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
   路由与出站，但这一步**没有自动化覆盖**，需要手动按 §16.3 跑一次。
 * **想要 UDP 静默丢弃还得单独配**：见 §15.5 —— 现在 UDP 被拦时会收到 blackhole 的
   403 字节。要"完全不回包"得为 UDP 单配一个 `blackhole type:"none"` 出站（本版没做）。
-* **模型指标（Jev 在域名级问题上的精确率/误杀率）仍然是空的。** 免密钥档返回 429
-  （`gateway_errors=12`），需要一个 Key 或额度恢复。在这个数字出来之前：功能默认关闭，
-  即使打开也是演练模式。
+* **模型的"增量"仍然没有证据。** 判据（精确率/误杀率）已经量到一次可用的：
+  精确率 **1.000**（5 真阳 / 0 假阳）、误杀率 **0.000/1000 连接**、
+  召回 **0.417**（12 个已知广告域只拦到 5 个）。但**无标注桶里一条都没被拦** ——
+  而那才是本功能的全部增量（静态名单拦不到的新域名）。见 §16.4 与
+  `docs/verification/INTENT-EVAL-BASELINE.md` §3。
+* **免密钥档的额度随时可能 429**，所以评测工具必须限速（`--sleep-ms 1200` 已是默认）。
+  紧循环跑会把额度打满，量到的是配额不是模型（本机实测：第二轮 106 条候选 93 条无答案）。
 * **根证书每次启动重新生成**（私钥只活在内存里）。好处是不留长期信任面，代价是每次启动
   都要重新信任一次。让 CA 稳定需要持久化私钥（0600、helper 目录），是独立的一步。
 * **真实 `install`/`remove` 只会跑 `#[ignore]` 的那条用例**（需要 root）。默认跑的路径只覆盖
@@ -910,6 +914,35 @@ cargo test -p xt-mitm                                          # 不需要核心
 `real_core_dataplane` 2 passed；`real_core_udp` 1 passed；`routing_api_live` 通过；
 `xt-mitm` 41 passed（34 lib + 7 e2e）；
 桌面 `xraytun-desktop` 274 + 6 通过；界面 `vitest` 40 文件 / 404 通过。
+
+### 16.4 模型指标（P1.5 的第二次交付）：**已量到一次可用的**
+
+2026-09-25 免密钥档（`jev-1.13-free`）恢复额度，跑通了一次限速的评测：
+
+| 指标 | 实测 | 判据 | 结论 |
+|---|---|---|---|
+| 精确率 | **1.000**（5 真阳 / 0 假阳） | ≥ 0.95 | 通过 |
+| 误杀率 | **0.000 / 1000 连接**（60 个强负样本全放行） | ≤ 1 | 通过 |
+| 召回率 | **0.417**（12 个已知广告域拦到 5 个） | **非判据** | 产出量很低 |
+| 无标注桶被拦 | **0** | — | **增量零证据** |
+
+12 个正样本与 60 个负样本**全都拿到了答案**，所以上面两个判据数是可用的。
+报告新加了一节「怎么读这份报告（判据只回答一半）」，并且在**无标注桶 0 拦时**
+强制打印一句"对'模型能发现新广告域'这件事没有任何证据、`通过` 只说明开它不太会误杀"
+（有正/负对照测试：未知桶有 block 时那句话必须消失，否则它会变成没人看的噪音）。
+
+**别把 `结论：通过` 读成"打开就能过滤广告"**：通过判据只覆盖精确率与误杀率
+（设计刻意不管召回）。真正的增量在无标注桶里，而那一桶目前是 0。
+
+复跑：
+
+```bash
+CORPUS="$HOME/Library/Application Support/com.xraytun.desktop/logs"
+cargo run -q -p xt-intent --example eval_domains -- \
+  --corpus "$CORPUS/app.jsonl" --corpus "$CORPUS/app.1.jsonl" \
+  --geosite-dir apps/desktop/binaries --report /tmp/intent-eval-live.md \
+  --live --limit 120            # 默认 --sleep-ms 1200（约 50 次/分钟）
+```
 
 ### 16.3 手动验收：根证书的装 / 卸 / 过期会话回滚（**需要 root，默认不跑**）
 

@@ -385,7 +385,8 @@ pub fn render_report(dataset: &Dataset, metrics: Option<&Metrics>, notes: &[Stri
                 }
             ));
             out.push_str(&format!(
-                "**召回率** {}\n\n",
+                "**召回率** {} —— **非判据**（产出量指标：漏拦一个广告用户几乎无感，\
+                 误杀一个正常站点用户会立刻关掉功能）\n\n",
                 opt_ratio(m.recall(), "名单里一条都没判过")
             ));
             let gate = m.verdict();
@@ -396,6 +397,32 @@ pub fn render_report(dataset: &Dataset, metrics: Option<&Metrics>, notes: &[Stri
                 Gate::Pass => {}
             }
             out.push_str("\n\n");
+
+            // **读法**：判据只回答一半的问题。没有这一段，"结论：通过"会被读成
+            // "打开就能过滤广告了" —— 而它其实只说"打开不太会误杀"。
+            out.push_str("### 怎么读这份报告（判据只回答一半）\n\n");
+            out.push_str(
+                "通过判据回答的是**「开它会不会把上网搞坏」**（精确率 + 误杀率）。\
+                 它**不回答「能不能拦到广告」**，那是下面两件事：\n\n",
+            );
+            out.push_str(&format!(
+                "* **召回率 {}**：已知广告域名里有多少被拦到。判据不管这一项，\
+                 但用户感受得到 —— 它决定「开了之后到底少看了多少广告」。\n",
+                opt_ratio(m.recall(), "名单里一条都没判过")
+            ));
+            out.push_str(&format!(
+                "* **无标注桶里拦了 {} 条**：这才是本功能的**全部增量**（静态名单拦不到的那批\
+                 新域名），也是网关账单的去处。\n",
+                m.unknown_blocked
+            ));
+            if m.unknown_blocked == 0 {
+                out.push_str(
+                    "\n> ⚠️ **无标注桶一条都没拦 ⇒ 本次评测对「模型能发现新广告域」这件事\
+                     **没有任何证据**。`通过` 只说明「开它不太会误杀」，**不支持「打开就能过滤广告」**。\
+                     要支持后者，未知桶里必须至少有几条真的 block（那是唯一可看的正例）。\n",
+                );
+            }
+            out.push('\n');
         }
     }
 
@@ -627,5 +654,51 @@ mod tests {
         assert!(report.contains("精确率"));
         assert!(report.contains("误杀率"));
         assert!(report.contains("结论："));
+    }
+
+    /// **读法那一节是判别性的**：未知桶一条都没拦时，报告必须**显式**说
+    /// "对'模型能发现新广告域'这件事没有任何证据"。
+    ///
+    /// 没有这条，`结论：通过` 会被读成"打开就能过滤广告" —— 而通过判据只覆盖
+    /// 精确率与误杀率（设计里刻意不管召回）。真实语料上第一次跑出来就是
+    /// 精确率 1.000 / 召回 0.417 / 未知桶 0 拦，正是最容易被误读的那种形态。
+    #[test]
+    fn a_pass_with_no_unknown_blocks_says_the_increment_is_unproven() {
+        let ds = Dataset { connections_total: 1000, ..Default::default() };
+        // `metrics_from` **不填 `connections_total`**（那是调用方从数据集带过来的），
+        // 漏了它会让误杀率算不出来 ⇒ 结论变成"证据不足"而不是"通过"。
+        let mut m = metrics_from(&[
+            (Label::Positive, Judgement::Block, 1),
+            (Label::Negative, Judgement::NotBlock, 1),
+            (Label::Unknown, Judgement::NotBlock, 1),
+        ]);
+        m.connections_total = ds.connections_total;
+        assert_eq!(m.verdict(), Gate::Pass, "前置条件：这份指标本身是「通过」的");
+        let report = render_report(&ds, Some(&m), &[]);
+        assert!(report.contains("结论：通过"), "{report}");
+        assert!(
+            report.contains("没有任何证据"),
+            "未知桶 0 拦时报告必须点明增量没有证据：\n{report}"
+        );
+        assert!(
+            report.contains("非判据"),
+            "召回率必须被标成非判据（它是产出量指标，不是准入判据）：\n{report}"
+        );
+    }
+
+    /// 负对照：未知桶**有** block 时不该再打那句警告（否则警告会变成噪音，
+    /// 每次都被忽略）。
+    #[test]
+    fn an_unknown_block_removes_the_unproven_warning() {
+        let ds = Dataset { connections_total: 1000, ..Default::default() };
+        let mut m = metrics_from(&[
+            (Label::Positive, Judgement::Block, 1),
+            (Label::Negative, Judgement::NotBlock, 1),
+            (Label::Unknown, Judgement::Block, 1),
+        ]);
+        m.connections_total = ds.connections_total;
+        let report = render_report(&ds, Some(&m), &[]);
+        assert!(!report.contains("没有任何证据"), "{report}");
+        assert!(report.contains("无标注桶里拦了 1 条"), "{report}");
     }
 }

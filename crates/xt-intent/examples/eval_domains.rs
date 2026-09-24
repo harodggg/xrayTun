@@ -43,6 +43,13 @@ struct Args {
     model: String,
     api_key: Option<String>,
     limit: usize,
+    /// 每条候选之间的间隔。
+    ///
+    /// **默认不是 0，而且这不是"保守"而是"必须"**：免密钥档的额度是按分钟计的，
+    /// 紧循环跑会把额度打满、把 `gateway_errors` 刷到覆盖大部分样本 ——
+    /// 那样量到的是配额，不是模型（本机实测：第一轮 120 条拿到 36 条无答案，
+    /// 紧接着的第二轮 196 条错误 / 106 条候选有 93 条无答案）。
+    sleep_ms: u64,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -56,6 +63,7 @@ fn parse_args() -> Result<Args, String> {
         model: "jev-1.13-free".into(),
         api_key: std::env::var("JEV_API_KEY").ok(),
         limit: 200,
+        sleep_ms: 1200,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -73,8 +81,13 @@ fn parse_args() -> Result<Args, String> {
                     .parse()
                     .map_err(|_| "--limit 必须是数字".to_string())?
             }
+            "--sleep-ms" => {
+                a.sleep_ms = value("--sleep-ms")?
+                    .parse()
+                    .map_err(|_| "--sleep-ms 必须是数字（毫秒）".to_string())?
+            }
             "--help" | "-h" => {
-                println!("用法：--corpus <jsonl> [--corpus …] --geosite-dir <dir> --report <md> [--live] [--limit N] [--dump-unknown <path>]");
+                println!("用法：--corpus <jsonl> [--corpus …] --geosite-dir <dir> --report <md> [--live] [--limit N] [--sleep-ms N] [--dump-unknown <path>]");
                 std::process::exit(0);
             }
             other => return Err(format!("不认识的参数：{other}")),
@@ -159,6 +172,7 @@ fn main() {
     // 3) 可选：真的问一遍模型。
     let mut notes = vec![
         format!("语料文件 {} 个，共读入 {lines_read} 行", args.corpus.len()),
+        format!("候选之间间隔 {} ms（限速；用 --sleep-ms 0 关掉）", args.sleep_ms),
         "否定样本刻意不含 `cn`（它里面既有正常站点也有投放域名，拿它当正常会系统性高估精确率）"
             .to_string(),
     ];
@@ -226,6 +240,11 @@ fn main() {
         let mut samples: Vec<(Label, Judgement, u64)> = Vec::new();
         let mut totals = xt_intent::engine::ClassifyReport::default();
         for (host, label, connections) in &queue {
+            // 限速：**在发请求之前**等，而不是撞到 429 之后靠退避重试
+            // （重试会把同一个额度窗口浪费掉，还会让"无答案"的比例看起来像模型不行）。
+            if args.sleep_ms > 0 {
+                std::thread::sleep(Duration::from_millis(args.sleep_ms));
+            }
             let rec = synthetic_record(host);
             engine.observe(&rec, 0);
             // 立刻跑一轮，让每条候选都有判决（节拍在这里只是形式）。

@@ -626,8 +626,11 @@ mod tests {
     ///
     /// 默认 `#[ignore]`（CI 不该依赖外网）。手动跑：
     /// ```bash
-    /// cargo test -p xt-intent --test live -- --ignored --nocapture
+    /// cargo test -p xt-intent --lib jev -- --ignored --nocapture
     /// ```
+    ///
+    /// （**不是** `--test live`：这条用例在 lib 的测试模块里，没有名为 `live` 的
+    /// 测试目标 —— 照着旧写法跑会得到"0 tests"，看起来像"没跑"，实际是"没找到"。）
     ///
     /// 断言刻意宽松：免密钥档随时可能 429（本机实测就是 429），
     /// 但**绝不允许**出现 TLS / 连接 / 格式层面的失败 —— 那才是我们自己的 bug。
