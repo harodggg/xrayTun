@@ -98,6 +98,27 @@ function snap(over: Record<string, unknown> = {}) {
       error: null,
     },
     notice: null,
+    // task-189：仪表盘新增了「有新版本 / 已是最新 / 没查到」那条提示，它读
+    // `snapshot.update`（`UpdateStatus` 是 `AppSnapshot` 的**必填**字段）——
+    // 这个夹具是手写的最小骨架，缺了它就会在**渲染时**抛
+    // `Cannot read properties of undefined (reading 'check_error')`。
+    // 这里补全 **`UpdateStatus` 的全部字段**（不是只补我用到的那几个），并刻意给
+    // 「还没查过」（`checked_at: null`）—— 于是这条提示在这些用例里是中性的一句，
+    // 不会影响它们原本要断言的「连接/断开」与「系统代理徽章」。
+    update: {
+      core_version: "26.9.9",
+      core_managed: false,
+      core_managed_version: null,
+      geo_tag: null,
+      geo_installed_at: null,
+      latest_core: null,
+      latest_geo: null,
+      latest_app: null,
+      app_update_available: false,
+      progress: null,
+      checked_at: null,
+      check_error: null,
+    },
     nodes: [{ id: "n1", name: "香港 · REALITY 01", source: { kind: "manual" } }],
     latency: {},
     subscriptions: [],

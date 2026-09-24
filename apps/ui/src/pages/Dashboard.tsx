@@ -27,7 +27,7 @@ import { InlineConfirm } from "../InlineConfirm";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
 import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
 import { useStore } from "../store";
-import type { AppSnapshot } from "../types";
+import type { AppSnapshot, UpdateStatus } from "../types";
 import {
   formatBytes,
   formatRate,
@@ -81,6 +81,46 @@ export function NoticeAction({ action }: { action: NonNullable<Notice["action"]>
       onConfirm={action.run}
     />
   );
+}
+
+/**
+ * 「有没有新版本」这条提示该说什么（task-189）。
+ *
+ * # 为什么要有这条（用户的原始需求）
+ *
+ * 用户要的是「**自动检测最新版本**」。`task-188` 让后端启动查一次 + 每 6h 复查，
+ * 但**结果只出现在设置页的「核心与数据更新」分节里** —— 不打开设置页就永远看不到，
+ * 自动检测等于白做。所以这里把它提到**仪表盘状态区**（默认落地页）。
+ *
+ * # 三态（外加两个诚实的兜底态），判据全部来自 `UpdateStatus` 的现成字段
+ *
+ * | 条件 | 结论 | 文案要能看出 |
+ * |---|---|---|
+ * | `check_error` 非空 | `failed` | 「**没查到**」+ 原因 —— **绝不许**写成「已是最新」 |
+ * | `app_update_available === true` | `available` | 「有新版本 vX.Y.Z」 |
+ * | 查过 + `latest_app` 有值 + 不可更新 | `latest` | 「已是最新（vX.Y.Z）」 |
+ * | 查过但 `latest_app === null` | `unknown` | 「没拿到版本信息」——**不**等同于「已是最新」 |
+ * | `checked_at === null` | `unknown` | 「还没检查过」——**不假装知道结果** |
+ *
+ * ⚠️ `check_error` 是**客户端/核心/geo 检查共用**的一个字段（`state.rs` 的注释写明），
+ * 所以这里的措辞只说「更新检查没成功」，**不**替它断言是哪一个子系统失败。
+ */
+export type UpdateNotice =
+  | { kind: "available"; version: string }
+  | { kind: "latest"; version: string }
+  | { kind: "failed"; reason: string }
+  | { kind: "unknown"; reason: string };
+
+export function updateNotice(u: UpdateStatus): UpdateNotice {
+  // **失败优先**：`check_error` 非空时我们还不知道有没有新版 —— 这一支必须在
+  // 「不可更新 ⇒ 已是最新」之前，否则「没查到」会被说成「已是最新」（红线）。
+  if (u.check_error) return { kind: "failed", reason: u.check_error };
+  if (u.app_update_available && u.latest_app) {
+    return { kind: "available", version: u.latest_app.version };
+  }
+  if (u.checked_at === null) return { kind: "unknown", reason: "还没检查过更新" };
+  if (!u.latest_app) return { kind: "unknown", reason: "更新检查没拿到版本信息" };
+  return { kind: "latest", version: u.latest_app.version };
 }
 
 export default function Dashboard({
@@ -195,6 +235,46 @@ export default function Dashboard({
             以及（task-68）探测失败窗口的自救提示 —— 两者都由 `appStatus` 折进来，
             这样顶栏 `title`、live region 与这里**同一份文本、同一个真源**。 */}
         {state.sub && <div className="dash__state-sub">{state.sub}</div>}
+
+        {/* task-189：把「有没有新版本」摆在**默认落地页**的状态区里 ——
+            用户不打开设置页也能看到（那是这一卡的全部意义）。
+            刻意**不**走 `collectNotices`：那套只显示最急的一条，其余折进
+            「还有 N 条提示」，新版本提示会被压在下面而看不见。
+            点一下走既有的带意图跳转（`task-48`）：`onNavigate("settings", "set-update")`。 */}
+        {(() => {
+          const n = updateNotice(snapshot.update);
+          const [text, title, cls] =
+            n.kind === "available"
+              ? [
+                  `有新版本 v${n.version} —— 去更新`,
+                  "打开「设置 → 核心与数据更新」查看并更新（本卡只给入口，安装仍在那一页）",
+                  "update-chip update-chip--new",
+                ]
+              : n.kind === "latest"
+                ? [
+                    `已是最新（v${n.version}）`,
+                    "上次检查的结果：没有比当前更新的版本。点开可以手动再查一次。",
+                    "update-chip",
+                  ]
+                : n.kind === "failed"
+                  ? [
+                      // 这一句**必须**看得出是「没查到」，不许读成「已是最新」
+                      "更新检查没成功 —— 所以不知道有没有新版本",
+                      n.reason,
+                      "update-chip update-chip--fail",
+                    ]
+                  : [`${n.reason}`, "点开可以去设置页手动检查一次", "update-chip"];
+          return (
+            <button
+              type="button"
+              className={cls}
+              title={title}
+              onClick={() => onNavigate("settings", "set-update")}
+            >
+              {text}
+            </button>
+          );
+        })()}
 
         {/* 主操作（连接/断开）**只在顶栏渲染一个**（task-72）。
             这里原来还有一颗等价的「连接/断开」，同一个屏上出现两个 —— 而两者
