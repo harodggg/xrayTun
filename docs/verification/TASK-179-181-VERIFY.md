@@ -3,9 +3,10 @@
 > 验收人：`tester`。**不采信实现者的自测**：UI 侧的结论来自**我自己写的探针**（渲染真实组件 + 注入两种
 > `self_check` / 三种 `traffic`），不是读他们的用例。
 > 绑定：`af582bf`（tip，含两个目标提交；`af582bf` 只动 site/版本号，见 §1）。
-> 隔离：worktree `v179`（**已被环境清理，见 §0.2**）。
-> 判定：**UI 侧（item 2/5 + 两条 UI 突变）我量到并通过；Rust 执行级（item 1 的反例、A20 核心断言、
-> 跨语言自动断言、两条 Rust 突变）被环境事件打断，未复测 —— 只给出读码证据，不冒充已验证。**
+> 隔离：worktree `v179`（先建在 `${TMPDIR}` 下、**被环境清理**；改到**仓库内 `.wt/`** 后重建，复用幸存的
+> `CARGO_TARGET_DIR` 完成补测 —— 见 §0.2）。
+> 判定：**全部四类判据都已实测**：Rust 侧 4 条执行级断言 + UI 侧 8 条断言全绿；**四条反向突变全部变红**
+> （UI 两条、Rust 两条，每条都让**我的探针与实现者的用例同时红**）。
 
 ---
 
@@ -25,8 +26,11 @@
 **整个目录在 16:25 前后被系统清理**：`git worktree list` 显示 `leadgate182 / t183 / v179` 全部 pruned。
 ⇒ 我的 `v179` 里**正在跑的 Rust 探针构建被打断**（依赖还在编译阶段），**Rust 侧结论未能产出**。
 **target dir 幸存**（`.cargo-target.wt/v179`），可复用重建。
-**未复测的部分已在 §4/§5 逐条标注**（不写成「已验证」）。
-（附带发现：`wt.sh` 把 worktree 放进可清理目录这件事本身值得机制化 —— 建议默认改成仓库内 `.wt/`。）
+**恢复过程（已成功）**：`git worktree prune` → `WT_DIR_ROOT=/Users/xbtg-/deepseek-harness/.wt ./scripts/wt.sh new v179 af582bf`
+→ 复用幸存的 `CARGO_TARGET_DIR=.cargo-target.wt/v179`（外部依赖已编译）⇒ 构建在 **113 s** 内完成，补测跑完。
+（附带发现：`wt.sh` 默认把 worktree 放进可清理目录这件事本身值得机制化 —— 建议默认改成仓库内 `.wt/`。
+另：第一次补测里我又踩了自己一个坑 —— 用 `git checkout` 还原 M1 突变时**把我附加的探针模块一起抹掉了**，
+导致 M2 第一轮只在实现者的用例上变红（7 条）；重新附上探针后 M2 是 **2 红**（见 §4）。）
 
 ---
 
@@ -66,10 +70,29 @@
 * 构造器交叉约束：`verified_for(tag)` ⇒ `tag=Some` + `verified=true`；`unattributed` ⇒ `tag=None` + `verified=false` + `is_node_outbound=false`
   ⇒ **`is_node_outbound=true` 而 `tag=None` 这种矛盾组合在构造器层面不可达**。
 
-### 2.3 ⏳ 未复测
+### 2.3 执行级断言（我自己的探针，**实测全绿**）
 
-我原本在工作区里准备了 3 条执行级断言（真值表 4 例、`direct` 16e9 vs 节点 5,555 字节、未归属契约），
-**构建被环境事件打断**，因此**不作为已验证结论**。
+我的探针 `globe::tester_probe`（worktree 内，未提交）有 3 条执行级断言；与实现者的用例一起跑：
+
+```
+$ ./scripts/wt.sh run v179 -- bash -c "cd <wt> && cargo test -p xraytun-desktop --lib globe:: -- --nocapture"
+test commands::globe::tester_probe::probe_self_check_truth_table ... ok
+test commands::globe::tester_probe::probe_attribution_reports_node_tag_not_max ... ok
+test commands::globe::tester_probe::probe_unattributed_contract ... ok
+test commands::globe::tester_probe::probe_cross_language_fields ... ok
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 243 filtered out; finished in 0.00s
+```
+
+它断言的内容（**构造反例**，不是复述实现）：
+* **真值表 4 例**：`(Some(en0),Some)` ⇒ `trusted=true` 且 `reason=None` 且 `ip/bound_interface` 都齐；
+  `(Some(en0),None)`、`(None,Some)`、`(None,None)` ⇒ `trusted=false`、`reason` 非空且**≥10 字符**、
+  绑卡那例还要**点名 `en0`**、且**不许声称绑了哪张卡**（`bound_interface` 必须 `None`）；
+  每例同时断言 `trusted ⇔ reason.is_none()`；
+* **A20 核心**：`direct` 各 8e9（合计 16e9）vs `node-abc` 1234+4321 ⇒ 断言
+  `tag == Some("node-abc")`、`is_node_outbound`、**`bytes == 5555`**（不是 16e9）；
+  另有「节点 tag 不在统计里 ⇒ `bytes=0` 但**仍 verified**」；
+* **未归属契约**：`node_tag=None` 与 `stats=None` 两种 ⇒ `verified=false`、`bytes==0`、`tag=None`、
+  `reason` 非空；并用构造器交叉检查「`verified ⇒ tag` 有」「`direct` 的 `is_node_outbound=false`」。
 
 ---
 
@@ -114,8 +137,12 @@ $ npx vitest run src/globeProvenance.test.tsx
 |---|---|---|
 | **M1-UI**：`originLabel` 恒返回「本机出口」（trusted 恒真） | 我的 + 实现者的用例都要红 | ✅ **`Test Files 2 failed (2)` / `Tests 4 failed \| 13 passed (17)`** |
 | **M3-UI**：把渲染条件 `{r.traffic.verified ? …}` 改成恒真（去掉数字渲染条件） | 同上 | ✅ **`Test Files 2 failed (2)` / `Tests 2 failed \| 15 passed (17)`**，两条红分别是<br>`task-181 · A20：归属决定数字挂谁名下 > verified === false ⇒ 不显示数字…`（实现者）<br>`task-184 探针 · A20 流量归属 > verified=false ⇒ 不渲染任何数字…`（我） |
-| **M1-Rust**：`SelfCheck::judge` 里 `trusted` 恒真 | 我的 + 实现的 globe 断言都要红 | ⏳ **未复测**（构建被清理打断） |
-| **M2-Rust**：`read_exit_traffic` 改回「取最大」当归属 | 同上 | ⏳ **未复测** |
+| **M1-Rust**：`SelfCheck::judge` 里 `trusted` 恒真 | 我的 + 实现的 globe 断言都要红 | ✅ **`test result: FAILED. 7 passed; 3 failed; 1 ignored`**，三条红是：<br>`tester_probe::probe_self_check_truth_table`（我）<br>`tests::self_check_is_trusted_only_when_the_query_was_bound_and_answered`（实现者）<br>`tests::trusted_iff_bound_interface_and_ip_and_no_reason`（实现者） |
+| **M2-Rust**：`read_exit_traffic` 改回「取最大」当归属 | 同上 | ✅ **`test result: FAILED. 8 passed; 2 failed; 1 ignored`**：<br>`tester_probe::probe_attribution_reports_node_tag_not_max`（我）<br>`tests::attribution_follows_the_node_tag_not_the_busiest_outbound`（实现者） |
+
+> ⚠️ M2 的**第一轮**只拿到 1 红：我用 `git checkout` 还原 M1 时把**附加进 `globe.rs` 的探针模块**一起抹掉了，
+> 于是那一轮只剩实现者的用例（`7 条 = 5 passed + 1 failed + 1 ignored`）。补上探针重跑后是上面的 **2 红**。
+> 这与本项目反复记录的「`git checkout` 会连探针一起还原 ⇒ 结论无效」是同一个坑（我自己又踩了一次，留档）。
 
 两次 UI 突变都在**同一份 worktree 源码**上做，做完立刻 `cp` 还原：
 `Globe.tsx` 的 sha256 还原前后**均为 `2149417071694a0c06568e59e16c959e9cd5d710bff0f2c875ebcdec23cbad09`**（逐字节一致）。
@@ -138,21 +165,30 @@ $ npx vitest run src/globeProvenance.test.tsx
 * **`preview.ts` 已补齐**这两个字段（`git show 7deedb9 -- apps/ui/src/preview.ts` 增了
   `traffic{tag,is_node_outbound,verified,reason}` + `self_check{ip,bound_interface,trusted,reason}`）
   ⇒ 预览（唯一能截图核对的路径）能看到两种降级文案；
-* ⏳ 我原计划在 Rust 探针里**读 `types.ts`、解析接口字段、与 `serde_json::to_value()` 的键集合断言相等**
-  （把「读码一致」升级为「自动断言一致」）——**未跑**（同 §0.2）。
+* ✅ **自动断言已跑通**：Rust 探针里的 `probe_cross_language_fields` **读 `types.ts`、解析接口字段，
+  与 `serde_json::to_value()` 的键集合断言相等**，原始输出：
+  ```
+  PROBE 跨语言一致 SelfCheck=["bound_interface", "ip", "reason", "trusted"]                      TrafficProvenance=["is_node_outbound", "reason", "tag", "verified"]
+  test commands::globe::tester_probe::probe_cross_language_fields ... ok
+  ```
+  ⇒ §5 表格里的「读码一致」已升级为**执行级一致**（字段名逐字段相等，含顺序无关的集合比较）。
 
 ---
 
 ## §6 诚实清单
 
-1. **Rust 执行级结论缺失**：item 1 的反例、A20 的「`direct` 比节点大」执行级断言、跨语言自动断言、
-   两条 Rust 突变 —— **全部未复测**，原因见 §0.2（worktree 被系统清理，构建中断）。报告里它们只以**读码**形式出现。
+1. ~~Rust 执行级未跑~~ → **已补测完成**（见 §2.3/§4/§5）：4 条执行级断言绿、两条 Rust 突变各 2/3 红。
+   唯一仍属「读码」的是 `SelfCheck::judge` 各分支 reason 的**措辞**（我只断言了「非空、≥10 字符、绑卡那例含 en0」，
+   没有逐字比对文案）。
 2. **真机 WKWebView 未验**：UI 结论来自 jsdom + 注入数据；它**测不到**真机 canvas 渲染结果、字体/布局、
    以及「用户实际看到的那一屏」。
 3. **canvas 标记未断言**（只在 DOM 之外）：我验证的是「它与 `originLabel` 同源」这一读码事实。
 4. **`ip === null` 态**在今天的后端路径里据实现者说不可达（我未复核其可达性）；我只验证了它的 UI 映射。
-5. 我的 UI 探针 fixture 里 `GeoLocation` 必须带 `sources`（缺了会让 `<Fact>` 崩）——这是**我自己的**
-   fixture bug（第一次跑 6 红），修好后 8/8；记在这里以免被误读成产品缺陷。
+5. **我自己的两个工具坑**（都留档，不当成产品缺陷）：① UI 探针 fixture 里 `GeoLocation` 必须带 `sources`
+   （缺了会让 `<Fact>` 崩，第一次跑 6 红，修好后 8/8）；② 用 `git checkout` 还原突变会把**附加的探针模块**一起抹掉
+   （M2 第一轮只剩 1 红，补上探针后 2 红，见 §4）。
+6. **被清理打断过一次**：第一轮 Rust 构建在依赖编译阶段随 worktree 一起消失（日志里只有 `Compiling …`），
+   换到仓库内 `.wt/` 后重跑才拿到结论 —— 「临时目录里的现场等于不存在」这次落在**我自己的工具链**上。
 6. 主树里别人的在途改动我未碰（`site/**`、`Cargo.toml`、`CHANGELOG.md` 等）。
 
 ---
