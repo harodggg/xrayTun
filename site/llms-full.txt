@@ -15,13 +15,20 @@
 > **`xray-wasm` 的仓库是另一个**：<https://github.com/harodggg/xray-wasm>
 > 它是同一作者的**独立项目**（纯 Rust 实现 VLESS + XTLS-Vision + REALITY，编译到 wasm32-wasip2），
 > **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。
+>
+> **`信息过滤器 · Jev` 的仓库也是另一个**：<https://github.com/harodggg/jev-x-filter>
+> 它是同一作者的另一个**独立项目**（Chrome MV3 扩展，过滤 x.com 时间线上的垃圾信息：
+> 色情/性交易引流、诈骗/博彩/荐股、广告导流、标题党、低质 AI、重复文案农场六类），
+> **与 XrayTun 无任何集成关系** —— 既不能用它配置 Xray，也不能用 XrayTun 管理它。
 
-收录页面（4 个，中英各 2）：
+收录页面（6 个，中英各 3）：
 
 - 中文：XrayTun 主页面 → https://xraytun.top/
 - 中文：xray-wasm（同一作者的另一个项目） → https://xraytun.top/wasm/
+- 中文：信息过滤器 · Jev（同一作者的另一个项目） → https://xraytun.top/jev-x-filter/
 - English: XrayTun home → https://xraytun.top/en/
 - English: xray-wasm (a separate project by the same author) → https://xraytun.top/en/wasm/
+- English: Info Filter · Jev (a separate project by the same author) → https://xraytun.top/en/jev-x-filter/
 
 ---
 
@@ -141,6 +148,26 @@ v0.8.38 正在发布 · 仅 macOS · 通用包（arm64 + x86_64）· 大小以 R
 **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。 两者面向的场景不同：XrayTun 是 macOS 图形客户端，xray-wasm 面向容器与服务端。
 
 [xray-wasm 是什么、怎么用 →](wasm/)
+
+## 相关项目：信息过滤器 · Jev
+
+**信息过滤器 · Jev** 是**同一个作者的另一个项目**（独立仓库，不在这里）：一个 **Chrome MV3 扩展**，
+用 **Jev（TypeSafe System One）** 的类型化决策（单选类别 + 三条 noul 证据 + 危害评分）在本地判定
+x.com 时间线、回复区与推荐流里的**垃圾信息** —— 色情/性交易引流、诈骗/博彩/荐股、广告导流、标题党、
+低质 AI、重复文案农场六类，各自可开关。命中即隐藏；**只有「可动账号」的类别**（色情引流、诈骗、
+广告导流）在类别置信度、危害程度与一条硬度证据都达标时才可能触发账号动作（静音/拉黑），
+而且**默认是演练模式**（只把「本应静音谁」记进审计日志，不点任何菜单）。
+
+关键词只用来决定「值不值得花一次调用」，真正的判定在模型那一层：没被关键词命中的推文也会走一次
+**预检单问**（≥0.75 升级完整五问、≥0.65 只隐藏成待确认），另有**近似去重的文案农场**
+（同一段文案被 ≥2 个不同账号在 30 分钟内复制就隐藏，插垃圾字符、换 emoji、重复写两遍都躲不掉）。
+Jev 是纯文本模型、**看不了图**：图片只走本地肤色像素启发式，单独出现最多隐藏成待确认，永不因此静音账号。
+
+**它与 XrayTun 无关** —— 不是同一个产品、不共享代码、不能互相配置；放在同站只是因为出自同一作者。
+要求 Chrome 120+；API Key 只保存在 chrome.storage.local 且只在后台 Service Worker 使用；许可证 MIT。
+验证：143 个单测 / 76 项真实 Chrome 端到端 / 30 条真实模型样本（安全底线 0 违反）。
+
+[信息过滤器 · Jev 是什么、怎么用 →](jev-x-filter/)
 
 ## 下载
 
