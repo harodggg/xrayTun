@@ -198,6 +198,81 @@ export interface AppSettings {
    * 开启会把"这台机器访问过哪些域名"发到远端网关，不该替用户默认做这个决定。
    */
   intent: IntentSettings;
+  /**
+   * MITM（内容级判定）。默认关闭；**空名单 = 一条引导规则都不出**。
+   *
+   * 与 Rust 侧 `model.rs::MitmSettings` 是同一份形状。这是整个功能里唯一会改
+   * 系统状态的部分（要往系统钥匙串装一张本地根证书、还要拆 TLS），
+   * 所以必须由用户逐个域名点开。
+   */
+  mitm: MitmSettings;
+}
+
+/**
+ * MITM 设置（`model.rs::MitmSettings`）。
+ *
+ * `listen_port` / `upstream_port` 是**两个不同的本地端口**：前者是核心把被 steer
+ * 的流量送来的地方，后者是这个 MITM 回连用的 socks 入站。两者相同会自环，
+ * Rust 侧会拒绝。
+ */
+export interface MitmSettings {
+  enabled: boolean;
+  listen_port: number;
+  /** 回连用的 socks 入站端口。**必须与监听端口不同**（否则自己连自己）。 */
+  upstream_port: number;
+  /** 只对**这些域名**拆 TLS（opt-in）。空 = 等同于没开。 */
+  domains: string[];
+  /** 对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP（QUIC 拆不了）。 */
+  block_quic: boolean;
+  /**
+   * 可选的响应体裁剪。`null` = 不碰任何响应体（默认）。
+   *
+   * 它不是"顺手多做的优化"，而是**语义改动**：我们要从别人的响应里删掉条目。
+   * 本版只支持一种窄口径动作（删掉某个布尔字段为 true 的数组元素）。
+   */
+  body_strip: MitmBodyStrip | null;
+}
+
+/** 响应体裁剪的唯一口径（`model.rs::MitmBodyStrip`）。 */
+export interface MitmBodyStrip {
+  /** 要裁剪的数组，RFC 6901 JSON 指针（例如 `/data/items`）。 */
+  pointer: string;
+  /** 数组元素里必须为布尔 `true` 才删除的字段名（例如 `promoted`）。 */
+  field: string;
+}
+
+/**
+ * MITM 运行态（`commands::mitm_status`）。
+ *
+ * `note` 是**给人看的一句话**：为什么没生效。`core_restart_required` 说明
+ * "证书刚装好、但核心还没按它跑" —— 引导规则挂在出站/入站上，没法热加，
+ * 必须重连一次核心。
+ */
+export interface MitmStatus {
+  enabled: boolean;
+  active: boolean;
+  running: boolean;
+  listen_port: number;
+  upstream_port: number;
+  domains: string[];
+  block_quic: boolean;
+  /** 本会话根证书的 SHA-1 指纹（没生成过时是 null）。 */
+  ca_fingerprint: string | null;
+  stats: {
+    accepted: number;
+    blocked: number;
+    passed: number;
+    rejected_over_limit: number;
+    failed: number;
+    websocket_refused: number;
+    body_rewritten: number;
+    body_rewrite_declined: number;
+  } | null;
+  /** 一句话解释为什么没生效（null = 一切正常）。 */
+  note: string | null;
+  applied: string | null;
+  core_steering: boolean | null;
+  core_restart_required: boolean;
 }
 
 /**

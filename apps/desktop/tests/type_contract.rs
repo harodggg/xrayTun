@@ -623,10 +623,13 @@ fn registered_commands_match_the_frontend_invoke_literals() {
     // **故意不注册**：前端没封装它、角标只用计数 —— Lead 在 task-130 里裁决）。
     // 43 = 37 + 意图过滤的 6 个（`intent_status` / `intent_allow` / `intent_clear_cache`
     // / `intent_audit` / `intent_explain` / `intent_apply`）。
+    // 47 = 43 + MITM 的 4 个（`mitm_status` / `mitm_ca_install` / `mitm_ca_remove`
+    // / `mitm_apply`）——装/卸根证书各一个命令：那是**唯一会改系统状态**的动作，
+    // 必须是一次显式的用户点击，不能藏进别的命令里。
     assert_eq!(
         rust.len(),
-        43,
-        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 43。\
+        47,
+        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 47。\
          增删命令请同步更新这个数字与 ipc.ts。实际注册: {rust:?}",
         rust.len()
     );
@@ -634,8 +637,8 @@ fn registered_commands_match_the_frontend_invoke_literals() {
     // （第一次改这个契约时就漏了它 —— Rust 侧改到 43、TS 侧还是 37，于是红。）
     assert_eq!(
         ts.len(),
-        43,
-        "\nipc.ts 的 invoke 字面量有 {} 个，预期 43；实际: {ts:?}",
+        47,
+        "\nipc.ts 的 invoke 字面量有 {} 个，预期 47；实际: {ts:?}",
         ts.len()
     );
 

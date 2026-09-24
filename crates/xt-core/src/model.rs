@@ -1045,6 +1045,138 @@ impl IntentSettings {
     }
 }
 
+/// MITM（内容级判定）的设置。
+///
+/// # 默认全关，而且**空名单 = 不出规则**
+///
+/// 这是整个功能里唯一会改系统状态的部分（要往系统钥匙串装一个本地根证书、
+/// 还要拆 TLS），所以默认关闭；而且即使打开了，**名单为空时也不生成任何 steer 规则** ——
+/// 「打开了但什么都没配」在行为上应当等于没开。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MitmSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// MITM 进程监听的本地端口（被 steer 的流量会送到这里）。
+    #[serde(default = "default_mitm_port")]
+    pub listen_port: u16,
+    /// MITM **回连**用的本地 socks 入站端口。
+    ///
+    /// **必须与 tun 的入站分开**：steer 规则里的 `inboundTag` 只列 tun/socks/http，
+    /// 于是回连天然不会命中 steer 规则 —— 防自环是靠**构造**，不是靠一条"旁路规则"
+    /// （后者容易被后来者调整顺序时改坏）。
+    #[serde(default = "default_mitm_upstream_port")]
+    pub upstream_port: u16,
+    /// 只对**这些域名**拆 TLS（opt-in）。空 = 等同于没开。
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// 对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP（QUIC 拆不了）。
+    #[serde(default)]
+    pub block_quic: bool,
+    /// **可选**的响应体裁剪（设计 §8.5 那一行）。
+    ///
+    /// 默认 `None` = 不碰任何响应体。它不是"顺手多做的优化"，而是**语义改动**：
+    /// 我们要从别人的响应里删掉条目，所以必须由用户单独点开，而且只支持
+    /// 一种窄口径动作（见 [`MitmBodyStrip`]）。
+    #[serde(default)]
+    pub body_strip: Option<MitmBodyStrip>,
+}
+
+/// 响应体裁剪的**唯一**支持口径：删掉 JSON 里某个数组内、某个布尔字段为 `true` 的元素。
+///
+/// # 为什么只有这一种
+///
+/// 设计里明确"不做 HTML DOM 重写、不注入脚本、不改响应语义" —— 那等于在里面
+/// 再写一个 AdGuard，风险与工程量都不成比例。而"删掉一个 JSON 数组元素"能覆盖
+/// 同一站点接口内的推广条目，且**副作用可穷举**：
+/// 我们只把某些元素摘出去，其余字节由 `serde_json` 原样重写。
+///
+/// 代价要如实写：**重写会改变响应体字节**（键顺序、空白都可能不同），
+/// 所以只对用户点过名的域名生效，且失败一律放行（见 `xt-mitm` 的 `DeclineReason`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MitmBodyStrip {
+    /// 要裁剪的数组，RFC 6901 JSON 指针（例如 `/data/items`；`""` = 根数组）。
+    #[serde(default)]
+    pub pointer: String,
+    /// 数组元素里必须为布尔 `true` 才删除的字段名（例如 `promoted`）。
+    #[serde(default)]
+    pub field: String,
+}
+
+impl MitmBodyStrip {
+    /// 两项都填了才算配置好。空字符串是"没配"，不是"配了空指针"。
+    pub fn is_configured(&self) -> bool {
+        !self.pointer.is_empty() && !self.field.is_empty()
+    }
+}
+
+fn default_mitm_port() -> u16 {
+    10810
+}
+fn default_mitm_upstream_port() -> u16 {
+    10811
+}
+
+impl Default for MitmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_port: default_mitm_port(),
+            upstream_port: default_mitm_upstream_port(),
+            domains: Vec::new(),
+            block_quic: false,
+            body_strip: None,
+        }
+    }
+}
+
+impl MitmSettings {
+    /// 出站/入站/规则要不要生成 —— 由它一处决定，避免三处各判一遍。
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.domains.is_empty()
+    }
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut errs = Vec::new();
+        if self.enabled && self.domains.is_empty() {
+            errs.push("MITM 已开启，但 opt-in 域名列表是空的（等于没开）".into());
+        }
+        if !self.enabled {
+            return errs;
+        }
+        if self.listen_port == 0 || self.upstream_port == 0 {
+            errs.push("MITM 的监听/回连端口不能为 0".into());
+        }
+        if self.listen_port == self.upstream_port {
+            errs.push("MITM 的监听端口与回连端口不能相同（会自己连自己）".into());
+        }
+        if let Some(strip) = &self.body_strip {
+            if strip.pointer.is_empty() && !strip.field.is_empty() {
+                errs.push(
+                    "响应体裁剪填了字段名但没有 JSON 指针：请补上指针（根数组要显式写指针），\
+                     或把整项清空"
+                        .into(),
+                );
+            }
+            if strip.field.is_empty() && !strip.pointer.is_empty() {
+                errs.push("响应体裁剪填了 JSON 指针但没有字段名（不知道要删哪些元素）".into());
+            }
+            if strip.field.contains('/') || strip.field.contains(' ') {
+                errs.push(format!(
+                    "响应体裁剪的字段名 {:?} 不像一个 JSON 键（不能含空格或斜杠）",
+                    strip.field
+                ));
+            }
+            if !strip.pointer.is_empty() && !strip.pointer.starts_with('/') {
+                errs.push(format!(
+                    "响应体裁剪的 JSON 指针 {:?} 必须以 '/' 开头（RFC 6901）",
+                    strip.pointer
+                ));
+            }
+        }
+        errs
+    }
+}
+
 /// 设置文件的版本号。用来做**一次性迁移**。
 ///
 /// 0 表示 0.1.0 时代写下的文件（那时还没有这个字段）。
@@ -1110,6 +1242,9 @@ pub struct AppSettings {
     /// 新字段缺省就等于"用户从没开过这个功能"，与迁移的语义一致。
     #[serde(default)]
     pub intent: IntentSettings,
+    /// MITM（内容级判定）。默认关闭；空名单等于没开。见 [`MitmSettings`]。
+    #[serde(default)]
+    pub mitm: MitmSettings,
 }
 
 fn default_socks_port() -> u16 {
@@ -1146,6 +1281,7 @@ impl Default for AppSettings {
             restore_system_proxy_on_exit: true,
             show_speed_in_title: true,
             intent: IntentSettings::default(),
+            mitm: MitmSettings::default(),
         }
     }
 }

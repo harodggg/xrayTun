@@ -29,7 +29,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// 线协议版本。任何破坏兼容性的改动都要 +1，helper 会拒绝不等版本。
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// helper 监听的 Unix domain socket 路径。
 ///
@@ -85,6 +85,14 @@ pub enum Request {
     Uninstall,
     /// 让 helper 进程退出（launchd 会按需重新拉起）。
     Shutdown,
+    /// 安装一个**本地根证书**（MITM 阶段的信任锚）。
+    ///
+    /// `fingerprint` 是 **SHA-1 指纹**：`security delete-certificate -Z` 要的就是它，
+    /// 也是 helper 回滚时用来定位的那把钥匙。**由调用方给，helper 不自己再算一份** ——
+    /// 两个标识符迟早会不同步，而不同步的后果是"删不掉"或"删错"。
+    InstallTrustAnchor { pem: String, fingerprint: String },
+    /// 移除之前安装的信任锚（**幂等**）。
+    RemoveTrustAnchor { fingerprint: String },
 }
 
 /// helper -> GUI 的响应。每个请求恰好对应一个响应（无服务端主动推送）。
@@ -100,6 +108,7 @@ pub enum Response {
     /// 接收方必须先尝试 `recv_fd`；拿不到 fd 说明 helper 处于
     /// `SpawnDatapath` / `NoDatapath` 模式，此时应改用 [`HelperStatus`] 里的信息。
     TunFd(TunFdInfo),
+    Trust(TrustStatus),
     Error(HelperError),
 }
 
@@ -122,6 +131,24 @@ pub struct HelloInfo {
     pub tun_active: bool,
     /// 磁盘上是否存在未清理的会话（提示 GUI 调 `Restore`）。
     pub stale_session: Option<String>,
+}
+
+/// 信任锚的当前状态（`Request::InstallTrustAnchor` / `RemoveTrustAnchor` 的响应）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustStatus {
+    /// 这个指纹**现在**是否被信任。
+    pub installed: bool,
+    /// 统一成大写无冒号形式（避免"同一个指纹两种写法"被当成两个）。
+    pub fingerprint: String,
+    /// 证书文件的绝对路径（安装过才有）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    /// 安装**之前**它就已经被信任了吗 —— 回滚时决定删不删。
+    #[serde(default)]
+    pub existed_before: bool,
+    /// 一句话说明（**给界面看，不给机器判据**）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -624,6 +651,43 @@ pub fn default_bypass_networks() -> Vec<Cidr> {
 
 #[cfg(test)]
 mod tests {
+    /// 信任锚的响应形状要能往返 —— 它是新协议里唯一带结构化「状态」的响应。
+    #[test]
+    fn trust_status_roundtrips_and_tolerates_missing_fields() {
+        let r = Response::Trust(TrustStatus {
+            installed: true,
+            fingerprint: "ABCDEF".into(),
+            cert_path: Some("/Library/Application Support/XrayTun/ca/ABCDEF.pem".into()),
+            existed_before: false,
+            note: None,
+        });
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), r);
+        assert!(!json.contains("note"), "None 的 note 不该出现在线上（不打无用字段）");
+
+        // 缺字段（老/精简实现）也要能读 —— 用 default。
+        let lean: Response = serde_json::from_str(
+            r#"{"status":"trust","installed":false,"fingerprint":"AB"}"#,
+        )
+        .unwrap();
+        match lean {
+            Response::Trust(t) => {
+                assert!(!t.installed);
+                assert_eq!(t.fingerprint, "AB");
+                assert!(t.cert_path.is_none());
+                assert!(!t.existed_before);
+            }
+            other => panic!("反序列化成了别的：{other:?}"),
+        }
+    }
+
+    /// 协议版本本轮 +1（新增信任锚请求）—— helper 会拒绝版本不等的客户端，
+    /// 这是防止"新 GUI 对着老 helper 发新请求"的唯一机制，所以版本号本身值得钉住。
+    #[test]
+    fn the_protocol_version_was_bumped_for_the_trust_anchor_requests() {
+        assert_eq!(PROTOCOL_VERSION, 2);
+    }
+
     use super::*;
 
     #[test]

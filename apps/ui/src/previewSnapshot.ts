@@ -239,6 +239,17 @@ const BASE_SNAPSHOT: AppSnapshot = {
       allow_overrides: [{ host: "cdn.news.example", action: "direct" }],
       store_context_in_audit: false,
     },
+    // `MitmSettings`：预览取真实默认值（**关闭 + 空名单**）。
+    // 这里故意放一条域名与一个"已装好、待重连"的形态，好让界面上那两句最要紧的
+    // 话（"空名单 = 不出规则"、"要重连核心才生效"）在预览态下也能被看到。
+    mitm: {
+      enabled: true,
+      listen_port: 10810,
+      upstream_port: 10811,
+      domains: ["promoted.example"],
+      block_quic: false,
+      body_strip: { pointer: "/data/items", field: "promoted" },
+    },
   },
   subscriptions: [
     {

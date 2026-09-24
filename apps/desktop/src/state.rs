@@ -223,6 +223,10 @@ pub struct Inner {
     /// [`crate::intent`] 的模块文档。所以把它挂在 `Inner` 上是安全的 ——
     /// 数据面路径（核心日志转发）只做一次 `observe`，判定在后台节拍里跑。
     pub intent: crate::intent::IntentRuntime,
+    /// MITM 通道的运行态（P4 第四步）：代理句柄 + 本会话 CA。
+    ///
+    /// **只活在内存里**，不落盘：CA 是每次启动新生成的（见 `crate::mitm` 的文档）。
+    pub mitm: crate::mitm::MitmRuntime,
 }
 
 /// DNS 探测状态。
@@ -358,6 +362,7 @@ impl Inner {
             logs_dir: store.logs_dir(),
             connections: xt_core::xray::access_log::ConnectionLog::new(),
             intent: crate::intent::IntentRuntime::new(store.root().to_path_buf()),
+            mitm: crate::mitm::MitmRuntime::default(),
         }
     }
 

@@ -99,6 +99,41 @@ async fn tcp_reachable(addr: std::net::SocketAddr, timeout: Duration) -> bool {
         .unwrap_or(false)
 }
 
+/// 单次 TCP 探测，**失败再试一次**；返回 `(是否可达, 两次的轨迹)`。
+///
+/// # 为什么要重试（这不是"保守"，是修一个真实的误判）
+///
+/// 这是一次**单发的 4 秒 TCP 握手**，而它的结果决定「整次启动中止 + 回滚」。
+/// 刚睡醒、刚换网、首个连接走慢路径时，一次超时**不等于**"节点不可达"。
+/// 实测：同一台机器上节点直连 116 ms 可达，但用户遇到过一次这样的中止 ——
+/// 错误文案还把瞬时超时归因成「请检查节点地址 / 端口」，往错误方向指路。
+///
+/// 重试一次能把「瞬时抖动」与「真的不可达」分开；轨迹进日志与错误文案，
+/// 于是"到底是几次都失败"这件事可见，而不是一句笼统的"联系不上"。
+async fn tcp_reachable_with_retry(addr: std::net::SocketAddr, timeout: Duration) -> (bool, String) {
+    tcp_reachable_with_retry_by(|| tcp_reachable(addr, timeout), Duration::from_millis(700)).await
+}
+
+/// 可注入探测函数的版本（测试用：不碰真网络也能钉住"重试一次"的语义）。
+async fn tcp_reachable_with_retry_by<F, Fut>(mut probe: F, pause: Duration) -> (bool, String)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut trace: Vec<String> = Vec::new();
+    for attempt in 1..=2u32 {
+        if attempt > 1 {
+            tokio::time::sleep(pause).await;
+        }
+        if probe().await {
+            trace.push(format!("第{attempt}次成功"));
+            return (true, trace.join("、"));
+        }
+        trace.push(format!("第{attempt}次失败"));
+    }
+    (false, trace.join("、"))
+}
+
 /// 经**本机 SOCKS 入站**发一个真实 HTTP 请求，返回 HTTP 状态码（拿不到时空串）。
 ///
 /// `--socks5-hostname` 让**节点**去解析域名，所以这一个检查同时覆盖
@@ -726,7 +761,8 @@ impl Supervisor {
         // 回滚，错误信息指向真正的原因。
         if deferred_commit {
             if let Some(target) = server_probe_target {
-                if !tcp_reachable(target, REGION_PROBE_TIMEOUT).await {
+                let (reachable, trace) = tcp_reachable_with_retry(target, REGION_PROBE_TIMEOUT).await;
+                if !reachable {
                     // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
                     // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
                     // 只留痕、不改控制流（task-122 A-3）。
@@ -735,11 +771,18 @@ impl Supervisor {
                     }
                     self.rollback_tun(helper);
                     return Err(format!(
-                        "接管默认路由之前就联系不上代理服务器 {target}。\n\
-                         请检查节点地址 / 端口，以及本机到该服务器的直连是否正常。"
+                        "接管默认路由之前就联系不上代理服务器 {target}（{trace}，每次 {} 秒）。\n\
+                         请检查节点地址 / 端口，以及本机到该服务器的直连是否正常。\n\
+                         本次启动已中止并回滚，**默认路由没有被接管**。",
+                        REGION_PROBE_TIMEOUT.as_secs()
                     ));
                 }
-                tracing::info!(%target, "提交路由前：服务器可达");
+                if trace != "第1次成功" {
+                    // 抖过去了也要留痕：这解释了"为什么这次启动慢了几秒"，
+                    // 也是"节点侧偶发丢包 / 本机刚换网"的早期信号。
+                    tracing::info!(%target, %trace, "提交路由前探测：首次失败、重试后成功（已继续）");
+                }
+                tracing::info!(%target, %trace, "提交路由前：服务器可达");
             }
 
             // ---- 端到端门禁：TCP 通 ≠ 代理能用 ----
@@ -811,7 +854,8 @@ impl Supervisor {
             // 关键检查：默认路由已经指向隧道，此时**从本机**再连一次服务器。
             // 如果 bypass 路由没生效，这个连接会被送进隧道而永远出不去。
             if let Some(target) = server_probe_target {
-                if !tcp_reachable(target, REGION_PROBE_TIMEOUT).await {
+                let (reachable, trace) = tcp_reachable_with_retry(target, REGION_PROBE_TIMEOUT).await;
+                if !reachable {
                     // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
                     // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
                     // 只留痕、不改控制流（task-122 A-3）。
@@ -820,13 +864,14 @@ impl Supervisor {
                     }
                     self.rollback_tun(helper);
                     return Err(format!(
-                        "接管默认路由之后无法再联系代理服务器 {target} —— \
+                        "接管默认路由之后无法再联系代理服务器 {target}（{trace}，每次 {} 秒）—— \
                          这是**路由环**：服务器自身的流量也被送进了隧道。\n\
                          原因通常是「服务器地址没有走物理出口的 host 路由」。\n\
-                         已自动回滚，网络应已恢复。"
+                         已自动回滚，网络应已恢复。",
+                        REGION_PROBE_TIMEOUT.as_secs()
                     ));
                 }
-                tracing::info!(%target, "提交路由后：服务器仍可达（bypass 路由生效）");
+                tracing::info!(%target, %trace, "提交路由后：服务器仍可达（bypass 路由生效）");
             }
         }
 
@@ -1333,6 +1378,37 @@ mod tests {
     ///
     /// 守卫的**位置**和文案一样重要：它排在「探出口、写配置、建 utun」之前。
     /// 顺序一旦被改动，用户会先经历一次网络被拆掉、然后才看到「请先选择节点」。
+    /// **重试语义必须是可判别的**：首次失败、第二次成功 ⇒ 继续（不是中止）。
+    ///
+    /// 这条测试存在的理由：用户遇到过一次"节点直连明明通、却被告知联系不上"的中止。
+    /// 单发探测把瞬时抖动当成了不可达；重试之后"抖一下"不该再挡人。
+    #[tokio::test]
+    async fn a_single_transient_probe_failure_is_retried_and_does_not_abort() {
+        let mut calls = 0;
+        let (ok, trace) = tcp_reachable_with_retry_by(
+            || {
+                calls += 1;
+                let n = calls;
+                async move { n > 1 }
+            },
+            Duration::from_millis(1),
+        )
+        .await;
+        assert!(ok, "首次失败、第二次成功 ⇒ 应当判定为可达");
+        assert_eq!(calls, 2, "只重试一次（不无限重试）");
+        assert!(trace.contains("第1次失败") && trace.contains("第2次成功"), "{trace}");
+    }
+
+    /// 负对照：两次都失败 ⇒ 判定不可达，而且轨迹里两次都记着
+    /// （用户看到的文案要能区分"抖了一下"与"真的连不上"）。
+    #[tokio::test]
+    async fn two_real_failures_still_abort_with_a_visible_trace() {
+        let (ok, trace) =
+            tcp_reachable_with_retry_by(|| async { false }, Duration::from_millis(1)).await;
+        assert!(!ok);
+        assert_eq!(trace, "第1次失败、第2次失败");
+    }
+
     #[tokio::test]
     async fn start_refuses_without_a_selected_node_before_touching_the_system() {
         let (store, mut helper) = scaffold("no-node");

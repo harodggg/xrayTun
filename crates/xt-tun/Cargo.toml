@@ -13,3 +13,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 libc.workspace = true
+# SHA-1 指纹：`security delete-certificate -Z` 要的就是 SHA-1，而
+# `ring` 本来就在依赖树里（rustls 的 ring provider），不引入新代码来源。
+ring = "0.17"

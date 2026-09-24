@@ -180,10 +180,23 @@ pub(crate) async fn start_core(
         supervisor.set_intent_rules(allow, block);
     }
 
+    // ---- MITM 的 fail-open 闸门（**这一句决定了用户会不会"网站打不开"**）----
+    //
+    // 引导规则只能挂在核心启动时的配置里（`mitm-out` 出站 + `mitm-upstream` 入站
+    // 都没法热加），所以闸门必须开在这里：**根证书没被信任就摘掉 MITM**，
+    // 让那些域名照常直连。否则被 steer 的流量会撞上一张没人信的证书 ——
+    // 用户看到的是"网站打不开"，而不是"广告没拦住"。
+    //
+    // 查询要跑一次 `security(1)`（几十毫秒，本机、只读）。读不出来按"没信任"处理。
+    let mitm_trusted = state
+        .with(|i| crate::mitm::ca_is_trusted(i.mitm.existing_fingerprint().as_deref()))
+        .unwrap_or(false);
+    let effective_settings = crate::mitm::core_settings(&settings, mitm_trusted);
+
     let result = supervisor
         .start(
             &state.store,
-            &settings,
+            &effective_settings,
             &nodes,
             &mut helper,
             Some(tx),
@@ -216,6 +229,10 @@ pub(crate) async fn start_core(
     // 新核心起来了：启动它的监控（换网检测 / 连通性检查 / 看门狗）。
     // 与「已经在跑」那条路径共用同一个入口，避免两处各写一份。
     spawn_monitors(app, egress_before, runtime.pid);
+
+    // 记下"这次下发的配置里到底带了没有引导规则" —— 证书刚装上/刚卸掉时，
+    // 界面靠它说"要重连一次核心才生效"（`MitmStatus::core_restart_required`）。
+    state.with(|i| i.mitm.mark_core_steering(effective_settings.mitm.is_active()));
 
     // 核心已经用这份规则起来了 ⇒ 记下"这一版已经生效"。
     // 放在**成功之后**是关键：起不来的时候界面必须继续显示"待生效"，
@@ -440,6 +457,9 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
     let result = supervisor.stop(&mut helper).await;
     drop(helper);
     drop(supervisor);
+    // 核心没了 ⇒ "核心那边生不生效"这个问题不该再有答案（否则界面会拿上一次的
+    // 事实去回答现在的问题）。
+    state.with(|i| i.mitm.clear_core_steering());
     // 核心已经停了：它的监控凭据作废，否则表里会留下永远不会释放的旧 pid。
     release_monitors(pid);
 

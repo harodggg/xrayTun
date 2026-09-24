@@ -224,20 +224,21 @@ pub async fn check_app_update(
         .ok_or(util::STATE_UNAVAILABLE)?;
 
     let result = tauri::async_runtime::spawn_blocking(move || xt_core::update::check_app(proxy))
-    .await
-    .map_err(|e| format!("检查任务失败：{e}"))?;
+        .await
+        .map_err(|e| format!("检查任务失败：{e}"))?
+        .map_err(|e| e.to_string());
 
+    // 落盘逻辑与**自动检测**共用同一份（`version_check::apply_app_check_result`）：
+    // 两条路对「失败不清 latest_app / 同样的失败不刷屏 / 恢复记一条」的口径必须一致，
+    // 各写一份必然漂移。
     state.with(|i| {
-        i.update.checked_at = Some(crate::state::now_unix());
-        match result {
-            Ok(a) => {
-                i.push_log("app", "info", format!("客户端最新版 {}", a.version));
-                i.update.latest_app = Some(a);
-                i.update.check_error = None;
-            }
-            Err(e) => {
-                i.update.check_error = Some(e.to_string());
-            }
+        let line = crate::version_check::apply_app_check_result(
+            &mut i.update,
+            result,
+            crate::state::now_unix(),
+        );
+        if let crate::version_check::LogLine::Line(level, msg) = line {
+            i.push_log("app", level, msg);
         }
     });
     build_snapshot(&app, &state).await

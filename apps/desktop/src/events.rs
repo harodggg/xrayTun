@@ -17,6 +17,14 @@ pub const NODES_CHANGED: &str = "nodes://changed";
 pub const SUBSCRIPTIONS_CHANGED: &str = "subscriptions://changed";
 pub const SETTINGS_CHANGED: &str = "settings://changed";
 pub const UPDATE_PROGRESS: &str = "update://progress";
+/// 自动版本检测完成了一次（task-188）。
+///
+/// 新增事件而不是复用 `nodes://changed` 之类：那些会让前端**拉整份快照**
+/// （前端只在 nodes/subscriptions/settings 变化时这样做），而版本检测每 6 小时
+/// 才发生一次、只改 `update` 里三个字段 —— 用不着拉快照。
+/// 载荷就是那三个字段本身（`app_update_available` 由快照按当前版本号算，
+/// 见 `commands/snapshot.rs::update_status_with`，不在事件里重复）。
+pub const APP_UPDATE_CHECKED: &str = "app://update-checked";
 
 #[derive(Clone, Serialize)]
 pub struct LogPayload {
@@ -78,6 +86,27 @@ pub fn log_line(app: &AppHandle, entry: LogEntry) {
         CORE_LOG,
         LogPayload { line: entry.message, level: entry.level },
     );
+}
+
+/// 自动版本检测完成了一次：播报 `update` 里那三个字段的现状。
+///
+/// **成功与失败都要发**（失败也要让界面把 `check_error` 显示出来），
+/// 但周期守卫拦下的那一轮不发 —— 状态没变，没有可播报的。
+pub fn app_update_checked(app: &AppHandle, state: &AppState) {
+    #[derive(Clone, Serialize)]
+    struct P {
+        latest_app: Option<xt_core::update::Available>,
+        checked_at: Option<u64>,
+        check_error: Option<String>,
+    }
+    let payload = state.with(|i| P {
+        latest_app: i.update.latest_app.clone(),
+        checked_at: i.update.checked_at,
+        check_error: i.update.check_error.clone(),
+    });
+    if let Some(payload) = payload {
+        emit(app, APP_UPDATE_CHECKED, payload);
+    }
 }
 
 pub fn latency_updated(app: &AppHandle, results: &[xt_core::xray::ProbeResult]) {

@@ -1,0 +1,20 @@
+[package]
+name = "xt-mitm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MITM 内容级判定通道：TLS 终结（仅 http/1.1）、请求判定、响应体裁剪"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# 运行时**真的要用**：CA 与叶子证书在进程内生成（每次启动新签），
+# 而 TLS 终结用的就是这两样。不是 dev-dependency。
+rcgen = "0.13"
+rustls = { workspace = true }
+
+# 刻意**不引** tokio / tokio-rustls：代理是阻塞 IO + 每连接一个线程
+# （桌面场景下并发是几十量级），与 xt-intent 的传输层同一取舍 —— 少一层 async TLS 适配。
