@@ -8,7 +8,9 @@
 用法：python3 gen_geo.py
 """
 import html
+import os
 import re
+import sys
 from pathlib import Path
 
 # 脚本住在 <repo>/scripts/ 下，所以 site/ 在上一级。
@@ -53,6 +55,186 @@ if PUBLISHED and not (DMG_BYTES and DMG_MIB and ZIP_BYTES and ZIP_MIB and SHA_BY
         "PUBLISHED=True 但 *_BYTES/*_MIB 是空的："
         "请先用 `gh release view v{VERSION} --json assets` 取真实值填上再发布。"
     )
+
+# ---------------------------------------------------------------------------
+# 外部条目：**生成器不允许静默抹掉非本产品页面的收录**（task-180）
+#
+# 真实事故（v0.8.38 停发期间发生两次）：`site/jev-x-filter/**` 是**另一条工作流**的项目页，
+# 它的 sitemap / llms 收录是手写加进 `site/{sitemap.xml,llms.txt,llms-full.txt}` 的；
+# 而本脚本只认识本产品页面 ⇒ 每次重跑都把那些条目**静默删掉**，对方自己补了两次。
+#
+# 机制（**不动对方一个可见字符**）：
+#   · `sitemap.xml`    —— 按 `<loc>` **归属**保留：`<loc>` 不是本产品页面的 `<url>` 块逐字插回；
+#   · `llms.txt`       —— 按 `## ` **节归属**保留：标题不在生成集里的整节逐字插回原位；
+#   · `llms-full.txt`  —— 它的外部内容插在**生成文本内部**（头部提示、索引 + 一节），
+#                         用**显式标记区间**界定；区间内容逐字插回固定锚点，
+#                         索引上方的计数行按「本产品页 + 区间里数出来的外部页对」计算。
+#
+# **不许静默丢**（这是本机制的重点）：写之前会比对「旧文件里有、新文件里没有、且带**站内非本产品
+# 路径**的整行」—— 那只有一种成因：有人把外部条目塞进了**生成区块**且没放进标记区间。
+# 这时**非零退出并指名到行**，绝不把它抹掉、也不"顺手保留"（保留等于把别人的内容挪进我们的生成逻辑）。
+# `check` 模式另外把「盘上产物 ≠ 生成器重算结果」直接判红（手写进生成区块同样在这里被抓住）。
+#
+# 覆盖不到的（诚实清单见 docs/verification/GEN-SITE-EXTERNAL.md）：
+#   · 第三个外部项目若只改 `llms-full.txt`，**必须自己包一次标记区间**（sitemap / llms.txt 自动）；
+#   · 在**生成器区块内**手写的内容会被重写（`check` 会红，但重跑生成器不会保留它）。
+#
+# 测试缝：`GEN_SITE_EXTERNAL_OFF=1` 关掉本机制（**只给反向敏感性测试用**；等于旧行为）。
+# ---------------------------------------------------------------------------
+PRESERVE_EXTERNAL = os.environ.get("GEN_SITE_EXTERNAL_OFF") != "1"
+
+# 本产品页面（**单一来源**：sitemap 的归属判定、llms-full 的页面清单、计数行都用它）。
+#   (中文路径, 英文路径, 中文 priority, 英文 priority)
+PRODUCT_PAGES = [
+    ("/", "/en/", "1.0", "0.9"),
+    ("/wasm/", "/en/wasm/", "0.8", "0.7"),
+]
+
+# `llms-full.txt` 外部内容的**标记区间**：`(区间名, 生成文本里的插入锚点, 插在锚点前/后)`。
+# 锚点必须是生成文本里的**唯一**子串；找不到或不唯一 ⇒ 大声失败（绝不静默丢内容）。
+EXT_BEGIN = "<!-- BEGIN external:{name}（其它工作流维护：生成器原样保留本区间，不解析、不重排） -->"
+EXT_END = "<!-- END external:{name} -->"
+# `(区间名, 生成文本里的锚点, 插在锚点前/后, 区间是否连带标记之后的那个换行)`。
+# 锚点必须是生成文本里的**唯一**子串；找不到或不唯一 ⇒ 大声失败（绝不静默丢内容）。
+EXT_REGIONS = [
+    (
+        "header",
+        "> **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。\n",
+        "after",
+        True,
+    ),
+    ("body", "[xray-wasm 是什么、怎么用 →](wasm/)\n", "after", False),
+]
+
+
+def own_paths() -> set:
+    """本产品页面路径集合（含中英）。"""
+    return {p for zh, en, _, _ in PRODUCT_PAGES for p in (zh, en)}
+
+
+def read_artifact(name: str) -> str:
+    """读盘上的产物；不存在返回空串（首次生成时这是正常的）。"""
+    p = SITE / name
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+def ext_region(text: str, name: str, trailing: bool = False) -> str:
+    """取出某个标记区间（含标记行本身）；没有就返回空串。
+
+    `trailing=True` 时连带标记之后的那个换行一起取（区间自己"带着"一个尾随空行，
+    这样插回原位后与迁移前的逐字节形态一致）。
+    """
+    if not text:
+        return ""
+    m = re.search(
+        re.escape(EXT_BEGIN.format(name=name))
+        + r".*?"
+        + re.escape(EXT_END.format(name=name))
+        + (r"\n?" if trailing else ""),
+        text,
+        re.S,
+    )
+    return m.group(0) if m else ""
+
+
+def _site_path(url: str) -> str:
+    """从站内 URL 取路径（去掉 query/fragment）。"""
+    path = url[len(BASE):]
+    for sep in ("#", "?"):
+        path = path.split(sep, 1)[0]
+    return path
+
+
+def external_url_lines(text: str) -> list:
+    """旧文件里带**站内非本产品路径**的行：`[(行号, 原文), …]`（判据见文件头注释）。"""
+    own = own_paths()
+    out = []
+    for i, line in enumerate(text.splitlines(), 1):
+        for url in re.findall(r"https?://[^\s)\]<>\"',]+", line):
+            if url.startswith(BASE) and _site_path(url) not in own:
+                out.append((i, line))
+                break
+    return out
+
+
+def lost_external_lines(name: str, old: str, new: str) -> list:
+    """旧里有、新里没有、且带站内非本产品路径的行 ⇒ 生成器**必须大声失败**而不是抹掉它。"""
+    new_lines = set(new.splitlines())
+    return [(n, line) for n, line in external_url_lines(old) if line not in new_lines]
+
+
+def _norm(line: str) -> str:
+    """把数字抹平：用来区分「我们自己的产物过期」与「别人手写的新内容」。"""
+    return re.sub(r"\d", "#", line).strip()
+
+
+def _is_our_url(url: str) -> bool:
+    """这个 URL 是不是**本产品自己**的（站点产品路径，或本仓库）。"""
+    if url.startswith(BASE):
+        return _site_path(url) in own_paths()
+    return url.startswith("https://github.com/harodggg/xrayTun")
+
+
+def lost_external_sections(name: str, old: str, new: str) -> list:
+    """旧里有、新里没有的**外部 `## ` 整节**（外部 = 不在生成集、且正文提到非本产品的地址）。
+
+    这一条补住「外部内容不带站内路径」的漏洞：光看行里的站内 URL 抓不到它，
+    但一个**成节**的外部内容一定有自己的标题 —— 标题没了就是没了。
+    """
+    new_lines = set(new.splitlines())
+    new_norm = {_norm(l) for l in new_lines}
+    out = []
+    lines = old.splitlines()
+    heads = [(i, l) for i, l in enumerate(lines) if l.startswith("## ")]
+    for idx, (i, head) in enumerate(heads):
+        if head in new_lines or _norm(head) in new_norm:
+            continue
+        end = heads[idx + 1][0] if idx + 1 < len(heads) else len(lines)
+        urls = [u for l in lines[i:end] for u in re.findall(r"https?://[^\s)\]<>\"',]+", l)]
+        if any(not _is_our_url(u) for u in urls):
+            out.append((i + 1, head))
+    return out
+
+
+def merge_external_sitemap(new_xml: str, old: str) -> str:
+    """把旧文件里**不属于本产品**的 `<url>` 块逐字插回（顺序不变、内容不重写）。"""
+    if not (PRESERVE_EXTERNAL and old):
+        return new_xml
+    own = {f"{BASE}{p}" for p in own_paths()}
+    kept = []
+    for block in re.findall(r"  <url>.*?</url>", old, re.S):
+        loc = re.search(r"<loc>([^<]*)</loc>", block)
+        if loc and loc.group(1) not in own:
+            kept.append(block)
+    if not kept:
+        return new_xml
+    print(f"  ⟳ 保留 {len(kept)} 条外部 <url>（非本产品页面，逐字不动）")
+    return new_xml.replace("</urlset>", "".join(b + "\n" for b in kept) + "</urlset>", 1)
+
+
+def merge_external_llms(new_txt: str, old: str) -> str:
+    """把旧文件里**标题不在生成集里**的 `## ` 整节逐字插回原位。"""
+    if not (PRESERVE_EXTERNAL and old):
+        return new_txt
+    gen_heads = set(re.findall(r"^## .*$", new_txt, re.M))
+    heads = [(m.start(), m.group(0)) for m in re.finditer(r"^## .*$", old, re.M)]
+    out = new_txt
+    inserted = 0
+    for i, (pos, head) in enumerate(heads):
+        if head in gen_heads:
+            continue
+        end = heads[i + 1][0] if i + 1 < len(heads) else len(old)
+        section = old[pos:end]
+        anchor = next((h for _, h in heads[i + 1:] if h in gen_heads), None)
+        if anchor is None or out.count(anchor) != 1:
+            out = out.rstrip("\n") + "\n\n" + section
+        else:
+            out = out.replace(anchor, section + anchor, 1)
+        inserted += 1
+    if inserted:
+        print(f"  ⟳ 保留 {inserted} 个外部 `## ` 分节（标题不在生成集内，逐字不动）")
+    return out
+
 
 # robots.txt 的两组 UA —— **与 Cloudflare 托管段逐条对齐**（原因见 write_robots 的注释）。
 #
@@ -185,7 +367,7 @@ def html_to_md(src: str, lang: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", md).strip()
 
 
-def write_robots() -> None:
+def build_robots() -> str:
     """robots.txt：**本站自己完整表达策略**（镜像站上没有任何注入兜底）。
 
     ## 为什么必须与 Cloudflare 托管段逐条对齐
@@ -254,23 +436,17 @@ def write_robots() -> None:
             continue  # 见 BAIDU_NOT_LISTED 的注释：保持沉默，避免与 CF 打架
         lines += [f"User-agent: {bot}", "Disallow: /", ""]
     lines += [f"Sitemap: {BASE}/sitemap.xml", ""]
-    (SITE / "robots.txt").write_text("\n".join(lines), encoding="utf-8")
-    print(
-        f"  写出 robots.txt：`*` 放行 + 显式放行 {len(CITATION_BOTS)} 个检索/引用类 + "
-        f"显式禁止 {len(TRAINING_BOTS) - 1} 个训练/抓取类（Baiduspider 按注释刻意不列）"
-    )
+    return "\n".join(lines)
 
 
-def write_sitemap() -> None:
-    # 每个「逻辑页面」一对中英路径 + 各自优先级。
+def build_sitemap(old: str = "") -> str:
+    # 本产品「逻辑页面」清单来自模块级 `PRODUCT_PAGES`（**单一来源**：归属判定也用它），
+    # 每个逻辑页面一对中英路径 + 各自优先级。
     #
     # hreflang 必须指向**同一逻辑页面**的中英版本 —— 早先这里写死了
     # `{BASE}/` 与 `{BASE}/en/`，加子页面时 `/wasm/` 的 alternate 会错误地
     # 指向首页（那会让搜索引擎把子页面当成首页的副本）。
-    pages = [
-        ("/", "/en/", "1.0", "0.9"),
-        ("/wasm/", "/en/wasm/", "0.8", "0.7"),
-    ]
+    pages = [(zh, en, zh_pri, en_pri) for zh, en, zh_pri, en_pri in PRODUCT_PAGES]
 
     def url(zh_path: str, en_path: str, priority: str, self_lang: str) -> str:
         alts = "".join(
@@ -299,11 +475,11 @@ def write_sitemap() -> None:
         + "\n".join(entries)
         + "\n</urlset>\n"
     )
-    (SITE / "sitemap.xml").write_text(xml, encoding="utf-8")
-    print(f"  写出 sitemap.xml：{len(entries)} 个 URL（按逻辑页面成对、各自三向 hreflang）")
+    print(f"  构建 sitemap.xml：本产品 {len(entries)} 个 URL（按逻辑页面成对、各自三向 hreflang）")
+    return merge_external_sitemap(xml, old)
 
 
-def write_llms() -> None:
+def build_llms(old: str = "") -> str:
     # 下载段：已发布给 pinned 直链 + 真实字节数；未发布如实写「正在发布，见 Releases 页面」。
     if PUBLISHED:
         dl_section = (
@@ -380,11 +556,11 @@ TUN 模式还需要在应用内安装一次特权 helper（要求一次管理员
 - 许可证：XrayTun 以 **MIT** 发布（仓库有 `LICENSE`，`Cargo.toml` 亦声明 `license = "MIT"`）；随包分发的 Xray-core 是 MPL-2.0。
 - 仅 macOS；界面目前只有中文。
 """
-    (SITE / "llms.txt").write_text(txt, encoding="utf-8")
-    print("  写出 llms.txt：H1 + blockquote 摘要 + 6 个分节（绝对 URL）")
+    print("  构建 llms.txt：H1 + blockquote 摘要 + 6 个分节（绝对 URL）")
+    return merge_external_llms(txt, old)
 
 
-def write_llms_full() -> None:
+def build_llms_full(old: str = "") -> str:
     """把所有官网页面转成 Markdown 拼起来 —— 等价性由「直接转换」保证，不手抄。"""
     pages = [
         ("中文：XrayTun 主页面", "/", SITE / "index.html", "zh"),
@@ -401,6 +577,29 @@ def write_llms_full() -> None:
 
     total_zh = sum(len(b) for (t, _, _, lg), b in zip(pages, bodies) if lg == "zh")
     total_en = sum(len(b) for (t, _, _, lg), b in zip(pages, bodies) if lg == "en")
+
+    # 外部**索引行**按归属保留：旧文件里「引用站内非本产品路径」的 `- 中文：… / - English: …` 行
+    # （不认任何项目名字面量 ⇒ 第三个、第四个外部项目一样成立）。
+    # 计数行按「本产品页 + 保留下来的外部索引行」算，不猜数字。
+    own_index = [f"- {t} → {BASE}{p}" for t, p, _, _ in pages]
+    ext_index = []
+    if PRESERVE_EXTERNAL and old:
+        new_index_set = set(own_index)
+        for _, line in external_url_lines(old):
+            if re.match(r"^-\s*(?:中文|English)[：:]", line) and line not in new_index_set:
+                ext_index.append(line)
+    own_zh = [l for l in own_index if l.startswith("- 中文")]
+    own_en = [l for l in own_index if l.startswith("- English")]
+    ext_zh_lines = [l for l in ext_index if l.startswith("- 中文")]
+    ext_en_lines = [l for l in ext_index if l.startswith("- English")]
+    index_lines = own_zh + ext_zh_lines + own_en + ext_en_lines
+    n_pages = len(pages) + len(ext_zh_lines) + len(ext_en_lines)
+    if len(ext_zh_lines) == len(ext_en_lines):
+        count_line = f"收录页面（{n_pages} 个，中英各 {len(pages) // 2 + len(ext_zh_lines)}）："
+    else:
+        count_line = f"收录页面（{n_pages} 个；本产品 {len(pages)} + 外部 {len(ext_index)}）："
+    if ext_index:
+        print(f"  ⟳ 保留 {len(ext_index)} 条外部索引行（非本产品页面，逐字不动）")
 
     header = f"""# XrayTun — 全文（llms-full.txt）
 
@@ -420,25 +619,139 @@ def write_llms_full() -> None:
 > 它是同一作者的**独立项目**（纯 Rust 实现 VLESS + XTLS-Vision + REALITY，编译到 wasm32-wasip2），
 > **XrayTun 并不使用它** —— XrayTun 随包附带的是官方 Go 版 Xray-core。
 
-收录页面（{len(pages)} 个，中英各 2）：
+{count_line}
 
-{chr(10).join(f"- {t} → {BASE}{p}" for t, p, _, _ in pages)}
+{chr(10).join(index_lines)}
 
 ---
 
 {chr(10).join("\n---\n\n" + b for b in bodies)}
 """
-    (SITE / "llms-full.txt").write_text(header, encoding="utf-8")
-    print(f"  写出 llms-full.txt：{len(pages)} 个页面（中文 {total_zh} 字 + 英文 {total_en} 字，由 HTML 直接转换）")
+    out = header
+    if PRESERVE_EXTERNAL and old:
+        for name, anchor, where, trailing in EXT_REGIONS:
+            region = ext_region(old, name, trailing)
+            if not region:
+                continue
+            if out.count(anchor) != 1:
+                raise SystemExit(
+                    f"✗ 外部区间 `{name}` 的插入锚点 {anchor!r} 在生成文本里出现 "
+                    f"{out.count(anchor)} 次（要求恰好 1 次）——\n"
+                    "  生成器**不会**静默丢掉外部内容：请检查 EXT_REGIONS 的锚点常量与模板是否漂移。"
+                )
+            out = out.replace(anchor, region + anchor if where == "before" else anchor + region, 1)
+            print(f"  ⟳ 保留外部区间 `{name}`（{len(region.splitlines())} 行，逐字不动）")
+    print(f"  构建 llms-full.txt：本产品 {len(pages)} 个页面（中文 {total_zh} 字 + 英文 {total_en} 字，由 HTML 直接转换）")
+    return out
+
+
+ARTIFACTS = ("robots.txt", "sitemap.xml", "llms.txt", "llms-full.txt")
+
+
+def build_all(old: dict) -> dict:
+    """按盘上现有内容构建四份产物 —— 生成与检查**共用同一段代码**（check 就是"重算一遍比一比"）。"""
+    return {
+        "robots.txt": build_robots(),
+        "sitemap.xml": build_sitemap(old.get("sitemap.xml", "")),
+        "llms.txt": build_llms(old.get("llms.txt", "")),
+        "llms-full.txt": build_llms_full(old.get("llms-full.txt", "")),
+    }
+
+
+def guard_report(old: dict, new: dict) -> int:
+    """「**不许静默丢**」守卫：旧里有、新里没有的外部内容 ⇒ 非零 + 指名到文件与行。
+
+    两类判据（都不认识任何项目名字面量，只看「是不是本产品」）：
+      · `lost_external_lines`  —— 带**站内非本产品路径**的整行；
+      · `lost_external_sections` —— 连标题一起没了的外部 `## ` 整节（补住「内容不带站内路径」）。
+
+    测试缝 `GEN_SITE_EXTERNAL_OFF=1` 会把整个机制（含本守卫）关掉 ⇒ 那才是"旧行为"，
+    用于反向敏感性：旧行为**静默抹掉**，新机制**非零拒绝**。
+    """
+    if not PRESERVE_EXTERNAL:
+        print("  ⚠️ 测试缝 GEN_SITE_EXTERNAL_OFF=1：外部条目保护与守卫都已关闭（等于旧行为）")
+        return 0
+    bad = 0
+    for name in ARTIFACTS:
+        lost_lines = lost_external_lines(name, old[name], new[name])
+        lost_sections = lost_external_sections(name, old[name], new[name])
+        if not (lost_lines or lost_sections):
+            continue
+        bad = 1
+        print(
+            f"✗ site/{name}：生成器会把**不属于本产品的外部内容**丢掉（拒绝静默删除）：",
+            file=sys.stderr,
+        )
+        for lineno, line in lost_lines:
+            print(f"    site/{name}:{lineno}: {line}", file=sys.stderr)
+        for lineno, head in lost_sections:
+            print(f"    site/{name}:{lineno}: {head}（整节）", file=sys.stderr)
+        print(
+            "  修法：外部内容要么走**归属规则**（sitemap 的 `<loc>` / llms.txt 的 `## ` 节自动保留），\n"
+            "        要么放进 `<!-- BEGIN external:<名> --> … <!-- END external:<名> -->` 区间。",
+            file=sys.stderr,
+        )
+    return bad
+
+
+def write_all() -> int:
+    old = {name: read_artifact(name) for name in ARTIFACTS}
+    new = build_all(old)
+    if guard_report(old, new):
+        return 1
+    for name in ARTIFACTS:
+        if old[name] != new[name]:
+            (SITE / name).write_text(new[name], encoding="utf-8")
+            print(f"  ✓ 写出 site/{name}（{len(new[name])} 字节）")
+        else:
+            print(f"  = site/{name} 无变化（{len(new[name])} 字节）")
+    return 0
+
+
+def check() -> int:
+    """`check` 模式：**不写盘**，把盘上产物与生成器重算结果逐字节比较（漂移即红）。
+
+    这条不变量接在 `scripts/check.sh` 里 —— 门禁会抓住「跑完生成器产物会变」的情况：
+    手写进生成区块的内容、过期产物、以及被 `GEN_SITE_EXTERNAL_OFF` 关掉机制后的产物都会红。
+    """
+    old = {name: read_artifact(name) for name in ARTIFACTS}
+    new = build_all(old)
+    if guard_report(old, new):
+        return 1
+    bad = 0
+    for name in ARTIFACTS:
+        if old[name] == new[name]:
+            print(f"  ✓ site/{name} 与生成器重算结果逐字节一致（{len(old[name])} 字节）")
+        else:
+            bad = 1
+            print(f"  ✗ site/{name} 与生成器重算结果不一致（盘上 {len(old[name])} 字节 / 重算 {len(new[name])} 字节）", file=sys.stderr)
+            for i, (a, b) in enumerate(zip(old[name].splitlines(), new[name].splitlines()), 1):
+                if a != b:
+                    print(f"      首个差异 site/{name}:{i}\n        盘上：{a}\n        重算：{b}", file=sys.stderr)
+                    break
+            else:
+                print("      （差异在行数：请直接重跑 `python3 scripts/gen-site-geo.py` 后复核）", file=sys.stderr)
+    if bad:
+        print(
+            "\n✗ 站点 GEO 产物与生成器不一致。修法：\n"
+            "  · 那是**手写**内容 ⇒ sitemap/llms.txt 会被自动保留（按归属）；llms-full.txt 请放进\n"
+            "    `<!-- BEGIN external:<名> --> … <!-- END external:<名> -->` 区间；\n"
+            "  · 那是**产物过期** ⇒ 重跑 `python3 scripts/gen-site-geo.py`（外部条目会自动保留）。",
+            file=sys.stderr,
+        )
+    return bad
 
 
 def main() -> int:
+    mode = sys.argv[1] if len(sys.argv) > 1 else "gen"
+    if mode == "check":
+        print("检查 GEO / AI 产物是否与生成器一致（不写盘）：")
+        return check()
+    if mode != "gen":
+        print(f"用法：{sys.argv[0]} [gen|check]", file=sys.stderr)
+        return 2
     print("生成 GEO / AI 索引产物：")
-    write_robots()
-    write_sitemap()
-    write_llms()
-    write_llms_full()
-    return 0
+    return write_all()
 
 
 if __name__ == "__main__":
