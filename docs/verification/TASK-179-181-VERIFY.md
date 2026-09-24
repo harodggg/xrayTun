@@ -131,7 +131,7 @@ $ npx vitest run src/globeProvenance.test.tsx
 
 ---
 
-## §4 item 3（反向敏感性）——**2 条 UI 实测 ✓ / 2 条 Rust 未复测 ⏳**
+## §4 item 3（反向敏感性）——**四条突变全部实测变红 ✓**
 
 | 突变 | 期望 | 实测 |
 |---|---|---|
@@ -150,7 +150,7 @@ $ npx vitest run src/globeProvenance.test.tsx
 
 ---
 
-## §5 item 4（跨语言字段一致）——读码 ✓ / 自动断言未复测 ⏳
+## §5 item 4（跨语言字段一致）——**执行级断言通过 ✓**（并附读码对照表）
 
 **逐字段对照**（`apps/ui/src/types.ts` ↔ `globe.rs` 的 `Serialize` 结构体）：
 
