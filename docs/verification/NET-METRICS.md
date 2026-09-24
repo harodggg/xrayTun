@@ -479,11 +479,10 @@ self-test：**全部通过**（去重 / 多对象行 / v6-v4 分类 / 探针三�
 * **跨语言夹具**：`scripts/fixtures/probe-targets.json`（`[{url, side}]`）。
   Rust 测试 `probe_targets_fixture_matches_authoritative_table` **逐条**断言
   「Rust 表 == 夹具」；**Rust 是权威，夹具是双方共同的真源**。
-* ⚠️ **本脚本（`net-metrics.py`）在 `task-175` 之前仍是第三份清单**：
-  `DEFAULT_PROBE_TARGETS = ("cp.cloudflare.com:80", "www.baidu.com:80")`
-  **不含今天的两个 IP 字面量** ⇒ 它的 ② 段**量不到当前境内探针**
-  （这也解释了现场包里 `223.5.5.5` 的失败没出现在 `probes` 段）。
-  `task-175` 会把它改成读上面那份夹具。
+* ✅ **第三份清单已删除（`task-175`）**：`net-metrics.py` 原来内联
+  `DEFAULT_PROBE_TARGETS = ("cp.cloudflare.com:80", "www.baidu.com:80")`（**不含两个 IP 字面量**
+  ⇒ ② 段**量不到境内探针**；现场包里 `223.5.5.5` 的失败只出现在 `events.jsonl` 就是这个原因）。
+  现在它**只从上面那份夹具读目标**，并**失败即报错、不回退**（见 §12）。
 
 ### 11.2 目标与门槛：改前 → 改后
 
@@ -519,3 +518,67 @@ self-test：**全部通过**（去重 / 多对象行 / v6-v4 分类 / 探针三�
 
 境内全灭 = **2 ≥ 门槛** ⇒ 连续 2 轮后重建；重建会重走 `bring_up`（含 scoped 默认路由的安装）
 ⇒ `task-172` 那种「绑卡直连全挂」的形状**当场自愈**，不再依赖用户手动断开重连。
+
+---
+
+## 12. 探针目标不再有第三份真源（`task-175`）
+
+### 12.1 改了什么
+
+* **删除** `net-metrics.py` 里内联的 `DEFAULT_PROBE_TARGETS`；
+* 新增 `load_probe_targets()`：**只从夹具读**
+  `scripts/fixtures/probe-targets.json`（`task-106` 产物；Rust 的 `REQUIRED_PROBE_TARGETS` 是权威），
+  并把 URL 归一成日志里的 `host:port`（`http://223.5.5.5/` → `223.5.5.5:80`）；
+* **夹具缺失 / 路径写错 / 内容不合法 ⇒ `SystemExit` 明确报错（fail closed）**，**不回退**旧内联表。
+  理由：静默兜底会把本卡要修的缺陷（境内探针量不到）**重新藏回静默区** —— 宁可让指标工具直接失败。
+  需要指定别处时用 `NET_METRICS_PROBE_TARGETS_FIXTURE=<path>`（自测/敏感性用）。
+* **口径头升到 v3**：新增 `④b 探针目标：来自夹具 <路径>（sha256:…；N 个 = 境内 a / 境外 b）`；
+  JSON 的 `caliber.probe_targets` 同字段。
+  ⚠️ **目标集合变了**（旧：`cp.cloudflare.com` + `www.baidu.com`；新：夹具 4 条）
+  ⇒ **本文件里 v2 时期的探针数字与 v3 不可直接比较**（这也是升版的原因）。
+* `probes.targets[]` 每条新增 `side` 字段，并新增 `domestic_targets` 计数。
+
+### 12.2 核心验收：同一份**真实日志**上的改前/改后（同一批 246,602 条记录）
+
+```
+--- 旧口径（内联 cp.cloudflare.com / www.baidu.com）---
+  cp.cloudflare.com:80   连接= 611 成功= 609 failed= 1 无结局= 1
+  www.baidu.com:80       连接=   0 成功=   0 failed= 0 无结局= 0
+  境内目标数=0            ← 223.5.5.5 **不存在**
+--- 新口径（读夹具 scripts/fixtures/probe-targets.json）---
+  1.1.1.1:80             side=overseas 连接= 609 成功= 607 failed= 1 无结局= 1
+  cp.cloudflare.com:80   side=overseas 连接= 611 成功= 609 failed= 1 无结局= 1
+  223.5.5.5:80           side=domestic 连接= 616 成功= 594 failed= 21 无结局= 1   ← 境内探针现在量得到
+  119.29.29.29:80        side=domestic 连接=   0 成功=   0 failed= 0 无结局= 0   ← task-106 新加，日志里还没跑过
+  境内目标数=2
+```
+
+⇒ 现场包里「**境内全灭**」这件事，在 `probes` 段里**从「根本看不到」变成「能直接看到 failed 计数」**。
+
+**诚实边界**：现场包那个窗口（`2026-09-23 20:27:52 → 20:36:29`，epoch `1790166472–1790166989`）
+**已经不在本机保留的日志里**（`app.1.jsonl` 从 `1790167553` 起，约 20:45）⇒ 我**没能**在那个窗口上重跑；
+上面用的是**当前保留的真实记录**。失败时工具给的是明确报错：
+`✗ 窗口内没有记录（检查 --since/--until）`（不是静默出空表）。对照证据来自现场包自身：
+它的 `metrics.json` 里 `probes.targets = ['cp.cloudflare.com:80','www.baidu.com:80']`（**没有 223.5.5.5**），
+而同一包的 `events.jsonl` 写着「境内 全灭1/1、境外 0/2 死 —— http://223.5.5.5/ → 000」。
+
+### 12.3 自测与双向敏感性（`python3 scripts/net-metrics.py --self-test`，exit 0）
+
+* 新增断言：`probes` 段**覆盖夹具里的全部目标**、**境内 ≥ 2**（`PROBE_DOMESTIC_MIN`，产品门槛）、
+  口径头记下**夹具路径 + sha256**；
+* **敏感性 4**：把人造夹具里的 `223.5.5.5` 去掉 ⇒ 「境内 ≥2」不变量变**假** ⇒ 原断言会红
+  （证明它真的在读夹具，而不是读内联表）；
+* **敏感性 5**：夹具路径写成 `/nonexistent/...` ⇒ **明确报错**且提示「不回退」；
+* 自测里原先用 `www.baidu.com:80` 造的那条失败探针**换成夹具里的 `223.5.5.5:80`**（目标必须来自夹具）。
+
+### 12.4 诚实清单
+
+* **夹具与 Rust 表无法在 Python 侧自动校验** —— 「Rust 表 == 夹具」是 Rust 那条测试
+  （`probe_targets_fixture_matches_authoritative_table`）的职责；本脚本只能断言「我用的是夹具里的目标」。
+* `net-metrics.py` 里**仍然内联**的口径（本次未动）：`ROUND_GAP_SECS=5s`（分轮阈值）、
+  `PROBE_TIMEOUT_SECS=6s`、去重键 `(ts_unix, message)`、`SUCCESS_MARKS`/`FAILED_MARK` 的措辞、
+  `RE_CONNECT` 的正则。它们同样是「口径」，改它们要同时改本文与自测里的期望值。
+* `119.29.29.29` 在当前保留日志里 **0 次连接**（`task-106` 刚加，App 还没探过它）⇒ 「境内 ≥2」在**数据上**还
+  看不出效果；本卡只保证**量得到**。
+* `probes` 段的 `failed_line` 计数依赖日志里出现 `failed to process outbound traffic`；
+  「没有结局行」（连接发起后既无成功也无失败）单独计一列 —— 两者都不是「网络坏了」的直接证明。

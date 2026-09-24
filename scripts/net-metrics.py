@@ -12,8 +12,10 @@
    * **它回答**：v6 改写是否是失败的必要条件/风险因子（**不是**「v6 改写是否导致用户上不了网」——见下面边界）。
 
 **② task-98 / task-100：探针判据本身可靠吗？**（`analyze_probes`）
-   * 探针连接 = 日志里 `proxy/socks: TCP Connect request to tcp:<目标>`，目标默认
-     `cp.cloudflare.com:80`（境外）与 `www.baidu.com:80`（境内，v0.8.33 的第二个目标）；
+   * 探针连接 = 日志里 `proxy/socks: TCP Connect request to tcp:<目标>`；
+     **目标列表来自共享夹具** `scripts/fixtures/probe-targets.json`（`task-106` 的产物；
+     Rust 侧 `REQUIRED_PROBE_TARGETS` 是权威，那条测试断言「Rust 表 == 夹具」）。
+     本文件**不再内联**目标表 —— 内联就是第三份真源，会让「境内探针量不到」重新变静默（`task-175`）。
    * 每个探针连接的结局分三种：**成功**（后续出现 `connection opened` 或 `tunneling request`）、
      **失败·有 failed 行**（出现 `failed to process outbound traffic`）、
      **失败·无结局行**（两者都没有 —— 轨迹停在半路，例如只到 `dialing to tcp:<节点>`）；
@@ -82,13 +84,70 @@ from datetime import datetime, timedelta
 # ---------------------------------------------------------------- 常量 / 正则
 LOG_DIR_DEFAULT = os.path.expanduser("~/Library/Application Support/com.xraytun.desktop/logs")
 LOG_FILES = ("app.1.jsonl", "app.jsonl")          # 旧 → 新；两者有重叠，必须去重
-DEFAULT_PROBE_TARGETS = ("cp.cloudflare.com:80", "www.baidu.com:80")
+# 探针目标**只从夹具读**（task-175）。以前这里内联 ("cp.cloudflare.com:80", "www.baidu.com:80")：
+# 它是**第三份真源**，且不含实际在用的境内 IP 字面量 ⇒ 现场包 metrics 量不到「境内全灭」。
+PROBE_TARGETS_FIXTURE_ENV = "NET_METRICS_PROBE_TARGETS_FIXTURE"
+PROBE_TARGETS_FIXTURE_DEFAULT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "probe-targets.json")
+# 产品侧要求：境内目标 ≥ 2（否则「境内全灭」永远到不了重建门槛，task-106）
+PROBE_DOMESTIC_MIN = 2
+
+
+def _url_host_port(url):
+    """夹具里的 `http://223.5.5.5/` → 日志里 `tcp:223.5.5.5:80` 的 `host:port` 形态。"""
+    from urllib.parse import urlsplit
+
+    u = urlsplit(url)
+    if not u.hostname:
+        raise SystemExit(f"✗ 探针目标夹具里的 url 解析不出主机：{url!r}")
+    port = u.port or (443 if u.scheme == "https" else 80)
+    return f"{u.hostname}:{port}"
+
+
+def probe_targets_source(path=None):
+    """夹具路径（可用环境变量覆盖；自测/敏感性用）。"""
+    return path or os.environ.get(PROBE_TARGETS_FIXTURE_ENV) or PROBE_TARGETS_FIXTURE_DEFAULT
+
+
+def load_probe_targets(path=None):
+    """读夹具 ⇒ `(targets, meta, fixture_path, sha256)`。
+
+    **夹具缺失 / 路径写错 / 内容不合法 ⇒ 明确报错退出（fail closed）**，理由：
+    静默回退到「旧内联表」会把本卡要修的缺陷（境内探针量不到）**重新藏回静默区**；
+    宁可让指标工具直接失败并要求修夹具，也不要给出一份「看起来正常、其实少了一侧」的口径。
+    """
+    p = probe_targets_source(path)
+    if not os.path.isfile(p):
+        raise SystemExit(
+            f"✗ 探针目标夹具不存在：{p}\n"
+            f"  夹具由 task-106 维护（Rust 的 REQUIRED_PROBE_TARGETS 是权威，二者同源）。\n"
+            f"  本工具**不回退**到旧的内联目标表 —— 那会让「境内探针量不到」重新变成静默缺陷。\n"
+            f"  可用 {PROBE_TARGETS_FIXTURE_ENV}=<path> 指定别处（自测/敏感性用）。")
+    raw = open(p, encoding="utf-8").read()
+    try:
+        rows = json.loads(raw)
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(f"✗ 探针目标夹具不是合法 JSON：{p}（{e}）")
+    if not isinstance(rows, list) or not rows:
+        raise SystemExit(f"✗ 探针目标夹具必须是非空数组：{p}")
+    targets, meta = [], []
+    for r in rows:
+        url, side = r.get("url"), r.get("side")
+        if not url or side not in ("domestic", "overseas"):
+            raise SystemExit(f"✗ 探针目标夹具条目不合法（需要 url + side∈{{domestic,overseas}}）：{r!r}")
+        hp = _url_host_port(url)
+        targets.append(hp)
+        meta.append({"url": url, "host_port": hp, "side": side, "why": r.get("why")})
+    if len(set(targets)) != len(targets):
+        raise SystemExit(f"✗ 探针目标夹具里有重复的 host:port：{targets}")
+    return targets, meta, p, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 ROUND_GAP_SECS = 5.0        # 分轮阈值（写在输出里）
 PROBE_TIMEOUT_SECS = 6.0    # 应用侧探针超时（v0.8.33；用于统计「>6s 才成功」）
 DEDUPE_KEY = "(ts_unix, message)"   # 去重键（写在输出里；改它必须改同名的自测）
 # 口径版本：改口径（切/解/匹配/单位/指纹）就必须改这个字符串，
 # 好让文档里的旧数字一眼能看出「不是同一把尺子量的」。
-CALIBER_VERSION = "口径头 v2（2026-09-22：切/解/匹配/单位 + 选择内容指纹）"
+CALIBER_VERSION = ("口径头 v3（2026-09-24：探针目标改为读夹具 scripts/fixtures/probe-targets.json；"
+                   "目标集合含境内 IP 字面量 ⇒ 与 v2 的探针数字**不可直接比较**）")
 FINGERPRINT_ALGO = "sha256"
 
 RE_ID = re.compile(r"\[(\d{6,})\]\s")
@@ -284,7 +343,14 @@ def analyze_task97(records):
 
 
 # ---------------------------------------------------------------- ② 探针
-def analyze_probes(records, targets=DEFAULT_PROBE_TARGETS):
+def analyze_probes(records, targets=None, target_meta=None, target_source=None):
+    # 目标**只从夹具读**（调用方可传 targets 以便测试）；不传就现读夹具
+    if targets is None:
+        targets, target_meta, src_path, src_sha = load_probe_targets()
+        target_source = {"path": src_path, "sha256": src_sha,
+                         "domestic": sum(1 for m in target_meta if m["side"] == "domestic"),
+                         "overseas": sum(1 for m in target_meta if m["side"] == "overseas")}
+    side_of = {m["host_port"]: m["side"] for m in (target_meta or [])}
     # 1) 找出探针连接
     meta = {}
     for r in records:
@@ -346,6 +412,7 @@ def analyze_probes(records, targets=DEFAULT_PROBE_TARGETS):
         sub = [c for c in conns if c["target"] == tgt]
         lat = [c["lat"] for c in sub if c["outcome"] == "success" and c["lat"] is not None]
         by_target[tgt] = {
+            "side": side_of.get(tgt),
             "connections": len(sub),
             "success": sum(1 for c in sub if c["outcome"] == "success"),
             "failed_line": sum(1 for c in sub if c["outcome"] == "failed_line"),
@@ -359,6 +426,8 @@ def analyze_probes(records, targets=DEFAULT_PROBE_TARGETS):
         }
     return {
         "targets": by_target,
+        "target_source": target_source,
+        "domestic_targets": sum(1 for t in targets if side_of.get(t) == "domestic"),
         "total_connections": len(conns),
         "success": sum(1 for c in conns if c["outcome"] == "success"),
         "failed_line": sum(1 for c in conns if c["outcome"] == "failed_line"),
@@ -431,6 +500,7 @@ def caliber_lines(stats, m2, ctx):
     ⓪ 身份 + 移动标记（N/T） ① 切（窗口） ② 解（解析） ③ 匹配（去重） ④ 单位 ⑤ 选择内容指纹
     """
     win = ctx["window"]
+    ts = m2.get("target_source") or {"path": "(未知)", "sha256": "", "domestic": 0, "overseas": 0}
     return [
         "口径头（引用任何数字请连这一段一起引用）：",
         f"  ⓪ 身份/移动标记：工具=scripts/net-metrics.py；{CALIBER_VERSION}",
@@ -450,6 +520,9 @@ def caliber_lines(stats, m2, ctx):
         f"     来源：source=app {stats['src_app']} / source=core {stats['src_core']} / 其它 {stats['src_other']}",
         f"  ④ 单位        ：时间=ts_unix(秒)；耗时=消息内微秒时间戳；"
         f"探针轮=相邻间隔>{m2['round_gap_secs']:.0f}s；探针超时={m2['timeout_secs']:.0f}s；字节=B",
+        f"  ④b 探针目标    ：来自夹具 {ts['path']}（sha256:{ts['sha256'][:16]}…；"
+        f"{m2['domestic_targets'] + ts['overseas']} 个 = 境内 {ts['domestic']} / 境外 {ts['overseas']}）"
+        f" ⇒ 探针数字只在**这份目标集合**下可比",
         f"  ⑤ 选择内容指纹：{FINGERPRINT_ALGO}:{ctx['fingerprint']}",
         f"     ⚠️ 这是「本次选中的 {stats['kept']} 条」的指纹，**不是日志文件指纹**"
         f"（换窗口 / 换去重键即变；未选中的行不覆盖）",
@@ -529,7 +602,8 @@ def self_test():
     rows_new.append(rec(5, "[555555555] proxy/socks: TCP Connect request to tcp:cp.cloudflare.com:80", base + 20))
     rows_new.append(rec(5, "[555555555] transport/internet/tcp: dialing to tcp:45.207.197.185:443", base + 20.1))
     # --- 探针 3：失败·有 failed 行（baidu），同一轮
-    rows_new.append(rec(6, "[666666666] proxy/socks: TCP Connect request to tcp:www.baidu.com:80", base + 20.2))
+    # task-175：目标必须来自夹具 ⇒ 原来的 www.baidu.com:80 不在夹具里，换成夹具里的境内目标
+    rows_new.append(rec(6, "[666666666] proxy/socks: TCP Connect request to tcp:223.5.5.5:80", base + 20.2))
     rows_new.append(rec(6, "[666666666] failed to process outbound traffic > proxy/freedom", base + 20.3))
     # --- 自愈：13:10 作废 → 13:11 core 启动（口径A = 60s）；流量在 13:00:10.5 与 13:11:40（口径B = 689.5s）
     rows_new.append(json.dumps({"ts_unix": base + 600, "level": "info", "source": "app",
@@ -645,6 +719,44 @@ def self_test():
     print(f"  改前 成功={m2['success']}/无结局行={m2['no_outcome_line']}  改后 成功={m2b['success']}/无结局行={m2b['no_outcome_line']}")
     check("敏感性 2：成功 -1", m2b["success"], m2["success"] - 1)
     check("敏感性 2：无结局行 +1", m2b["no_outcome_line"], m2["no_outcome_line"] + 1)
+
+    # ---------- task-175：探针目标来自夹具（第三份真源已删） ----------
+    print("\n=== task-175：探针目标来自共享夹具 ===")
+    fx_targets, fx_meta, fx_path, fx_sha = load_probe_targets()
+    fx_hp = sorted(m["host_port"] for m in fx_meta)
+    check("probes 段覆盖夹具里的**全部**目标", sorted(m2["targets"].keys()), fx_hp)
+    check("境内目标数 ≥ 产品门槛 2", sum(1 for m in fx_meta if m["side"] == "domestic") >= PROBE_DOMESTIC_MIN, True)
+    check("口径头记下夹具路径", m2["target_source"]["path"], fx_path)
+    check("口径头记下夹具 sha256", m2["target_source"]["sha256"], fx_sha)
+    check("接入夹具后能看见境内目标 223.5.5.5:80", "223.5.5.5:80" in m2["targets"], True)
+    print(f"  夹具 {fx_path}（sha256:{fx_sha[:16]}…）= {fx_hp}")
+
+    print("\n=== 敏感性 4（task-175）：从夹具去掉一个境内目标 ⇒ 「境内 ≥2」不变量必须变假（原断言会红）===")
+    import json as _json
+    import tempfile as _tf
+    bad = [r for r in _json.loads(open(fx_path, encoding="utf-8").read())
+           if not (r["side"] == "domestic" and r["url"].startswith("http://223.5.5.5"))]
+    fd, bad_path = _tf.mkstemp(prefix="probe-targets-bad-", suffix=".json")
+    os.write(fd, _json.dumps(bad).encode()); os.close(fd)
+    _t, _meta, _p, _sha = load_probe_targets(bad_path)
+    inv = sum(1 for m in _meta if m["side"] == "domestic") >= PROBE_DOMESTIC_MIN
+    check("（坏夹具下）「境内 ≥2」不变量为假 ⇒ 原断言会红", inv, False)
+    os.unlink(bad_path)
+
+    print("\n=== 敏感性 5（task-175）：夹具路径写错 ⇒ 必须**明确报错**，不许静默回退旧内联表 ===")
+    _prev = os.environ.get(PROBE_TARGETS_FIXTURE_ENV)
+    os.environ[PROBE_TARGETS_FIXTURE_ENV] = "/nonexistent/probe-targets.json"
+    try:
+        load_probe_targets()
+        err = None
+    except SystemExit as e:  # noqa: BLE001
+        err = str(e)
+    if _prev is None:
+        os.environ.pop(PROBE_TARGETS_FIXTURE_ENV, None)
+    else:
+        os.environ[PROBE_TARGETS_FIXTURE_ENV] = _prev
+    check("路径写错 ⇒ 报错且说明「不回退」", bool(err) and "夹具不存在" in err and "不回退" in err, True)
+    print(f"  报错原文（首行）：{(err or '').splitlines()[0] if err else '(没有报错！)'}")
 
     print("\n=== 敏感性 3：把 core 启动推后 120s ⇒ 口径A 必须从 60s 变 180s ===")
     mut3 = [{**r, "t": r["t"] + 120 if ("core: Xray" in r["msg"] and "started" in r["msg"]) else r["t"]} for r in recs]
@@ -842,6 +954,14 @@ def main(argv=None):
                 "hits": stats["kept"], "message_with_lf_records": stats["lf_in_message"],
                 "selection_fingerprint": f"{FINGERPRINT_ALGO}:{fingerprint}",
                 "selection_fingerprint_is_not_file_fingerprint": True,
+                "probe_targets": {
+                    "source": (m2.get("target_source") or {}).get("path"),
+                    "sha256": (m2.get("target_source") or {}).get("sha256"),
+                    "targets": list((m2.get("targets") or {}).keys()),
+                    "domestic": (m2.get("target_source") or {}).get("domestic"),
+                    "overseas": (m2.get("target_source") or {}).get("overseas"),
+                    "note": "目标集合来自 task-106 的共享夹具；Rust 的 REQUIRED_PROBE_TARGETS 是权威",
+                },
             },
             "window": f"{win['since']} → {win['until']}；共 {len(recs)} 条记录",
             "snapshot": snap, "stats": stats,
