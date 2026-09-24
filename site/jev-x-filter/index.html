@@ -40,10 +40,10 @@
   "name": "信息过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.5",
+  "softwareVersion": "0.4.6",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/jev-x-filter-0.4.5.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/jev-x-filter-0.4.5.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -182,6 +182,7 @@
           <a href="#verify">验证状态</a>
           <a href="#limits">已知边界</a>
           <a href="#faq">常见问题</a>
+          <a href="#errors">扩展报错</a>
         </nav>
         <nav class="lang-switch" aria-label="语言">
           <a href="./" aria-current="page" lang="zh-Hans">中文</a>
@@ -205,13 +206,13 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/jev-x-filter-0.4.5.zip"
-            >下载 v0.4.5（zip，174.4 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip"
+            >下载 v0.4.6（zip，175.8 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.4.5 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.4.6 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -466,6 +467,21 @@
           <code>我服了</code> / <code>难过死了</code> / <code>真好看</code> 这类加强语与程度补语也都能正确归类了。
         </p>
       </section>
+      <section class="wrap prose" id="errors">
+        <h2>v0.4.6：扩展卡片出现「错误」按钮怎么办</h2>
+        <p>
+          Chrome 会把扩展的历史错误<strong>一直累积在同一张卡片上</strong>，所以那个按钮可能来自更早的版本、或某次加载时文件正在写入。
+          清除步骤：<code>chrome://extensions</code> → 点该扩展的<strong>「错误」</strong> → 右上角<strong>「清除所有」（Clear all）</strong>
+          → 回到卡片点<strong>「重新加载」（↻）</strong>。若之后<strong>再次</strong>出现，把里面的文本（含文件名与行号）反馈给我们。
+        </p>
+        <p>
+          本版同时把最可能的来源堵死：真站某个出乎意料的 DOM 让内容脚本抛异常时，调用方 <code>void inspectArticle()</code>
+          会变成未捕获的 Promise 异常，正好点亮那个按钮。现在内容脚本<strong>全链路兜底</strong> —— 计数、标 error 态、
+          写审计（<code>stage: inspect|register</code>）与 <code>summary().lastError</code>，同屏其它推文照常判定；
+          端到端也补上了 <strong>Service Worker 异常断言</strong>（从扩展加载起监听）与<strong>畸形 DOM 回归</strong>
+          （空推文容器 / 半截推文）。
+        </p>
+      </section>
       <section class="wrap prose" id="samples">
         <h2>v0.4.1：用户发来的三条真站样本，两个漏检都补上了</h2>
         <p>
@@ -534,7 +550,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
               <td>真实 Chrome 端到端</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>143 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
+                <strong>144 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
                 触发按钮无盒子、菜单异步渲染、多语言菜单项、菜单里确实没有目标项）→ 判定 → 隐藏 →
                 α 徽标 / β 折叠 → 点菜单（含「隐藏档也静音」边界与「绝不猜点 + 留下诊断」）
               </td>
@@ -682,7 +698,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.5/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -700,7 +716,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          信息过滤器 · Jev v0.4.5 · Chrome MV3 · 页面最后更新 2026-09-24 ·
+          信息过滤器 · Jev v0.4.6 · Chrome MV3 · 页面最后更新 2026-09-24 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>

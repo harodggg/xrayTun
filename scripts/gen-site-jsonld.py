@@ -53,7 +53,7 @@ WASM_REPO = "https://github.com/harodggg/xray-wasm"
 # 它与 XrayTun **不是同一个产品**：下载地址、Release、许可证都指向它自己的仓库，
 # 所以 SoftwareApplication 分支允许逐页覆盖这些字段（默认值仍是 XrayTun 的那套）。
 JEVX_REPO = "https://github.com/harodggg/jev-x-filter"
-JEVX_VERSION = "0.4.5"
+JEVX_VERSION = "0.4.6"
 JEVX_RELEASES = f"{JEVX_REPO}/releases"
 JEVX_DL = f"{JEVX_REPO}/releases/download/v{JEVX_VERSION}/jev-x-filter-{JEVX_VERSION}.zip"
 
