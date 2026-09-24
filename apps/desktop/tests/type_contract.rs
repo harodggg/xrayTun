@@ -621,17 +621,21 @@ fn registered_commands_match_the_frontend_invoke_literals() {
     // 哨兵：数量写死，增删命令时必须同步改这里（否则解析退化会假绿）。
     // 37 = 34（task-94 时的全集）+ task-130 的三个 `incident_*`（`incident_anomalies`
     // **故意不注册**：前端没封装它、角标只用计数 —— Lead 在 task-130 里裁决）。
+    // 43 = 37 + 意图过滤的 6 个（`intent_status` / `intent_allow` / `intent_clear_cache`
+    // / `intent_audit` / `intent_explain` / `intent_apply`）。
     assert_eq!(
         rust.len(),
-        37,
-        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 37。\
+        43,
+        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 43。\
          增删命令请同步更新这个数字与 ipc.ts。实际注册: {rust:?}",
         rust.len()
     );
+    // 同一把哨兵的另一半：**前端这一侧也要同步**。
+    // （第一次改这个契约时就漏了它 —— Rust 侧改到 43、TS 侧还是 37，于是红。）
     assert_eq!(
         ts.len(),
-        37,
-        "\nipc.ts 的 invoke 字面量有 {} 个，预期 37；实际: {ts:?}",
+        43,
+        "\nipc.ts 的 invoke 字面量有 {} 个，预期 43；实际: {ts:?}",
         ts.len()
     );
 

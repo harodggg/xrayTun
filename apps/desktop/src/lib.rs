@@ -112,6 +112,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::snapshot,
+            commands::intent_status,
+            commands::intent_allow,
+            commands::intent_clear_cache,
+            commands::intent_audit,
+            commands::intent_explain,
+            commands::intent_apply,
             commands::routing_topology,
             commands::explain_dest,
             commands::recent_connections,

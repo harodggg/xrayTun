@@ -295,10 +295,13 @@ impl IntentRuntime {
         }
     }
 
-    /// 用户点"这个拦错了"（本切片：只登记放行纠正，因为还没有规则可撤销）。
-    pub fn allow_now(&mut self, host: &str) -> bool {
+    /// 用户点"这个拦错了"。
+    ///
+    /// 动作（直连 / 走代理）**必须由调用方给**：我们绝不替用户选，
+    /// 因为放行一个域名顺带会把它的分流方式也改掉（设计文档 §6）。
+    pub fn allow_now(&mut self, host: &str, action: xt_intent::rules::AllowAction) -> bool {
         match self.engine.as_mut() {
-            Some(engine) => engine.allow_now(host, xt_intent::rules::AllowAction::Direct),
+            Some(engine) => engine.allow_now(host, action),
             None => false,
         }
     }
@@ -306,6 +309,34 @@ impl IntentRuntime {
     /// 某个域名的判决（界面的"为什么"）。
     pub fn explain(&self, host: &str) -> Option<xt_intent::cache::CacheEntry> {
         self.engine.as_ref().and_then(|e| e.explain(host))
+    }
+
+    /// 清空判决缓存（内存 + 下次落盘）。返回清掉的条数。
+    ///
+    /// **不删审计**：审计是"发生过什么"的记录，清缓存是"重新问一遍"的意图，
+    /// 两者不该互相牵连。
+    pub fn clear_cache(&mut self) -> usize {
+        match self.engine.as_mut() {
+            Some(engine) => {
+                let n = engine.clear_cache();
+                if let Err(e) = engine.persist_cache() {
+                    self.last_error = Some(format!("清空缓存后落盘失败：{e}"));
+                }
+                n
+            }
+            None => 0,
+        }
+    }
+
+    /// 最近若干条审计（界面用）。**读文件，不读内存** —— 审计是 append-only 的。
+    pub fn audit_tail(&self, limit: usize) -> Vec<xt_intent::audit::AuditRecord> {
+        let path = xt_intent::audit::AuditLog::default_path(&self.data_root);
+        xt_intent::audit::AuditLog::tail(&path, limit).unwrap_or_default()
+    }
+
+    /// 审计文件路径（界面"打开文件"用）。
+    pub fn audit_path(&self) -> PathBuf {
+        xt_intent::audit::AuditLog::default_path(&self.data_root)
     }
 }
 
@@ -455,7 +486,7 @@ mod tests {
         };
         rt.observe(&rec, 1); // 不该 panic
         assert!(rt.tick(2).is_none(), "没引擎就没有一轮账");
-        assert!(!rt.allow_now("ads.example"));
+        assert!(!rt.allow_now("ads.example", xt_intent::rules::AllowAction::Direct));
         assert!(rt.explain("ads.example").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -494,7 +525,7 @@ mod tests {
         assert_eq!(rt.summary().allow_rules, 0);
 
         // 用户点"这个拦错了" ⇒ 放行带多一条 ⇒ 规则集合变了。
-        assert!(rt.allow_now("cdn.news.example"));
+        assert!(rt.allow_now("cdn.news.example", xt_intent::rules::AllowAction::Direct));
         let s = rt.summary();
         assert_eq!(s.allow_rules, 1, "放行纠正必须真的进规则集合");
         assert!(s.rules_pending_apply, "集合变了就必须重新下发");
@@ -521,7 +552,7 @@ mod tests {
         let dir = root("off-rules");
         let mut rt = IntentRuntime::new(dir.clone());
         rt.follow_settings(&zen_settings(), 100);
-        rt.allow_now("cdn.news.example");
+        rt.allow_now("cdn.news.example", xt_intent::rules::AllowAction::Direct);
         rt.mark_applied(110);
         rt.follow_settings(&AppSettings::default(), 120);
         // 关掉之后：没有引擎、没有规则、也不该再说"待生效"。

@@ -201,6 +201,100 @@ export interface AppSettings {
 }
 
 /**
+ * 意图过滤的运行态摘要（`commands::intent_status`）。
+ *
+ * 与 Rust 侧 `intent.rs::IntentSummary` 是同一份形状。
+ */
+export interface IntentSummary {
+  /** 引擎建起来了（≠ 已经在拦，见 `rules_pending_apply`）。 */
+  active: boolean;
+  enabled: boolean;
+  /** 演练模式：只记录本该拦谁，不下发拦截规则。 */
+  drill: boolean;
+  model: string;
+  gateway: string;
+  /** 判决缓存的指纹（含模型/网关/阈值，换任一项即整库作废）。 */
+  fingerprint: string;
+  /** 待判定的候选数（后台节拍处理）。 */
+  pending: number;
+  cache_len: number;
+  built_at_unix: number | null;
+  /** 当前**应该**生效的拦截规则条数（演练模式下恒为 0）。 */
+  block_rules: number;
+  allow_rules: number;
+  /** 因为域名形状非法被丢掉的条数（要能被看见，不许静默）。 */
+  skipped_rules: number;
+  /** 判决变了但还没下发给核心。界面要显示"待生效"，而不是假装已生效。 */
+  rules_pending_apply: boolean;
+  applied_at_unix: number | null;
+  gateway_calls: number;
+  gateway_errors: number;
+  cache_hits: number;
+  /** 缓存里判为"拦"的域名数。 */
+  blocked: number;
+  /** 当前状态的一句话说明（未开启 / 缺密钥 / 待生效…）。 */
+  note: string | null;
+}
+
+/**
+ * 一个域名的判决详情（`intent_explain`）。
+ *
+ * 这是 `xt_intent::cache::CacheEntry` 的形状：`verdict` 是 serde 内部标签
+ * （`#[serde(tag = "verdict")]` + newtype 变体），所以它在这里是一个
+ * **可辨识联合**，而不是三个平铺字段。
+ */
+export interface IntentExplain {
+  host: string;
+  verdict: IntentVerdict;
+  decided_at_unix: number;
+  expires_at_unix: number;
+  /** 这条判决被复用过多少次（"省了多少次请求"）。 */
+  hits: number;
+  model: string | null;
+}
+
+/** 判决的三种形态；`allow` / `deferred` 各自带具体原因。 */
+export type IntentVerdict =
+  | {
+      verdict: "block";
+      category: IntentCategory;
+      ads_intent: number;
+      risk_of_breakage: number;
+      choice_confidence: number;
+      effective_min: number;
+    }
+  | { verdict: "allow"; reason: "breakage_risk_too_high"; risk: number; max: number }
+  | { verdict: "allow"; reason: "category_not_blockable"; category: IntentCategory }
+  | { verdict: "allow"; reason: "low_confidence"; confidence: number; min: number }
+  | { verdict: "allow"; reason: "below_threshold"; ads_intent: number; effective_min: number }
+  | { verdict: "deferred"; reason: "missing_answer"; id: string }
+  | { verdict: "deferred"; reason: "schema_invalid"; id: string }
+  | { verdict: "deferred"; reason: "budget_exhausted"; scope: string }
+  | { verdict: "deferred"; reason: "gateway_unavailable"; message: string }
+  | { verdict: "deferred"; reason: "not_candidate"; why: string }
+  | { verdict: "deferred"; reason: "disabled" };
+
+/** 一条意图判定的审计记录（`intent_audit`）。 */
+export interface IntentAuditRecord {
+  ts_unix: number;
+  host: string;
+  outcome: "block" | "allow" | "deferred";
+  reason: string | null;
+  category: string | null;
+  ads_intent: number | null;
+  risk_of_breakage: number | null;
+  choice_confidence: number | null;
+  effective_min: number | null;
+  /** 这条判决是否真的变成了配置里的规则。 */
+  applied: boolean;
+  cache_hit: boolean;
+  model: string | null;
+  usage: { input_tokens: number; output_tokens: number } | null;
+  /** 只在用户显式开启"记录外发内容"时才非空。 */
+  context_sent: string | null;
+}
+
+/**
  * Jev 网关预设。URL 与默认模型写在 Rust 侧（`model.rs::IntentPreset`），
  * 界面只显示，不自己拼地址 —— 抄错地址的表现是"功能莫名不可用"。
  */

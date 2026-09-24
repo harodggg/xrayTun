@@ -33,6 +33,8 @@ pub(crate) enum CoreStartTrigger {
     WatchdogRebuild,
     /// 启动时按上次的连接意图自动重连。
     AutoReconnect,
+    /// 用户点了「应用意图规则」（规则在核心启动时才下发，所以要重连一次）。
+    IntentRulesApply,
 }
 
 impl CoreStartTrigger {
@@ -46,6 +48,7 @@ impl CoreStartTrigger {
             Self::EgressChange => "物理出口变化（换网）",
             Self::WatchdogRebuild => "看门狗重建",
             Self::AutoReconnect => "启动时自动重连",
+            Self::IntentRulesApply => "应用意图规则",
         }
     }
 

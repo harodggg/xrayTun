@@ -10,6 +10,10 @@ import { isObject } from "./eventGuards";
 import type { IncidentPreview, IncidentUpload } from "./incident";
 import type {
   GlobeData,
+  IntentAllowAction,
+  IntentAuditRecord,
+  IntentExplain,
+  IntentSummary,
   RecoveryState,
   NodeExport,
   RecentConnections,
@@ -44,6 +48,20 @@ export const api = {
     invoke<IncidentUpload>("incident_upload", { bundlePath }),
   /** 本地待上报的异常条数（被动哨兵）。 */
   incidentAnomalyCount: () => invoke<number>("incident_anomaly_count"),
+
+  // ---- 意图过滤（Jev 判定）-----------------------------------------------
+  //
+  // `intent_apply` 是**唯一**会把规则推给核心的动作，它会重连一次 ——
+  // 界面必须让用户明确点它，不能自动调（规则在核心启动时才下发）。
+  intentStatus: () => invoke<IntentSummary>("intent_status"),
+  intentAudit: (limit?: number) => invoke<IntentAuditRecord[]>("intent_audit", { limit }),
+  intentExplain: (host: string) =>
+    invoke<IntentExplain | null>("intent_explain", { host }),
+  /** 放行一个被误杀的域名。动作由用户选（`direct` / `proxy`），我们不替他猜。 */
+  intentAllow: (host: string, action: IntentAllowAction) =>
+    invoke<IntentSummary>("intent_allow", { host, action }),
+  intentClearCache: () => invoke<number>("intent_clear_cache"),
+  intentApply: () => invoke<IntentSummary>("intent_apply"),
 
   setMode: (mode: ProxyMode) => invoke<AppSnapshot>("set_mode", { mode }),
 
