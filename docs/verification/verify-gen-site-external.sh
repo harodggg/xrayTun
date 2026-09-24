@@ -106,7 +106,17 @@ if [ -z "$lit" ]; then ok "逻辑里 0 处项目名字面量（只按归属判�
 for p in 'jev-x-filter' 'beauty-meter'; do
   n1="$(grep -c "$p" "$D2/site/sitemap.xml" || true)"
   n2="$(grep -c "$p" "$D2/site/llms.txt" || true)"
-  [ "${n1:-0}" -ge 1 ] && [ "${n2:-0}" -ge 1 ] && ok "夹具 ${p}：sitemap=${n1} llms.txt=${n2}（都在）" || bad "夹具 ${p} 缺失（sitemap=${n1} llms.txt=${n2}）"
+  # **口径一起打印**：`grep -c '<pattern>'`（不带斜杠、按行）与 `grep -o '<pattern>/' | wc -l`
+  # （带斜杠、按出现次数）**不是同一个数** —— 本项目已经因为「拿 A 口径的数字当通用判据」
+  # 对不上过一次（task-182 的 8/4/4 vs 8/3/3）。两种都打出来，谁也不用猜。
+  m1="$(grep -o "${p}/" "$D2/site/sitemap.xml" | wc -l | tr -d ' ')"
+  m2="$(grep -o "${p}/" "$D2/site/llms.txt" | wc -l | tr -d ' ')"
+  if [ "${n1:-0}" -ge 1 ] && [ "${n2:-0}" -ge 1 ]; then
+    ok "夹具 ${p}：sitemap=${n1} llms.txt=${n2}（口径：grep -c '${p}'，不带斜杠/按行）"
+    ok "  └ 同两文件按「带斜杠 + 按出现次数」口径（grep -o '${p}/'）：sitemap=${m1} llms.txt=${m2}"
+  else
+    bad "夹具 ${p} 缺失（sitemap=${n1} llms.txt=${n2}；判据 grep -c '${p}'）"
+  fi
 done
 
 echo

@@ -181,6 +181,13 @@ python3 scripts/helper_tristate.py --self-test
 bash scripts/incident-bundle.sh --self-test
 python3 scripts/triage-incident.py --self-test
 
+# task-185：worktree 的**位置**也要有守卫 —— 默认值曾经落在 `${TMPDIR}` 下，
+# 2026-09-24 16:25 整棵树被系统清理，三个正在编译/验证的 worktree 目录整个消失
+# （其中两个是队友的在途工作），而失败方式是「跑到一半目录没了」。
+# 这条自测只做**路径解析与守卫行为**（不建 worktree、不跑 cargo），秒级、只读。
+step "worktree 位置守卫自测（wt.sh：默认不在 ${TMPDIR} 下）"
+bash docs/verification/verify-wt-dir-root.sh
+
 step "前端构建"
 # 注意这条是对的：`npm run` 会把 cwd 切到包目录，脚本里的 `tsc --noEmit`
 # 因此能找到 tsconfig.json。上一行那个 `npm exec` 不会。
