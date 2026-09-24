@@ -588,6 +588,21 @@ fn build_outbounds(nodes: &[Node], input: &CoreConfigInput<'_>) -> Value {
         "settings": { "response": { "type": "http" } }
     }));
 
+    // **静默**拦截出站：只给 **UDP-only** 的拦截规则用（见 `routing::compile`）。
+    //
+    // 为什么需要它：UDP 没有"响应"这个概念。上面那个 `block` 会把 HTTP 403 的字节
+    // 当成一个数据报回给客户端（本机实测，见 `crates/xt-intent/tests/real_core_udp.rs`），
+    // 对 QUIC 客户端来说就是一个解析不了的包 —— 它会当成协议错误。
+    // `response.type: "none"` 才是真正的丢弃：客户端等一次超时后自己回退 TCP。
+    //
+    // **刻意不把所有拦截都改成静默**：TCP 上那个 403 是有用的信号
+    // （HTTP 客户端能立刻分清"被拦了"与"网站挂了"）。
+    out.push(json!({
+        "tag": "block-silent",
+        "protocol": "blackhole",
+        "settings": { "response": { "type": "none" } }
+    }));
+
     // DNS 出站：被路由到这里的 DNS 查询交给内核 DNS 模块，它只答 A/AAAA。
     //
     // **刻意不给它加 `settings`。** 非 A/AAAA 的查询（PTR / SVCB / HTTPS RR）
@@ -1397,6 +1412,22 @@ mod tests {
         let s = mitm_settings();
         assert!(!merge_rules_with_intent(&s, &[], &[]).iter().any(|r| r.id == "mitm-quic-fallback"));
 
+        // 开了 QUIC 兜底之后：那条规则是 **UDP-only**，所以它必须编译到**静默**出站 ——
+        // 这正是 §8.4 想要的"逼浏览器回退 TCP"：客户端收不到任何回包，
+        // 而不是收到一个 403 的字节（后者对 QUIC 来说是个解析不了的包）。
+        let mut q = mitm_settings();
+        q.mitm.block_quic = true;
+        let quic_rules = merge_rules_with_intent(&q, &[], &[]);
+        let compiled = crate::routing::compile(&quic_rules, "node-x");
+        let fb = compiled
+            .iter()
+            .find(|r| r["ruleTag"] == "mitm-quic-fallback")
+            .expect("开了 QUIC 兜底就该有这条规则");
+        assert_eq!(
+            fb["outboundTag"], "block-silent",
+            "UDP-only 的 QUIC 兜底必须静默丢弃（收到 403 字节的 QUIC 客户端会当协议错误）"
+        );
+
         let mut q = mitm_settings();
         q.mitm.block_quic = true;
         let rules = merge_rules_with_intent(&q, &[], &[]);
@@ -1469,6 +1500,68 @@ mod tests {
             field: "promoted item".into(),
         });
         assert!(s.validate().iter().any(|e| e.contains("不像一个 JSON 键")), "{:?}", s.validate());
+    }
+
+    /// **UDP-only 的拦截必须走静默出站**，而 `block-silent` 必须真的存在且真的是
+    /// "不回包"。这条测试钉的是"编译出来的 tag"与"出站真的存在"两件事 ——
+    /// 只钉其中一件的话，写错 tag 名会得到一个指向不存在的出站、核心直接拒绝启动。
+    #[test]
+    fn udp_only_block_rules_go_to_a_silent_blackhole_outbound() {
+        use crate::routing::{compile, Network, RoutingRule};
+
+        let cfg: Value = serde_json::from_str(&build_pretty(&CoreConfigInput {
+            settings: &settings(),
+            nodes: &[],
+            selected: None,
+            rules: &[],
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        }))
+        .unwrap();
+        let silent = cfg["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "block-silent")
+            .expect("必须存在 block-silent 出站（UDP-only 的拦截规则指着它）");
+        assert_eq!(silent["protocol"], "blackhole");
+        assert_eq!(
+            silent["settings"]["response"]["type"], "none",
+            "只有 response.type=none 才是真正的丢弃"
+        );
+
+        let rule = |net: Network, id: &str| {
+            RoutingRule::new(
+                id,
+                "测试规则",
+                MatchCondition {
+                    domains: vec!["full:ads.example".into()],
+                    inbound_tags: vec!["tun".into()],
+                    network: net,
+                    ..Default::default()
+                },
+                RuleAction::Block,
+            )
+        };
+        let rules = vec![
+            rule(Network::Udp, "udp-only"),
+            rule(Network::Both, "both"),
+            rule(Network::Tcp, "tcp-only"),
+        ];
+        let compiled = compile(&rules, "node-x");
+        let tag_of = |id: &str| {
+            compiled
+                .iter()
+                .find(|r| r["ruleTag"] == id)
+                .and_then(|r| r["outboundTag"].as_str())
+                .unwrap_or("<缺失>")
+                .to_string()
+        };
+        assert_eq!(tag_of("udp-only"), "block-silent", "UDP-only 必须静默丢弃");
+        // **负对照**：混合规则与 TCP-only 规则都留在 `block` —— TCP 上那个 403
+        // 是有用的信号（客户端能分清"被拦了"与"网站挂了"）。
+        assert_eq!(tag_of("both"), "block");
+        assert_eq!(tag_of("tcp-only"), "block");
     }
 
     #[test]

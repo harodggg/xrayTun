@@ -38,11 +38,14 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use xt_core::model::{AppSettings, RoutingPreset};
 use xt_core::xray::{build_pretty, merge_rules_with_intent, CoreConfigInput, InboundProfile};
+use xt_core::routing::{MatchCondition, Network, RoutingRule, RuleAction};
 use xt_intent::rules::{materialize, RuleOptions};
 use xt_intent::verdict::{BlockVerdict, Category, Verdict};
 
 const BLOCKED: &str = "blocked.udp-dataplane";
 const ALLOWED: &str = "allowed.udp-dataplane";
+/// 只有一条 **UDP-only** 的拦截规则（不是域名级意图规则）⇒ 必须**静默丢弃**。
+const SILENT: &str = "silent.udp-dataplane";
 
 fn free_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("拿空闲端口");
@@ -223,6 +226,7 @@ fn an_intent_block_rule_also_drops_udp_on_a_real_core() {
     s.dns.hosts = vec![
         (BLOCKED.to_string(), "127.0.0.1".to_string()),
         (ALLOWED.to_string(), "127.0.0.1".to_string()),
+        (SILENT.to_string(), "127.0.0.1".to_string()),
     ];
     s.dns.direct_servers = vec!["223.5.5.5".to_string()];
     s.dns.remote_servers = vec!["https://1.1.1.1/dns-query".to_string()];
@@ -236,8 +240,33 @@ fn an_intent_block_rule_also_drops_udp_on_a_real_core() {
         choice_confidence: 0.93,
         effective_min: 0.85,
     });
-    let rules = materialize(vec![(BLOCKED, &block)], &RuleOptions::default());
+    let mut rules = materialize(vec![(BLOCKED, &block)], &RuleOptions::default());
+    // 再挂一条 **UDP-only** 的拦截规则：它必须走 `block-silent`（`response.type: none`），
+    // 也就是真正的"不回包" —— 这一组是 `routing::compile` 那条分支的真实核心证据。
+    rules.block.push(RoutingRule::new(
+        "silent-udp-only",
+        "测试：UDP-only 拦截必须静默",
+        MatchCondition {
+            domains: vec![format!("full:{SILENT}")],
+            inbound_tags: vec!["tun".into(), "socks".into(), "http".into()],
+            network: Network::Udp,
+            ..Default::default()
+        },
+        RuleAction::Block,
+    ));
     let merged = merge_rules_with_intent(&s, &rules.allow, &rules.block);
+    // 前置条件：编译结果里那条规则必须指着静默出站（这就是"实验组是静默的"的依据）。
+    let compiled = xt_core::routing::compile(&merged, "node-test");
+    let silent_tag = compiled
+        .iter()
+        .find(|r| r["ruleTag"] == "silent-udp-only")
+        .and_then(|r| r["outboundTag"].as_str())
+        .unwrap_or("<缺失>")
+        .to_string();
+    assert_eq!(
+        silent_tag, "block-silent",
+        "UDP-only 的拦截规则必须走 block-silent，否则下面那条「沉默」断言验的不是静默"
+    );
 
     // 规则本身不设 network ⇒ 两条都要能命中 UDP 与 TCP。
     let intent_rule = merged
@@ -340,11 +369,24 @@ fn an_intent_block_rule_also_drops_udp_on_a_real_core() {
     );
     println!("② 实验组 {BLOCKED}：没到终点、收到的是 blackhole 的 403（不是静默丢弃）✓");
 
-    // ---- ③ 负对照：再发一次对照组，证明"实验组没拿到真应答"不是路径整体坏了 ----
+    // ---- ③ UDP-only 的拦截：**真正的静默**（客户端什么都收不到）----
+    //
+    // 与 ② 的区别正是 `block` vs `block-silent`：② 的规则同时匹配 TCP+UDP，
+    // 只能指一个出站，所以它收到 403 字节；③ 这条是 UDP-only，走 `response.type: none`。
+    let silent = udp_echo_via(socks, SILENT, echo.port, b"ping", Duration::from_millis(1500));
+    assert!(
+        silent.is_none(),
+        "UDP-only 的拦截必须**静默**，却收到了 {:?}",
+        silent.map(|b| String::from_utf8_lossy(&b).to_string())
+    );
+    assert_eq!(echo.hits(), 1, "静默拦截也不许让包到终点");
+    println!("③ UDP-only 拦截：完全静默（客户端什么都收不到）且终点 0 次 ✓");
+
+    // ---- ④ 负对照：再发一次对照组，证明"实验组没拿到真应答"不是路径整体坏了 ----
     let ok2 = udp_echo_via(socks, ALLOWED, echo.port, b"ping", Duration::from_secs(3));
     assert_eq!(ok2.as_deref(), Some(&b"pong"[..]), "第二次对照也必须通");
     assert_eq!(echo.hits(), 2);
-    println!("③ 再次对照：仍然通（说明 ② 里终点没被摸到是拦截造成的，不是路径坏了）✓");
+    println!("④ 再次对照：仍然通（说明 ②③ 里终点没被摸到是拦截造成的，不是路径坏了）✓");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -307,6 +307,16 @@ pub fn compile(rules: &[RoutingRule], selected_tag: &str) -> Vec<serde_json::Val
             RuleAction::Proxy { outbound: Some(t) } => t.clone(),
             RuleAction::Proxy { outbound: None } => selected_tag.to_string(),
             RuleAction::Direct => "direct".to_string(),
+            // **UDP-only 的拦截走静默出站。** UDP 没有"响应"这回事：`block` 出站会把
+            // HTTP 403 的字节当一个数据报回过去（真实核心实测），QUIC 客户端只会看到
+            // 一个解析不了的包。`block-silent`（`response.type: "none"`）才是丢弃 ——
+            // 客户端等一次超时后自己回退 TCP，这正是 §8.4 想要的行为。
+            //
+            // 已知边界：一条规则只能指一个出站。所以**同时匹配 TCP+UDP** 的拦截规则
+            // 只能留在 `block` 上（TCP 那边需要 403 这个可读信号），它的 UDP 分支
+            // 仍会收到那个 403 字节。要让这种规则在 UDP 上静默，得把它拆成两条规则
+            // （TCP→block、UDP→block-silent）—— 本版没做，写在 §15.5 里。
+            RuleAction::Block if rule.when.network == Network::Udp => "block-silent".to_string(),
             RuleAction::Block => "block".to_string(),
         };
         let when = &rule.when;
