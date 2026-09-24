@@ -38,11 +38,16 @@
 #     ./scripts/wt.sh rm fix1                 # 删 worktree（**同时删它自己的 target dir**）
 #
 # 环境变量：
-#   WT_DIR_ROOT       worktree 放哪（默认 `<repo>/../.wt` —— **不要放在 ${TMPDIR} 下**，见下）
-#   WT_TARGET_ROOT    各 worktree 的 target dir 放哪（默认 `<repo>/../.cargo-target.wt`）
+#   WT_DIR_ROOT       worktree 放哪（默认 `<主工作区>/../.wt` —— **不要放在 ${TMPDIR} 下**，见下）
+#   WT_TARGET_ROOT    各 worktree 的 target dir 放哪（默认 `<主工作区>/../.cargo-target.wt`）
 #   WT_STRICT=1       `check` / `run` / `dir` 命中「共享 target dir」或「worktree 在临时目录下」时
 #                     **失败**（退出码 75）而不是只警告
+#   WT_ANCHOR         测试缝：`checkout` = 还原旧行为（锚在当前 checkout），只给反向敏感性测试用
 #   BUILD_LOCK_*      见 scripts/build-lock.sh（`run` 会走那把锁）
+#
+# ⚠️ **默认值锚在「主工作区」，不是当前 checkout**（task-187）：显式传的值一律保持原样；
+#    从 worktree 内部运行时也解析到同一处（否则 `$ROOT/../.wt` 会变成 `.wt/.wt`：
+#    target dir 不命中既有目录 ⇒ 全量重编，而且守卫会因为「期望值与 $ROOT 同源」而假绿）。
 #
 # # 为什么默认不是 `${TMPDIR}/xraytun-wt`（2026-09-24 16:25 实测事故）
 #
@@ -50,24 +55,45 @@
 # `git worktree list` 里三个条目全部变 `prunable`、`wt.sh path` 报 `No such file or directory` ——
 # 其中两个是队友**正在编译 / 正在做突变验证**的 worktree ⇒ **在途工作被静默打断**，
 # 而失败方式是「跑到一半目录没了」，很容易被读成「测试自己挂了」。
-# 现在默认放到 `<repo>/../.wt`（与 `WT_TARGET_ROOT` 对称，不会被系统清理）；显式指向临时目录会**大声警告**。
-# 详见 `docs/verification/WORKTREE-TARGET-DIR.md` §6，自测 `docs/verification/verify-wt-dir-root.sh`。
+# 现在默认放到 `<主工作区>/../.wt`（与 `WT_TARGET_ROOT` 对称，不会被系统清理）；显式指向临时目录会**大声警告**。
+# 详见 `docs/verification/WORKTREE-TARGET-DIR.md` §5，自测 `docs/verification/verify-wt-dir-root.sh`。
 #
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WT_DIR_ROOT="${WT_DIR_ROOT:-$ROOT/../.wt}"
-WT_TARGET_ROOT="${WT_TARGET_ROOT:-$ROOT/../.cargo-target.wt}"
-MAIN_TARGET="${MAIN_TARGET_DIR:-$ROOT/../.cargo-target}"
 
 die() { echo "✗ $*" >&2; exit 2; }
 
-# 主工作区路径（worktree 的公共 git 目录指向主树）
+# 主工作区路径（linked worktree 的公共 git 目录指向主树的 `.git`）
 main_worktree() {
   local common
   common="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
   printf '%s' "$(dirname "$common")"
 }
+
+# ------------------------------------------------------------------ 默认目录锚在哪
+# **必须锚在「主工作区」，不能锚在当前 checkout**（task-187 实测）：
+# 从 worktree 内部运行时 `$ROOT` 就是那个 worktree（例如 `….wt/leadgate182`）
+# ⇒ `$ROOT/../.wt` 会解析成 `.wt/.wt`，两件真实的坏事：
+#   1. worktree 落 `.wt/.wt/<名>`、target 落 `.wt/.cargo-target.wt/<名>` ⇒ **不命中**既有的
+#      `.cargo-target.wt/<名>` ⇒ 每个都全量重编（per-worktree target dir 的设计白做）；
+#   2. 位置守卫的期望值若与 `$ROOT` 同源 ⇒ **假绿**（门禁总是在 worktree 里跑 `check.sh`）。
+# 显式传入的环境变量一律**保持原样**（不覆盖用户选择）。
+#
+# 测试缝：`WT_ANCHOR=checkout` 还原旧行为（锚在当前 checkout），只给反向敏感性测试用
+# （`docs/verification/verify-wt-dir-root.sh` 的案子 [7]）。
+WT_ANCHOR="${WT_ANCHOR:-main}"
+case "$WT_ANCHOR" in
+  main) ANCHOR_ROOT="$(main_worktree 2>/dev/null)"; [ -n "$ANCHOR_ROOT" ] || ANCHOR_ROOT="$ROOT" ;;
+  checkout) ANCHOR_ROOT="$ROOT" ;;
+  *) die "WT_ANCHOR 只能是 main 或 checkout（收到：${WT_ANCHOR}）" ;;
+esac
+WT_DIR_ROOT="${WT_DIR_ROOT:-$ANCHOR_ROOT/../.wt}"
+WT_TARGET_ROOT="${WT_TARGET_ROOT:-$ANCHOR_ROOT/../.cargo-target.wt}"
+MAIN_TARGET="${MAIN_TARGET_DIR:-$ANCHOR_ROOT/../.cargo-target}"
+# 同理：cargo home / npm cache / 软链源也要锚在主工作区，否则 worktree 里会各配一份
+# （`.wt/.cargo` 会把整个 registry 重下一遍；`$ROOT/apps/ui/node_modules` 在 worktree 里根本不存在）。
+MAIN_ROOT="${MAIN_ROOT:-$ANCHOR_ROOT}"
 
 wt_path() { printf '%s/%s' "$WT_DIR_ROOT" "$1"; }
 wt_target() { printf '%s/%s' "$WT_TARGET_ROOT" "$1"; }
@@ -123,7 +149,7 @@ wt_dir_guard() { # $1=1 ⇒ 额外打印解析结果（`new` 用）
       TMPDIR      = $tmp   （macOS 的可清理临时目录）
   2026-09-24 16:25 实测：整棵 worktree 树被系统清理，三个正在编译的 worktree 目录整个消失
   （其中两个是队友的在途验证）——失败方式是「跑到一半目录没了」，不是明确报错。
-  建议：不设 WT_DIR_ROOT（默认 $(norm "$ROOT/../.wt")），或显式指到仓库旁的持久位置。
+  建议：不设 WT_DIR_ROOT（默认 $(norm_nonexist "$MAIN_ROOT/../.wt")），或显式指到仓库旁的持久位置。
 EOF
     [ "${WT_STRICT:-0}" = "1" ] && { echo "  ✗ WT_STRICT=1：worktree 在临时目录下 ⇒ 明确失败（退出码 75）" >&2; return 75; }
   fi
@@ -189,13 +215,15 @@ cmd_new() {
   # 让 worktree 立刻可用、又不复制大文件：node_modules 整个软链；binaries **按文件**软链
   # （`apps/desktop/binaries/` 在 worktree 里本就存在——它有 tracked 的 `.gitkeep`——
   #   所以不能整目录判断「不存在」，第一版就是这么漏掉 xray 的，结果 check.sh 去下载了一份新的）
-  if [ -d "$ROOT/apps/ui/node_modules" ] && [ ! -e "$dir/apps/ui/node_modules" ]; then
+  # ⚠️ 软链源用 **`$MAIN_ROOT`**：在 worktree 里跑 `wt.sh new` 时，当前 checkout 里没有
+  # `node_modules`（那是主树的东西）⇒ 用 `$ROOT` 会静默跳过软链，新 worktree 就跑不了前端。
+  if [ -d "$MAIN_ROOT/apps/ui/node_modules" ] && [ ! -e "$dir/apps/ui/node_modules" ]; then
     mkdir -p "$dir/apps/ui"
-    ln -s "$ROOT/apps/ui/node_modules" "$dir/apps/ui/node_modules"
+    ln -s "$MAIN_ROOT/apps/ui/node_modules" "$dir/apps/ui/node_modules"
   fi
-  if [ -d "$ROOT/apps/desktop/binaries" ]; then
+  if [ -d "$MAIN_ROOT/apps/desktop/binaries" ]; then
     mkdir -p "$dir/apps/desktop/binaries"
-    for f in "$ROOT"/apps/desktop/binaries/*; do
+    for f in "$MAIN_ROOT"/apps/desktop/binaries/*; do
       [ -e "$f" ] || continue
       bn="$(basename "$f")"
       [ -e "$dir/apps/desktop/binaries/$bn" ] || ln -s "$f" "$dir/apps/desktop/binaries/$bn"
@@ -211,9 +239,9 @@ cmd_new() {
 
 cmd_env() {
   local name="${1:-}"; [ -n "$name" ] || die "用法：wt.sh env <name>"
-  echo "export CARGO_HOME=\"${CARGO_HOME:-$ROOT/../.cargo}\""
+  echo "export CARGO_HOME=\"${CARGO_HOME:-$MAIN_ROOT/../.cargo}\""
   echo "export CARGO_TARGET_DIR=\"$(wt_target "$name")\""
-  echo "export npm_config_cache=\"${npm_config_cache:-$ROOT/../.npm-cache}\""
+  echo "export npm_config_cache=\"${npm_config_cache:-$MAIN_ROOT/../.npm-cache}\""
 }
 
 cmd_path() { local name="${1:-}"; [ -n "$name" ] || die "用法：wt.sh path <name>"; norm_nonexist "$(wt_path "$name")"; }
@@ -253,9 +281,9 @@ cmd_run() {
   fi
   echo "  ▶ 在 $dir 运行（CARGO_TARGET_DIR=$tgt ← 独立；并走构建锁）"
   ( cd "$dir" && \
-      CARGO_HOME="${CARGO_HOME:-$ROOT/../.cargo}" \
+      CARGO_HOME="${CARGO_HOME:-$MAIN_ROOT/../.cargo}" \
       CARGO_TARGET_DIR="$tgt" \
-      npm_config_cache="${npm_config_cache:-$ROOT/../.npm-cache}" \
+      npm_config_cache="${npm_config_cache:-$MAIN_ROOT/../.npm-cache}" \
       "$ROOT/scripts/build-lock.sh" run --wait "${BUILD_LOCK_WAIT:-3600}" -- "$@" )
 }
 

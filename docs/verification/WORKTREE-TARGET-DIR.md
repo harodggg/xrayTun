@@ -111,7 +111,7 @@ $ git worktree list
 
 | 项 | 改前 | 改后 |
 |---|---|---|
-| 默认 `WT_DIR_ROOT` | `${TMPDIR:-/tmp}/xraytun-wt`（本机 = `/var/folders/…/T/`） | **`<repo>/../.wt`** = `/Users/xbtg-/deepseek-harness/.wt`（与 `WT_TARGET_ROOT` 对称，不会被系统清理） |
+| 默认 `WT_DIR_ROOT` | `${TMPDIR:-/tmp}/xraytun-wt`（本机 = `/var/folders/…/T/`） | **`<主工作区>/../.wt`** = `/Users/xbtg-/deepseek-harness/.wt`（与 `WT_TARGET_ROOT` 对称，不会被系统清理；§5.4 起锚到**主工作区**而不是当前 checkout） |
 | 落在 `${TMPDIR}` 之下 | 静默按旧行为继续 | **大声警告**（说明会被清理、给出建议），`WT_STRICT=1` ⇒ **退出 75** |
 | 能看「会放哪」 | 无 | `./scripts/wt.sh dir`：打印解析后的绝对路径 + `under_tmpdir=yes/no`；`new` 也会打印 |
 | 路径解析 | `norm()`（目录不存在时原样返回 ⇒ `/var` 与 `/private/var` 前缀判不出来） | 新增 `norm_nonexist()`：把仍存在的祖先 `pwd -P` 解析后再拼回剩余部分 |
@@ -149,16 +149,69 @@ $ ./scripts/wt.sh rm wt185probe                                       # 只删�
 
 ```
 $ bash docs/verification/verify-wt-dir-root.sh
-[1] 不设 WT_DIR_ROOT ⇒ 不在临时目录下、且 = <repo>/../.wt          ✓✓
-[2] 显式 = $TMPDIR/… ⇒ 出现警告 + under_tmpdir=yes + 退出码 0      ✓✓✓
-[3] WT_STRICT=1 + 临时目录 ⇒ 退出 75                              ✓✓
-[4] 反向敏感性：把守卫从副本里去掉 ⇒ 警告消失（案子 [2] 的断言变红） ✓
-[5] 边界：恰好 = $TMPDIR ⇒ yes ；同级前缀相近（…/T2/wt）⇒ no        ✓✓
-== 汇总：pass=10 fail=0 ==
+  口径：本脚本所在 checkout = … ；主工作区 = …
+[1] 不设 WT_DIR_ROOT ⇒ 不在临时目录下、且 = <主工作区>/../.wt        ✓✓
+[2] 显式 = $TMPDIR/… ⇒ 出现警告 + under_tmpdir=yes + 退出码 0        ✓✓✓
+[3] WT_STRICT=1 + 临时目录 ⇒ 退出 75                                ✓✓
+[4] 反向敏感性：把守卫从副本里去掉 ⇒ 警告消失（案子 [2] 的断言变红）   ✓
+[5] 边界：恰好 = $TMPDIR ⇒ yes ；同级前缀相近（…/T2/wt）⇒ no          ✓✓
+[6] 嵌套 worktree：worktree 里解析到与主树**同一处**、无 `.wt/.wt`，
+    且 `WT_ANCHOR=checkout`（旧行为）⇒ 真的产生 `.wt/.wt`（断言会红）  ✓✓✓✓✓
+== 汇总：pass=16 fail=0 ==
 ```
 
-**没接进 `scripts/check.sh`**：接的那一刻 ops 正在改 `check.sh`（task-180 刚加了一步），
-Lead 明确要求先别动 ⇒ 自测先独立可跑；接线留作后续（判据已就绪，一条 `bash docs/verification/verify-wt-dir-root.sh` 即可）。
+**已接进 `scripts/check.sh`**（`step "worktree 位置守卫自测（wt.sh：默认不在 ${TMPDIR} 下）"`）——
+判据不再靠「记得手动跑」。注意：**门禁总是在 linked worktree 里跑 `check.sh`**，
+所以案子 [6]（锚定主工作区）是这条自测真正的价值所在。
+
+### 5.4 锚在**主工作区**，不是当前 checkout（task-187，`task-185` 的补丁遗漏）
+
+`task-185` 把默认值改成 `$ROOT/../.wt`，但 `$ROOT` 是**当前 checkout**。从 worktree 内部运行时：
+
+```
+$ cd <主树>          && bash docs/verification/verify-wt-dir-root.sh
+  ✓ …（WT_DIR_ROOT=/Users/xbtg-/deepseek-harness/.wt）                     ← 正确
+$ cd .wt/leadgate182 && bash docs/verification/verify-wt-dir-root.sh
+  ✓ 解析结果不在临时目录下（WT_DIR_ROOT=/Users/xbtg-/deepseek-harness/.wt/.wt）  ← 嵌套，而且**还是绿的**
+```
+
+两条真实代价（不是外观问题）：
+
+1. **target dir 复用失效**：在 worktree 里 `wt.sh new x` ⇒ worktree 落 `.wt/.wt/x`、target 落
+   `.wt/.cargo-target.wt/x` ⇒ **不命中**既有 `.cargo-target.wt/<名>` ⇒ 每个都全量重编（~2 GB / 数分钟），
+   而这套 per-worktree target dir 的设计本来就是为了避免它；
+2. **同源假绿**：案子 [1] 的期望值当时也用同一个 `$ROOT` 算 ⇒ 主树与 worktree **都绿**、含义却不同。
+
+**改法**：默认值（`WT_DIR_ROOT` / `WT_TARGET_ROOT` / `MAIN_TARGET`）改用脚本里早就有的
+`main_worktree()`（读 `git rev-parse --git-common-dir` 的父目录）**锚到主工作区**；
+`CARGO_HOME` / `npm_config_cache` / `node_modules`、`binaries` 的软链源也同样锚到 `MAIN_ROOT`
+（否则 worktree 里会各配一份 `.wt/.cargo`，把 registry 重下一遍）。显式传入的环境变量**保持原样**。
+测试缝 `WT_ANCHOR=checkout` 用来还原旧行为，供反向敏感性使用。
+
+实测（主树 / worktree 两处原始输出一致）：
+
+```
+$ ./scripts/wt.sh dir                     # 主树
+WT_DIR_ROOT=/Users/xbtg-/deepseek-harness/.wt
+WT_TARGET_ROOT=/Users/xbtg-/deepseek-harness/.cargo-target.wt
+$ cd .wt/wt187env && ./scripts/wt.sh dir  # worktree（脚本是同一份修好的副本）
+WT_DIR_ROOT=/Users/xbtg-/deepseek-harness/.wt
+WT_TARGET_ROOT=/Users/xbtg-/deepseek-harness/.cargo-target.wt
+$ diff <(./scripts/wt.sh env probe) <(cd .wt/wt187env && ./scripts/wt.sh env probe)   → 空（逐行相同）
+```
+
+⇒ 改后 `wt.sh new <名>` 在**两个位置**都会命中**同一个** `.cargo-target.wt/<名>`。
+现有 `.wt/.wt` **不存在**（那次只打印了解析结果，没有真的建目录）⇒ 无需迁移，也没有 `prune` 别人的条目。
+
+**在 worktree 里跑整条自测**（门禁的真实场景；把修好的两份文件拷进一个临时 worktree）：
+
+```
+$ cd .wt/wt187gate && bash docs/verification/verify-wt-dir-root.sh
+  口径：本脚本所在 checkout = …/.wt/wt187gate ；主工作区 = …/xray-tun
+[6] ✓ 主树/ worktree 的 WT_DIR_ROOT 与 WT_TARGET_ROOT 逐行相同、无 `.wt/.wt`
+    ✓ 反向敏感性：WT_ANCHOR=checkout ⇒ /Users/xbtg-/deepseek-harness/.wt/.wt（≠ 主树）
+== 汇总：pass=16 fail=0 ==
+```
 
 ## 6. 诚实清单：本卡**不**覆盖的场景
 
@@ -184,3 +237,13 @@ Lead 明确要求先别动 ⇒ 自测先独立可跑；接线留作后续（判�
   守卫判的是「在 `${TMPDIR}` 之下」，**不是**「一定会被清」；
 * 自测只覆盖 `wt.sh` 的路径解析与守卫（不建 worktree、不跑 cargo）⇒ 它证明默认值与守卫行为，
   **不**证明「新建的 worktree 一定能编译」；后者由 §5.2 里那次真实的 `new` + `run -- true` 作证。
+
+### 6.2 §5.4 的「锚到主工作区」覆盖不到什么
+
+* `WT_ANCHOR=checkout` 是**测试缝**：谁在 CI 里设它就等于把锚定退回旧行为（只允许出现在自测脚本里）；
+* 锚定靠 `git rev-parse --git-common-dir`：**不在 git 仓库里**（例如解包出来的目录）时会退回 `$ROOT`
+  —— 那时 `wt.sh` 本来也用不了（`worktree add` 需要仓库）；
+* **已经建在 `.wt/.wt/<名>` 的 worktree 不会被自动迁移**（本次 `.wt/.wt` 并未被建出来，所以没这个问题）；
+  真出现了就人工 `git worktree remove --force` + 重建，**不要 `prune`** 别人的条目；
+* 自测案子 [6] 会**临时建一个探针 worktree**（`<主工作区>/../.wt/wt187probe`）并在结束时删掉；
+  它在 `trap … EXIT` 里清理 ⇒ 若进程被 `kill -9` 可能残留一个空 worktree 条目，需人工 `git worktree prune`。
