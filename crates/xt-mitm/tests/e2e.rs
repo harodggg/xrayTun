@@ -268,6 +268,8 @@ fn harness_with(decider: Arc<dyn Decider>, rewriter: Option<Arc<dyn BodyRewriter
         upstream_socks: format!("127.0.0.1:{}", upstream.port).parse().unwrap(),
         io_timeout: Duration::from_secs(5),
         max_connections: 32,
+        // 测试替身忽略请求里的端口（真 MITM 只能假设 443，端口由替身接管）。
+        assumed_port: 443,
     };
     let proxy = serve_with(cfg, ca, decider, rewriter).expect("起代理");
     Harness { proxy, origin, _upstream: upstream, client }
@@ -370,6 +372,7 @@ fn a_client_that_does_not_trust_the_ca_fails_the_handshake() {
         upstream_socks: format!("127.0.0.1:{}", upstream.port).parse().unwrap(),
         io_timeout: Duration::from_secs(5),
         max_connections: 8,
+        assumed_port: 443,
     };
     let proxy = serve(cfg, ca, Arc::new(BlocklistDecider::default())).expect("起代理");
 

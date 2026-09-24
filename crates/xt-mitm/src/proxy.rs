@@ -64,6 +64,13 @@ pub struct ProxyConfig {
     /// 同时处理的连接上限（线程数上限）。超了直接关连接 ——
     /// 比"无限开线程"安全（一个页面能轻易开出几百条连接）。
     pub max_connections: usize,
+    /// **回连时假定的目标端口**。
+    ///
+    /// `freedom.redirect` **不传递原始目标**，所以 MITM 只能自己假定一个端口，
+    /// 默认 `443`（HTTPS 的常态）。做成旋钮的理由很具体：把 MITM 用在非 443 的
+    /// 本地/开发服务上时，没有它就只能拆包到一个没人监听的端口。
+    /// 生产（桌面）用默认值。
+    pub assumed_port: u16,
 }
 
 impl Default for ProxyConfig {
@@ -73,6 +80,7 @@ impl Default for ProxyConfig {
             upstream_socks: "127.0.0.1:10811".parse().expect("静态地址"),
             io_timeout: Duration::from_secs(20),
             max_connections: 256,
+            assumed_port: 443,
         }
     }
 }
@@ -389,8 +397,9 @@ fn exchange<S: Read + Write>(
     let host = head
         .host()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "请求没有 Host"))?;
-    // **端口只能假设 443**：redirect 不传递原始目标（模块文档的硬约束）。
-    let mut upstream = socks_connect(cfg.upstream_socks, host, 443, cfg.io_timeout)?;
+    // **端口只能假设**：redirect 不传递原始目标（模块文档的硬约束）。
+    // 默认 443，可用 `cfg.assumed_port` 覆盖（非 443 的 HTTPS 服务）。
+    let mut upstream = socks_connect(cfg.upstream_socks, host, cfg.assumed_port, cfg.io_timeout)?;
     upstream.set_read_timeout(Some(cfg.io_timeout))?;
     upstream.set_write_timeout(Some(cfg.io_timeout))?;
 

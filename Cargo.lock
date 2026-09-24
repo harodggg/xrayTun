@@ -4880,6 +4880,7 @@ dependencies = [
  "http",
  "libc",
  "percent-encoding",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4887,6 +4888,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "xt-mitm",
  "xt-proto",
 ]
 

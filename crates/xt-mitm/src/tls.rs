@@ -84,6 +84,14 @@ impl LocalCa {
         &self.cert_pem
     }
 
+    /// CA 的 DER（rustls 的根仓库只吃 DER）。
+    ///
+    /// 测试客户端要用**同一张** CA 去信这个代理；生产里 helper 装进钥匙串的
+    /// 是同一份证书，所以"测试信任"与"系统信任"不是两套东西。
+    pub fn cert_der(&self) -> CertificateDer<'static> {
+        self.cert.der().clone()
+    }
+
     /// 为某个域名签一张短效叶子证书，并直接构造好 rustls 的服务端配置。
     pub fn server_config(&self, host: &str) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         let (chain, key) = self.leaf_for(host)?;
@@ -239,5 +247,18 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b), "同一个域名应当复用同一张叶子证书");
         let _ = r.key_for("b.example");
         assert_eq!(r.cached_hosts(), 2);
+    }
+
+    /// **判别性**：`cert_der()` 出来的东西必须能进 rustls 的根仓库
+    /// （测试客户端就是靠它信这个代理的；错一个字节就握不上手）。
+    #[test]
+    fn the_ca_der_can_be_used_as_a_trust_root() {
+        let ca = LocalCa::generate().unwrap();
+        let der = ca.cert_der();
+        assert!(!der.as_ref().is_empty(), "DER 不能是空的");
+        assert_eq!(der.as_ref()[0], 0x30, "DER 应当以 SEQUENCE 开头");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).expect("CA 的 DER 必须能装进根仓库");
+        assert_eq!(roots.len(), 1);
     }
 }

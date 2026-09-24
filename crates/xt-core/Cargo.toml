@@ -23,3 +23,9 @@ libc.workspace = true
 h2.workspace = true
 http.workspace = true
 bytes.workspace = true
+
+[dev-dependencies]
+# 真 MITM 的真实核心验收（`tests/mitm_tls_live.rs`）：**只有测试**依赖 xt-mitm，
+# 生产依赖方向不变（xt-core 不依赖 xt-mitm）。
+xt-mitm.workspace = true
+rustls.workspace = true
