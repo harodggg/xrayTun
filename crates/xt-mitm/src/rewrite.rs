@@ -129,6 +129,148 @@ pub fn length_matches(headers: &[(String, String)], body: &[u8]) -> Result<(), R
     }
 }
 
+// ---------------------------------------------------------------------------
+// 裁剪接缝：谁来裁、为什么没裁
+// ---------------------------------------------------------------------------
+
+/// "为什么没改"的**显式**原因。
+///
+/// 每一次没改都要能被计数与解释：静默地"什么都没发生"是这层最难查的失败，
+/// 因为没有 symptom 可看（响应是对的，只是广告还在）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclineReason {
+    /// 没有配置裁剪（[`crate::serve`] 的默认路径，接缝存在但不启用）。
+    NotConfigured,
+    /// 响应 `Content-Type` 不是 JSON 类型。
+    NotJsonContentType,
+    /// body 超过 [`MAX_REWRITE_BYTES`]：**不裁** —— 否则要为一个响应缓冲任意大的内存。
+    TooLarge,
+    /// body 不是合法 JSON，或指针没指到数组。**fail-open**：原样转发。
+    NotJson,
+    /// 解析成功但**没有条目被删** ⇒ 原样转发，连 framing 都不动。
+    NothingRemoved,
+    /// 裁剪本身成功，但**长度自检没过** ⇒ 退回原 body。
+    ///
+    /// 单独立一个原因（而不是并进 `NotJson`）：这是"我们自己的 bug"，
+    /// 而 `NotJson` 是"对方的数据不是我们要的形状"。两者混在一起时，
+    /// 排查只能靠猜。
+    FramingRefused,
+}
+
+impl DeclineReason {
+    /// 给日志/界面用的一句话（**中文，可读**；不要拿 `Debug` 糊用户）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "未配置响应体裁剪",
+            Self::NotJsonContentType => "响应不是 JSON 类型",
+            Self::TooLarge => "响应体超过裁剪上限",
+            Self::NotJson => "响应体不是合法 JSON 或指针不指向数组",
+            Self::NothingRemoved => "没有条目需要删除",
+            Self::FramingRefused => "裁剪后的长度自检没过（退回原响应体）",
+        }
+    }
+}
+
+/// 裁剪结果。
+///
+/// **故意不是 `Option<Vec<u8>>`**：`Unchanged` 必须带原因，否则"为什么没裁"
+/// 只能靠猜，而这类功能最怕的就是"打开了但一直没生效、也没人发现"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyRewrite {
+    /// 真的要改：用这些字节（调用方**必须**同时重算 framing）。
+    Changed(Vec<u8>),
+    /// 不改：连同原因一起说明。
+    Unchanged(DeclineReason),
+}
+
+/// 裁剪上限：设计文档 §8.5 写的「默认 ≤ 64 KiB」。
+///
+/// 注意这和 [`crate::proxy::MAX_BODY_BYTES`]（读全体的上限，12 MiB）不是一回事：
+/// 前者是"愿意为裁剪额外付出的解析/内存成本"，后者是"愿意为一次响应缓冲多少"。
+/// 两者都超出时选择**放行**，不选择失败。
+pub const MAX_REWRITE_BYTES: usize = 64 * 1024;
+
+/// 响应体裁剪的接缝。
+///
+/// 与判定用的 [`crate::decide::Decider`] 同一个套路：代理只依赖这个 trait，
+/// 策略由上层（设置 → 桌面）装配，于是**代理不需要认识设置结构**。
+pub trait BodyRewriter: Send + Sync {
+    /// `content_type` 是响应头里的原样值（可能带 `; charset=utf-8`）。
+    fn rewrite(
+        &self,
+        host: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) -> BodyRewrite;
+}
+
+/// 一个够用的实现：把 `pointer` 指到的数组里、`field == equals` 的条目删掉。
+///
+/// 例：`JsonStripRewriter::new("/data/items", "promoted", json!(true))`
+/// 删掉 `data.items[]` 里 `promoted` 为 `true` 的条目。
+///
+/// **只认条目自己那一层的 `field`**（不做递归查找）：递归会让"删了哪些"
+/// 变得难以预料，而这是要跟用户解释的行为。
+pub struct JsonStripRewriter {
+    pointer: String,
+    field: String,
+    equals: Value,
+}
+
+impl JsonStripRewriter {
+    pub fn new(pointer: impl Into<String>, field: impl Into<String>, equals: Value) -> Self {
+        Self { pointer: pointer.into(), field: field.into(), equals }
+    }
+
+    /// 裁剪目标（JSON 指针）。
+    pub fn pointer(&self) -> &str {
+        &self.pointer
+    }
+}
+
+impl BodyRewriter for JsonStripRewriter {
+    fn rewrite(
+        &self,
+        _host: &str,
+        _path: &str,
+        content_type: Option<&str>,
+        body: &[u8],
+    ) -> BodyRewrite {
+        // 顺序有意为之：**先**用最便宜的检查挡掉不该处理的响应。
+        if !content_type_is_json(content_type) {
+            return BodyRewrite::Unchanged(DeclineReason::NotJsonContentType);
+        }
+        if body.len() > MAX_REWRITE_BYTES {
+            return BodyRewrite::Unchanged(DeclineReason::TooLarge);
+        }
+        let (field, equals) = (self.field.clone(), self.equals.clone());
+        match strip_json_array_entries(body, &self.pointer, move |item| {
+            item.get(&field) == Some(&equals)
+        }) {
+            Ok(Some(new)) => BodyRewrite::Changed(new),
+            Ok(None) => BodyRewrite::Unchanged(DeclineReason::NothingRemoved),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    pointer = %self.pointer,
+                    "MITM：响应体裁剪放弃（fail-open，原样转发）"
+                );
+                BodyRewrite::Unchanged(DeclineReason::NotJson)
+            }
+        }
+    }
+}
+
+/// JSON 的 MIME 判定：`application/json` 与 `*+json`（`; charset=...` 允许）。
+fn content_type_is_json(content_type: Option<&str>) -> bool {
+    let Some(ct) = content_type else {
+        return false;
+    };
+    let mime = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    mime == "application/json" || mime.ends_with("+json")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +408,97 @@ mod tests {
             crate::http1::get_header(&headers, "Content-Length"),
             Some(stripped.len().to_string().as_str())
         );
+    }
+
+    // ---- 接缝：谁裁、为什么没裁 -------------------------------------------
+
+    /// **判别性**：字段命中就真删，并且剩下的字节仍是合法 JSON。
+    #[test]
+    fn the_rewriter_removes_a_matching_entry_and_keeps_valid_json() {
+        let rw = JsonStripRewriter::new("/data/items", "promoted", Value::Bool(true));
+        let out = rw.rewrite("x.test", "/api/timeline", Some("application/json"), &timeline());
+        let BodyRewrite::Changed(new) = out else {
+            panic!("命中一条 promoted 条目，应当真的改：{out:?}");
+        };
+        let v: Value = serde_json::from_slice(&new).expect("改完必须仍是合法 JSON");
+        let items = v.pointer("/data/items").and_then(Value::as_array).unwrap();
+        // 夹具是 4 条、其中 2 条 promoted ⇒ 剩下 2 条、且正好是 id 1 和 3。
+        assert_eq!(items.len(), 2, "4 条里应当删掉恰好 2 条");
+        let ids: Vec<&Value> = items.iter().map(|i| &i["id"]).collect();
+        assert_eq!(ids, vec![&json!(1), &json!(3)], "留下的必须是没有 promoted 的两条");
+        assert!(new.len() < timeline().len());
+    }
+
+    /// **负对照**：没有条目命中 ⇒ `NothingRemoved`，而且**字节一模一样**
+    /// （连"改了个一模一样的东西"都不做）。
+    #[test]
+    fn no_matching_entry_declines_without_touching_bytes() {
+        let rw = JsonStripRewriter::new("/data/items", "promoted", Value::Bool(true));
+        let body = br#"{"data":{"items":[{"id":1},{"id":2}]}}"#;
+        let out = rw.rewrite("x.test", "/api/timeline", Some("application/json"), body);
+        assert_eq!(out, BodyRewrite::Unchanged(DeclineReason::NothingRemoved));
+    }
+
+    /// 不是 JSON 类型的响应**在解析前**就被挡掉（便宜的先做）。
+    #[test]
+    fn a_non_json_content_type_is_declined_before_parsing() {
+        let rw = JsonStripRewriter::new("/data/items", "promoted", Value::Bool(true));
+        let out = rw.rewrite("x.test", "/", Some("text/html; charset=utf-8"), &timeline());
+        assert_eq!(out, BodyRewrite::Unchanged(DeclineReason::NotJsonContentType));
+        let missing = rw.rewrite("x.test", "/", None, &timeline());
+        assert_eq!(missing, BodyRewrite::Unchanged(DeclineReason::NotJsonContentType));
+    }
+
+    /// `application/*+json` 也要认（厂商 MIME 很常见），`; charset` 允许。
+    #[test]
+    fn vendor_json_mime_types_are_recognized() {
+        let rw = JsonStripRewriter::new("/data/items", "promoted", Value::Bool(true));
+        let out = rw.rewrite(
+            "x.test",
+            "/",
+            Some("application/vnd.api+json; charset=utf-8"),
+            &timeline(),
+        );
+        assert!(matches!(out, BodyRewrite::Changed(_)), "{out:?}");
+    }
+
+    /// 超过裁剪上限 ⇒ `TooLarge`，**不裁**（不为了一个响应缓冲任意大的内存）。
+    #[test]
+    fn an_oversized_body_is_declined_not_buffered() {
+        let rw = JsonStripRewriter::new("/items", "promoted", Value::Bool(true));
+        let mut items = Vec::new();
+        for i in 0..(MAX_REWRITE_BYTES / 16) {
+            items.push(json!({ "id": i, "promoted": true }));
+        }
+        let big = serde_json::to_vec(&json!({ "items": items })).unwrap();
+        assert!(big.len() > MAX_REWRITE_BYTES, "夹具必须真的超过上限");
+        let out = rw.rewrite("x.test", "/", Some("application/json"), &big);
+        assert_eq!(out, BodyRewrite::Unchanged(DeclineReason::TooLarge));
+    }
+
+    /// body 说是 JSON 其实不是 ⇒ **fail-open**（不 panic、不把连接搞断）。
+    #[test]
+    fn a_broken_json_body_is_declined_instead_of_panicking() {
+        let rw = JsonStripRewriter::new("/items", "promoted", Value::Bool(true));
+        let out = rw.rewrite("x.test", "/", Some("application/json"), b"{not json");
+        assert_eq!(out, BodyRewrite::Unchanged(DeclineReason::NotJson));
+        // 指针不存在 / 指到的不是数组，同样只是"没改"。
+        let missing = rw.rewrite("x.test", "/", Some("application/json"), b"{\"a\":1}");
+        assert_eq!(missing, BodyRewrite::Unchanged(DeclineReason::NotJson));
+    }
+
+    /// 每种原因都有可读说法（不能只靠 `Debug`）。
+    #[test]
+    fn every_decline_reason_has_a_readable_explanation() {
+        for r in [
+            DeclineReason::NotConfigured,
+            DeclineReason::NotJsonContentType,
+            DeclineReason::TooLarge,
+            DeclineReason::NotJson,
+            DeclineReason::NothingRemoved,
+            DeclineReason::FramingRefused,
+        ] {
+            assert!(!r.as_str().is_empty(), "{r:?} 必须能解释自己");
+        }
     }
 }

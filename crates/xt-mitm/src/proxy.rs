@@ -26,8 +26,11 @@
 //!   本版直接回 `501` 并计入 `failed`。缓解：**opt-in 名单里不要放 WebSocket 端点**。
 //!   修法明确（把 `rustls::ServerConnection` 拿在手里手动 `read_tls`/`write_tls`），
 //!   但那是独立一步。
-//! * **响应体裁剪尚未接进这条循环**（[`crate::rewrite`] 已实现并单测）。
-//!   接进来要先定"缓冲上限"，而缓冲会改变首字节延迟 —— 单独一步做、单独验。
+//! * **响应体裁剪是"可选 + 有上限"的**：只有装了 [`BodyRewriter`] 才生效，
+//!   且只处理 ≤ [`crate::rewrite::MAX_REWRITE_BYTES`]（64 KiB）的 JSON 响应。
+//!   代价要如实说：为了裁剪，**这条路径先把整个响应读全再写回**，
+//!   首字节延迟因此变差（对 opt-in 的少数域名才付这个成本，
+//!   没装 rewriter 的 `serve` 也照样先把响应读全 —— 见 `exchange` 的注释）。
 //! * body 不重压：请求一律**去掉 `Accept-Encoding`**（要求上游给未压缩体），
 //!   否则裁剪的字节数与 `Content-Length` 又会打架。
 
@@ -39,6 +42,9 @@ use std::time::Duration;
 
 use crate::decide::{blocked_response, Decider, Decision};
 use crate::http1::{head_end, remove_header, RequestHead, MAX_HEAD_BYTES};
+use crate::rewrite::{
+    apply_body_change, length_matches, BodyRewriter, DeclineReason,
+};
 use crate::tls::{CertResolver, LocalCa, TlsError};
 
 /// 单个应答体的缓冲上限（超过就**不裁**、原样转发）。
@@ -84,6 +90,11 @@ pub struct ProxyStats {
     pub failed: AtomicU64,
     /// 遇到 WebSocket 升级而被拒的条数（本版的已知限制）。
     pub websocket_refused: AtomicU64,
+    /// 真的改了响应体的条数（裁剪生效）。
+    pub body_rewritten: AtomicU64,
+    /// 走到裁剪接缝但**没有改**的条数（原因见日志；必须可见，
+    /// 否则"功能开着却一直不生效"没人发现）。
+    pub body_rewrite_declined: AtomicU64,
 }
 
 impl ProxyStats {
@@ -95,6 +106,8 @@ impl ProxyStats {
             rejected_over_limit: self.rejected_over_limit.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             websocket_refused: self.websocket_refused.load(Ordering::Relaxed),
+            body_rewritten: self.body_rewritten.load(Ordering::Relaxed),
+            body_rewrite_declined: self.body_rewrite_declined.load(Ordering::Relaxed),
         }
     }
 }
@@ -108,6 +121,8 @@ pub struct ProxyStatsSnapshot {
     pub rejected_over_limit: u64,
     pub failed: u64,
     pub websocket_refused: u64,
+    pub body_rewritten: u64,
+    pub body_rewrite_declined: u64,
 }
 
 /// 正在运行的代理。`Drop` 停掉接受循环并等它退出（**不留后台线程**）。
@@ -145,11 +160,23 @@ impl Drop for ProxyHandle {
     }
 }
 
-/// 起代理。返回的 handle 一 drop 就停。
+/// 起代理（**不装响应体裁剪**）。返回的 handle 一 drop 就停。
+///
+/// 只是 [`serve_with`] 的薄封装，为的是让"没有裁剪"这条路径在类型上就是默认的。
 pub fn serve(
     config: ProxyConfig,
     ca: Arc<LocalCa>,
     decider: Arc<dyn Decider>,
+) -> Result<ProxyHandle, TlsError> {
+    serve_with(config, ca, decider, None)
+}
+
+/// 起代理，并（可选）装上响应体裁剪。
+pub fn serve_with(
+    config: ProxyConfig,
+    ca: Arc<LocalCa>,
+    decider: Arc<dyn Decider>,
+    rewriter: Option<Arc<dyn BodyRewriter>>,
 ) -> Result<ProxyHandle, TlsError> {
     let listener = TcpListener::bind(config.listen)
         .map_err(|e| TlsError::Config(format!("绑定 {} 失败: {e}", config.listen)))?;
@@ -169,6 +196,7 @@ pub fn serve(
     let inflight = Arc::new(AtomicU64::new(0));
     let (s2, st2, inf2) = (stop.clone(), stats.clone(), inflight.clone());
     let cfg = config.clone();
+    let rw = rewriter.clone();
 
     let join = std::thread::spawn(move || {
         while !s2.load(Ordering::Relaxed) {
@@ -188,10 +216,16 @@ pub fn serve(
                         continue;
                     }
                     inf2.fetch_add(1, Ordering::Relaxed);
-                    let (cfg, dec, sc, st, inf) =
-                        (cfg.clone(), decider.clone(), server_config.clone(), st2.clone(), inf2.clone());
+                    let (cfg, dec, sc, st, inf, rw) = (
+                        cfg.clone(),
+                        decider.clone(),
+                        server_config.clone(),
+                        st2.clone(),
+                        inf2.clone(),
+                        rw.clone(),
+                    );
                     std::thread::spawn(move || {
-                        handle_connection(sock, &cfg, &dec, sc, &st);
+                        handle_connection(sock, &cfg, &dec, sc, &st, rw.as_ref());
                         inf.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
@@ -216,6 +250,7 @@ fn handle_connection(
     decider: &Arc<dyn Decider>,
     server_config: Arc<rustls::ServerConfig>,
     stats: &Arc<ProxyStats>,
+    rewriter: Option<&Arc<dyn BodyRewriter>>,
 ) {
     let _ = sock.set_read_timeout(Some(cfg.io_timeout));
     let _ = sock.set_write_timeout(Some(cfg.io_timeout));
@@ -273,7 +308,7 @@ fn handle_connection(
         }
 
         // ---- 转发一次请求/应答 ----
-        match exchange(&mut tls, cfg, &head) {
+        match exchange(&mut tls, cfg, &head, rewriter, stats) {
             Ok(close) => {
                 stats.passed.fetch_add(1, Ordering::Relaxed);
                 if close {
@@ -348,6 +383,8 @@ fn exchange<S: Read + Write>(
     tls: &mut S,
     cfg: &ProxyConfig,
     head: &RequestHead,
+    rewriter: Option<&Arc<dyn BodyRewriter>>,
+    stats: &Arc<ProxyStats>,
 ) -> std::io::Result<bool> {
     let host = head
         .host()
@@ -377,9 +414,32 @@ fn exchange<S: Read + Write>(
         "MITM：放行"
     );
 
-    // 写回客户端：头 + body（长度保持一致；body 原样，裁剪挂点在下一步）。
+    // ---- 响应体裁剪（装了才生效；没装则连内容都不看）----
+    if let Some(rw) = rewriter {
+        match apply_rewrite(&mut resp_head, &mut body, rw.as_ref(), host, head.path()) {
+            None => {
+                stats.body_rewritten.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(host = %host, path = %head.path(), "MITM：响应体裁剪已生效");
+            }
+            Some(reason) => {
+                stats.body_rewrite_declined.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    host = %host,
+                    path = %head.path(),
+                    reason = reason.as_str(),
+                    "MITM：响应体裁剪未生效（原样转发）"
+                );
+            }
+        }
+    }
+
+    // 写回客户端：头 + body（长度保持一致）。
+    //
+    // `resp_head` **不含**尾随空行（见 `read_response` 的注释），所以这里补
+    // `\r\n\r\n`：一个结束最后一行、一个就是那个空行。少补一个字节，
+    // 客户端就找不到头/体分隔，症状是"读不到响应"而不是"读到错响应"。
     let mut out = resp_head.join("\r\n").into_bytes();
-    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(b"\r\n\r\n");
     tls.write_all(&out)?;
     if !body.is_empty() {
         tls.write_all(&body)?;
@@ -389,6 +449,62 @@ fn exchange<S: Read + Write>(
     let _ = &mut resp_head;
     body.clear();
     Ok(true)
+}
+
+/// 把一次裁剪应用到 `(响应头行, body)` 上。
+///
+/// 返回 `None` = 真的改了；`Some(原因)` = 没改（原样转发）。
+///
+/// **所有失败路径都是放行。** 这里唯一不可接受的结果是"改了 body 但长度没改"，
+/// 所以每条改动路径最后都过一遍 [`length_matches`]；自检不过就退回原 body。
+///
+/// 代价说明：为了让 `apply_body_change` 能重写 framing，改 body 时头块会被重排成
+/// `名字: 值`（补一个空格）。这只发生在**我们真的改了 body** 的那条响应上，
+/// 语义不变；没改的响应连头块都不动。
+fn apply_rewrite(
+    resp_head: &mut Vec<String>,
+    body: &mut Vec<u8>,
+    rewriter: &dyn BodyRewriter,
+    host: &str,
+    path: &str,
+) -> Option<DeclineReason> {
+    let Some(status) = resp_head.first().cloned() else {
+        return Some(DeclineReason::NotJson);
+    };
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(resp_head.len());
+    for line in &resp_head[1..] {
+        match line.split_once(':') {
+            Some((k, v)) => headers.push((k.trim().to_string(), v.trim().to_string())),
+            // 拆不动的畸形头：**放弃裁剪**，而不是去猜它想说什么。
+            None => return Some(DeclineReason::NotJson),
+        }
+    }
+    let content_type = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.as_str());
+
+    let changed = match rewriter.rewrite(host, path, content_type, body) {
+        crate::rewrite::BodyRewrite::Changed(new) => new,
+        crate::rewrite::BodyRewrite::Unchanged(reason) => return Some(reason),
+    };
+    if apply_body_change(&mut headers, &changed).is_err()
+        || length_matches(&headers, &changed).is_err()
+    {
+        // 这是**我们自己的**不一致（不是对方数据的问题）：退回原 body 并单独计数。
+        tracing::warn!(
+            host = %host,
+            path = %path,
+            "MITM：裁剪后的长度自检没过，退回原响应体（不许发出长度对不上的响应）"
+        );
+        return Some(DeclineReason::FramingRefused);
+    }
+    let mut lines = Vec::with_capacity(headers.len() + 1);
+    lines.push(status);
+    lines.extend(headers.into_iter().map(|(k, v)| format!("{k}: {v}")));
+    *resp_head = lines;
+    *body = changed;
+    None
 }
 
 /// 读一个应答：返回 `(头行, 体)`。**只支持 Content-Length**（本版）。
@@ -408,8 +524,21 @@ fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<(Vec<String>, Vec
         }
         buf.extend_from_slice(&chunk[..n]);
     };
-    let head_text = String::from_utf8_lossy(&buf[..end - 2]).to_string();
+    // `end` 是 `"\r\n\r\n"` 之后的下标，所以 [..end-4] 正好是"状态行 + 头字段"，
+    // **不含**任何尾随 CRLF。用 `end - 2` 会多留一个 CRLF ⇒ `split` 出一个**尾随空行**，
+    // 而原样转发路径（`join("\r\n")` 再补一个 CRLF）恰好会把它掩盖掉：
+    // 字节是对的，但"头行列表"多一项。裁剪路径一见到没有冒号的行就会放弃 ——
+    // 于是症状是"功能开着却一直不生效"。这里必须精确。
+    let head_text = String::from_utf8_lossy(&buf[..end - 4]).to_string();
     let lines: Vec<String> = head_text.split("\r\n").map(str::to_string).collect();
+    debug_assert!(
+        lines.first().is_some_and(|l| l.starts_with("HTTP/")),
+        "应答头第一行必须是状态行：{lines:?}"
+    );
+    debug_assert!(
+        !lines.iter().any(String::is_empty),
+        "应答头列表里不许有空行（见上面的注释）：{lines:?}"
+    );
 
     let declared = lines
         .iter()

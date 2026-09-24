@@ -25,10 +25,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 测试源站的固定 JSON 应答：2 条 items、其中 1 条 `promoted: true`。
+///
+/// 抽成常量是为了让断言能引用**同一份**原始字节（比如"改完必须比原来短"）。
+const ORIGIN_BODY: &[u8] = br#"{"data":{"items":[{"id":1},{"id":2,"promoted":true}]}}"#;
+const ORIGIN_CONTENT_TYPE: &str = "application/json";
+
 use rustls::pki_types::{CertificateDer, ServerName};
 use xt_mitm::decide::{Decision, Decider};
 use xt_mitm::{
-    serve, BlocklistDecider, LocalCa, ProxyConfig, ALPN_HTTP1,
+    serve, serve_with, BlocklistDecider, BodyRewriter, JsonStripRewriter, LocalCa, ProxyConfig,
+    ALPN_HTTP1,
 };
 
 /// 本地 HTTP 源站：每次都回一段 JSON，并**记录被真正请求过几次** ——
@@ -57,9 +64,10 @@ impl Origin {
                         // 但其实没读到请求）。替身必须显式设回阻塞。
                         let _ = sock.set_nonblocking(false);
                         h2.fetch_add(1, Ordering::Relaxed);
-                        let body = br#"{"data":{"items":[{"id":1},{"id":2,"promoted":true}]}}"#;
+                        let body = ORIGIN_BODY;
                         let resp = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            ORIGIN_CONTENT_TYPE,
                             body.len()
                         );
                         let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
@@ -245,6 +253,11 @@ struct Harness {
 }
 
 fn harness(decider: Arc<dyn Decider>) -> Harness {
+    harness_with(decider, None)
+}
+
+/// 同 `harness`，但可以装响应体裁剪（`None` = 不装，走 [`serve`]）。
+fn harness_with(decider: Arc<dyn Decider>, rewriter: Option<Arc<dyn BodyRewriter>>) -> Harness {
     install_crypto_provider();
     let origin = Origin::start();
     let upstream = FakeUpstream::start(origin.port);
@@ -256,7 +269,7 @@ fn harness(decider: Arc<dyn Decider>) -> Harness {
         io_timeout: Duration::from_secs(5),
         max_connections: 32,
     };
-    let proxy = serve(cfg, ca, decider).expect("起代理");
+    let proxy = serve_with(cfg, ca, decider, rewriter).expect("起代理");
     Harness { proxy, origin, _upstream: upstream, client }
 }
 
@@ -387,6 +400,102 @@ fn a_client_that_does_not_trust_the_ca_fails_the_handshake() {
         "不受信任的客户端不应握手成功（否则'信任锚'没有意义）"
     );
     assert_eq!(origin.hits(), 0);
+}
+
+/// 断言响应头里声明的 `Content-Length` 与**实际收到的 body 字节数**一致。
+///
+/// 这是设计文档 §8.6 的必测项：`strip_json` 必须重算长度，
+/// **不许出现"内容剪了但长度没改"** —— 那会让客户端读到截断/挂起的响应。
+/// 返回 `(声明的长度, 实际 body 字节数)` 供调用方再做"确实变短了"的断言。
+fn assert_content_length_matches(raw: &str) -> (usize, usize) {
+    let (head, body) = raw.split_once("\r\n\r\n").expect("响应必须有头/体分隔");
+    let declared = head
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .expect("响应必须有 Content-Length");
+    assert_eq!(
+        declared,
+        body.len(),
+        "声明的 Content-Length 必须等于实际 body 长度（否则客户端会读坏）"
+    );
+    (declared, body.len())
+}
+
+/// **裁掉了什么**：响应体里 `promoted: true` 的条目消失，长度被重算，且新长度更短。
+///
+/// 这条同时钉住三件事：裁剪真的发生、framing 真的跟着改、改动没有破坏 JSON 之外的东西。
+#[test]
+fn the_mitm_strips_a_promoted_entry_and_keeps_the_length_consistent() {
+    let rw = Arc::new(JsonStripRewriter::new(
+        "/data/items",
+        "promoted",
+        serde_json::json!(true),
+    ));
+    let h = harness_with(Arc::new(BlocklistDecider::default()), Some(rw));
+    let (resp, _, clean) = https_get(h.proxy.listen, "news.example", "/index", &h.client);
+    assert!(clean, "裁剪路径也要干净收尾");
+    assert!(resp.contains("200 OK"), "{resp:?}");
+    assert!(
+        !resp.contains("\"promoted\":true"),
+        "推广条目必须被删掉：{resp:?}"
+    );
+    assert!(resp.contains("\"id\":1"), "正常条目必须留下：{resp:?}");
+    let (declared, actual) = assert_content_length_matches(&resp);
+    assert_eq!(
+        declared,
+        actual,
+        "剪了内容就必须改长度（这正是这条测试存在的理由）"
+    );
+    assert!(
+        actual < ORIGIN_BODY.len(),
+        "实际 body 应当比源站的 {} 字节更短，而不是原样转发",
+        ORIGIN_BODY.len()
+    );
+    let st = h.proxy.stats();
+    assert_eq!(st.body_rewritten, 1, "应当记下「裁剪生效」一条");
+    assert_eq!(st.body_rewrite_declined, 0);
+    assert_eq!(st.passed, 1);
+    assert_eq!(h.origin.hits(), 1, "裁剪是改应答，不是不回源站");
+}
+
+/// **负对照**：接缝装上了，但没有任何条目命中 ⇒ 原样转发、字节不变。
+///
+/// 没有这条，"裁剪"与"把响应体删空"这两种实现都能让上一条测试变绿。
+#[test]
+fn a_rewriter_that_matches_nothing_does_not_touch_the_response() {
+    let rw = Arc::new(JsonStripRewriter::new(
+        "/data/items",
+        "promoted",
+        serde_json::json!("这个值谁也不等于"),
+    ));
+    let h = harness_with(Arc::new(BlocklistDecider::default()), Some(rw));
+    let (resp, _, _) = https_get(h.proxy.listen, "news.example", "/index", &h.client);
+    assert!(
+        resp.contains("\"promoted\":true"),
+        "没命中就不许动它：{resp:?}"
+    );
+    let (declared, actual) = assert_content_length_matches(&resp);
+    assert_eq!(declared, ORIGIN_BODY.len(), "长度必须还是源站那个长度");
+    assert_eq!(actual, ORIGIN_BODY.len());
+    let st = h.proxy.stats();
+    assert_eq!(st.body_rewritten, 0, "没命中就不该记「生效」");
+    assert_eq!(st.body_rewrite_declined, 1, "但「走过接缝且没改」必须可见");
+}
+
+/// 不装接缝（默认 `serve`）⇒ 连内容都不看，字节逐字原样。
+#[test]
+fn without_a_rewriter_the_body_is_forwarded_verbatim() {
+    let h = harness(Arc::new(BlocklistDecider::default()));
+    let (resp, _, _) = https_get(h.proxy.listen, "news.example", "/index", &h.client);
+    let (_, body) = resp.split_once("\r\n\r\n").expect("头/体分隔");
+    assert_eq!(body.as_bytes(), ORIGIN_BODY, "默认路径不许碰 body 一个字节");
+    assert_eq!(h.proxy.stats().body_rewritten, 0);
+    assert_eq!(h.proxy.stats().body_rewrite_declined, 0);
 }
 
 /// 负对照用的"另一个自签根"（**故意不是**我们那张 CA）。

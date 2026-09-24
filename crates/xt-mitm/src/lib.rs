@@ -45,8 +45,11 @@ pub mod tls;
 
 pub use decide::{blocked_response, BlocklistDecider, Decision, Decider};
 pub use http1::RequestHead;
-pub use proxy::{serve, ProxyConfig, ProxyHandle};
-pub use rewrite::{apply_body_change, length_matches, strip_json_array_entries, RewriteError};
+pub use proxy::{serve, serve_with, ProxyConfig, ProxyHandle, ProxyStatsSnapshot};
+pub use rewrite::{
+    apply_body_change, length_matches, strip_json_array_entries, BodyRewrite, BodyRewriter,
+    DeclineReason, JsonStripRewriter, RewriteError, MAX_REWRITE_BYTES,
+};
 pub use tls::{CertResolver, LocalCa, TlsError, ALPN_HTTP1};
 
 /// MITM 的状态码/原因短语用的常量（客户端看到的那一版响应）。
