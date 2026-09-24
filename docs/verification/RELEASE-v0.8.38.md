@@ -157,3 +157,42 @@ $ python3 scripts/gen-site-jsonld.py gen && python3 scripts/gen-site-jsonld.py c
 * 本环境不在中国大陆、也没有真机安装流程，站点/资产相关的真机行为未验证；
 * 本条回退**只动 `site/**` + 版本号 + CHANGELOG + 本文件**；另一条工作流的
   `crates/xt-intent/**`、`apps/desktop/**`、`apps/ui/**` 一行未碰。
+
+## 9. 线上复核（**由 Lead 独立做，不采信实现者自测**）
+
+推送后部署：
+
+```
+Pages            35972954562  91f3d7a  completed success
+Cloudflare Pages 35972954412  91f3d7a  completed success
+```
+
+用**仓库自己的**线上验收脚本（不是临时 curl；它的判据是 content-type + body sha256 双判，
+专门防「apex 的 SPA 兜底把不存在的东西报成 200」这个假绿）：
+
+```
+$ VER=0.8.37 PREV=0.8.36 ./scripts/verify-live-site.sh
+...
+总结：全部通过（2 条 warning）
+EXIT=0
+```
+
+原始数字（`https://xraytun.top/`，44036 bytes，sha256 `68b1ed00ee56805216a3f40a1e79ba1fd0fa0403690d9c3796a6d2259723251f`）：
+
+| 观察 | 值 |
+|---|---|
+| 站点版本字面 | `0.8.37` × **35**、`0.8.38` × **0**、`0.8.36` × 0 |
+| 「正在发布」 | **0** |
+| pinned 直链 | `releases/download/v0.8.37` × **8**（首页）／`site/**` 全量 **30** |
+| 真实字节数 | `47,469,092` 与 `42,954,264` 字面量在场 |
+| `releases/latest` 最终跳向 | `.../tag/v0.8.37`（200） |
+| 随机不存在路径 | **404**（本次未观察到 SPA 兜底；对照 GitHub Pages 镜像同样 404） |
+| Jev 侧 | `/jev-x-filter/` 200 · `/en/jev-x-filter/` 200 · `sitemap.xml` `jev-x-filter/` **8** · `llms.txt` **3** · `llms-full.txt` **3** |
+
+2 条 warning 都是**观察项、不阻断**：v0.8.36 的中文/英文 OG 图（`59013 B` / `42294 B`）已从仓库删除，
+但仍留在边缘缓存（immutable）里 —— 这是缓存残留的**合法旧资产**，不是「软 404」。要清需在 CF 侧 purge。
+
+**口径更正（Lead 自己的错，记在这里）**：本文件 §6 的逐行不变量用 `grep 'jev-x-filter/'`（**带斜杠**）⇒ `8 / 3 / 3`；
+而任务卡上写的 `8 / 4 / 4` 用的是**不带斜杠**的口径。两者**都与 `HEAD` 逐项相同**，
+但当时把 `8 / 4 / 4` 当成唯一目标，属于**把一种口径的计数写成了通用判据** ——
+已改为「与 `HEAD` 逐行 diff 为空」，这条不依赖任何计数口径。
