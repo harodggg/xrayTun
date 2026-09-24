@@ -79,3 +79,26 @@ GitHub Pages 镜像同版本也成功。**只看内容，不看状态码**（ape
 
 对照组：`/beauty-meter/__does_not_exist__` 返回 **404**（本 zone 未开 SPA 兜底），因此上面的
 「200 + content-type + 正文指纹」三重判据成立。
+
+第二次部署（`770cd23`，补 `llms-full.txt`）后的复核：
+
+| 检查 | 结果 |
+| --- | --- |
+| `/llms-full.txt` | 线上 **69,324 字节**，与提交**逐字节一致**；含 `收录页面（8 个，中英各 4）` 与新的相关项目分节 |
+| `/llms.txt`、`/sitemap.xml` | 均含 `/beauty-meter/`（7,329B / 3,581B） |
+| 两个页面 | canonical + JSON-LD 仍在，未回归 |
+
+### 最强的一条：把「用户真正下载到的那份」装进真浏览器
+
+不是只看 zip 的内容列表，而是**从线上把 zip 下下来 → 解压 → 用 CDP 加载进真实 Chrome 跑完整端到端**：
+
+```
+curl -sS -o bm.zip https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip
+unzip -q bm.zip
+EXT_DIR=<解压目录> SHOT_DIR=<临时目录> node tools/verify-in-chrome.js
+→ 通过 16 / 16
+```
+
+其中包含：后台跨域取图出报告、网页悬停角标、**同一张合成人像的原片 24 分 vs 美颜版 66 分**、
+点击展开报告卡片、悬停开关生效、弹窗「分析当前页面最大的图片」、Service Worker 内引擎契约。
+（`EXT_DIR` / `SHOT_DIR` 这两个覆盖点就是为「验证别人手上的副本」加的：默认不往用户的解压目录里写截图。）
