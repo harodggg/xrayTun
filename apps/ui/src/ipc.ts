@@ -151,6 +151,19 @@ export const EVENTS = {
   subscriptionsChanged: "subscriptions://changed",
   settingsChanged: "settings://changed",
   updateProgress: "update://progress",
+  /**
+   * 自动版本检测跑完了一次（task-188：启动 20 s 后查一次 + 每 6 h 复查）。
+   *
+   * ⚠️ **载荷刻意不读**：它带的是 `latest_app` / `checked_at` / `check_error`，**没有**
+   * `app_update_available` —— 那个字段由后端按当前版本号在**每个快照**里重算
+   * （`commands/snapshot.rs::update_status_with`，注释写明「不让前端自己比版本」）。
+   * 而「有没有新版」只该由它决定 ⇒ 本事件的正确用法是**重新拉快照**（见 `store.tsx`），
+   * 否则就得在前端再实现一遍版本比较，那就是第二处真源。
+   *
+   * 名字必须与 `apps/desktop/src/events.rs::APP_UPDATE_CHECKED` 一致：Tauri 里事件名
+   * 拼错**不报错**，只会静静地收不到 —— 那正是「自动检测了却像什么都没发生」的成因。
+   */
+  appUpdateChecked: "app://update-checked",
 } as const;
 
 export interface RuntimePayload {
@@ -310,6 +323,12 @@ export function subscribe(handlers: {
   onSubscriptionsChanged?: () => void;
   onSettingsChanged?: () => void;
   onUpdateProgress?: (payload: UpdateProgressPayload) => void;
+  /**
+   * 自动版本检测完成（`app://update-checked`）。**没有载荷参数**：它唯一的用法是
+   * 「重新拉一次快照」，载荷不带 `app_update_available` 且前端不允许自己比版本
+   * （见 `EVENTS.appUpdateChecked` 的注释）。
+   */
+  onAppUpdateChecked?: () => void;
 }): () => void {
   const unlisteners: UnlistenFn[] = [];
   let disposed = false;
@@ -345,6 +364,11 @@ export function subscribe(handlers: {
         EVENTS.updateProgress,
         (e) => handlers.onUpdateProgress!(e.payload as UpdateProgressPayload),
       ]);
+    }
+    if (handlers.onAppUpdateChecked) {
+      // **不 cast 载荷**：我们不读它（见 `EVENTS.appUpdateChecked`），
+      // 少一处「把未知数据当已知形状用」的机会。
+      pairs.push([EVENTS.appUpdateChecked, () => handlers.onAppUpdateChecked!()]);
     }
 
     for (const [name, handler] of pairs) {

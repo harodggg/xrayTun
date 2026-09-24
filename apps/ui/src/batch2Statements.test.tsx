@@ -77,16 +77,24 @@ beforeEach(() => {
 // 1) B8：检查失败之后不得再劝用户升级
 // ---------------------------------------------------------------------------
 
-describe("task-128 · 客户端更新按钮必须看 check_error", () => {
+// ⚠️ **task-194 改绑**：本 describe 原来用**合并** `check_error` 造「客户端检查失败」。
+// 后端在客户端失败时**两个字段都写**（`version_check.rs::apply_app_check_result` 的 `Err`
+// 分支 `:142-143`），而**核心/geo** 失败只写 `check_error` ⇒ 继续用合并字段会把
+// 「核心失败 + 客户端其实成功」误判成「客户端失败」，与 task-194 修好的产品行为打架
+// （那种误判会**收掉**安装按钮：已知有新版却无从安装）。
+// 判据口径与 `appUpdate.test.tsx` / 仪表盘 chip（task-193）**完全同一套**：`check_error_app`。
+describe("task-128 · 客户端更新按钮必须看客户端专属的 check_error_app（task-194 改绑）", () => {
   const withUpdate = (over: Record<string, unknown>) => {
     const base = scenarioSnapshot();
     return snap({ update: { ...base.update, ...over } });
   };
 
-  it("check_error 非空 + 残留 latest_app ⇒ **不给**「更新并重启」，版本号标明是上次查到的", async () => {
+  it("**客户端**检查失败 + 残留 latest_app ⇒ **不给**「更新并重启」，版本号标明是上次查到的", async () => {
     await renderWith(
       withUpdate({
+        // 真实的客户端失败会**同时**写两个字段（`version_check.rs:142-143`）
         check_error: "GitHub API 限流（60 次/小时）",
+        check_error_app: "GitHub API 限流（60 次/小时）",
         app_update_available: true,
         latest_app: APP_UPDATE,
       }),
@@ -100,13 +108,33 @@ describe("task-128 · 客户端更新按钮必须看 check_error", () => {
     expect(screen.getByText(/上次查到的最新版（本次没查成）/)).toBeTruthy();
   });
 
-  it("反例：check_error 为空 ⇒ 按钮出现，标题是「GitHub 上的最新版」", async () => {
+  it("反例：客户端没有失败 ⇒ 按钮出现，标题是「GitHub 上的最新版」", async () => {
     await renderWith(
-      withUpdate({ check_error: null, app_update_available: true, latest_app: APP_UPDATE }),
+      withUpdate({ check_error_app: null, app_update_available: true, latest_app: APP_UPDATE }),
       <Settings focusSection="set-update" />,
     );
     expect(await screen.findByRole("button", { name: /更新到 0\.8\.99 并重启/ })).toBeTruthy();
     expect(screen.getByText("GitHub 上的最新版")).toBeTruthy();
+  });
+
+  it("**task-194 翻转（改前必红）**：只有**合并** `check_error`（核心失败）+ 客户端确证有新版 ⇒ 按钮**必须还在**", async () => {
+    await renderWith(
+      withUpdate({
+        check_error: "GitHub 超时", // 核心那条线失败
+        check_error_app: null, // 客户端这条线是好的、刚查成
+        checked_at: 1_700_000_000,
+        checked_at_app: 1_700_000_000,
+        app_update_available: true,
+        latest_app: APP_UPDATE,
+      }),
+      <Settings focusSection="set-update" />,
+    );
+    expect(
+      await screen.findByRole("button", { name: /更新到 0\.8\.99 并重启/ }),
+      "核心失败不许收掉客户端已确证的安装按钮",
+    ).toBeTruthy();
+    expect(screen.getByText("GitHub 上的最新版")).toBeTruthy();
+    expect(screen.getByText(/核心检查更新失败/)).toBeTruthy();
   });
 });
 

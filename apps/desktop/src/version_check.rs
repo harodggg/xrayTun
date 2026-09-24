@@ -75,6 +75,82 @@ pub(crate) fn proxy_for_check(running: bool, socks_port: u16) -> Option<u16> {
 
 /// 把一次检查的结果落到 [`UpdateStatus`]，并决定要不要落日志（**纯函数**）。
 ///
+/// **核心 / geo** 检查的落盘（纯函数，便于断言「不污染客户端专属字段」）。
+///
+/// 与客户端路径 [`apply_app_check_result`] **分开**：本函数只写
+/// `checked_at` / `check_error_core` / `check_error_geo` / `latest_core` / `latest_geo`，
+/// **绝不碰** `check_error_app` / `checked_at_app`（task-191），也**不直接**写 `check_error`
+/// （它是派生字段，唯一写点是 [`refresh_merged_error`]）。
+///
+/// task-195 两处修正：
+/// * **geo 的 `Err` 以前什么都不写** ⇒ geo 检查失败在界面上永远看不到；现在各写自己那一格；
+/// * **成功只清自己那一格** —— 不许把另一个子系统的失败一起清掉。
+///
+/// task-196：与客户端路径**同一套日志口径** —— 不是每次都刷，而是「第一次失败 / 原因变了 /
+/// 恢复」各落一条（6 小时一轮，网络一直不好时一天只该有几条，不是每轮两条）。
+/// 两个子系统同时失败时只返回**第一条** warn（另一条仍在自己的字段里，界面照样看得到）。
+///
+/// 返回需要落盘的那条文案（不需要落就是 `None`）。
+pub(crate) fn apply_core_geo_check_result(
+    update: &mut UpdateStatus,
+    core: Result<Available, String>,
+    geo: Result<Available, String>,
+    now: u64,
+) -> Option<String> {
+    update.checked_at = Some(now);
+    let mut warn = None;
+    match core {
+        Ok(a) => {
+            // 恢复：上一次核心是失败的 ⇒ 说一句（与客户端路径同口径）。
+            let recovered = update.check_error_core.take().is_some();
+            update.latest_core = Some(a.clone());
+            if recovered {
+                warn = Some(format!("更新检查已恢复：核心 {}", a.version));
+            }
+        }
+        Err(e) => {
+            let same = update.check_error_core.as_deref() == Some(e.as_str());
+            if !same {
+                warn = Some(format!("检查核心更新失败：{e}"));
+            }
+            update.check_error_core = Some(e);
+        }
+    }
+    match geo {
+        Ok(a) => {
+            let recovered = update.check_error_geo.take().is_some();
+            update.latest_geo = Some(a.clone());
+            if recovered && warn.is_none() {
+                warn = Some(format!("更新检查已恢复：geo {}", a.version));
+            }
+        }
+        Err(e) => {
+            // 以前这一支**不写任何字段** ⇒ geo 的失败在界面上不存在。现在留原文，并按变化落一条。
+            let same = update.check_error_geo.as_deref() == Some(e.as_str());
+            if !same && warn.is_none() {
+                warn = Some(format!("检查 geo 更新失败：{e}"));
+            }
+            update.check_error_geo = Some(e);
+        }
+    }
+    refresh_merged_error(update);
+    warn
+}
+
+/// `check_error` 的**唯一写入点**：按 客户端 → 核心 → geo 取第一条非空的子系统错误。
+///
+/// 为什么派生而不是「谁最后写谁赢」：以前它是三路共写的合并字段，于是
+/// ① 客户端复查成功（`check_error.take()`）会把**核心**的失败一起清掉；
+/// ② 客户端与核心**同时**失败只留最后一条 —— 都是静默少报（task-195）。
+/// 派生之后，「任一路成功都不清除别人的失败」是**构造保证**，不依赖每个写入点自觉。
+pub(crate) fn refresh_merged_error(update: &mut UpdateStatus) {
+    update.check_error = update
+        .check_error_app
+        .clone()
+        .or_else(|| update.check_error_core.clone())
+        .or_else(|| update.check_error_geo.clone());
+}
+
 /// 三条硬规矩：
 /// 1. **失败绝不清空 `latest_app`** —— 那是**上次**查到的版本，抹掉它会让界面上的
 ///    更新按钮凭空消失（用户会因为一次网络抖动丢掉已知的新版本）；
@@ -88,11 +164,18 @@ pub(crate) fn apply_app_check_result(
     now: u64,
 ) -> LogLine {
     update.checked_at = Some(now);
+    // 失败也是一次「客户端检查」⇒ 时刻照样记（与 `checked_at` 对齐；`check_error_app` 只在失败分支写）
+    update.checked_at_app = Some(now);
     match result {
         Ok(a) => {
-            // 「恢复」= 上一次是失败的。取走它，顺便把 `check_error` 清空。
-            let recovered = update.check_error.take().is_some();
+            // 「恢复」= **客户端**上一次是失败的。
+            //
+            // task-195：这里以前是 `update.check_error.take()` —— 那会把**核心/geo** 的失败
+            // 一起取走（静默少报）。去重与「恢复」都只看客户端自己那一格。
+            let recovered = update.check_error_app.take().is_some();
             update.latest_app = Some(a.clone());
+            // task-191：客户端专属字段 —— 成功 ⇒ 清错误 + 记时刻
+            refresh_merged_error(update);
             let msg = if recovered {
                 format!("更新检查已恢复：客户端最新版 {}", a.version)
             } else {
@@ -102,10 +185,12 @@ pub(crate) fn apply_app_check_result(
             LogLine::Line("info", msg)
         }
         Err(e) => {
-            let same = update.check_error.as_deref() == Some(e.as_str());
-            // 先把文案拼好再移动 `e`，否则 `check_error` 拿走后就用不了它了。
+            // 去重键是**客户端自己**的错误：合并字段是派生的，拿它做键会被其它子系统的
+            // 变化带偏（例如核心刚失败 ⇒ 合并值变了 ⇒ 客户端这里会重复记一条）。
+            let same = update.check_error_app.as_deref() == Some(e.as_str());
             let line = format!("检查客户端更新失败：{e}");
-            update.check_error = Some(e);
+            update.check_error_app = Some(e);
+            refresh_merged_error(update);
             if same {
                 LogLine::Silent
             } else {
@@ -155,6 +240,45 @@ pub(crate) async fn check_now(proxy: Option<u16>) -> Result<Available, String> {
     .map_err(|e| format!("检查任务失败：{e}"))?
 }
 
+/// 真网络那一层：**核心与 geo**（同样是阻塞客户端，同样 `spawn_blocking`）。
+///
+/// task-196：自动检测原来只覆盖**客户端自己**的版本 ⇒ 「核心有新版」「geo 有新版」
+/// 仍然只有手动按钮会查。现在每轮一起查：三个仓库各一次请求（匿名配额 60 次/小时，够）。
+///
+/// 两个子系统**各自**失败互不影响（不 fail-fast）：一个挂掉不影响另一个的结果落盘。
+pub(crate) async fn check_core_geo_now(
+    proxy: Option<u16>,
+) -> (Result<Available, String>, Result<Available, String>) {
+    tauri::async_runtime::spawn_blocking(move || {
+        (
+            xt_core::update::check_core(proxy).map_err(|e| e.to_string()),
+            xt_core::update::check_geo(proxy).map_err(|e| e.to_string()),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // 任务本身崩了（join 失败）⇒ 两边都算失败，**不许**静默当作「已经是最新」。
+        let msg = format!("检查任务失败：{e}");
+        (Err(msg.clone()), Err(msg))
+    })
+}
+
+/// **一轮检查的落盘**（生产与测试**共用同一个函数**，避免「测过的」和「跑起来的」是两回事）。
+///
+/// task-196：一轮 = 客户端 + 核心 + geo 三路。三路各自独立落盘：
+/// 客户端失败不影响核心/geo，核心失败不影响 geo —— 谁失败就在谁那一格里说话。
+pub(crate) fn apply_round(
+    update: &mut UpdateStatus,
+    app: Result<Available, String>,
+    core: Result<Available, String>,
+    geo: Result<Available, String>,
+    now: u64,
+) -> (Option<LogLine>, Option<String>) {
+    let line = Some(apply_app_check_result(update, app, now));
+    let core_geo_line = apply_core_geo_check_result(update, core, geo, now);
+    (line, core_geo_line)
+}
+
 /// 做一次自动检查：写状态、落日志（若该落）、通知界面。
 ///
 /// 周期守卫不通过时**什么都不做**（连事件都不发 —— 状态没变化，没有可播报的）。
@@ -170,9 +294,19 @@ pub(crate) async fn check_once(app: &tauri::AppHandle, state: &AppState) {
     };
 
     let result = check_now(proxy).await;
-    let line = state.with(|i| apply_app_check_result(&mut i.update, result, now));
+    // task-196：同一轮里把**核心 / geo** 也查了（原来只有手动按钮会查它们）。
+    // 与客户端那条**各自独立**：客户端失败不影响核心/geo 落盘，反之亦然。
+    let (core, geo) = check_core_geo_now(proxy).await;
+    let Some((line, core_geo_line)) =
+        state.with(|i| apply_round(&mut i.update, result, core, geo, now))
+    else {
+        return;
+    };
     if let Some(LogLine::Line(level, msg)) = line {
         state.with(|i| i.push_log("app", level, msg));
+    }
+    if let Some(msg) = core_geo_line {
+        state.with(|i| i.push_log("app", "warn", msg));
     }
     // `Silent`（同样的失败）不落日志，但状态确实变了 ⇒ 仍要通知界面。
     // 不通知的话，20 秒后查到的结果在下次拉快照前都不会出现在界面上。
@@ -428,4 +562,273 @@ mod tests {
             other => panic!("期望一条日志，实际是 {other:?}"),
         }
     }
+    // ---- task-195：三条「静默少报」必须消失 ----
+
+    /// 缺口 1：**geo 的失败以前没有字段可写** ⇒ 界面永远看不到。现在必须留原文。
+    #[test]
+    fn geo_failure_is_recorded_in_its_own_field() {
+        let mut u = UpdateStatus::default();
+        let warn = apply_core_geo_check_result(
+            &mut u,
+            Ok(an_available("26.9.9")),
+            Err("geo 404".into()),
+            1_000,
+        );
+        assert_eq!(
+            u.check_error_geo.as_deref(),
+            Some("geo 404"),
+            "geo 失败必须有自己的字段（以前被静默丢掉）"
+        );
+        assert_eq!(u.check_error_core, None, "geo 的失败不许写进核心那一格");
+        assert_eq!(
+            warn.as_deref(),
+            Some("检查 geo 更新失败：geo 404"),
+            "日志也要说一次，而且带原始错误"
+        );
+        assert_eq!(
+            u.check_error.as_deref(),
+            Some("geo 404"),
+            "派生的合并字段必须反映 geo 的失败（否则设置页看不见）"
+        );
+    }
+
+    /// 缺口 2：**核心的失败不许被随后的客户端成功清掉**（以前是 `check_error.take()` 干的）。
+    #[test]
+    fn core_failure_survives_a_later_client_success() {
+        let mut u = UpdateStatus::default();
+        apply_core_geo_check_result(&mut u, Err("core down".into()), Ok(an_available("geo1")), 10);
+        assert!(u.check_error_core.is_some(), "前置：核心失败已记录");
+
+        apply_app_check_result(&mut u, Ok(an_available("0.9.9")), 20);
+
+        assert_eq!(
+            u.check_error_core.as_deref(),
+            Some("core down"),
+            "客户端成功**不许**清掉核心的失败（静默少报）"
+        );
+        assert_eq!(
+            u.check_error.as_deref(),
+            Some("core down"),
+            "派生的合并字段也必须仍然反映核心的失败"
+        );
+        assert_eq!(u.check_error_app, None, "客户端自己那格该清就清");
+    }
+
+    /// 缺口 3：客户端与核心**同时**失败 ⇒ 两条都在，不再 last-writer-wins。
+    #[test]
+    fn both_client_and_core_failures_are_both_recorded() {
+        let mut u = UpdateStatus::default();
+        apply_core_geo_check_result(&mut u, Err("core down".into()), Err("geo down".into()), 10);
+        apply_app_check_result(&mut u, Err("app down".into()), 20);
+
+        assert_eq!(u.check_error_core.as_deref(), Some("core down"));
+        assert_eq!(u.check_error_geo.as_deref(), Some("geo down"));
+        assert_eq!(u.check_error_app.as_deref(), Some("app down"));
+        assert_eq!(
+            u.check_error.as_deref(),
+            Some("app down"),
+            "派生顺序是 客户端 → 核心 → geo（固定且可测）"
+        );
+        // 反向：核心后来成功，只清自己那格，客户端/geo 的失败不受影响。
+        apply_core_geo_check_result(&mut u, Ok(an_available("26.9.9")), Err("geo down".into()), 30);
+        assert_eq!(u.check_error_core, None, "核心成功只清自己那格");
+        assert_eq!(u.check_error_app.as_deref(), Some("app down"), "别人的失败不许被清");
+        assert_eq!(u.check_error_geo.as_deref(), Some("geo down"), "别人的失败不许被清");
+    }
+
+    /// 去重键必须是**客户端自己**的错误：核心失败让派生字段变化时，客户端重复失败仍只记一条。
+    #[test]
+    fn client_log_dedup_ignores_other_subsystems() {
+        let mut u = UpdateStatus::default();
+        assert_log(&apply_app_check_result(&mut u, Err("app down".into()), 1), "warn");
+
+        // 核心也失败 ⇒ 派生字段的值会变（如果我们拿它当去重键，就会误记第二条）。
+        apply_core_geo_check_result(&mut u, Err("core down".into()), Ok(an_available("geo1")), 2);
+
+        let again = apply_app_check_result(&mut u, Err("app down".into()), 3);
+        assert!(
+            matches!(again, LogLine::Silent),
+            "同一客户端失败不许因为核心也失败而重复记：{again:?}"
+        );
+    }
+
+    // ---- task-196：自动检测必须覆盖**三路**（客户端 + 核心 + geo）----
+
+    /// **生产路径**必须真的查三路，并走共用的落盘函数。
+    ///
+    /// 源级守卫（L3）：`check_once` 是唯一的接线点，删掉任何一路都会红 ——
+    /// 「自动检测了核心/geo」这句话要有机器证据，不能只靠注释。
+    #[test]
+    fn check_once_fetches_all_three_and_uses_the_shared_apply() {
+        let src = include_str!("version_check.rs");
+        let start = src
+            .find("pub(crate) async fn check_once")
+            .expect("check_once 不见了");
+        let rest = &src[start..];
+        let body = &rest[..rest.find("\n}\n").expect("check_once 没有正常结束")];
+        for needle in [
+            "check_now(proxy)",
+            "check_core_geo_now(proxy)",
+            "apply_round(",
+        ] {
+            assert!(
+                body.contains(needle),
+                "生产路径缺 `{needle}` ⇒ 自动检测没有覆盖三路"
+            );
+        }
+    }
+
+    /// 一轮三路：核心/geo 的结果都落进各自的格子（以前它们只有手动按钮会查）。
+    #[test]
+    fn a_round_records_all_three_subsystems() {
+        let mut u = UpdateStatus::default();
+        let (app_line, warn) = apply_round(
+            &mut u,
+            Ok(an_available("0.9.9")),
+            Ok(an_available("26.9.9")),
+            Ok(an_available("geo-2026.09")),
+            1_000,
+        );
+        assert!(matches!(app_line, Some(LogLine::Line("info", _))));
+        assert_eq!(warn, None, "都成功 ⇒ 没有 warn");
+        assert_eq!(u.latest_app.as_ref().map(|a| a.version.as_str()), Some("0.9.9"));
+        assert_eq!(u.latest_core.as_ref().map(|a| a.version.as_str()), Some("26.9.9"));
+        assert_eq!(
+            u.latest_geo.as_ref().map(|a| a.version.as_str()),
+            Some("geo-2026.09")
+        );
+        assert_eq!(u.checked_at, Some(1_000), "一轮只记一次时刻");
+    }
+
+    /// 三路**各自独立**：客户端与核心都失败时，geo 的成功照样落盘（不 fail-fast）。
+    #[test]
+    fn a_round_is_fail_open_per_subsystem() {
+        let mut u = UpdateStatus::default();
+        let (_, warn) = apply_round(
+            &mut u,
+            Err("app down".into()),
+            Err("core down".into()),
+            Ok(an_available("geo1")),
+            2_000,
+        );
+        assert_eq!(u.check_error_app.as_deref(), Some("app down"));
+        assert_eq!(u.check_error_core.as_deref(), Some("core down"));
+        assert_eq!(u.check_error_geo, None, "geo 成功了就不该有错误");
+        assert_eq!(
+            u.latest_geo.as_ref().map(|a| a.version.as_str()),
+            Some("geo1"),
+            "别人的失败不许挡住 geo 的结果"
+        );
+        assert_eq!(warn.as_deref(), Some("检查核心更新失败：core down"));
+    }
+
+    /// 同样的核心失败重复出现**只落一条**；原因变了再落一条；恢复时落一条恢复。
+    #[test]
+    fn repeated_core_failure_logs_once_and_recovery_is_announced() {
+        let mut u = UpdateStatus::default();
+        let first = apply_core_geo_check_result(
+            &mut u,
+            Err("core timeout".into()),
+            Ok(an_available("geo1")),
+            1,
+        );
+        assert_eq!(first.as_deref(), Some("检查核心更新失败：core timeout"));
+
+        let again = apply_core_geo_check_result(
+            &mut u,
+            Err("core timeout".into()),
+            Ok(an_available("geo1")),
+            2,
+        );
+        assert_eq!(again, None, "同一失败不许每轮都刷");
+
+        let changed = apply_core_geo_check_result(
+            &mut u,
+            Err("core 403".into()),
+            Ok(an_available("geo1")),
+            3,
+        );
+        assert_eq!(changed.as_deref(), Some("检查核心更新失败：core 403"), "原因变了要再说一条");
+
+        let recovered = apply_core_geo_check_result(
+            &mut u,
+            Ok(an_available("26.9.9")),
+            Ok(an_available("geo1")),
+            4,
+        );
+        assert_eq!(
+            recovered.as_deref(),
+            Some("更新检查已恢复：核心 26.9.9"),
+            "恢复要说一句"
+        );
+        assert_eq!(u.check_error_core, None);
+    }
+}
+
+
+#[cfg(test)]
+mod tester_task191 {
+    use super::*;
+
+    fn avail(v: &str) -> Available {
+        Available {
+            version: v.to_string(),
+            published_at: "2026-09-24T00:00:00Z".to_string(),
+            prerelease: false,
+            download_url: "https://example.invalid/a.zip".to_string(),
+            digest_url: None,
+            size: Some(1),
+        }
+    }
+
+    /// 核心/geo 失败 ⇒ 各写自己那格、**客户端专属字段一个都不许被污染**。
+    ///
+    /// ⚠️ task-195 改绑：`check_error` 现在是**派生**字段（客户端 → 核心 → geo 取第一条非空），
+    /// 所以本用例里它**不再是** `core net down`，而是既有的 `check_error_app` 值 ——
+    /// 这正是「核心失败不许把客户端错误挤掉」的机器证据（旧语义下会被核心覆盖）。
+    #[test]
+    fn core_geo_failure_does_not_pollute_app_specific_fields() {
+        let mut u = UpdateStatus {
+            check_error_app: Some("上一次客户端失败".into()),
+            checked_at_app: Some(111),
+            ..UpdateStatus::default()
+        };
+        let warn = apply_core_geo_check_result(
+            &mut u, Err("core net down".into()), Err("geo net down".into()), 999);
+        assert_eq!(warn.as_deref(), Some("检查核心更新失败：core net down"));
+        assert_eq!(u.check_error_core.as_deref(), Some("core net down"), "核心的失败有自己的格");
+        assert_eq!(u.check_error_geo.as_deref(), Some("geo net down"), "geo 的失败也有自己的格");
+        assert_eq!(
+            u.check_error.as_deref(),
+            Some("上一次客户端失败"),
+            "派生顺序 客户端 → 核心 → geo：客户端的错误仍在，不许被核心/geo 挤掉"
+        );
+        assert_eq!(u.checked_at, Some(999), "合并时刻照旧写");
+        assert_eq!(u.check_error_app.as_deref(), Some("上一次客户端失败"), "客户端错误不许被核心/geo 覆盖");
+        assert_eq!(u.checked_at_app, Some(111), "客户端时刻不许被核心/geo 覆盖");
+    }
+
+    /// 客户端失败 ⇒ 写 `check_error_app`，且**不清 `latest_app`**（task-188 口径）。
+    #[test]
+    fn app_failure_sets_app_error_and_keeps_latest() {
+        let mut u = UpdateStatus { latest_app: Some(avail("0.9.0")), ..UpdateStatus::default() };
+        apply_app_check_result(&mut u, Err("net down".into()), 500);
+        assert_eq!(u.check_error_app.as_deref(), Some("net down"));
+        assert_eq!(u.latest_app.as_ref().map(|a| a.version.as_str()), Some("0.9.0"), "失败绝不清 latest_app");
+        assert_eq!(u.checked_at_app, Some(500), "失败也记一次检查时刻");
+    }
+
+    /// 客户端成功 ⇒ 清 `check_error_app` + 更新 `checked_at_app`。
+    #[test]
+    fn app_success_clears_app_error_and_stamps_time() {
+        let mut u = UpdateStatus {
+            check_error_app: Some("旧错误".into()),
+            ..UpdateStatus::default()
+        };
+        apply_app_check_result(&mut u, Ok(avail("0.9.1")), 777);
+        assert_eq!(u.check_error_app, None, "成功必须清掉客户端错误");
+        assert_eq!(u.checked_at_app, Some(777));
+        assert_eq!(u.latest_app.as_ref().map(|a| a.version.as_str()), Some("0.9.1"));
+    }
+
 }

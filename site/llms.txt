@@ -27,7 +27,7 @@
   v0.4.0 起还做两件**纯展示**的整理：**β** 折叠重复/类似/语义相同的信息只显示一次，**α** 标出「与评论区多数观点明显不同」的特殊观点（不隐藏）
 - [Info Filter · Jev page (English)](https://xraytun.top/en/jev-x-filter/)：与中文页逐段等价
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
-- 下载 v0.4.2：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip>（MIT，Chrome 120+）
+- 下载 v0.4.6：<https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip>（MIT，Chrome 120+）
 
 ## 相关项目：素颜镜 · 美颜程度检测（**独立项目，与 XrayTun 无关**）
 
@@ -47,9 +47,29 @@
 - 下载轻量版 v1.0.0：<https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip>（74.2 KiB，仅美颜检测，无模型文件）
 - 许可证全文：<https://xraytun.top/beauty-meter/LICENSE>（本项目**没有独立仓库**，源码随 zip 分发）
 
-> 维护提示：XrayTun 的发版流程会重写本文件（最近一次发版提交就删掉过本节）。重写时请保留上面两节
-> （信息过滤器 · Jev、素颜镜 · 美颜程度检测），否则官网「相关项目」会缺条目；
-> llms-full.txt 里的对应小节也要一并保留（那两节按 `<!-- BEGIN external:… -->` 区间保留）。
+## 相关项目：一目十行 · SpeedRead（**独立项目，与 XrayTun 无关**）
+
+- [一目十行 · SpeedRead 页面（中文）](https://xraytun.top/speed-read/)：Chrome MV3 扩展，把整个网页的正文压成
+  **恰好 3 条** —— **α 阿尔法**（全文最重要、最先该知道的核心结论）、**β 贝塔**（第二关键信息：
+  支撑证据，或代价/风险/限制/反面观点）、**γ 人说最多**（全页被重复、强调、引用次数最多的议题，
+  并给出正文里真实出现的高频词作为证据）。摘要由**用户自己配置的 OpenAI 兼容大模型接口**生成
+  （内置 8 个服务商预设），Key 只存本机、只由扩展的 Service Worker 读取与发送；
+  **没有 Key 或调用失败时自动降级为本地词频 + 句子打分，仍然给满 3 条**并在面板底部标注来源。
+  **页面一变就自动重算**：DOM 变化、SPA 路由、切回标签页、兜底轮询四路触发；
+  同时有三道省钱闸门（内容指纹未变不发请求、变化过小视为噪声、缓存 + 并发去重 + 限流），
+  实测「改正文 → 约 0.7 秒自动更新；页脚加噪声 → 不触发；同内容新标签页 → 命中缓存」。
+  面板挂在 Shadow DOM 里并与宿主页面 CSS 完全隔离，严格 CSP（`style-src 'none'`）站点上外观也不丢；
+  模型输出一律 `textContent` 写入，绝不 `innerHTML`
+- [SpeedRead page (English)](https://xraytun.top/en/speed-read/)：与中文页逐段等价
+- 下载 v0.1.0：<https://xraytun.top/speed-read/speed-read-extension-0.1.0.zip>（**79,813 字节 / 77.9 KiB**，
+  含未压缩源码，MIT，Chrome 110+；**没有独立仓库**，源码随 zip 分发）
+- 许可证全文：<https://xraytun.top/speed-read/LICENSE>
+- 验证：12 项静态自检 / 100 项单元测试 / 52 项真实 Chrome 端到端断言（含「页面先开、扩展后装」的补注入、
+  未配 Key 时 0 次网络请求、缓存命中不重复调用、严格 CSP 与 div 汤页面抽取）
+
+> 维护提示：XrayTun 的发版流程会重写本文件（最近一次发版提交就删掉过本节）。重写时请保留上面三节
+> （信息过滤器 · Jev、素颜镜 · 美颜程度检测、一目十行 · SpeedRead），否则官网「相关项目」会缺条目；
+> llms-full.txt 里的对应小节也要一并保留（那三节按 `<!-- BEGIN external:… -->` 区间保留）。
 
 ## 下载
 

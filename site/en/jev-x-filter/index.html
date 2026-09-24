@@ -40,10 +40,10 @@
   "name": "Info Filter · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.2",
+  "softwareVersion": "0.4.6",
   "softwareHelp": "https://xraytun.top/en/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -174,11 +174,15 @@
           <a href="#decide">How it decides</a>
           <a href="#semantics">Duplicates &amp; outliers</a>
           <a href="#lowsignal">Agreement once</a>
+          <a href="#slang">Slang template</a>
+          <a href="#emotion">Emotion replies</a>
+          <a href="#emotion-feed">Emotion (timeline)</a>
           <a href="#samples">Live samples</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
           <a href="#limits">Limits</a>
           <a href="#faq">FAQ</a>
+          <a href="#errors">Extension errors</a>
         </nav>
         <nav class="lang-switch" aria-label="Language">
           <a href="../../jev-x-filter/" hreflang="zh-Hans" lang="zh-Hans">中文</a>
@@ -204,12 +208,12 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/jev-x-filter-0.4.2.zip"
-            >Download v0.4.2 (zip, 167.2 KB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/jev-x-filter-0.4.6.zip"
+            >Download v0.4.6 (zip, 175.8 KB)</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">Repository harodggg/jev-x-filter</a>
         </p>
-        <p class="meta">v0.4.2 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
+        <p class="meta">v0.4.6 · MIT · Chrome 120+ / Manifest V3 · no build step · no key material in the repo</p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           Load unpacked; then paste your own Jev API key in the options page, or switch to the keyless free tier.
@@ -412,6 +416,93 @@
           In news/discussion context the rule downgrades to weight 1, so quoting the phrase is not hidden.
         </p>
       </section>
+      <section class="wrap prose" id="slang">
+        <h2>v0.4.3: a third solicitation catchphrase, hidden as review</h2>
+        <p>
+          One of the user&rsquo;s third-batch screenshots was
+          <code>Jonathan Fisher · 玩归玩闹归闹🌹🍷给你看福👍我不开玩笑 X 6</code> &mdash; no explicit words, so the
+          model returned <code>adult 0.03 / ordinary</code>, and locally there was no signal either
+          (the opener &ldquo;玩归玩闹归闹&rdquo; is an ordinary meme and cannot convict on its own), so it used to be passed.
+        </p>
+        <ul>
+          <li>New rule <code>zh_meme_fuli</code>: the opener <em>and</em> the hook <code>给你看福 / 看福利</code> must appear
+            <strong>together</strong>; the opener alone never triggers anything.</li>
+          <li>A rule can now carry a <strong>&ldquo;review floor&rdquo;</strong> (<code>reviewFloor</code>): when such a
+            template matches, the post is <strong>hidden as &ldquo;review&rdquo; even if the model says ordinary</strong>
+            (reason <code>solicit_template</code>). Same tier as &ldquo;display name is solicitation&rdquo; and X&rsquo;s own
+            probable-spam section: <strong>hide only, never an account action</strong>; the model still wins when it
+            reports hide/block. In news/discussion context the rule is downgraded to weight 1 and the floor is lifted,
+            so quoting the phrase is not hidden.</li>
+        </ul>
+        <p>The other two posts in that batch were already caught: <code>处男无偿 + 只入身体🌻😊不入生活</code> &rarr;
+          <code>hide</code> (adult 0.89), and <code>👆只入身体❤️👄不入生活。4</code> &rarr; <code>hide</code> (same normalised
+          text as the sibling accounts: a farm hit).</p>
+      </section>
+      <section class="wrap prose" id="emotion">
+        <h2>v0.4.4: emotion replies folded or hidden, labelled by kind</h2>
+        <p>
+          Seven kinds of emotional reply &mdash; <strong>anger, joy, support, opposition, sadness, confirmation and
+          emoji-only</strong> &mdash; are now recognised by a <strong>local classifier</strong> with
+          <strong>zero model calls</strong>: no budget, and it never changes hiding or account actions.
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>Mode (options section 1.6)</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Fold</strong> (default)</td><td>The <strong>first</strong> reply of its kind in a thread stays, carrying an
+              &ldquo;emotion · anger&rdquo; badge so you know which kind it is; the rest collapse into
+              <code>emotion · anger: same kind of reply as @… · N more · [expand]</code></td></tr>
+            <tr><td><strong>Hide</strong> (the &ldquo;delete&rdquo; you asked for)</td><td><strong>All</strong> of them collapse &mdash; none is shown;
+              the bar still names the kind, and &ldquo;expand&rdquo; brings them back</td></tr>
+          </tbody>
+        </table>
+        <p>
+          It is deliberately conservative: only a short, exact emotional phrase counts.
+          Replies that argue &mdash; <code>I disagree, the public data actually says otherwise</code> &mdash; questions,
+          numbers and links are <strong>never folded</strong>: what gets folded is emotion, not argument.
+          Each kind groups separately (2 angry + 2 happy &rarr; two representatives + two folds), only inside reply threads,
+          and it is presentation only &mdash; &ldquo;expand&rdquo; always works.
+        </p>
+      </section>
+      <section class="wrap prose" id="emotion-feed">
+        <h2>v0.4.5: emotion tidy-up now covers the timeline too (11 kinds)</h2>
+        <p>
+          A user pointed out that timeline posts like <code>交朋友</code> / <code>美女啊</code> / <code>👍好</code> / <code>我也想去🥺</code> / <code>Gm</code> / <code>太美了</code>
+          were never folded &mdash; the emotion layer was limited to reply threads. Now:
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>Scope</th><th>Behaviour</th></tr></thead>
+          <tbody>
+            <tr><td>Timeline / recommendations</td><td>No thread semantics &rarr; <strong>each emotional post folds on its own</strong>, with a bar reading <code>emotion · praise: 美女啊 (folded)</code>; &ldquo;expand&rdquo; shows the original</td></tr>
+            <tr><td>Reply threads</td><td>Grouped by &ldquo;same thread + same kind&rdquo;: the first stays with an &ldquo;emotion · XX&rdquo; badge, the rest fold</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Kinds are now <strong>11</strong>: anger, joy, support, opposition, sadness, confirmation, <strong>praise, wish, greeting, social</strong> and emoji-only.
+          Same switches as before (options section 1.6: on/off + fold/hide; the timeline fold honours the existing &ldquo;fold in feed&rdquo; switch).
+        </p>
+        <p>
+          The same release fixes <strong>4 false positives and 2 misses</strong> found by independent verification: a bare
+          &ldquo;不入生活&rdquo; no longer convicts, the hook no longer matches &ldquo;看福建舰/看福彩开奖&rdquo;, science/medical context is downgraded,
+          and phrases such as &ldquo;我服了&rdquo; / &ldquo;难过死了&rdquo; / &ldquo;真好看&rdquo; are now classified correctly.
+        </p>
+      </section>
+      <section class="wrap prose" id="errors">
+        <h2>v0.4.6: what to do about the &ldquo;Errors&rdquo; button</h2>
+        <p>
+          Chrome accumulates an extension&rsquo;s historical errors on the same card forever, so that button may come from an
+          older build or from a moment when files were being written. To clear it: <code>chrome://extensions</code> &rarr;
+          <strong>Errors</strong> &rarr; <strong>Clear all</strong> &rarr; <strong>Reload</strong> (&#8635;) on the card.
+          If it appears again, send us the text (with file and line).
+        </p>
+        <p>
+          This release also closes the most likely cause: when an unexpected real-world DOM made the content script throw,
+          the caller <code>void inspectArticle()</code> turned it into an uncaught promise rejection &mdash; exactly what lights that
+          button up. The content script now contains every failure (counter, error state, audit event with
+          <code>stage: inspect|register</code>, and <code>summary().lastError</code>) while other posts keep being judged;
+          the end-to-end suite now asserts <strong>zero Service Worker exceptions</strong> (captured from extension load) and
+          includes a <strong>broken-DOM regression</strong> (empty and half-built tweet containers).
+        </p>
+      </section>
       <section class="wrap prose" id="samples">
         <h2>v0.4.1: three real-world samples, two misses closed</h2>
         <p>
@@ -438,7 +529,7 @@
         <h2>Install and configure</h2>
         <p>There is no build step: the unzipped folder is a loadable extension directory.</p>
         <pre class="code"><code># 1) download and unzip
-unzip jev-x-filter-0.4.2.zip -d info-filter
+unzip jev-x-filter-0.4.6.zip -d info-filter
 
 # 2) open chrome://extensions → enable Developer mode
 #    → "Load unpacked" → select the unzipped info-filter directory
@@ -477,13 +568,13 @@ unzip jev-x-filter-0.4.2.zip -d info-filter
             <tr>
               <td>Unit tests</td>
               <td><code>npm test</code></td>
-              <td><strong>246 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
+              <td><strong>289 passing</strong> (wire contract, category gates and switches, pre-screen, farm, α/β semantics, menu matching and adversarial cases, image pixels, blocklist, audit, pipeline)</td>
             </tr>
             <tr>
               <td>Real-Chrome end-to-end</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>125 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
+                <strong>144 passing</strong>: load the extension over CDP → fake-X fixture page (20+ posts, six real-world traps:
                 anti-item menu entries, a stale Dropdown, a trigger with no layout box, async menu rendering,
                 localised menu entries, and a menu that genuinely lacks the target item) → decide → hide →
                 α badge / β fold → click the menu (including the “mute hidden band too” boundary and
@@ -499,7 +590,7 @@ unzip jev-x-filter-0.4.2.zip -d info-filter
               <td>Real-model check</td>
               <td><code>JEV_API_KEY=… node tools/live-check.js</code></td>
               <td>
-                <strong>38 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 12 · α flags 1 · semantic calls 13: adult solicitation and scams are
+                <strong>41 real-world samples</strong>, 0 safety violations, 0 expected hides missed; β folds 14 · α flags 1 · semantic calls 15: adult solicitation and scams are
                 caught, clickbait and low-quality filler are hidden only, while everyday posts, moderation news,
                 sex education, swimwear and fitness posts all pass
               </td>
@@ -648,7 +739,7 @@ unzip jev-x-filter-0.4.2.zip -d info-filter
         <ul class="link-list">
           <li>Source: <a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>Downloads and release notes: <a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.2/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>Checksums: <a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.6/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>Design notes: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>Verification record: <a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>Decision model: <a href="https://typesafe.ai/">TypeSafe Jev (System One)</a></li>
@@ -666,7 +757,7 @@ unzip jev-x-filter-0.4.2.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">repository</a>.
         </p>
         <p class="site-footer__meta">
-          Info Filter · Jev v0.4.2 · Chrome MV3 · page last updated 2026-09-24 ·
+          Info Filter · Jev v0.4.6 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>

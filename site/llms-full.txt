@@ -25,18 +25,25 @@
 > **`素颜镜 · 美颜程度检测` 没有独立仓库**：它是一个 Chrome MV3 扩展，由本站在
 > <https://xraytun.top/beauty-meter/> 直接分发（zip 内含未压缩源码与 MIT 许可证），因此它的下载与
 > 许可证都指向本站资产，**不落在 XrayTun 的 Releases 上**。
+>
+> **`一目十行 · SpeedRead` 同样没有独立仓库**：它是一个 Chrome MV3 扩展，由本站在
+> <https://xraytun.top/speed-read/> 直接分发（zip 内含未压缩源码与 MIT 许可证）。
+> 它的摘要会调用**用户自己配置的**大模型接口，所以「网页正文会离开浏览器」这件事在页面里是明说的；
+> 它**与 XrayTun 无任何集成关系**。
 <!-- END external:header -->
 
-收录页面（8 个，中英各 4）：
+收录页面（10 个，中英各 5）：
 
 - 中文：XrayTun 主页面 → https://xraytun.top/
 - 中文：xray-wasm（同一作者的另一个项目） → https://xraytun.top/wasm/
 - 中文：信息过滤器 · Jev（同一作者的另一个项目） → https://xraytun.top/jev-x-filter/
 - 中文：素颜镜 · 美颜程度检测（同一作者的另一个项目） → https://xraytun.top/beauty-meter/
+- 中文：一目十行 · SpeedRead（同一作者的另一个项目） → https://xraytun.top/speed-read/
 - English: XrayTun home → https://xraytun.top/en/
 - English: xray-wasm (a separate project by the same author) → https://xraytun.top/en/wasm/
 - English: Info Filter · Jev (a separate project by the same author) → https://xraytun.top/en/jev-x-filter/
 - English: Beauty Meter (a separate project by the same author) → https://xraytun.top/en/beauty-meter/
+- English: SpeedRead (a separate project by the same author) → https://xraytun.top/en/speed-read/
 
 ---
 
@@ -222,6 +229,63 @@ AI 生成图 5/6 判对、合成人像（含极端美颜）3/3 判为真实拍�
 （`src/models/ai-image/ATTRIBUTION.md`，CC BY-NC 4.0 非商业）。
 
 [素颜镜 · 美颜程度检测 是什么、怎么用 →](beauty-meter/)
+
+## 一目十行 · SpeedRead（同一作者的另一个项目，与 XrayTun 无关）
+
+**它做什么**：把整个网页的正文压成**恰好 3 条**信息，不再多给一行。
+**α 阿尔法**是全文最重要、最先该知道的核心结论，单独拿出来就能回答「这页在说什么」；
+**β 贝塔**是第二关键信息，且与 α 不重复 —— 优先取支撑 α 的证据或数据，其次取代价、风险、限制、
+条件、时间点或反方观点；**γ 人说最多**回答「大家反复在说什么」（而不是「哪条最重要」），
+并给出正文里真实出现过的高频词作为证据。每条默认限 60 字（可调 16~200），超出按句读截断。
+
+**摘要从哪来**：由**用户自己配置的** OpenAI 兼容 `/chat/completions` 接口生成，内置 8 个服务商预设
+（OpenRouter / OpenAI / DeepSeek / Moonshot / 阿里百炼 / 硅基流动 / 智谱 / 火山方舟）以及自定义网关。
+**API Key 只存在本机**（`chrome.storage.local`），只由扩展的 Service Worker 读取与发送，
+内容脚本与网页脚本都拿不到；所有模型调用都在 Service Worker 里发起（扩展源），
+因此不受宿主页面 CSP 的 `connect-src` 限制。**页面正文会发往用户自己填的那个地址**，
+这一点在页面上是明说的。
+**没有 Key、或调用失败时**，自动降级为**本地词频 + 句子打分**的抽取式摘要，仍然给满 3 条，
+并在面板底部标注「本地兜底」—— 精度明显低于 AI 摘要。
+
+**页面一变就自动重算**（用户不用点任何按钮），四路触发：`MutationObserver` 盯 DOM 变化（静默一段时间后重算）、
+每秒比对地址栏 + `popstate`/`hashchange` 处理 SPA 路由、切回标签页时核对、以及兜底轮询救那些
+没有 DOM 变化事件的轮询式页面。**同时有三道省钱闸门**：内容指纹未变就不发请求（指纹由归一化地址、
+标题、正文头尾采样与总长组成，忽略 `utm_*` 等跟踪参数）；变化过小视为噪声（时钟、阅读数、广告轮播
+不触发）；缓存 + 并发去重 + 同标签最小调用间隔。实测链路：首屏 1 次调用 → 改正文 → 自动第 2 次
+（面板约 0.7 秒内更新）→ 页脚加噪声 → 仍是 2 次 → 同内容新标签页 → 仍是 2 次（命中缓存）。
+
+**正文抽取与输入压缩**：先按「长度 × (1 − 链接密度) × 句读密度 × 标签加成」选最佳容器甩掉导航/页脚/侧栏，
+容器阈值随页面长度自适应，`div` 冒充的 `nav`/`footer` 按 id/class 丢弃，高链接密度块按导航丢弃
+（整页都是链接时关掉过滤重算，宁可带噪音也不返回空），只有内联子元素的 `div` 当段落处理 ——
+所以没有 `<p>` 的 div 汤站点也抓得到。正文不整段丢给模型：首段无条件保底（导语密度最高）、
+结构标题占位、其余按分数填满头部、再给结尾留一段（结论常在最后），省略量在提示词里标出。
+
+**面板与安全**：面板挂在 Shadow DOM 里，与宿主页面 CSS 完全隔离；样式用 constructible stylesheet 注入，
+所以连 `style-src 'none'` 的严格 CSP 站点上外观也不丢。模型输出一律用 `textContent` 写入，
+绝不 `innerHTML`。权限只有 4 个：`storage`、`unlimitedStorage`、`scripting`（补注入用）、`activeTab`；
+不修改页面内容、不上传本地文件、没有统计与上报。
+扩展装好之前就已经打开的标签页会被**自动补注入**，弹窗里也有「补注入到本页」按钮与一个诊断面板
+（逐项列出页面类型、内容脚本是否注入、站点访问权限、黑名单、API Key、面板是否隐藏、最近一次运行结果）。
+
+**验证**：12 项静态自检 / 100 项单元测试 / 52 项真实 Chrome 端到端断言。端到端里几条关键的：
+「页面先开、扩展后装」补注入后无需刷新即出现面板；未配 Key 时本地兜底给出 3 条且**网络请求为 0 次**；
+改正文后约 683 毫秒自动更新且第二次提示词用的是新正文；页脚噪声不产生额外调用；同内容第二个标签页
+命中缓存；严格 CSP 站点样式仍生效；div 汤页面也能抽出正文；关掉底部与证据后面板严格只剩 3 行；
+Service Worker 与页面都没有未捕获异常。
+
+**已知边界**：只处理 `http/https`（`file://` 需显式开启）；只摘要主框架，不处理 iframe；
+浏览器不允许扩展注入的页面（`chrome://`、扩展页、应用商店）本来就没有任何反应；
+正文抽取是启发式的，不保证每个站点都完美，纯图/纯视频或正文太短的页面会直接提示「正文太短」
+而不是硬凑 3 条；中文分词用二元组而非词典，γ 的高频词提示偶尔会出现跨词边界的片段
+（γ 本身由模型判定）；有些网关不支持 `response_format: json_object`，扩展会自动去掉再重试一次；
+摘要质量取决于所选模型，同一个页面换模型结论会变（换模型会让缓存键失效并重算）；
+它**不是阅读模式**，不重排页面、不隐藏广告、不翻译。**用摘要做决策前请回到原文确认**。
+
+下载 v0.1.0：<https://xraytun.top/speed-read/speed-read-extension-0.1.0.zip>
+（79,813 字节 / 77.9 KiB，含未压缩源码；顶层目录 `speed-read-extension/`，27 个文件）。
+许可证全文：<https://xraytun.top/speed-read/LICENSE>（MIT；本项目**没有独立仓库**，源码随 zip 分发）。
+
+[一目十行 · SpeedRead 是什么、怎么用 →](speed-read/)
 
 <!-- END external:body -->
 ## 下载

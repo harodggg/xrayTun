@@ -367,6 +367,10 @@ const BASE_SNAPSHOT: AppSnapshot = {
     app_update_available: false,
     checked_at: now - 300,
     check_error: null,
+    checked_at_app: now - 300,
+    check_error_app: null,
+    check_error_core: null,
+    check_error_geo: null,
     progress: null,
   },
   dns: {
