@@ -650,6 +650,9 @@ mod tests {
         assert_eq!(outbound_kind("direct", "freedom"), "direct");
         assert_eq!(outbound_kind("api", "freedom"), "internal");
         assert_eq!(outbound_kind("block", "blackhole"), "block");
+        // 新增的静默拦截出站必须与 `block` 同类：它也是 blackhole，
+        // 界面上该显示成"拦截"，而不是"节点"或"内部"。
+        assert_eq!(outbound_kind("block-silent", "blackhole"), "block");
         assert_eq!(outbound_kind("dns-out", "dns"), "dns");
         assert_eq!(outbound_kind("node-abc", "vless"), "node");
     }
