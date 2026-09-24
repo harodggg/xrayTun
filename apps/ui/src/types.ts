@@ -191,6 +191,76 @@ export interface AppSettings {
    * 「窗口」菜单与 Mission Control 里显示什么，**但标题栏上仍然看不到**（task-140）。
    */
   show_speed_in_title: boolean;
+  /**
+   * 意图过滤（Jev 判定）。
+   *
+   * 与 Rust 侧 `model.rs::IntentSettings` 是同一份形状。默认**关闭 + 演练模式**：
+   * 开启会把"这台机器访问过哪些域名"发到远端网关，不该替用户默认做这个决定。
+   */
+  intent: IntentSettings;
+}
+
+/**
+ * Jev 网关预设。URL 与默认模型写在 Rust 侧（`model.rs::IntentPreset`），
+ * 界面只显示，不自己拼地址 —— 抄错地址的表现是"功能莫名不可用"。
+ */
+export type IntentPreset = "typesafe" | "zen" | "openrouter" | "vercel" | "custom";
+
+/** 可以定罪的端点类别。 */
+export type IntentCategory =
+  | "ad_or_monetization"
+  | "tracker_or_analytics"
+  | "cdn_or_infra"
+  | "api_or_service"
+  | "human_site"
+  | "unknown";
+
+/** 闸门阈值。三条件是 AND，见 `docs/design/INTENT-FILTER.md` §7.2。 */
+export interface IntentThresholds {
+  /** `ads_intent`（"是"的概率）下限。 */
+  ads_intent_min: number;
+  /** `choice` 的 confidence 下限。 */
+  choice_confidence_min: number;
+  /** `risk_of_breakage` 上限：**超过就永远不拦**（误杀刹车）。 */
+  risk_of_breakage_max: number;
+  /** 形状特征最多能把阈值压低多少（有上限，永不定罪）。 */
+  shape_bonus_max: number;
+  block_categories: IntentCategory[];
+}
+
+/** 用户对误杀选的动作。**必须显式选**，我们绝不替他猜。 */
+export type IntentAllowAction = "direct" | "proxy";
+
+export interface IntentAllowOverride {
+  host: string;
+  action: IntentAllowAction;
+}
+
+export interface IntentSettings {
+  enabled: boolean;
+  /** 演练模式：判决照做、审计照写，但不下发拦截规则。默认 true。 */
+  drill: boolean;
+  preset: IntentPreset;
+  /** `preset === "custom"` 时生效；其它预设忽略。 */
+  custom_base_url: string;
+  /** 模型 id；空 = 用预设的默认模型。 */
+  model: string;
+  /**
+   * Jev API Key 的**引用**，不是明文：`keychain:<service>/<account>`。
+   *
+   * 与订阅 token 同一条约定（`store.rs` 模块文档）——密钥进 Keychain，
+   * `settings.json` 里永远不该出现明文。
+   */
+  api_key_ref: string;
+  thresholds: IntentThresholds;
+  per_minute: number;
+  per_day: number;
+  cache_max_entries: number;
+  /** 永不判定的域名（用户白名单）。 */
+  allow_hosts: string[];
+  allow_overrides: IntentAllowOverride[];
+  /** 是否把发给网关的上下文也写进审计。默认 false。 */
+  store_context_in_audit: boolean;
 }
 
 /** 开机自启动的**真实**状态，来自系统的 SMAppService，不是回显设置字段。 */

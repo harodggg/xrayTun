@@ -694,6 +694,40 @@ fn build_policy() -> Value {
 /// 这一层只看得见「预设 + 自定义」；App 自己追加的内部规则 tag（`internal-*`）
 /// 由 [`uniquify_rule_tag_values`] 在**最终 rules 数组**上兜底。
 pub fn merge_rules(s: &AppSettings) -> Vec<RoutingRule> {
+    merge_rules_with_intent(s, &[], &[])
+}
+
+/// 预设 + **意图规则** + 自定义，按优先级拼成一份规则表。
+///
+/// # 意图规则插在哪，以及为什么
+///
+/// ```text
+/// [preset-private]      ← 永远最先（否则路由器/NAS 不可达）
+/// [intent-allow-*]      ← 用户纠正（必须先于 block，才能纠正误杀）
+/// [intent-block-*]      ← Jev 判定的投放/追踪端点
+/// [preset-ads]          ← geosite:category-ads-all（L0 静态名单）
+/// [preset-cn-domain] …
+/// [自定义规则]
+/// ```
+///
+/// 三条顺序理由（每条都对应一个失败模式）：
+///
+/// * **`allow` 必须早于 `block`** —— 反过来的话，用户点"这个拦错了"之后什么都不会发生；
+/// * **意图规则必须早于 `preset-cn-domain` / `preset-ads`** —— 否则被 `direct` 规则先命中，
+///   意图判定花了钱却永远不生效（与 `preset-ads` 必须早于 `preset-cn-domain` 同一条理由）；
+/// * **插在 `preset-private` 之后** —— 私有地址直连是唯一一条不允许被覆盖的规则。
+///
+/// `Custom` 预设下没有任何预设规则，于是意图两带落在**自定义规则之前**：
+/// 意图过滤属于"预设"这一层，用户要纠正就用放行纠正（`allow_overrides`），
+/// 而不是期望自定义规则能压过它。
+///
+/// `intent_allow` / `intent_block` 由 `xt-intent` 的 `materialize()` 产出；
+/// 本函数**不依赖那个 crate**（会成环），只把 `RoutingRule` 当数据。
+pub fn merge_rules_with_intent(
+    s: &AppSettings,
+    intent_allow: &[RoutingRule],
+    intent_block: &[RoutingRule],
+) -> Vec<RoutingRule> {
     let mut rules = if s.routing_preset == RoutingPreset::Custom {
         s.custom_rules.clone()
     } else {
@@ -701,6 +735,19 @@ pub fn merge_rules(s: &AppSettings) -> Vec<RoutingRule> {
         rules.extend(s.custom_rules.iter().cloned());
         rules
     };
+
+    if !intent_allow.is_empty() || !intent_block.is_empty() {
+        let at = rules
+            .iter()
+            .position(|r| r.id == "preset-private")
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let mut band: Vec<RoutingRule> = Vec::with_capacity(intent_allow.len() + intent_block.len());
+        band.extend(intent_allow.iter().cloned());
+        band.extend(intent_block.iter().cloned());
+        rules.splice(at..at, band);
+    }
+
     let mut ids: Vec<String> = rules.iter().map(|r| r.id.clone()).collect();
     if uniquify_tags(&mut ids) > 0 {
         for (rule, id) in rules.iter_mut().zip(ids) {
@@ -1125,6 +1172,146 @@ mod tests {
 
     fn tun_profile(s: &AppSettings) -> InboundProfile {
         InboundProfile::Tun(tun_inbound_spec(s, Some("en0"), true))
+    }
+
+    // -----------------------------------------------------------------------
+    // 意图过滤：规则插入位置（顺序即优先级，错了就是静默失效）
+    // -----------------------------------------------------------------------
+
+    fn intent_rule(id: &str, domain: &str, then: RuleAction) -> RoutingRule {
+        RoutingRule::new(
+            id,
+            format!("测试规则 {id}"),
+            MatchCondition {
+                domains: vec![format!("full:{domain}")],
+                inbound_tags: vec!["tun".into()],
+                ..Default::default()
+            },
+            then,
+        )
+    }
+
+    /// 生效顺序里每个 id 的位置。
+    fn order_of(rules: &[RoutingRule], id: &str) -> usize {
+        rules
+            .iter()
+            .position(|r| r.id == id)
+            .unwrap_or_else(|| panic!("规则表里没有 {id}：{:?}", rules.iter().map(|r| &r.id).collect::<Vec<_>>()))
+    }
+
+    #[test]
+    fn intent_rules_land_after_private_and_before_ads_and_cn() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        let allow = vec![intent_rule("intent-allow-ok.example", "ok.example", RuleAction::Direct)];
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+
+        let rules = merge_rules_with_intent(&s, &allow, &block);
+
+        let private = order_of(&rules, "preset-private");
+        let allow_at = order_of(&rules, "intent-allow-ok.example");
+        let block_at = order_of(&rules, "intent-block-ads.example");
+        let ads = order_of(&rules, "preset-ads");
+        let cn = order_of(&rules, "preset-cn-domain");
+
+        assert!(private < allow_at, "私有地址直连必须永远最先");
+        assert!(allow_at < block_at, "用户放行必须早于拦截（否则纠正无效）");
+        assert!(block_at < ads, "意图拦截必须早于静态广告名单");
+        assert!(block_at < cn, "意图拦截必须早于大陆直连（否则被 direct 先命中）");
+        assert!(ads < cn, "既有的顺序理由不变");
+    }
+
+    #[test]
+    fn intent_bands_are_contiguous_and_ordered_allow_then_block() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        let allow = vec![
+            intent_rule("intent-allow-a.example", "a.example", RuleAction::Direct),
+            intent_rule("intent-allow-b.example", "b.example", RuleAction::Proxy { outbound: None }),
+        ];
+        let block = vec![intent_rule("intent-block-c.example", "c.example", RuleAction::Block)];
+
+        let rules = merge_rules_with_intent(&s, &allow, &block);
+        let allow_at = order_of(&rules, "intent-allow-a.example");
+        assert_eq!(rules[allow_at + 1].id, "intent-allow-b.example");
+        assert_eq!(rules[allow_at + 2].id, "intent-block-c.example");
+    }
+
+    #[test]
+    fn no_intent_rules_means_the_table_is_unchanged() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        let base = merge_rules(&s);
+        let with_empty = merge_rules_with_intent(&s, &[], &[]);
+        assert_eq!(base, with_empty, "没有意图规则时不许改变任何一条既有规则");
+    }
+
+    #[test]
+    fn custom_preset_puts_intent_rules_before_user_rules() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::Custom;
+        s.custom_rules = vec![intent_rule("mine", "mine.example", RuleAction::Proxy { outbound: None })];
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+
+        let rules = merge_rules_with_intent(&s, &[], &block);
+        assert_eq!(rules[0].id, "intent-block-ads.example", "Custom 预设下意图规则也属于「预设」那一层");
+        assert_eq!(rules[1].id, "mine");
+    }
+
+    #[test]
+    fn direct_all_still_gets_the_intent_block_before_the_catch_all() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::DirectAll;
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+
+        let rules = merge_rules_with_intent(&s, &[], &block);
+        // 预设只有一条 catch-all 直连；意图拦截必须在它之前，否则永远不会命中。
+        assert_eq!(rules[0].id, "intent-block-ads.example");
+        assert_eq!(rules.last().unwrap().id, "preset-direct-all");
+    }
+
+    #[test]
+    fn intent_rules_survive_tag_uniquification_and_do_not_collide() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        // 用户自定义规则故意撞上意图规则的 id。
+        s.custom_rules = vec![intent_rule(
+            "intent-block-ads.example",
+            "other.example",
+            RuleAction::Direct,
+        )];
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+
+        let rules = merge_rules_with_intent(&s, &[], &block);
+        let mut ids: Vec<String> = rules.iter().map(|r| r.id.clone()).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "ruleTag 必须全唯一，否则核心拒启（v0.8.37 的 P0）");
+        // 而且只改 tag、不改条件：两条规则都还在，各自的条件未变。
+        let mine = rules.iter().find(|r| r.when.domains == vec!["full:other.example".to_string()]).unwrap();
+        assert_eq!(mine.then, RuleAction::Direct);
+        let intent = rules.iter().find(|r| r.when.domains == vec!["full:ads.example".to_string()]).unwrap();
+        assert_eq!(intent.then, RuleAction::Block);
+    }
+
+    #[test]
+    fn an_intent_block_compiles_to_a_blackhole_rule() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+        let rules = merge_rules_with_intent(&s, &[], &block);
+        let compiled = routing::compile(&rules, "node-x");
+
+        let hit = compiled
+            .iter()
+            .find(|r| r["ruleTag"] == "intent-block-ads.example")
+            .expect("意图拦截规则必须出现在编译结果里");
+        assert_eq!(hit["outboundTag"], "block");
+        assert_eq!(hit["domain"][0], "full:ads.example");
+        assert_eq!(hit["inboundTag"][0], "tun");
+        // Xray 要求每条 field 规则至少有一个生效字段；这里靠 domain 满足。
+        assert!(hit["domain"].as_array().is_some_and(|a| !a.is_empty()));
     }
 
     #[test]

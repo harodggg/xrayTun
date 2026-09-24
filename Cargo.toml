@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/xt-proto",
     "crates/xt-core",
+    "crates/xt-intent",
     "crates/xt-tun",
     "crates/xt-helper",
     "apps/desktop",
@@ -53,12 +54,22 @@ h2 = "0.4"
 http = "1"
 bytes = "1"
 
+# 判定网关（Jev）的 HTTPS 客户端。
+#
+# 只为"一个 POST + 读响应"引入 rustls：**不用 reqwest/hyper**
+# （理由与取舍见 docs/design/INTENT-FILTER.md §5.1）。
+# `default-features = false` 是必须的：默认会拉 aws-lc-rs（要 cmake/nasm），
+# 我们只要 ring 这一条纯 cc 后端。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+
 # CLI（helper / 开发工具）
 clap = { version = "4", features = ["derive"] }
 
 # 内部 crate
 xt-proto = { path = "crates/xt-proto" }
 xt-core = { path = "crates/xt-core" }
+xt-intent = { path = "crates/xt-intent" }
 xt-tun = { path = "crates/xt-tun" }
 
 [profile.release]

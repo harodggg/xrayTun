@@ -716,6 +716,335 @@ impl Default for FakeDnsSettings {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 意图过滤（Jev 判定）
+// ---------------------------------------------------------------------------
+//
+// 完整设计见 `docs/design/INTENT-FILTER.md`，判定引擎在 `xt-intent`。
+// 这里只放**设置形状**：`xt-core` 不能依赖 `xt-intent`（会成环），
+// 所以阈值在这里再写一份同名同义的结构，由桌面层转成 `xt_intent::Thresholds`，
+// 并有一条单测钉住"逐字段都搬过去了"。
+
+/// Jev 网关预设。URL 都写在这里，避免用户在界面上手抄地址抄错。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentPreset {
+    /// TypeSafe 官方网关：`api.typesafe.ai`，模型 `jev-latest`，**需要自己的 Key**。
+    #[default]
+    Typesafe,
+    /// OpenCode Zen：`opencode.ai/zen`，模型 `jev-1.13-free`，**免密钥**。
+    ///
+    /// 刻意单独列出来：它是"先试试看"的唯一零成本入口，但数据会经过第三方网关，
+    /// 所以界面上必须写清楚，不能当成默认值偷偷用。
+    Zen,
+    OpenRouter,
+    Vercel,
+    /// 自填 base URL（高级用户 / 自建网关）。
+    Custom,
+}
+
+impl IntentPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Typesafe => "typesafe",
+            Self::Zen => "zen",
+            Self::OpenRouter => "openrouter",
+            Self::Vercel => "vercel",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// 该预设的 base URL（`Custom` 返回 `None`，由用户填）。
+    pub fn base_url(self) -> Option<&'static str> {
+        match self {
+            Self::Typesafe => Some("https://api.typesafe.ai"),
+            Self::Zen => Some("https://opencode.ai/zen"),
+            Self::OpenRouter => Some("https://openrouter.ai/api"),
+            Self::Vercel => Some("https://ai-gateway.vercel.sh"),
+            Self::Custom => None,
+        }
+    }
+
+    /// 该预设的默认模型。
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Typesafe => "jev-latest",
+            Self::Zen => "jev-1.13-free",
+            Self::OpenRouter => "typesafe/jev-1.13",
+            Self::Vercel => "typesafe-ai/jev",
+            Self::Custom => "jev-latest",
+        }
+    }
+
+    /// 是否需要 API Key。**只有 Zen 免密钥**（上游客户端的硬约束）。
+    pub fn needs_key(self) -> bool {
+        !matches!(self, Self::Zen)
+    }
+}
+
+/// 可以定罪的端点类别（`xt_intent::Category` 的镜像）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentCategory {
+    AdOrMonetization,
+    TrackerOrAnalytics,
+    CdnOrInfra,
+    ApiOrService,
+    HumanSite,
+    Unknown,
+}
+
+impl IntentCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdOrMonetization => "ad_or_monetization",
+            Self::TrackerOrAnalytics => "tracker_or_analytics",
+            Self::CdnOrInfra => "cdn_or_infra",
+            Self::ApiOrService => "api_or_service",
+            Self::HumanSite => "human_site",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 闸门阈值（`xt_intent::Thresholds` 的镜像；默认值必须一致，有测试钉住）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntentThresholds {
+    #[serde(default = "intent_ads_min")]
+    pub ads_intent_min: f32,
+    #[serde(default = "intent_choice_min")]
+    pub choice_confidence_min: f32,
+    #[serde(default = "intent_risk_max")]
+    pub risk_of_breakage_max: f32,
+    /// 形状加分最多能把阈值压低多少。
+    #[serde(default = "intent_bonus_max")]
+    pub shape_bonus_max: f32,
+    #[serde(default = "intent_block_categories")]
+    pub block_categories: Vec<IntentCategory>,
+}
+
+fn intent_ads_min() -> f32 {
+    0.85
+}
+fn intent_choice_min() -> f32 {
+    0.5
+}
+fn intent_risk_max() -> f32 {
+    0.3
+}
+fn intent_bonus_max() -> f32 {
+    0.10
+}
+fn intent_block_categories() -> Vec<IntentCategory> {
+    vec![IntentCategory::AdOrMonetization, IntentCategory::TrackerOrAnalytics]
+}
+
+impl Default for IntentThresholds {
+    fn default() -> Self {
+        Self {
+            ads_intent_min: intent_ads_min(),
+            choice_confidence_min: intent_choice_min(),
+            risk_of_breakage_max: intent_risk_max(),
+            shape_bonus_max: intent_bonus_max(),
+            block_categories: intent_block_categories(),
+        }
+    }
+}
+
+impl IntentThresholds {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errs = Vec::new();
+        for (name, v) in [
+            ("ads_intent_min", self.ads_intent_min),
+            ("choice_confidence_min", self.choice_confidence_min),
+            ("risk_of_breakage_max", self.risk_of_breakage_max),
+            ("shape_bonus_max", self.shape_bonus_max),
+        ] {
+            if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+                errs.push(format!("意图阈值 {name} 必须在 0..=1，现在是 {v}"));
+            }
+        }
+        if self.block_categories.is_empty() {
+            errs.push("意图阈值 block_categories 不能为空（空等于永不拦截）".into());
+        }
+        errs
+    }
+}
+
+/// 用户对"误杀"的纠正动作。**必须由用户显式选**，没有默认值可用而不告知。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentAllowAction {
+    #[default]
+    Direct,
+    Proxy,
+}
+
+/// 一条放行纠正。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntentAllowOverride {
+    pub host: String,
+    #[serde(default)]
+    pub action: IntentAllowAction,
+}
+
+/// 意图过滤的全部设置。**默认关闭 + 演练模式**。
+///
+/// 两个默认值都是产品态度：
+/// * 关闭：判定会把"你访问过哪些域名"发到远端网关，不默认替用户做这个决定；
+/// * 演练模式开：即使开了功能，也先只记录"本该拦谁"。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IntentSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 演练模式：判决照做、审计照写，但**不生成 block 规则**。
+    #[serde(default = "yes")]
+    pub drill: bool,
+    #[serde(default)]
+    pub preset: IntentPreset,
+    /// 预设为 `Custom` 时的 base URL；其它预设忽略。
+    #[serde(default)]
+    pub custom_base_url: String,
+    /// 模型 id。留空表示用预设的默认模型。
+    #[serde(default)]
+    pub model: String,
+    /// Jev API Key 的**引用**，不是明文。
+    ///
+    /// 约定与订阅 token 一致（见 `store.rs` 模块文档）：密钥进 macOS Keychain，
+    /// `settings.json` 里只留 `keychain:<service>/<account>`；空字符串表示没配。
+    /// 桌面层负责读写 Keychain —— **这个字段里永远不该出现明文密钥**。
+    #[serde(default)]
+    pub api_key_ref: String,
+    #[serde(default)]
+    pub thresholds: IntentThresholds,
+    #[serde(default = "intent_per_minute")]
+    pub per_minute: u32,
+    #[serde(default = "intent_per_day")]
+    pub per_day: u32,
+    #[serde(default = "intent_cache_entries")]
+    pub cache_max_entries: usize,
+    /// 永不判定的域名（用户白名单）。
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    /// 用户对误杀的纠正。
+    #[serde(default)]
+    pub allow_overrides: Vec<IntentAllowOverride>,
+    /// 是否把发给网关的上下文也写进审计（默认否，见设计 §9）。
+    #[serde(default)]
+    pub store_context_in_audit: bool,
+}
+
+fn intent_per_minute() -> u32 {
+    10
+}
+fn intent_per_day() -> u32 {
+    200
+}
+fn intent_cache_entries() -> usize {
+    5000
+}
+
+impl Default for IntentSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            drill: true,
+            preset: IntentPreset::default(),
+            custom_base_url: String::new(),
+            model: String::new(),
+            api_key_ref: String::new(),
+            thresholds: IntentThresholds::default(),
+            per_minute: intent_per_minute(),
+            per_day: intent_per_day(),
+            cache_max_entries: intent_cache_entries(),
+            allow_hosts: Vec::new(),
+            allow_overrides: Vec::new(),
+            store_context_in_audit: false,
+        }
+    }
+}
+
+impl IntentSettings {
+    /// Keychain 里存 Jev Key 的服务名/账号（桌面层读写时用同一处定义）。
+    pub const KEYCHAIN_ACCOUNT: &'static str = "jev-api-key";
+
+    /// 生效的 base URL。
+    pub fn base_url(&self) -> Option<&str> {
+        match self.preset {
+            IntentPreset::Custom => {
+                let t = self.custom_base_url.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
+            }
+            other => other.base_url(),
+        }
+    }
+
+    /// 生效的模型 id。
+    pub fn model(&self) -> &str {
+        let m = self.model.trim();
+        if m.is_empty() {
+            self.preset.default_model()
+        } else {
+            m
+        }
+    }
+
+    /// 是否已经具备"能问一次"的最小条件（网关 + 模型 + 密钥）。
+    pub fn ready(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let Some(url) = self.base_url() else { return false };
+        if !url.starts_with("https://") {
+            return false;
+        }
+        if self.preset.needs_key() && self.api_key_ref.trim().is_empty() {
+            return false;
+        }
+        true
+    }
+
+    /// 保存设置前调它。返回**全部**问题，不是第一个。
+    pub fn validate(&self) -> Vec<String> {
+        let mut errs = self.thresholds.validate();
+        if self.enabled {
+            match self.base_url() {
+                None => errs.push("意图过滤已开启，但没有可用的网关地址".into()),
+                Some(url) if !url.starts_with("https://") => {
+                    errs.push("意图过滤的网关地址必须是 https://".into())
+                }
+                Some(_) => {}
+            }
+            if self.preset.needs_key() && self.api_key_ref.trim().is_empty() {
+                errs.push(format!(
+                    "预设「{}」需要 Jev API Key；想零密钥试水请改用 Zen 预设",
+                    self.preset.as_str()
+                ));
+            }
+        }
+        if self.cache_max_entries == 0 {
+            errs.push("意图判决缓存条数不能为 0".into());
+        }
+        if self.per_day > 0 && self.per_minute > self.per_day {
+            errs.push("意图过滤的每分钟上限不能大于每天上限".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for o in &self.allow_overrides {
+            let h = o.host.trim().to_ascii_lowercase();
+            if h.is_empty() {
+                errs.push("放行纠正里有空域名".into());
+            } else if !seen.insert(h) {
+                errs.push("放行纠正里有重复域名".into());
+            }
+        }
+        errs
+    }
+}
+
 /// 设置文件的版本号。用来做**一次性迁移**。
 ///
 /// 0 表示 0.1.0 时代写下的文件（那时还没有这个字段）。
@@ -775,6 +1104,12 @@ pub struct AppSettings {
     /// 但菜单栏空间是公共资源，所以要给一个关掉它的开关。
     #[serde(default = "yes")]
     pub show_speed_in_title: bool,
+    /// 意图过滤（Jev 判定）。默认关闭 + 演练模式，见 [`IntentSettings`]。
+    ///
+    /// `#[serde(default)]` 让老 `settings.json` 直接可用，**不需要迁移**：
+    /// 新字段缺省就等于"用户从没开过这个功能"，与迁移的语义一致。
+    #[serde(default)]
+    pub intent: IntentSettings,
 }
 
 fn default_socks_port() -> u16 {
@@ -810,6 +1145,7 @@ impl Default for AppSettings {
             log_level: default_log_level(),
             restore_system_proxy_on_exit: true,
             show_speed_in_title: true,
+            intent: IntentSettings::default(),
         }
     }
 }
@@ -928,6 +1264,138 @@ mod tests {
 
         let unlimited = SubscriptionUsage::parse_header("upload=1; download=2; total=0");
         assert_eq!(unlimited.ratio(), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // 意图过滤的设置（判定引擎在 `xt-intent`，这里只钉住形状与默认值）
+    // -----------------------------------------------------------------------
+
+    /// 默认值本身就是产品态度：**不默认把用户的浏览域名发到远端网关**，
+    /// 而且即使开了也先只记录（演练模式）。
+    #[test]
+    fn intent_is_off_and_in_drill_mode_by_default() {
+        let i = IntentSettings::default();
+        assert!(!i.enabled);
+        assert!(i.drill, "演练模式必须默认开");
+        assert!(!i.ready(), "没开就不该 ready");
+        assert!(i.base_url().is_some(), "默认预设必须自带一个 https 网关");
+        assert!(!i.model().is_empty());
+    }
+
+    /// 这四个数是**闸门阈值**，与 `xt_intent::Thresholds::default()` 必须一致。
+    /// `xt-core` 不能依赖 `xt-intent`（会成环），所以这里显式钉住数值，
+    /// 桌面层另有一条转换测试做交叉校验。
+    #[test]
+    fn intent_threshold_mirror_matches_the_engine_defaults() {
+        let t = IntentThresholds::default();
+        assert_eq!(t.ads_intent_min, 0.85);
+        assert_eq!(t.choice_confidence_min, 0.5);
+        assert_eq!(t.risk_of_breakage_max, 0.3);
+        assert_eq!(t.shape_bonus_max, 0.10);
+        assert_eq!(
+            t.block_categories,
+            vec![IntentCategory::AdOrMonetization, IntentCategory::TrackerOrAnalytics]
+        );
+    }
+
+    #[test]
+    fn only_zen_is_keyless() {
+        for p in [IntentPreset::Typesafe, IntentPreset::OpenRouter, IntentPreset::Vercel] {
+            assert!(p.needs_key(), "{:?} 需要密钥", p);
+            assert!(p.base_url().unwrap().starts_with("https://"));
+        }
+        assert!(!IntentPreset::Zen.needs_key());
+        assert_eq!(IntentPreset::Zen.default_model(), "jev-1.13-free");
+        assert!(IntentPreset::Custom.base_url().is_none());
+    }
+
+    #[test]
+    fn ready_requires_gateway_and_key_but_not_for_zen() {
+        let mut i = IntentSettings { enabled: true, ..Default::default() };
+        assert!(!i.ready(), "TypeSafe 预设没配 Key 之前不该 ready");
+        i.api_key_ref = "keychain:com.xraytun.intent/jev-api-key".into();
+        assert!(i.ready());
+
+        let zen = IntentSettings { enabled: true, preset: IntentPreset::Zen, ..Default::default() };
+        assert!(zen.ready(), "Zen 免密钥档应当直接可用");
+
+        // 自定义网关必须自己填地址，而且必须是 https。
+        let mut custom = IntentSettings { enabled: true, preset: IntentPreset::Custom, ..Default::default() };
+        assert!(!custom.ready());
+        custom.custom_base_url = "http://insecure.example".into();
+        assert!(!custom.ready(), "明文网关必须拒绝");
+        custom.custom_base_url = "https://gw.example".into();
+        assert!(!custom.ready(), "自建网关同样需要密钥（只有 Zen 是免密钥档）");
+        custom.api_key_ref = "keychain:com.xraytun.intent/jev-api-key".into();
+        assert!(custom.ready());
+    }
+
+    #[test]
+    fn validate_reports_every_problem_at_once() {
+        let mut i = IntentSettings { enabled: true, ..Default::default() };
+        i.thresholds.ads_intent_min = 1.7;
+        i.thresholds.block_categories.clear();
+        i.cache_max_entries = 0;
+        i.per_minute = 500;
+        i.per_day = 100;
+        i.allow_overrides = vec![
+            IntentAllowOverride { host: "a.example".into(), action: IntentAllowAction::Direct },
+            IntentAllowOverride { host: "A.example ".into(), action: IntentAllowAction::Proxy },
+            IntentAllowOverride { host: "  ".into(), action: IntentAllowAction::Direct },
+        ];
+        let errs = i.validate();
+        // 阈值越界 ×1 + 类别空 ×1 + 缺 Key ×1 + 缓存 0 ×1 + 每分钟>每天 ×1 + 重复域名 ×1 + 空域名 ×1
+        assert_eq!(errs.len(), 7, "{errs:?}");
+
+        // 关闭状态下只校验"设置本身是否合法"，不抱怨缺 Key。
+        let mut off = IntentSettings { enabled: false, ..Default::default() };
+        off.thresholds.ads_intent_min = 1.7;
+        assert_eq!(off.validate().len(), 1);
+        assert!(IntentSettings::default().validate().is_empty());
+    }
+
+    /// 老 `settings.json`（没有 `intent` 字段）必须直接可用，**不需要迁移**。
+    #[test]
+    fn settings_written_before_this_feature_still_load() {
+        let old = r#"{
+            "settings_version": 1,
+            "mode": "tun",
+            "socks_port": 10808,
+            "http_port": 10809,
+            "selected_node": null,
+            "routing_preset": "bypass_mainland",
+            "custom_rules": [],
+            "tun": {},
+            "dns": {},
+            "fakedns": {},
+            "core_path": null,
+            "launch_at_login": false,
+            "was_connected": false,
+            "auto_reconnect": true,
+            "log_level": "warning",
+            "restore_system_proxy_on_exit": true,
+            "show_speed_in_title": true
+        }"#;
+        let s: AppSettings = serde_json::from_str(old).expect("老设置必须能读");
+        assert!(!s.intent.enabled, "缺省即关闭");
+        assert!(s.intent.drill);
+        assert_eq!(s.intent.per_day, 200);
+    }
+
+    #[test]
+    fn intent_settings_round_trip_through_json() {
+        let mut s = AppSettings::default();
+        s.intent.enabled = true;
+        s.intent.preset = IntentPreset::Custom;
+        s.intent.custom_base_url = "https://gw.example".into();
+        s.intent.thresholds.ads_intent_min = 0.9;
+        s.intent.allow_overrides = vec![IntentAllowOverride {
+            host: "ok.example".into(),
+            action: IntentAllowAction::Proxy,
+        }];
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
     }
 
     /// 迁移必须把 0.1.0 的默认 DNS 模式改掉 —— 那正是「DNS 频繁

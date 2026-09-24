@@ -1,0 +1,16 @@
+[package]
+name = "xt-intent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "意图过滤判定引擎：把候选端点翻译成 Jev 类型化问题、判决、缓存、预算与路由规则物化"
+
+[dependencies]
+xt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rustls.workspace = true
+webpki-roots.workspace = true

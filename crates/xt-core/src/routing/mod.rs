@@ -76,10 +76,17 @@ impl PortMatcher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MatchCondition {
     /// 域名匹配，支持 Xray 语法：`example.com`（子域+自身）、`domain:example.com`、
-    /// `full:example.com`、`regexp:^a.*`、`geosite:cn`、`ext:custom.srs`。
+    /// `full:example.com`、`regexp:^a.*`、`geosite:cn`、`ext:custom.dat:code`。
+    ///
+    /// ⚠️ **不存在的语法**：`ext:xxx.srs`。以前这里写着 `.srs`，那是 sing-box
+    /// 的规则集格式，**Xray 里没有任何 `.srs` 解析器**（稳定版与预发布版都没有）。
+    /// `ext:` 读的是 `GeoSiteList` / `GeoIPList` **二进制 protobuf** —— 也就是
+    /// `geosite.dat` / `geoip.dat` 本身的格式。照 `.srs` 写只会得到一个加载失败
+    /// 或"规则静默不命中"。
     #[serde(default)]
     pub domains: Vec<String>,
-    /// IP/CIDR 匹配，支持 `geoip:cn`、`ext:cn.srs`、`10.0.0.0/8`。
+    /// IP/CIDR 匹配，支持 `geoip:cn`、`ext:cn.dat:code`（同样是 protobuf，不是 `.srs`）、
+    /// `10.0.0.0/8`。
     #[serde(default)]
     pub ip: Vec<String>,
     #[serde(default)]

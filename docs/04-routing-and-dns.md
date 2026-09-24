@@ -420,12 +420,22 @@ cargo run -p xraytun-desktop --example dns_probe -- --no-socks # 模拟未连
 其余查询类型交给 DNS 出站决定「丢弃还是透传」。
 
 **我们刻意不给 `dns-out` 加 `settings`**，于是走内核默认行为：立刻回一个
-**空 NOERROR**。用一个隔离实例（`dokodemo-door` 收 DNS → `dns-out`，不碰 TUN、
+**0 答案**的响应。用一个隔离实例（`dokodemo-door` 收 DNS → `dns-out`，不碰 TUN、
 不改系统网络）实测三种配法：
 
 | `dns-out` 的配置 | TYPE65 的响应 | 内核日志 | 结论 |
 |---|---|---|---|
 | **不配（当前）** | `NOERROR, ANSWER: 0`，**1ms** | `rejected type` ×1 | ✅ 客户端立刻回退去问 A |
+
+> ⚠️ **两处复测的口径不一致，别把这句话写强。** 2026-09 用同一手法在
+> **稳定版 26.3.27** 上复测，TYPE65 与 TXT 拿到的是 **`rcode=5 REFUSED`、0 答案、约 0ms**
+> （不是 NOERROR）。代码路径能对上：`dns-out` 不配 `settings` 时 `nonIPQuery` 取默认
+> `"reject"`，而 `rejectNonIPQuery` 用的是 `dnsmessage.RCodeRefused`
+> （`proxy/dns/dns.go`）。
+>
+> **对用户行为的影响是一样的**（客户端拿到瞬时空答案 → 不启用 h3 → 回退问 A/AAAA），
+> 所以结论不变；但"空 NOERROR"这个说法在 26.3.27 上**不成立**。
+> 谁再动这一段，请用一个可复现的探测脚本把 rcode 打出来，别只写文字。
 | `nonIPQuery: "drop"` | 不回包，客户端**等到超时** | 无 | ❌ 更卡；且该字段已 deprecated |
 | `rules` + `direct` 到 `223.5.5.5` | `NOERROR, ANSWER: 0` | 无 | ❌ 1ms 变一次真实上游往返，且 223.5.5.5 同样不提供 HTTPS RR |
 

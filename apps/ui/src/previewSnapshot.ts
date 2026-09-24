@@ -213,6 +213,32 @@ const BASE_SNAPSHOT: AppSnapshot = {
     // 预览取**与真实一致**的值，不再靠「字段缺失 ⇒ 界面按默认值显示」蒙过去（task-89）。
     auto_reconnect: true,
     show_speed_in_title: false,
+    // `IntentSettings`（`model.rs`）。预览取真实默认值：**关闭 + 演练模式**，
+    // 而且**不填 `api_key_ref`** —— 预览快照里永远不会出现任何密钥引用，
+    // 免得有人误以为"预览里配好了就能用"。
+    intent: {
+      enabled: false,
+      drill: true,
+      preset: "typesafe",
+      custom_base_url: "",
+      model: "",
+      api_key_ref: "",
+      thresholds: {
+        ads_intent_min: 0.85,
+        choice_confidence_min: 0.5,
+        risk_of_breakage_max: 0.3,
+        shape_bonus_max: 0.1,
+        block_categories: ["ad_or_monetization", "tracker_or_analytics"],
+      },
+      per_minute: 10,
+      per_day: 200,
+      cache_max_entries: 5000,
+      allow_hosts: [],
+      // 预览里放一条**放行纠正**，这样"被误杀 → 我放行"这条路径在预览态下可见
+      // （它同时会渲染出 `IntentAllowAction` 的两个取值之一）。
+      allow_overrides: [{ host: "cdn.news.example", action: "direct" }],
+      store_context_in_audit: false,
+    },
   },
   subscriptions: [
     {

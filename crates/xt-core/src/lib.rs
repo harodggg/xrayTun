@@ -26,9 +26,10 @@ pub mod xray;
 
 pub use error::{Error, Result};
 pub use model::{
-    AppSettings, DatapathMode, DnsHandling, DnsSettings, FakeDnsSettings, FdOwnership, MuxSettings,
-    Node, NodeId, NodeSource, Protocol, ProxyMode, RealitySettings, RoutingPreset, Subscription,
-    TlsSettings, Transport, TunSettings, VmessSecurity,
+    AppSettings, DatapathMode, DnsHandling, DnsSettings, FakeDnsSettings, FdOwnership,
+    IntentAllowAction, IntentAllowOverride, IntentCategory, IntentPreset, IntentSettings,
+    IntentThresholds, MuxSettings, Node, NodeId, NodeSource, Protocol, ProxyMode, RealitySettings,
+    RoutingPreset, Subscription, TlsSettings, Transport, TunSettings, VmessSecurity,
 };
 pub use routing::{MatchCondition, Network, PortMatcher, RoutingRule, RuleAction};
 pub use subscription::{parse_any, ParseOutcome, SubscriptionFormat};
