@@ -40,10 +40,10 @@
   "name": "信息过滤器 · Jev",
   "operatingSystem": "Chrome 120 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "0.4.3",
+  "softwareVersion": "0.4.4",
   "softwareHelp": "https://xraytun.top/jev-x-filter/",
-  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.3/jev-x-filter-0.4.3.zip",
-  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.3/jev-x-filter-0.4.3.zip",
+  "downloadUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/jev-x-filter-0.4.4.zip",
+  "installUrl": "https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/jev-x-filter-0.4.4.zip",
   "releaseNotes": "https://github.com/harodggg/jev-x-filter/releases",
   "license": "https://github.com/harodggg/jev-x-filter/blob/main/LICENSE",
   "offers": {
@@ -175,6 +175,7 @@
           <a href="#semantics">重复与特殊</a>
           <a href="#lowsignal">附和只留一条</a>
           <a href="#slang">黑话模板</a>
+          <a href="#emotion">情绪言论</a>
           <a href="#samples">真站样本</a>
           <a href="#install">安装</a>
           <a href="#verify">验证状态</a>
@@ -203,13 +204,13 @@
         </p>
 
         <p class="cta">
-          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.3/jev-x-filter-0.4.3.zip"
-            >下载 v0.4.3（zip，168.5 KB）</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/jev-x-filter-0.4.4.zip"
+            >下载 v0.4.4（zip，171.7 KB）</a
           >
           <a class="btn btn--secondary" href="https://github.com/harodggg/jev-x-filter">查看仓库 harodggg/jev-x-filter</a>
         </p>
         <p class="meta">
-          v0.4.3 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
+          v0.4.4 · MIT · Chrome 120+ / Manifest V3 · 无需构建（解压即可加载）· 仓库内无任何密钥
         </p>
         <p class="meta meta--hint">
           下载后：解压 → <code>chrome://extensions</code> → 开发者模式 →
@@ -420,6 +421,27 @@
         <p>同批账号的另外两条本来就能抓：<code>处男无偿 + 只入身体🌻😊不入生活</code> → <code>hide</code>（adult 0.89）；
           <code>👆只入身体❤️👄不入生活。4</code> → <code>hide</code>（归一化后与同批同文案，农场命中）。</p>
       </section>
+      <section class="wrap prose" id="emotion">
+        <h2>v0.4.4：情绪言论折叠/隐藏，并标出是哪一类情绪</h2>
+        <p>
+          「把所有的情绪言论给折叠/删除，然后给予愤怒，喜悦，支持，反对，之类的信息」—— 现在：
+          <strong>愤怒 / 喜悦 / 支持 / 反对 / 悲伤 / 确认 / 表情（纯 emoji）</strong> 七类情绪由<strong>本地分类器</strong>识别，
+          <strong>0 次模型调用</strong>，不占额度、不影响隐藏与账号动作。
+        </p>
+        <table class="facts-table">
+          <thead><tr><th>模式（设置页 1.6 节）</th><th>行为</th></tr></thead>
+          <tbody>
+            <tr><td><strong>折叠</strong>（默认）</td><td>同线程同类情绪<strong>第一条保留</strong>并挂「情绪 · 愤怒」徽标（让你知道这是哪一类），其余折叠成 <code>情绪 · 愤怒：与 @… 的同类情绪回复相同 · 还有 N 条 · [展开]</code></td></tr>
+            <tr><td><strong>隐藏</strong>（= 删除）</td><td><strong>全部折叠</strong>，一条都不显示；条上写明这是哪一类情绪，点「展开」仍可看</td></tr>
+          </tbody>
+        </table>
+        <p>
+          判定<strong>保守</strong>：只有「整串恰好是一句情绪短语（可带加强语和语气词）」才算情绪言论 ——
+          <code>我不同意，公开数据其实是反过来的</code>（讲理由）、疑问句、带数字或链接、超长文本
+          <strong>一律不折叠</strong>：折叠的是情绪，不是论点。不同类别各自归组（2 条愤怒 + 2 条喜悦 → 两条代表 + 两条折叠），
+          只在回复区、同一线程内生效；纯展示，随时可「展开」。
+        </p>
+      </section>
       <section class="wrap prose" id="samples">
         <h2>v0.4.1：用户发来的三条真站样本，两个漏检都补上了</h2>
         <p>
@@ -482,13 +504,13 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
             <tr>
               <td>单元测试</td>
               <td><code>npm test</code></td>
-              <td><strong>250 个通过</strong>（协议契约、类别闸门与开关、预筛、农场、α/β 语义层、菜单识别与对抗、图片像素、黑名单、审计、流水线）</td>
+              <td><strong>252 个通过</strong>（协议契约、类别闸门与开关、预筛、农场、α/β 语义层、菜单识别与对抗、图片像素、黑名单、审计、流水线）</td>
             </tr>
             <tr>
               <td>真实 Chrome 端到端</td>
               <td><code>npm run verify</code></td>
               <td>
-                <strong>127 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
+                <strong>133 项通过</strong>：CDP 加载扩展 → 仿 X 夹具页（20+ 条推文、6 个真站陷阱：反义菜单项、残留 Dropdown、
                 触发按钮无盒子、菜单异步渲染、多语言菜单项、菜单里确实没有目标项）→ 判定 → 隐藏 →
                 α 徽标 / β 折叠 → 点菜单（含「隐藏档也静音」边界与「绝不猜点 + 留下诊断」）
               </td>
@@ -636,7 +658,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
         <ul class="link-list">
           <li>源码仓库：<a href="https://github.com/harodggg/jev-x-filter">github.com/harodggg/jev-x-filter</a></li>
           <li>下载与更新记录：<a href="https://github.com/harodggg/jev-x-filter/releases">GitHub Releases</a></li>
-          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.3/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
+          <li>校验和：<a href="https://github.com/harodggg/jev-x-filter/releases/download/v0.4.4/SHA256SUMS.txt">SHA256SUMS.txt</a></li>
           <li>设计说明：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/DESIGN.md">docs/DESIGN.md</a></li>
           <li>验证记录：<a href="https://github.com/harodggg/jev-x-filter/blob/main/docs/VERIFICATION.md">docs/VERIFICATION.md</a></li>
           <li>判定模型：<a href="https://typesafe.ai/">TypeSafe Jev（System One）</a></li>
@@ -654,7 +676,7 @@ unzip jev-x-filter-0.3.0.zip -d info-filter
           <a href="https://github.com/harodggg/jev-x-filter">仓库</a>里。
         </p>
         <p class="site-footer__meta">
-          信息过滤器 · Jev v0.4.3 · Chrome MV3 · 页面最后更新 2026-09-24 ·
+          信息过滤器 · Jev v0.4.4 · Chrome MV3 · 页面最后更新 2026-09-24 ·
           <a href="#main">回到顶部</a>
         </p>
       </div>
