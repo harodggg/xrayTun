@@ -18,9 +18,10 @@
 //! | 模块 | 职责 | 只依赖 |
 //! |---|---|---|
 //! | [`http1`] | 解析/序列化 HTTP/1.1 头 | 无 |
+//! | [`decide`] | 请求 → 阻断/放行（可注入的接缝） | 无 |
 //! | [`rewrite`] | 响应体裁剪 + **`Content-Length` 一致性** | `serde_json` |
 //! | [`decide`] | 请求 → 阻断/放行 的接缝（可注入） | 无 |
-//! | `tls` / `proxy` | TLS 终结与转发（**唯一碰网络的部分**） | `rustls` / `tokio` |
+//! | [`tls`] / [`proxy`] | TLS 终结与转发（**唯一碰网络的部分**） | `rustls` / `rcgen` / 标准库线程 |
 //!
 //! # 三条写进类型的硬约束
 //!
@@ -38,11 +39,15 @@
 
 pub mod decide;
 pub mod http1;
+pub mod proxy;
 pub mod rewrite;
+pub mod tls;
 
-pub use decide::{BlocklistDecider, Decision, Decider};
+pub use decide::{blocked_response, BlocklistDecider, Decision, Decider};
 pub use http1::RequestHead;
-pub use rewrite::{apply_body_change, strip_json_array_entries, RewriteError};
+pub use proxy::{serve, ProxyConfig, ProxyHandle};
+pub use rewrite::{apply_body_change, length_matches, strip_json_array_entries, RewriteError};
+pub use tls::{CertResolver, LocalCa, TlsError, ALPN_HTTP1};
 
 /// MITM 的状态码/原因短语用的常量（客户端看到的那一版响应）。
 pub const BLOCKED_STATUS_LINE: &str = "HTTP/1.1 204 No Content";
