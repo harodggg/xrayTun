@@ -196,3 +196,68 @@ EXIT=0
 而任务卡上写的 `8 / 4 / 4` 用的是**不带斜杠**的口径。两者**都与 `HEAD` 逐项相同**，
 但当时把 `8 / 4 / 4` 当成唯一目标，属于**把一种口径的计数写成了通用判据** ——
 已改为「与 `HEAD` 逐行 diff 为空」，这条不依赖任何计数口径。
+
+## 10. 停发期间 `main` 上落地的进展与「可发布状态」（Lead 汇总，2026-09-24）
+
+### 10.1 门禁证据（Lead 在隔离 worktree 上跑，命令都是 `BUILD_LOCK_STRICT=1 ./scripts/check.sh --no-release-build`）
+
+| 时点（`main`） | 结果 | 这一步新覆盖了什么 |
+|---|---|---|
+| `fc8a471` | `GATE_EXIT=0` | 站点修复 + Jev 收录回补 |
+| `c45a12c` | `GATE_EXIT=0` | A20/A21 后端字段（`task-179`） |
+| `c61c311` | `GATE_EXIT=0` | 回退态 + `task-184`/`task-185`；**首次含 `gen-site-geo.py check`** |
+| `0568a3a` | `GATE_EXIT=0` | `task-187`（`wt.sh` 锚主工作区）；自测案子 [6] 在门禁里真跑 |
+| **`2f23d22`** | **`GATE_EXIT=0`** | **`task-183`（A10 修正）** + 并行工作流的 `real_core_dataplane`（2 条真核心数据面断言） |
+
+`2f23d22` 的原始数字（15 个测试二进制，`FAILED` 字样 **0** 次）：
+
+```
+xraytun-desktop 259 passed / 0 failed / 5 ignored     type_contract 6/0
+xt-core         254 / 0 / 2                           rule_tag_uniqueness 3 / 0
+xt-helper        17 / 0                               xt-intent 139 / 0
+real_core         5 / 0                               real_core_dataplane 2 / 0
+xt-proto         22 / 0                               xt-tun  79 / 0
+doc-tests         全 0 failed
+✓ 与 CI 相同的全部检查通过
+```
+
+其中 `task-183` 的新回归都在 `2f23d22` 上真绿，例如
+`availability_without_socket_but_installed_reports_not_running`、
+`availability_without_socket_and_artifacts_missing_reports_not_installed`、
+`availability_without_socket_and_unreadable_artifacts_reports_unknown`、
+`humanize_not_running_is_true_for_both_causes`、
+`commands::diagnostics::…::helper_diagnostics_line_reports_state_and_both_disk_facts`。
+
+### 10.2 这段时间真落地的（都在 `origin/main`）
+
+* **A20/A21 真话**（`task-179` + `task-181`）→ 独立验证 `task-184`：UI 探针 8/8、Rust 执行级断言、
+  **四条突变全部变红**（两条 UI + 两条 Rust），跨语言字段一致性从「读码」升级为**执行级断言**；
+* **生成器不再抹掉别人的条目**（`task-180`）：归属保留（sitemap/llms.txt）+ 标记区间（llms-full.txt）+
+  **保不住就非零拒绝** + `check` 模式接进门禁；自测 **19/0 → 21/0**（含版本 bump 不误拦、两种 grep 口径一起打印）；
+* **A10 修正**（`task-183`，详见 `docs/design/task-120-statement-audit.md` §五）：
+  `!socket_present` **不等于**「没装」（socket 由守护进程启动时 bind、退出时删）⇒ 判据换成**安装产物**三分支
+  （`NotRunning` / `NotInstalled` / `Unknown`），并一次改掉四处同源假话（`availability` / `humanize(NotRunning)` /
+  启动日志 / 诊断文本）；实现者 6 条突变 + 验证者 3 条突变全红；
+* **工具链**（`task-185` + `task-187`）：`wt.sh` 默认位置从**会被系统清理**的 `${TMPDIR}` 锚到主工作区
+  （事故实况见 §9/`docs/verification/WORKTREE-TARGET-DIR.md`），并修掉「在 worktree 里运行会解析成 `.wt/.wt`」；
+  位置守卫自测**接进 `check.sh`**（`pass=16/0`，含嵌套断言与反向敏感性）；
+* **并行工作流**（同作者的另一条线）：Jev / 素颜镜项目页、`crates/xt-intent` 引擎与
+  `real_core_dataplane` 真实核心验收 —— **不属于本产品的用户可见改动**，不要写进本版 CHANGELOG。
+
+### 10.3 真发 `v0.8.38` 之前必须做的
+
+1. **`docs/release-notes/v0.8.38.md` 与 `CHANGELOG.md` 的 v0.8.38 段已过时**（写于 `c37eb90`，
+   此后 A20/A21/A10、生成器机制、`wt.sh` 都不在其中）⇒ 先按**实际出厂内容**重写，再走两阶段；
+2. 在**当时的 tip** 上重跑一次门禁（上表每个时点都是独立凭据，别拿旧时点当现在还成立）；
+3. 「**是否需要重装助手**」这条要按当时 tip 重新核一次
+   （`git diff v0.8.37..<冻结> -- crates/xt-helper crates/xt-tun crates/xt-proto`）：
+   本次 `task-183` 只改 `apps/desktop/**`（已复核：`crates/**` 零改动）；但并行工作流在动 `crates/xt-core`、`crates/xt-intent`。
+
+### 10.4 诚实清单（本节）
+
+* 门禁跑的**都是已经过去的 tip**（`main` 上的并行工作流提交很密集）；请把上表当**时点凭据**，不是「此刻 HEAD 一定绿」；
+* 任务板上仍有更早的卡显示 `in_progress`（`task-136` / `task-168` / `task-172` / `task-174` / `task-178` 等），
+  **本节没有核对它们的真实完成情况** —— 它们是否已完成、是否需要关掉，得单独过一遍；
+* 仍未做真机验证的：`task-172`（scoped 默认路由假设，需用户在场）、`task-183` 的两条真实 helper 路径
+  （全新机器 / 装了但没跑）、`task-184` 的真机 WKWebView；
+* `v0.8.38` **tag 依然不存在**（本地与远端都没有），本文件描述的是一份**停发记录 + 可发布状态**，不是已发布事实。
