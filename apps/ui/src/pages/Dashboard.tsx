@@ -92,42 +92,55 @@ export function NoticeAction({ action }: { action: NonNullable<Notice["action"]>
  * 但**结果只出现在设置页的「核心与数据更新」分节里** —— 不打开设置页就永远看不到，
  * 自动检测等于白做。所以这里把它提到**仪表盘状态区**（默认落地页）。
  *
- * # 三态（外加两个诚实的兜底态），判据全部来自 `UpdateStatus` 的现成字段
+ * # 判据：**只用客户端专属字段**（task-193；`task-189` 建了这条提示，`task-190` 补了组合态）
  *
  * | 条件 | 结论 | 文案要能看出 |
  * |---|---|---|
- * | `check_error` + `app_update_available` + `latest_app` | `available`（带 `staleReason`） | 「有新版本 vX.Y.Z」**和**「最近一次检查没成功」**同时**说 |
- * | `check_error`（其余） | `failed` | 「**没查到**」+ 原因 —— **绝不许**写成「已是最新」 |
- * | `app_update_available === true`（无错） | `available` | 「有新版本 vX.Y.Z」 |
- * | 查过 + `latest_app` 有值 + 不可更新 | `latest` | 「已是最新（vX.Y.Z）」 |
- * | 查过但 `latest_app === null` | `unknown` | 「没拿到版本信息」——**不**等同于「已是最新」 |
- * | `checked_at === null` | `unknown` | 「还没检查过」——**不假装知道结果** |
+ * | `check_error_app` + `app_update_available` + `latest_app` | `available`（带 `staleReason`） | 「有新版本 vX.Y.Z」**和**「最近一次**客户端**更新检查没成功」**同时**说 |
+ * | `check_error_app`（其余） | `failed` | 「**客户端**更新检查没查到」+ 原因 —— **绝不许**写成「已是最新」 |
+ * | `app_update_available === true` | `available` | 「有新版本 vX.Y.Z」 |
+ * | `latest_app` 有值 + 不可更新 | `latest` | 「**客户端**已是最新（vX.Y.Z）」 |
+ * | `checked_at_app === null` | `unknown` | 「还没检查过**客户端**更新」——**不假装知道结果** |
+ * | 查过但 `latest_app === null` | `unknown` | 「客户端检查没拿到版本信息」——**不**等同于「已是最新」 |
  *
- * # 为什么第一行是「同时说」而不是「失败优先」（task-190）
+ * # 为什么判据从 `check_error` 换成 `check_error_app`（task-193）
  *
- * 后端 `commands/snapshot.rs` 的 `check_app_update`：`Err` 分支**只写** `check_error`，
- * **不清** `latest_app`；而 `app_update_available` 是 `update_status_with` 每个快照
- * 按 `latest_app` 与当前版本重算的（`snapshot.rs:605-620`）。所以「查到过有新版 + 这次复查
- * 失败」是一个**真实可达**的组合态，而且 `latest_app` **只在成功分支被写入**
- * （`snapshot.rs:234-240`）⇒ 这句话的事实基础是稳的，只是可能**已经不是最新**。
- * 把它判成 `failed` 会把用户最该看到的那条提示（有新版本）一起藏掉。
+ * `check_error` / `checked_at` 是**客户端 / 核心 / geo 三类检查共用**的合并字段
+ * （`state.rs:281-297` 明写「仪表盘判断客户端有没有新版**不要**用它」；写入者见
+ * `version_check.rs::apply_app_check_result` 与 `_core_geo_check_result`）。用它下客户端结论
+ * 会产生两类**真实的错报**：
+ * * **over-claim 方向**（`task-190` 修的就是这条）：`check_error` 非空 ⇒ 说「不知道有没有
+ *   新版本」，而核心/geo 失败时客户端其实可能**已确证是最新** ⇒ 对已知事实装瞎；
+ * * **反向**（`task-189` 的红线）：绝不能把「客户端没查到」说成「已是最新」。
+ * ⇒ 客户端结论只由 `check_error_app` / `checked_at_app` / `latest_app` / `app_update_available`
+ *   决定；`check_error`（合并）**不得**改变它 —— 有一条对五个状态逐一对比的测试钉住。
  *
- * ⚠️ `check_error` 是**客户端/核心/geo 检查共用**的一个字段（`state.rs` 的注释写明；
- * `check_updates` 的 `Err` 分支也写它），所以措辞只说「更新检查没成功」、
- * **不**替它断言是哪一个子系统失败 —— 也因此**不**说「版本号来自上一次检查」，
- * 只说「上次**成功**查到的」（那是 `latest_app` 唯一的写入路径）。
+ * # `task-190` 的组合态为什么仍然成立
+ *
+ * 客户端检查失败时后端**不清** `latest_app`（`version_check.rs::apply_app_check_result`：`Err`
+ * 分支只写 `check_error_app`/`check_error`，`Ok` 分支才写 `latest_app`），而
+ * `app_update_available` 是 `update_status_with` 每个快照按 `latest_app` 与当前版本重算的
+ * ⇒「查到过有新版 + 这次**客户端**复查失败」真实可达：既要说「有新版本 vX」，又要说清
+ * 「版本号是上次成功查到的、可能已经不是最新」。**红线**：这个组合态绝不许说成「已是最新」。
+ * 措辞只说「上次**成功**查到的」（`latest_app` 唯一的写入路径），不断言「上一次检查」。
+ *
+ * ⚠️ 本提示**只谈客户端**（`task-193` 由 Lead 定：**一条事实一处陈述**）。核心/geo 的失败
+ * 在设置页「核心与数据更新」分节有展示位，这里**不**复述 —— 复述就是把两类失败重新混成
+ * 一句，正是本卡要修的东西。
  */
 export type UpdateNotice =
   | {
       kind: "available";
       version: string;
       /**
-       * task-190：**这个是「上次成功检查看到的版本」**，而最近一次检查没成功。
+       * task-190 引入、task-193 改绑到**客户端专属**字段：这个是「上次成功检查看到的版本」，
+       * 而最近一次**客户端**检查没成功（`= check_error_app`）。
        *
-       * 口径：`latest_app.version` 是那次**成功**检查的事实（后端 `check_app_update` 的
-       * `Err` 分支只写 `check_error`、**不清** `latest_app`），所以「有新版本 vX」这句话
-       * 仍然成立；但复查失败意味着**可能已经不是最新**了 —— 所以必须同时带上这个限定语。
-       * 有值时渲染成「（最近一次更新检查没成功；版本号是上次成功查到的）」，`title` 里给原始原因。
+       * 口径：`latest_app.version` 是那次**成功**检查的事实（`version_check.rs::
+       * apply_app_check_result` 的 `Err` 分支只写 `check_error_app`、**不清** `latest_app`），
+       * 所以「有新版本 vX」这句话仍然成立；但复查失败意味着**可能已经不是最新**了 ——
+       * 所以必须同时带上这个限定语。有值时渲染成
+       * 「（最近一次客户端更新检查没成功；版本号是上次成功查到的）」，`title` 里给原始原因。
        */
       staleReason?: string;
     }
@@ -136,28 +149,31 @@ export type UpdateNotice =
   | { kind: "unknown"; reason: string };
 
 export function updateNotice(u: UpdateStatus): UpdateNotice {
-  // **失败优先**：`check_error` 非空时，绝不能走到「不可更新 ⇒ 已是最新」（红线）。
-  // 但「失败」不等于「什么都不知道」：如果**曾经**成功查到过有新版，后端会保留
-  // `latest_app`（`commands/snapshot.rs` 的 `check_app_update`：`Err` 分支只写
-  // `check_error`，不清 `latest_app`），而 `app_update_available` 是每个快照按它重算的。
-  // ⇒ 这个组合态（查到过 + 复查失败）要**同时**说出两件事，否则就是对已知事实装瞎、
-  //   而且会把用户最该看到的那条提示（有新版本）一起藏掉。
-  if (u.check_error) {
+  // **只用客户端专属字段**（task-193）。`check_error` / `checked_at` 是客户端/核心/geo
+  // **共用**的合并字段（`state.rs` 明写不要用它下客户端结论）⇒ 用它会把
+  // 「核心/geo 失败 + 客户端已确证是最新」错报成「不知道有没有新版本」（under-claim，
+  // 也就是 task-190 修掉的那类「对已知事实装瞎」的反方向）。理由与锚点见上面的注释。
+  if (u.check_error_app) {
+    // **失败优先 + 不藏已知信息**（task-190）：曾经成功查到过有新版时，后端会保留
+    // `latest_app`（`Err` 分支不清它），而 `app_update_available` 每个快照按它重算
+    // ⇒ 这个组合态要**同时**说出两件事，否则会把用户最该看到的那条提示一起藏掉。
     if (u.app_update_available && u.latest_app) {
       return {
         kind: "available",
         version: u.latest_app.version,
-        staleReason: u.check_error,
+        staleReason: u.check_error_app,
       };
     }
-    // 没有已知新版 ⇒ 维持 failed：不许说成「已是最新」，也不许凭空说有新版。
-    return { kind: "failed", reason: u.check_error };
+    // 客户端自己没查到、也没有已知新版 ⇒ failed：不许说成「已是最新」，也不许凭空说有新版。
+    return { kind: "failed", reason: u.check_error_app };
   }
   if (u.app_update_available && u.latest_app) {
     return { kind: "available", version: u.latest_app.version };
   }
-  if (u.checked_at === null) return { kind: "unknown", reason: "还没检查过更新" };
-  if (!u.latest_app) return { kind: "unknown", reason: "更新检查没拿到版本信息" };
+  // `checked_at_app`（客户端专属）而不是 `checked_at`（三路共用）：核心/geo 查过不代表
+  // 客户端查过，用后者会把「客户端还没查过」说成「查过了」（进而可能说成「已是最新」）。
+  if (u.checked_at_app === null) return { kind: "unknown", reason: "还没检查过客户端更新" };
+  if (!u.latest_app) return { kind: "unknown", reason: "客户端更新检查没拿到版本信息" };
   return { kind: "latest", version: u.latest_app.version };
 }
 
@@ -287,21 +303,24 @@ export default function Dashboard({
               ? [
                   `有新版本 v${n.version} —— 去更新`,
                   stale
-                    ? `最近一次更新检查没成功（${stale}）；显示的版本号是上次成功查到的结果，` +
+                    ? `最近一次客户端更新检查没成功（${stale}）；显示的版本号是上次成功查到的结果，` +
                       "可能已经不是最新。打开「设置 → 核心与数据更新」可以重试并更新。"
                     : "打开「设置 → 核心与数据更新」查看并更新（本卡只给入口，安装仍在那一页）",
                   stale ? "update-chip update-chip--new update-chip--stale" : "update-chip update-chip--new",
                 ]
               : n.kind === "latest"
                 ? [
-                    `已是最新（v${n.version}）`,
-                    "上次检查的结果：没有比当前更新的版本。点开可以手动再查一次。",
+                    // 点名「客户端」：本提示只谈客户端（task-193），说成光秃秃的「已是最新」
+                    // 会被读成「核心/geo 也是最新的」，而那是另一条事实、另一处陈述。
+                    `客户端已是最新（v${n.version}）`,
+                    "上次客户端检查的结果：没有比当前更新的版本。点开可以手动再查一次。",
                     "update-chip",
                   ]
                 : n.kind === "failed"
                   ? [
-                      // 这一句**必须**看得出是「没查到」，不许读成「已是最新」
-                      "更新检查没成功 —— 所以不知道有没有新版本",
+                      // 这一句**必须**看得出是「没查到」，不许读成「已是最新」；
+                      // 并点名「客户端」——失败原因来自 `check_error_app`，与核心/geo 无关。
+                      "客户端更新检查没成功 —— 所以不知道有没有新版本",
                       n.reason,
                       "update-chip update-chip--fail",
                     ]
@@ -314,11 +333,11 @@ export default function Dashboard({
               onClick={() => onNavigate("settings", "set-update")}
             >
               {text}
-              {/* task-190：限定语必须**看得见**（不只放 title）：
-                  「有新版本」这句的事实基础是**上次成功**那次检查（见 `updateNotice` 注释）。 */}
+              {/* task-190：限定语必须**看得见**（不只放 title）；task-193：换用客户端专属
+                  字段后，这里可以而且**应当**点名「客户端」（见 `updateNotice` 注释）。 */}
               {stale && (
                 <span className="update-chip__note">
-                  （最近一次更新检查没成功；版本号是上次成功查到的）
+                  （最近一次客户端更新检查没成功；版本号是上次成功查到的）
                 </span>
               )}
             </button>
