@@ -34,18 +34,29 @@
 #     ./scripts/wt.sh env fix1                # 打印 export 行（想自己 cd 进去时用）
 #     ./scripts/wt.sh check [目录]            # 守卫：共享 target dir 且 cwd 在 worktree ⇒ 警告/失败
 #     ./scripts/wt.sh list                    # 现有 worktree 及其 target dir
+#     ./scripts/wt.sh dir                     # 只打印「worktree 会放哪」+ 是否在可被清理的临时目录下
 #     ./scripts/wt.sh rm fix1                 # 删 worktree（**同时删它自己的 target dir**）
 #
 # 环境变量：
-#   WT_DIR_ROOT       worktree 放哪（默认 `${TMPDIR:-/tmp}/xraytun-wt`）
+#   WT_DIR_ROOT       worktree 放哪（默认 `<repo>/../.wt` —— **不要放在 ${TMPDIR} 下**，见下）
 #   WT_TARGET_ROOT    各 worktree 的 target dir 放哪（默认 `<repo>/../.cargo-target.wt`）
-#   WT_STRICT=1       `check` / `run` 命中「共享 target dir」时**失败**（退出码 75）而不是只警告
+#   WT_STRICT=1       `check` / `run` / `dir` 命中「共享 target dir」或「worktree 在临时目录下」时
+#                     **失败**（退出码 75）而不是只警告
 #   BUILD_LOCK_*      见 scripts/build-lock.sh（`run` 会走那把锁）
+#
+# # 为什么默认不是 `${TMPDIR}/xraytun-wt`（2026-09-24 16:25 实测事故）
+#
+# 本机 `TMPDIR=/var/folders/…/T/` 是 **macOS 的可清理临时目录**。那次整棵 worktree 树被系统清掉：
+# `git worktree list` 里三个条目全部变 `prunable`、`wt.sh path` 报 `No such file or directory` ——
+# 其中两个是队友**正在编译 / 正在做突变验证**的 worktree ⇒ **在途工作被静默打断**，
+# 而失败方式是「跑到一半目录没了」，很容易被读成「测试自己挂了」。
+# 现在默认放到 `<repo>/../.wt`（与 `WT_TARGET_ROOT` 对称，不会被系统清理）；显式指向临时目录会**大声警告**。
+# 详见 `docs/verification/WORKTREE-TARGET-DIR.md` §6，自测 `docs/verification/verify-wt-dir-root.sh`。
 #
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WT_DIR_ROOT="${WT_DIR_ROOT:-${TMPDIR:-/tmp}/xraytun-wt}"
+WT_DIR_ROOT="${WT_DIR_ROOT:-$ROOT/../.wt}"
 WT_TARGET_ROOT="${WT_TARGET_ROOT:-$ROOT/../.cargo-target.wt}"
 MAIN_TARGET="${MAIN_TARGET_DIR:-$ROOT/../.cargo-target}"
 
@@ -71,6 +82,69 @@ in_linked_worktree() {
 
 # 规范化路径（去掉 ../、符号链接）——比较 target dir 时必须做，否则 `/x/../y` 判不出来
 norm() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+
+# 规范化一个**可能还不存在**的路径（worktree 根目录通常还没建）：
+# 把仍然存在的祖先用 `norm` 解析（macOS 上 /var → /private/var 这类符号链接就在这里被吃掉），
+# 再把剩余部分原样拼回去。**只做字符串处理，不建目录**（自测可以安全调用）。
+norm_nonexist() {
+  local p="$1" rest=""
+  while [ -n "$p" ] && [ "$p" != "/" ] && [ ! -d "$p" ]; do
+    rest="/$(basename "$p")$rest"
+    p="$(dirname "$p")"
+  done
+  printf '%s' "$(norm "$p")$rest"
+}
+
+# ------------------------------------------------------------------ 位置安全性守卫
+# 解析后的路径是否落在 ${TMPDIR} 之下 —— 那是**系统可以清理**的地方（本机 = /var/folders/…/T/）。
+# 2026-09-24 16:25 实测：默认值在那里 ⇒ 整棵树被清、三个正在编译的 worktree 目录消失。
+# 判据是**前缀**（`$TMPDIR` 本身或其子路径）；两边都规范化，避免 `/private/var/…` 与 `/var/…` 的假阴性。
+under_tmpdir() { # $1=路径 ⇒ 在 ${TMPDIR} 之下返回 0
+  local p t
+  p="$(norm_nonexist "$1")"
+  t="$(norm_nonexist "${TMPDIR:-/tmp}")"
+  [ -n "$t" ] || return 1
+  case "$p" in
+    "$t" | "$t"/*) return 0 ;;
+  esac
+  return 1
+}
+
+# 大声警告 +（WT_STRICT=1 时）退出 75。**不 mkdir**，所以 `dir` 子命令与自测都可以安全调用。
+# 显式指定 TMPDIR 的人可能是有意的 ⇒ 默认只警告；要「明确失败」就用 WT_STRICT=1。
+wt_dir_guard() { # $1=1 ⇒ 额外打印解析结果（`new` 用）
+  local p tmp
+  p="$(norm_nonexist "$WT_DIR_ROOT")"
+  if under_tmpdir "$WT_DIR_ROOT"; then
+    tmp="$(norm_nonexist "${TMPDIR:-/tmp}")"
+    cat >&2 <<EOF
+  ⚠️  **worktree 会建在系统的临时目录里，可能被清掉**：
+      WT_DIR_ROOT = $p
+      TMPDIR      = $tmp   （macOS 的可清理临时目录）
+  2026-09-24 16:25 实测：整棵 worktree 树被系统清理，三个正在编译的 worktree 目录整个消失
+  （其中两个是队友的在途验证）——失败方式是「跑到一半目录没了」，不是明确报错。
+  建议：不设 WT_DIR_ROOT（默认 $(norm "$ROOT/../.wt")），或显式指到仓库旁的持久位置。
+EOF
+    [ "${WT_STRICT:-0}" = "1" ] && { echo "  ✗ WT_STRICT=1：worktree 在临时目录下 ⇒ 明确失败（退出码 75）" >&2; return 75; }
+  fi
+  if [ "${1:-0}" = "1" ]; then
+    if under_tmpdir "$WT_DIR_ROOT"; then
+      echo "  · WT_DIR_ROOT = $p （**在 ${TMPDIR} 之下 = 会被系统清理**）"
+    else
+      echo "  · WT_DIR_ROOT = $p （不在临时目录下 ✓）"
+    fi
+  fi
+  return 0
+}
+
+# 只打印「会放哪」+ 安全性（不建任何东西）：给人看，也给自测当接口。
+cmd_dir() {
+  wt_dir_guard 1 || return $?
+  echo "WT_DIR_ROOT=$(norm_nonexist "$WT_DIR_ROOT")"
+  echo "WT_TARGET_ROOT=$(norm_nonexist "$WT_TARGET_ROOT")"
+  if under_tmpdir "$WT_DIR_ROOT"; then echo "under_tmpdir=yes"; else echo "under_tmpdir=no"; fi
+  return 0
+}
 
 # ------------------------------------------------------------------ 守卫
 # 共享 target dir + cwd 不在主工作区 ⇒ 这是本卡要防的那件事。
@@ -107,6 +181,7 @@ EOF
 cmd_new() {
   local name="${1:-}" ref="${2:-HEAD}"
   [ -n "$name" ] || die "用法：wt.sh new <name> [ref]"
+  wt_dir_guard 1 || return $?
   local dir; dir="$(wt_path "$name")"
   [ -e "$dir" ] && die "已存在：${dir}（先 wt.sh rm ${name}）"
   mkdir -p "$WT_DIR_ROOT" "$WT_TARGET_ROOT"
@@ -126,8 +201,8 @@ cmd_new() {
       [ -e "$dir/apps/desktop/binaries/$bn" ] || ln -s "$f" "$dir/apps/desktop/binaries/$bn"
     done
   fi
-  echo "  ✓ worktree: $dir （ref=$(git -C "$dir" rev-parse --short HEAD)）"
-  echo "  ✓ 它的 target dir（**独立**）: $(wt_target "$name")"
+  echo "  ✓ worktree: $(norm "$dir") （ref=$(git -C "$dir" rev-parse --short HEAD)）"
+  echo "  ✓ 它的 target dir（**独立**）: $(norm_nonexist "$(wt_target "$name")")"
   echo
   echo "  下一步二选一："
   echo "    ./scripts/wt.sh run $name -- cargo test --workspace"
@@ -141,7 +216,7 @@ cmd_env() {
   echo "export npm_config_cache=\"${npm_config_cache:-$ROOT/../.npm-cache}\""
 }
 
-cmd_path() { local name="${1:-}"; [ -n "$name" ] || die "用法：wt.sh path <name>"; wt_path "$name"; }
+cmd_path() { local name="${1:-}"; [ -n "$name" ] || die "用法：wt.sh path <name>"; norm_nonexist "$(wt_path "$name")"; }
 
 cmd_rm() {
   local name="${1:-}"; [ -n "$name" ] || die "用法：wt.sh rm <name>"
@@ -186,16 +261,17 @@ cmd_run() {
 
 check_quiet() { WT_STRICT="${WT_STRICT:-0}" cmd_check "$PWD" ; }
 
-cmd_help() { sed -n '3,50p' "$0"; }
+cmd_help() { sed -n "3,$(( $(grep -n '^set -uo pipefail' "$0" | head -1 | cut -d: -f1) - 1 ))p" "$0"; }
 
 case "${1:-}" in
   new) shift; cmd_new "$@" ;;
   run) shift; cmd_run "$@" ;;
   env) shift; cmd_env "$@" ;;
   path) shift; cmd_path "$@" ;;
+  dir) shift; cmd_dir "$@" ;;
   check) shift; cmd_check "$@" ;;
   list) shift; cmd_list "$@" ;;
   rm) shift; cmd_rm "$@" ;;
   -h | --help | "") cmd_help ;;
-  *) die "未知子命令：$1（可用：new / run / env / path / check / list / rm）" ;;
+  *) die "未知子命令：$1（可用：new / run / env / path / dir / check / list / rm）" ;;
 esac

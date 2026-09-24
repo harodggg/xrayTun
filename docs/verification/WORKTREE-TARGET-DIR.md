@@ -85,7 +85,82 @@ $ ./scripts/verify-worktree-isolation.sh --sensitivity     # 把隔离去掉（�
 > 敏感性模式第一次跑时**没有变红**：脚本在跑隔离侧之前 `rm -rf` 了那个 target dir，
 > 把要复现的 stale artifact 一起删了 —— **测试自身制造了「假绿」**。现在只在两侧目录不同时才删。
 
-## 5. 诚实清单：本卡**不**覆盖的场景
+## 5. worktree 放哪里：**不能放在 `${TMPDIR}` 下**（task-185，2026-09-24 实测事故）
+
+本卡上面说的是「target dir 不能共用」；这一节说的是**worktree 自己的目录放在哪**——同类错误的另一半：
+**看起来稳的东西其实建在会被系统清理的地方。**
+
+### 5.1 事故原文（2026-09-24 16:25，Lead 复核）
+
+`scripts/wt.sh` 当时的默认值是 `WT_DIR_ROOT="${TMPDIR:-/tmp}/xraytun-wt"`，而本机
+`TMPDIR=/var/folders/68/…/T/` 是 **macOS 的可清理临时目录**。系统清掉整棵树之后：
+
+```
+$ git worktree list
+…/T/xraytun-wt/leadgate182   91f3d7a  (detached HEAD)  prunable
+…/T/xraytun-wt/t183          7deedb9  (detached HEAD)  prunable
+…/T/xraytun-wt/v179          af582bf  (detached HEAD)  prunable
+```
+
+`wt.sh path` 报 `No such file or directory`；其中 `t183` 是 backend-dev **正在编译**的 worktree，
+`v179` 是 tester **正在做突变验证**的 ⇒ **两个队友的在途工作被静默打断**，`leadgate182` 那次门禁也白跑。
+**target dir 没丢**（`.cargo-target.wt/{leadgate182,t183,v179}` 共 6.0G 仍在）⇒ 重建后可复用。
+失败方式是「跑到一半目录没了」，**很容易被读成「测试自己挂了」**。
+
+### 5.2 改了什么
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 默认 `WT_DIR_ROOT` | `${TMPDIR:-/tmp}/xraytun-wt`（本机 = `/var/folders/…/T/`） | **`<repo>/../.wt`** = `/Users/xbtg-/deepseek-harness/.wt`（与 `WT_TARGET_ROOT` 对称，不会被系统清理） |
+| 落在 `${TMPDIR}` 之下 | 静默按旧行为继续 | **大声警告**（说明会被清理、给出建议），`WT_STRICT=1` ⇒ **退出 75** |
+| 能看「会放哪」 | 无 | `./scripts/wt.sh dir`：打印解析后的绝对路径 + `under_tmpdir=yes/no`；`new` 也会打印 |
+| 路径解析 | `norm()`（目录不存在时原样返回 ⇒ `/var` 与 `/private/var` 前缀判不出来） | 新增 `norm_nonexist()`：把仍存在的祖先 `pwd -P` 解析后再拼回剩余部分 |
+
+实测（真实输出，节选自 `wt.sh new` / `run` / `rm` 一次完整走一遍）：
+
+```
+$ env -u WT_DIR_ROOT ./scripts/wt.sh dir
+  · WT_DIR_ROOT = /Users/xbtg-/deepseek-harness/.wt （不在临时目录下 ✓）
+WT_DIR_ROOT=/Users/xbtg-/deepseek-harness/.wt
+under_tmpdir=no
+
+$ WT_DIR_ROOT="$TMPDIR/xraytun-wt-probe" ./scripts/wt.sh dir      # 退出码 0（只警告）
+  ⚠️  **worktree 会建在系统的临时目录里，可能被清掉**：
+      WT_DIR_ROOT = /private/var/folders/…/T/xraytun-wt-probe
+      TMPDIR      = /private/var/folders/…/T   （macOS 的可清理临时目录）
+  …（写明 2026-09-24 16:25 的事故与建议）…
+under_tmpdir=yes
+
+$ WT_STRICT=1 WT_DIR_ROOT="$TMPDIR/xraytun-wt-probe" ./scripts/wt.sh dir
+  ✗ WT_STRICT=1：worktree 在临时目录下 ⇒ 明确失败（退出码 75）        # 退出码 = 75
+
+$ ./scripts/wt.sh new wt185probe HEAD
+  · WT_DIR_ROOT = /Users/xbtg-/deepseek-harness/.wt （不在临时目录下 ✓）
+  ✓ worktree: /Users/xbtg-/deepseek-harness/.wt/wt185probe （ref=4a937d2）
+  ✓ 它的 target dir（**独立**）: /Users/xbtg-/deepseek-harness/.cargo-target.wt/wt185probe
+
+$ ./scripts/wt.sh run wt185probe -- true
+  ▶ 在 /Users/xbtg-/deepseek-harness/.wt/wt185probe 运行（CARGO_TARGET_DIR=…/wt185probe ← 独立；并走构建锁）
+  🔒 已获取构建锁… 🔓 已释放构建锁：pid=5060 持有 1s                    # 退出码 0
+$ ./scripts/wt.sh rm wt185probe                                       # 只删我自己的，别人的条目一个没动
+```
+
+### 5.3 自测（可复跑，`docs/verification/verify-wt-dir-root.sh`）
+
+```
+$ bash docs/verification/verify-wt-dir-root.sh
+[1] 不设 WT_DIR_ROOT ⇒ 不在临时目录下、且 = <repo>/../.wt          ✓✓
+[2] 显式 = $TMPDIR/… ⇒ 出现警告 + under_tmpdir=yes + 退出码 0      ✓✓✓
+[3] WT_STRICT=1 + 临时目录 ⇒ 退出 75                              ✓✓
+[4] 反向敏感性：把守卫从副本里去掉 ⇒ 警告消失（案子 [2] 的断言变红） ✓
+[5] 边界：恰好 = $TMPDIR ⇒ yes ；同级前缀相近（…/T2/wt）⇒ no        ✓✓
+== 汇总：pass=10 fail=0 ==
+```
+
+**没接进 `scripts/check.sh`**：接的那一刻 ops 正在改 `check.sh`（task-180 刚加了一步），
+Lead 明确要求先别动 ⇒ 自测先独立可跑；接线留作后续（判据已就绪，一条 `bash docs/verification/verify-wt-dir-root.sh` 即可）。
+
+## 6. 诚实清单：本卡**不**覆盖的场景
 
 * **同一个 target dir 里混着旧 release 产物**（`target/release` 与 `target/debug` 的交叉、
   或手工拷进去的二进制）——那既不是 worktree 也不是并发；
@@ -95,3 +170,17 @@ $ ./scripts/verify-worktree-isolation.sh --sensitivity     # 把隔离去掉（�
 * **`target` 目录被外部工具改写**（清缓存脚本、rsync 等）；
 * `wt.sh` 的 node_modules / binaries 是**软链回主树**的 ⇒ 不要在 worktree 里改它们
   （它们是主树的文件）；要改就在主树改，或在 worktree 里删掉软链重建。
+
+### 6.1 §5 的「位置守卫」覆盖不到什么
+
+* **显式把 worktree 放进 `${TMPDIR}` 仍然只是警告**（默认不失败）——那可能是有意的临时实验；
+  要硬拦就用 `WT_STRICT=1`。守卫的作用是让你**不会不知道**，不是禁止；
+* **已经建在旧位置的 worktree 不会被自动迁移**：`git worktree list` 里显示 `prunable` 时需人工重建
+  （`git worktree remove --force <目录>` + `git worktree prune` + `wt.sh new …`）——
+  **不要替别人 prune** 可能正在使用的条目；
+* 守卫只看 **`WT_DIR_ROOT`**：若把 `WT_TARGET_ROOT` 显式指到临时目录，本守卫**不管**
+  （target dir 丢了不会中断在途工作，只是重编一遍，代价不同）；
+* 「会被系统清理」是 **macOS 对 `/var/folders/…/T` 的行为**；其它平台上 `/tmp` 不一定被清 ——
+  守卫判的是「在 `${TMPDIR}` 之下」，**不是**「一定会被清」；
+* 自测只覆盖 `wt.sh` 的路径解析与守卫（不建 worktree、不跑 cargo）⇒ 它证明默认值与守卫行为，
+  **不**证明「新建的 worktree 一定能编译」；后者由 §5.2 里那次真实的 `new` + `run -- true` 作证。
