@@ -375,6 +375,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       onNodesChanged: () => void refresh(),
       onSubscriptionsChanged: () => void refresh(),
       onSettingsChanged: () => void refresh(),
+      // 自动版本检测（task-188：启动 20 s 后查一次 + 每 6 h 复查）跑完就发它。
+      //
+      // **为什么是「重新拉完整快照」而不是只吃事件载荷**：载荷里有 `latest_app` /
+      // `checked_at` / `check_error`，但**没有** `app_update_available` —— 那是后端按
+      // 当前版本号在每个快照里重算的（`snapshot.rs::update_status_with`），而「有没有新版」
+      // 只该由那一个字段决定（后端注释：不让前端自己比版本）。只吃载荷就得在前端再实现
+      // 一遍版本比较 = 第二处真源。⇒ 结论留给快照，这里只负责「让快照变新」。
+      //
+      // **复用同一个 `refresh()`**（不另写刷新逻辑）：形状守卫（task-146 的
+      // `acceptSnapshot`）、错误横幅、`busy` 语义都自动与其它三条事件同路；
+      // 写第二套就会有一份漏掉守卫。
+      onAppUpdateChecked: () => void refresh(),
     });
 
     return unsubscribe;
