@@ -895,8 +895,7 @@ TCP+UDP"的拦截在 UDP 上也静默，得把它拆成两条规则（TCP→`blo
 * **WebSocket 经 MITM 回 501**（本版不支持双向长期搬运），所以 opt-in 名单里不要放这类端点。
 * **`assumed_port` 默认 443**：`freedom.redirect` 不传递原始目标，非 443 的 HTTPS 服务
   要么改这个旋钮、要么拆不通。
-* 本分支（`intent-p4`，worktree `xray-tun-p4`）**还没合并回主树** —— 主树当时卡在另一个
-  会话的 rebase 中。
+* ~~本分支还没合并回主树~~ → **已合并**（见下面那条）。
 
 ### 16.2 真实核心验收：怎么跑、验的是什么
 
@@ -982,6 +981,36 @@ sudo launchctl kickstart -k system/com.xraytun.helper
 ```
 
 ②③ 就是 §8.1 承诺的那条："唯一会改系统状态的东西"也必须**可回滚、且回滚是自动的**。
+
+### 16.5 分支已并入 `main`（三方合并 + 两处内容取舍）
+
+`main` = **`74cc9f8`**：把三路合到一起 —— `main`（另一会话的 5 个本地提交）
++ `intent-p4`（P4 意图过滤的全部工作）+ `origin/main`（此前落后的 20 个提交）。
+
+**两处冲突与解决理由（只有两处，其余自动合并）**：
+
+1. `crates/xt-tun/src/macos/trust.rs`（add/add）：两侧是同一模块的两个版本；
+   `intent-p4` 那份是**严格超集**（`git diff :2 :3 --stat` = 42 insertions / **0 deletions**，
+   只多了 `sha1_fingerprint` 与它的测试向量用例）⇒ 取其版本，**可证明无丢失**。
+2. `site/{,en/}jev-x-filter/index.html`：本地那次是 **v0.4.2** 的站点跟进，origin 是更后的
+   **v0.4.6**；站点页描述扩展的当前版本 ⇒ 取 origin 侧。**这是本次唯一一处内容取舍**，
+   被取代的本地措辞仍在历史里（本地提交是该合并的另一个父提交），
+   `git diff <本地提交> HEAD -- site/jev-x-filter/index.html` 可取回。
+
+合并前的完整备份（都没删）：分支 `backup/main-5769f56`、tag `backup-rebase-head-0f6584a`、
+`/tmp/xt-backup/`（rebase 状态副本 + 641 行主树 WIP patch + autostash 指针 `87047d7`）。
+
+主树那次**状态已不一致**的交互式 rebase 用 `git rebase --quit` 收掉了：
+它**只清 rebase 状态，不动索引与工作区**（实测：HEAD 与 20 个改动文件一字未动，
+autostash 转为 `stash@{0}` 保留）—— 比 `--abort` 安全，因为 `--abort` 会 `reset --hard`
+掉那批未提交的工作。之后才能移动 `main`（git 会拒绝强改正被 rebase 占用的分支）。
+
+**验证（在合并后的树上跑，不是合并前）**：
+`cargo test --workspace` 全绿（desktop 287+8、xt-core 283、xt-intent 152+9、
+xt-mitm 35+7、xt-tun 87、xt-proto 24、helper 18，含 5 条真实核心用例）；
+UI `vitest` **41 文件 / 418 通过**、`tsc --noEmit` 干净。
+`origin/main` 是 `main` 的祖先 ⇒ 之后 `git push origin main` 是 **fast-forward，不需要 force**
+（本次**没有推**：那会把另一会话的 5 个本地提交一并公开，交给他们决定）。
 
 ### P4 踩过的坑（每一条都有测试钉住）
 
