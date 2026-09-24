@@ -102,3 +102,45 @@ EXT_DIR=<解压目录> SHOT_DIR=<临时目录> node tools/verify-in-chrome.js
 其中包含：后台跨域取图出报告、网页悬停角标、**同一张合成人像的原片 24 分 vs 美颜版 66 分**、
 点击展开报告卡片、悬停开关生效、弹窗「分析当前页面最大的图片」、Service Worker 内引擎契约。
 （`EXT_DIR` / `SHOT_DIR` 这两个覆盖点就是为「验证别人手上的副本」加的：默认不往用户的解压目录里写截图。）
+
+
+---
+
+# v1.1.0 更新：加入「AI 生成识别」（2026-09-24 同日）
+
+## 做了什么
+
+扩展从 v1.0.0（74 KB，纯像素美颜检测）升到 **v1.1.0**：新增**按需触发**的本地模型
+「AI 生成识别」（SMOGY-Ai-images-detector，Swin ONNX q4f16，52.5MB，CC BY-NC-4.0）。
+模型与 onnxruntime-web（MIT）的 wasm 打包进扩展，在 MV3 的 offscreen 文档里用 WebAssembly 推理，
+**不联网**。页面同时提供两个包：
+
+| 包 | 大小 | 位置 | 内容 |
+| --- | --- | --- | --- |
+| 完整版 v1.1.0 | **50,027,978 字节（47.7 MiB）** | **GitHub Releases**（本站放不下，见下） | 美颜检测 + AI 生成识别（含模型） |
+| 轻量版 v1.0.0 | 74,185 字节 | 本站 `site/beauty-meter/` | 仅美颜检测，无模型 |
+
+## 踩到并修掉的坑：Cloudflare Pages 单文件上限 25 MiB
+
+完整版 zip 是 50 MB，一开始按老办法放进 `site/beauty-meter/`。提交前查证官方 Limits：
+**单个站点资产最大 25 MiB** —— 直接部署会失败。改法是把大文件放到**仓库的 Releases**，
+页面链接指向 release 资产（这与本仓库既有的 dmg/zip 分发方式一致）。两条保险：
+
+* release tag 用 `beauty-meter-v1.1.0`（**不以 v 开头**，不会触发只在 `v*` 上跑的 `release.yml`），
+  并用 `gh release create --latest=false`，确保仓库的 **Latest 仍是 XrayTun v0.8.37**；
+* 部署工作流新增门禁：`find site -type f -size +25500k` 非空即失败，并注明大文件走 Releases。
+
+## 验证（v1.1.0）
+
+| 检查 | 结果 |
+| --- | --- |
+| 单元测试 + 静态完整性检查 | **37 / 37 通过**（新增 AI 纯逻辑：张量/softmax/三档阈值/结果字段/清单完整性） |
+| 真实 Chrome 端到端 | **24 / 24 通过**，含 AI 识别的 API 与 UI 全链路、offscreen 生命周期、模型首次加载 |
+| AI 识别真机实测 | 真实人像 `aiProb=0`、SD3.5 生成图 `aiProb=1`；模型首次加载 **1.0s**、单张推理 **0.75~0.8s** |
+| **打包产物本身**再跑一遍端到端 | 把 zip 解压到临时目录 → CDP 加载进真实 Chrome → **24 / 24 通过** |
+| `gen-site-jsonld.py check` | 8 个页面全绿（新页 FAQ 10 条与页面逐字一致；`downloadUrl` 指向 release 资产） |
+| `gen-site-geo.py check` | 四份产物逐字节一致（外部分节/索引行/区间照旧逐字保留） |
+| 本地 HTTP 与静态检查 | 两个页面 + 全部相对引用 200；`site/` 无 >25 MiB 文件；两个 zip 内容与清单引用齐备 |
+
+模型选型与**文字 AI 识别为什么没做**（实测 4 个开放模型在 HC3 上只有 50%~60% 准确率）
+写在扩展仓库侧的 `docs/AI-DETECTION.md`，官网页面第四节也如实写了同一份结论。

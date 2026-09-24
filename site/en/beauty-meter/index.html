@@ -6,7 +6,7 @@
     <title>Beauty Meter — hover any image and see how heavily it was beautified (Chrome extension)</title>
     <meta
       name="description"
-      content="Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. No network, no uploads, no models, zero dependencies. It is a separate project by the same author as XrayTun."
+      content="Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. Since v1.1 the full build can also judge, on demand, whether an image looks AI-generated, using a small model bundled inside the extension (50MB; a 74KB light build does beautification only). All inference stays on your machine: no network, no uploads. It is a separate project by the same author as XrayTun."
     />
     <link rel="canonical" href="https://xraytun.top/en/beauty-meter/" />
     <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/beauty-meter/" />
@@ -18,7 +18,7 @@
     <meta property="og:title" content="Beauty Meter — hover any image and see how heavily it was beautified" />
     <meta
       property="og:description"
-      content="Chrome MV3 extension: local pixel analysis, a 0~100 score plus five dimensions (smoothing / whitening / uniformity / desaturation / contrast), a badge on hover and a full report on click. No network, no uploads, no models."
+      content="Chrome MV3 extension: local pixel analysis, a 0~100 score plus five dimensions, a badge on hover, a full report on click, plus on-demand AI-generation detection with a model bundled in the extension. No network, no uploads."
     />
     <meta property="og:url" content="https://xraytun.top/en/beauty-meter/" />
     <meta property="og:locale" content="en" />
@@ -27,7 +27,7 @@
     <meta name="twitter:title" content="Beauty Meter" />
     <meta
       name="twitter:description"
-      content="Local-only beautification detector: a 0~100 score with five explainable dimensions, shown right on the page."
+      content="Local-only beautification detector: a 0~100 score with five explainable dimensions, plus on-demand AI-generation detection."
     />
     <meta name="twitter:image" content="https://xraytun.top/beauty-meter/preview-page.png" />
     <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
@@ -42,10 +42,10 @@
   "name": "Beauty Meter",
   "operatingSystem": "Chrome 109 or later (Manifest V3)",
   "applicationCategory": "BrowserApplication",
-  "softwareVersion": "1.0.0",
+  "softwareVersion": "1.1.0",
   "softwareHelp": "https://xraytun.top/en/beauty-meter/",
-  "downloadUrl": "https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip",
-  "installUrl": "https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip",
+  "downloadUrl": "https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.1.0/beauty-meter-extension-1.1.0.zip",
+  "installUrl": "https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.1.0/beauty-meter-extension-1.1.0.zip",
   "releaseNotes": "https://xraytun.top/en/beauty-meter/",
   "license": "https://xraytun.top/beauty-meter/LICENSE",
   "offers": {
@@ -53,7 +53,7 @@
     "price": "0",
     "priceCurrency": "USD"
   },
-  "description": "Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. No network, no uploads, no models, zero dependencies. It is a separate project by the same author as XrayTun.",
+  "description": "Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. Since v1.1 the full build can also judge, on demand, whether an image looks AI-generated, using a small model bundled inside the extension (50MB; a 74KB light build does beautification only). All inference stays on your machine: no network, no uploads. It is a separate project by the same author as XrayTun.",
   "inLanguage": "en"
 }</script>
 <!-- JSON-LD: generated by scripts/gen-site-jsonld.py — 改文案后重跑，别手改 -->
@@ -112,6 +112,30 @@
     },
     {
       "@type": "Question",
+      "name": "How accurate is the AI-generation detection?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "On a small self-collected sample: 14/15 real photos correct (the one false positive was a food photo), 5/6 AI-generated images correct, and 3/3 synthetic portraits (including a heavily beautified one) judged as real. It is not a forensic tool: it misses newer generative models and can flag compressed or heavily retouched real photos, which is why the UI only offers “likely / looks real / cannot tell”."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does AI detection upload my images?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Both the 52.5MB model and the WebAssembly runtime are bundled in the extension and inference runs in your browser with no network requests at all. The only network activity is you downloading the package."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why is the full build 50MB, and what does the light build leave out?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The full build embeds a 52.5MB image classifier (about 50MB compressed) — that is the price of offline AI detection, and it ships from GitHub Releases because a single site asset is capped at 25 MiB. The light build is 74.2 KiB and does beautification only, with no model files."
+      }
+    },
+    {
+      "@type": "Question",
       "name": "Can it detect bigger eyes or a slimmer face?",
       "acceptedAnswer": {
         "@type": "Answer",
@@ -158,6 +182,7 @@
           <a href="#what">What it is</a>
           <a href="#usage">How to use</a>
           <a href="#score">Reading the score</a>
+          <a href="#ai">AI detection</a>
           <a href="#how">How it works</a>
           <a href="#install">Install</a>
           <a href="#verify">Verification</a>
@@ -180,23 +205,29 @@
           <strong>how far the skin tone was pushed toward bright and colourless</strong>, and
           <strong>how much chroma and contrast were compressed</strong>. It then reports a
           <strong>0~100 beautification score</strong> with five explainable dimensions.
+          <strong>Since v1.1</strong> the full build can also judge, on demand, whether an image
+          <strong>looks AI-generated</strong> using a small model bundled inside the extension.
           Everything runs inside your browser —
-          <strong>no network, no uploads, no cloud model, no model files at all</strong>.
+          <strong>no network, no uploads, no cloud model</strong>.
         </p>
         <p class="cta">
-          <a class="btn btn--primary" href="../../beauty-meter/beauty-meter-extension-1.0.0.zip"
-            >Download v1.0.0 (zip, 74.2 KiB)</a
+          <a class="btn btn--primary" href="https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.1.0/beauty-meter-extension-1.1.0.zip"
+            >Download full build v1.1.0 (zip, 50,027,978 字节（47.7 MiB）, AI model included)</a
           >
-          <a class="btn btn--secondary" href="#how">How the score is computed</a>
+          <a class="btn btn--secondary" href="../../beauty-meter/beauty-meter-extension-1.0.0.zip"
+            >Light build v1.0.0 (zip, 74.2 KiB, beautification only)</a
+          >
+          <a class="btn btn--secondary" href="#ai">How AI detection works</a>
         </p>
         <p class="meta">
-          v1.0.0 · MIT · Chrome 109+ / Manifest V3 · zero dependencies, no build step ·
-          5 dimensions · 25 automated tests + 16 real-Chrome end-to-end checks
+          v1.1.0 · MIT · Chrome 109+ / Manifest V3 · no build step ·
+          5 beautification dimensions + AI-generation detection · 37 automated tests + 24 real-Chrome end-to-end checks
         </p>
         <p class="meta meta--hint">
           After downloading: unzip → <code>chrome://extensions</code> → enable Developer mode →
           “Load unpacked” and select the unzipped directory. Details in
-          <a href="#install">Install</a>.
+          <a href="#install">Install</a>; AI detection ships in the <strong>full build</strong> only
+          and loads its model only when you click the button.
         </p>
 
         <figure class="shot">
@@ -339,6 +370,79 @@
         </p>
       </section>
 
+      <section class="wrap prose" id="ai">
+        <h2>AI-generation detection: a local model, triggered on demand</h2>
+        <p>
+          Beyond beautification, the <strong>full build</strong> can tell whether an image
+          <strong>looks AI-generated</strong>. It is a <strong>separate axis</strong> from beautification:
+          the beautification score is pure pixel statistics and appears on hover; AI detection needs a model,
+          so it runs <strong>only when you click the button</strong> (hovering never loads the model).
+          The 52.5MB model and the inference runtime are <strong>bundled inside the extension</strong> and run
+          as WebAssembly in an MV3 offscreen document — <strong>with no network requests at all</strong>.
+        </p>
+        <table class="facts-table">
+          <thead>
+            <tr><th>Item</th><th>Detail</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Model</td>
+              <td>
+                Quantized ONNX export of SMOGY-Ai-images-detector (Swin, 224×224), 52.5MB, shipped inside the
+                extension; licence <strong>CC BY-NC 4.0 (non-commercial)</strong>, with provenance and
+                modification notes included in the package
+              </td>
+            </tr>
+            <tr>
+              <td>Runtime</td>
+              <td>onnxruntime-web (MIT) WASM backend, single-threaded, no cross-origin isolation required; runs in an offscreen document, not on the page's main thread</td>
+            </tr>
+            <tr>
+              <td>Output</td>
+              <td>
+                An “AI-generated likelihood” percentage plus a three-way verdict:
+                <strong>likely AI-generated / looks like a real photo / cannot tell</strong>,
+                with the model name and elapsed time
+              </td>
+            </tr>
+            <tr>
+              <td>Measured</td>
+              <td>
+                Real photos <strong>14/15</strong> correct, AI-generated images (Stable Diffusion / Midjourney)
+                <strong>5/6</strong> correct, synthetic portraits (including heavy beautification)
+                <strong>3/3</strong> judged as real — beautification does not contaminate this axis
+              </td>
+            </tr>
+            <tr>
+              <td>Latency (real Chrome)</td>
+              <td>First use loads the model in about <strong>1.0s</strong>; later inferences take about <strong>0.75–0.8s</strong></td>
+            </tr>
+          </tbody>
+        </table>
+        <figure class="shot">
+          <img
+            src="../../beauty-meter/preview-ai.png"
+            width="800"
+            height="2500"
+            alt="The popup showing the AI-generation result: the label “looks like a real photo”, AI likelihood 0%, model SMOGY-Ai-images-detector q4f16, 728 ms, followed by a boundary note."
+          />
+          <figcaption>The AI result sits next to the beautification report: three-way verdict, likelihood, model and latency, plus the boundary note.</figcaption>
+        </figure>
+        <p>
+          <strong>The limits are part of the feature.</strong> The model is only reliable inside its training
+          distribution: it <strong>misses newer generative models</strong>, and it can produce false positives on
+          low-quality, heavily compressed or heavily retouched real photos (in our sample, 1 of 15 real/synthetic
+          images — a food photo — was flagged). The UI therefore shows a three-way verdict and
+          <strong>never claims “this is AI”</strong>.
+        </p>
+        <p>
+          <strong>Text</strong> AI-generation detection (Chinese/English) is <strong>not included</strong>:
+          we measured four open models (126MB / 67MB / 103MB / 409MB, including a Chinese-specific one) on the
+          HC3 benchmark and they reached only 50–60% accuracy, or failed in one direction entirely
+          (labelling every human answer as ChatGPT). Shipping a coin-flip detector would be worse than shipping none.
+        </p>
+      </section>
+
       <section class="wrap prose" id="how">
         <h2>How it works: normalise the scale, then look only at skin</h2>
         <p>There is no model here — just pixel statistics. Two steps are what make it stand up:</p>
@@ -381,7 +485,11 @@
       <section class="wrap prose" id="install">
         <h2>Install and configure</h2>
         <ol>
-          <li>Download the <strong>zip</strong> above and unzip it (you get a <code>beauty-meter-extension/</code> directory).</li>
+          <li>
+            Download and unzip either build (both yield a <code>beauty-meter-extension/</code> directory):
+            the <strong>full v1.1.0</strong> (50,027,978 字节（47.7 MiB）, with AI detection, hosted on GitHub Releases because a single site asset is capped at 25 MiB) or the
+            <strong>light v1.0.0</strong> (74.2 KiB, beautification only, no model files).
+          </li>
           <li>Go to <code>chrome://extensions/</code> and turn on <strong>Developer mode</strong>.</li>
           <li>Click “<strong>Load unpacked</strong>” and select that directory (it contains <code>manifest.json</code> directly).</li>
           <li>Pin the extension to the toolbar; hover a portrait on any page.</li>
@@ -397,6 +505,7 @@
           </thead>
           <tbody>
             <tr><td>Hover detection</td><td>on</td><td>Turning it off stops badges; the context menu and popup still work</td></tr>
+            <tr><td>AI-generation detection</td><td>on (full build)</td><td>Turning it off removes the “detect AI generation” button and the model is never loaded</td></tr>
             <tr><td>Hover delay</td><td>300 ms</td><td>Too short fires constantly; too long feels sluggish</td></tr>
             <tr><td>Minimum image size</td><td>160 px</td><td>Only images at least this wide and tall are analysed</td></tr>
             <tr><td>Sensitivity</td><td>1.00</td><td>Scales the deviation from the midpoint; higher flags more images as beautified</td></tr>
@@ -418,13 +527,13 @@
           </thead>
           <tbody>
             <tr>
-              <td>Engine unit tests + static integrity checks</td>
-              <td><strong>25 / 25 pass</strong> (monotonicity, level boundaries, degradation paths, determinism, performance, report contract)</td>
+              <td>Unit tests + static integrity checks</td>
+              <td><strong>37 / 37 pass</strong> (beautification: monotonicity, level boundaries, degradation paths, determinism, performance, report contract; AI: preprocessing tensor, softmax, three-way thresholds, result fields, model and manifest integrity)</td>
             </tr>
             <tr>
               <td>Real-Chrome end to end</td>
               <td>
-                <strong>16 / 16 pass</strong>: the unpacked extension is loaded over CDP, then verified for
+                <strong>24 / 24 pass</strong>: the unpacked extension is loaded over CDP, then verified for
                 background cross-origin image fetching (<code>fetch</code> → <code>createImageBitmap</code> →
                 <code>OffscreenCanvas</code> → engine), the hover badge, the report card, settings taking
                 effect, and the engine contract inside the popup and the service worker
@@ -445,6 +554,14 @@
             <tr>
               <td>Counter-examples</td>
               <td>Landscape / food / warm white marble → skin dimensions disabled and marked “reference only”; black-and-white → refused outright</td>
+            </tr>
+            <tr>
+              <td>AI detection (real Chrome, offscreen inference)</td>
+              <td>
+                Real portrait <code>aiProb=0</code>, Stable Diffusion 3.5 image <code>aiProb=1</code>;
+                first model load 1.0s, single inference 0.75–0.8s; the full click-to-result path is checked
+                both in the in-page report card and in the popup
+              </td>
             </tr>
           </tbody>
         </table>
@@ -472,8 +589,10 @@
         <h2>Privacy and permissions</h2>
         <p>
           Everything is judged locally: the extension makes <strong>no network request for analysis</strong>,
-          there is no telemetry, reporting or tracking, and no remote code is loaded (the Manifest V3
-          default CSP forbids inline and remote scripts).
+          and there is no telemetry, reporting or tracking. The full build bundles the AI model and its
+          inference runtime (52.5MB model + 14MB wasm) and runs WebAssembly locally in an offscreen document;
+          to allow WebAssembly, the extension pages' CSP includes <code>'wasm-unsafe-eval'</code>, which
+          <strong>does not</strong> enable <code>eval</code> or remote scripts.
         </p>
         <table class="facts-table">
           <thead>
@@ -490,6 +609,13 @@
             <tr>
               <td><code>contextMenus</code></td>
               <td>For the right-click entry</td>
+            </tr>
+            <tr>
+              <td><code>offscreen</code></td>
+              <td>
+                The MV3 offscreen document that runs the local AI model: inference cannot live in the
+                service worker (it gets recycled) and should not block the page's main thread
+              </td>
             </tr>
             <tr>
               <td><code>&lt;all_urls&gt;</code> (host permission)</td>
@@ -532,6 +658,12 @@
             facial-landmark model, and this extension neither goes online nor ships a model.
           </li>
           <li>The score is a likelihood, not a verdict: compression and resizing move it a little, and re-compression by a platform stacks texture loss, which can push the score up.</li>
+          <li>
+            <strong>AI detection is only reliable inside its training distribution</strong>: it misses newer
+            generative models, and low-quality, heavily compressed or heavily retouched real photos can be
+            false positives (1 of 15 in our sample). It gives a three-way verdict, never a definitive claim.
+          </li>
+          <li><strong>Text AI detection is not included</strong>: four open models reached only 50–60% accuracy on HC3 — see the section above.</li>
         </ul>
       </section>
 
@@ -585,6 +717,29 @@
           <code>src/</code> ships inside the package — before installing it.
         </p>
 
+        <h3>How accurate is the AI-generation detection?</h3>
+        <p>
+          On a small self-collected sample: 14/15 real photos correct (the one false positive was a food photo),
+          5/6 AI-generated images correct, and 3/3 synthetic portraits (including a heavily beautified one)
+          judged as real. It is not a forensic tool: it <strong>misses newer generative models</strong> and can
+          flag compressed or heavily retouched real photos, which is why the UI only offers
+          “likely / looks real / cannot tell”.
+        </p>
+
+        <h3>Does AI detection upload my images?</h3>
+        <p>
+          No. Both the 52.5MB model and the WebAssembly runtime are bundled in the extension and inference runs
+          in your browser with <strong>no network requests at all</strong>. The only network activity is you
+          downloading the package.
+        </p>
+
+        <h3>Why is the full build 50MB, and what does the light build leave out?</h3>
+        <p>
+          The full build embeds a 52.5MB image classifier (about 50MB compressed) — that is the price of
+          offline AI detection, and it ships from GitHub Releases because a single site asset is capped at
+          25 MiB. The light build is 74.2 KiB and does beautification only, with no model files.
+        </p>
+
         <h3>Can it detect bigger eyes or a slimmer face?</h3>
         <p>
           No. Geometric reshaping needs a facial-landmark model, and this extension neither goes online
@@ -596,15 +751,17 @@
       <section class="wrap prose" id="links">
         <h2>Links</h2>
         <ul>
-          <li><a href="../../beauty-meter/beauty-meter-extension-1.0.0.zip">Download v1.0.0 (zip, 74.2 KiB, unminified source inside)</a></li>
+          <li><a href="https://github.com/harodggg/xrayTun/releases/download/beauty-meter-v1.1.0/beauty-meter-extension-1.1.0.zip">Download full v1.1.0 (zip, 50,027,978 字节（47.7 MiB）, AI model and unminified source inside)</a></li>
+          <li><a href="../../beauty-meter/beauty-meter-extension-1.0.0.zip">Download light v1.0.0 (zip, 74.2 KiB, beautification only)</a></li>
           <li><a href="../../beauty-meter/">中文页面</a> (equivalent section by section)</li>
           <li><a href="../">XrayTun main site</a> (another project by the same author: an Xray GUI client for macOS)</li>
         </ul>
         <p class="lang-note">
           This project currently has <strong>no separate code repository</strong>; the source ships with
           the zip. To sanity-check a download: the <code>version</code> field in
-          <code>manifest.json</code> should read <code>1.0.0</code>, and the package should contain
-          <code>src/common/beauty-engine.js</code>.
+          <code>manifest.json</code> should read <code>1.1.0</code> (full) or <code>1.0.0</code> (light);
+          the full build should also contain <code>src/models/ai-image/model_q4f16.onnx</code> and
+          <code>src/models/ai-image/ATTRIBUTION.md</code> (model provenance and licence).
         </p>
       </section>
     </main>
@@ -619,7 +776,7 @@
           judge how anyone “should” be photographed.
         </p>
         <p class="site-footer__meta">
-          Beauty Meter v1.0.0 · Chrome MV3 · page last updated 2026-09-24 ·
+          Beauty Meter v1.1.0 · Chrome MV3 · page last updated 2026-09-24 ·
           <a href="#main">Back to top</a>
         </p>
       </div>

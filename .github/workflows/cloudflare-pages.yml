@@ -82,6 +82,16 @@ jobs:
               && echo "  ✓ site/$f 收录了 /beauty-meter/" \
               || { echo "  ✗ site/$f 缺少 /beauty-meter/ 收录（发版重写时容易漏）" >&2; fail=1; }
           done
+          # Cloudflare Pages 的单文件上限是 25 MiB（官方 Limits 文档），超过就部署失败。
+          # 2026-09-24 就差点把 50MB 的扩展包放进 site/ —— 大文件走 GitHub Releases
+          # （例：/beauty-meter/ 的完整版，见 docs/verification/SITE-BEAUTY-METER-PAGE.md）。
+          big=$(find site -type f -size +25500k -print)
+          if [ -n "$big" ]; then
+            echo "  ✗ site/ 里有超过 25 MiB 的单文件（Cloudflare Pages 会拒绝）：" >&2
+            echo "$big" >&2; fail=1
+          else
+            echo "  ✓ site/ 没有超过 25 MiB 的单文件"
+          fi
           # 相关项目页自身与它的下载件必须存在（页面上的「下载」按钮不能指向空气）。
           for f in beauty-meter/index.html en/beauty-meter/index.html \
                    beauty-meter/beauty-meter-extension-1.0.0.zip beauty-meter/LICENSE; do
