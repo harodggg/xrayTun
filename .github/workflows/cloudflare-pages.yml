@@ -73,6 +73,20 @@ jobs:
               && echo "  ✓ site/$f 收录了 /jev-x-filter/" \
               || { echo "  ✗ site/$f 缺少 /jev-x-filter/ 收录（发版重写时容易漏）" >&2; fail=1; }
           done
+          # 「素颜镜 · 美颜程度检测」同样必须留在发现入口里（2026-09-24 新增的相关项目页）。
+          # 它目前收录在 sitemap.xml 与 llms.txt；llms-full.txt 的那一节由
+          # `<!-- BEGIN external:… -->` 区间机制维护（另一条工作流），落地后再把这里补成三个文件。
+          # 这里**如实只检查已经存在的入口**，不写一条当下就会红的检查。
+          for f in sitemap.xml llms.txt; do
+            grep -q 'beauty-meter/' "site/$f" \
+              && echo "  ✓ site/$f 收录了 /beauty-meter/" \
+              || { echo "  ✗ site/$f 缺少 /beauty-meter/ 收录（发版重写时容易漏）" >&2; fail=1; }
+          done
+          # 相关项目页自身与它的下载件必须存在（页面上的「下载」按钮不能指向空气）。
+          for f in beauty-meter/index.html en/beauty-meter/index.html \
+                   beauty-meter/beauty-meter-extension-1.0.0.zip beauty-meter/LICENSE; do
+            [ -e "site/$f" ] && echo "  ✓ site/$f" || { echo "  ✗ 缺 site/$f" >&2; fail=1; }
+          done
           [ "$fail" = 0 ] || exit 1
 
       - name: 确保 Pages 项目存在（读回确认；建不了就给出可操作提示）

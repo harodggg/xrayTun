@@ -57,6 +57,15 @@ JEVX_VERSION = "0.3.1"
 JEVX_RELEASES = f"{JEVX_REPO}/releases"
 JEVX_DL = f"{JEVX_REPO}/releases/download/v{JEVX_VERSION}/jev-x-filter-{JEVX_VERSION}.zip"
 
+# 美颜程度检测（素颜镜）：**没有独立仓库**，包直接由本站分发（site/beauty-meter/ 下），
+# 因此 license 指向本站自己发的 MIT 全文（site/beauty-meter/LICENSE），releaseNotes 指向项目页 ——
+# 不借用 XrayTun 的链接。（check() 要求 license 以 /LICENSE 结尾，所以文件就叫 LICENSE。）
+BM_VERSION = "1.0.0"
+BM_PAGE = f"{BASE}/beauty-meter/"
+BM_EN_PAGE = f"{BASE}/en/beauty-meter/"
+BM_DL = f"{BM_PAGE}beauty-meter-extension-{BM_VERSION}.zip"
+BM_LICENSE = f"{BM_PAGE}LICENSE"
+
 PAGES = [
     {
         "path": SITE / "index.html",
@@ -156,6 +165,46 @@ PAGES = [
         "install_url": JEVX_DL,
         "release_notes": JEVX_RELEASES,
         "license_url": f"{JEVX_REPO}/blob/main/LICENSE",
+        "must_contain": ["separate project"],
+    },
+    {
+        # 相关项目页：素颜镜 · 美颜程度检测（Chrome MV3 扩展）。
+        # 与 Jev 同一套做法，但它**没有独立仓库**：下载与许可证都指向本站自己的资产，
+        # 绝不能落到 XrayTun 的 dmg / LICENSE（那是不实陈述）。
+        "path": SITE / "beauty-meter" / "index.html",
+        "pair": "beauty-meter",
+        "lang": "zh-Hans",
+        "url": BM_PAGE,
+        "type": "SoftwareApplication",
+        "name": "素颜镜 · 美颜程度检测",
+        "version": BM_VERSION,
+        "description": "素颜镜是一个 Chrome MV3 扩展：用纯本地像素分析给出 0~100 的「美颜程度」评分，拆成磨皮去纹理、美白提亮、肤色均匀、去色低饱和、通透度压缩五个维度。悬停网页图片 0.3 秒看角标，点击展开完整报告；也可以拖拽、粘贴或选择本地图片分析。不联网、不上传、不带模型、零依赖。它与 XrayTun 是同一个作者的两个独立项目。",
+        "os": "Chrome 109 or later (Manifest V3)",
+        "application_category": "BrowserApplication",
+        "help_url": BM_PAGE,
+        "download_url": BM_DL,
+        "install_url": BM_DL,
+        "release_notes": BM_PAGE,
+        "license_url": BM_LICENSE,
+        # 红线：必须写明它与 XrayTun 是两个独立项目（不许暗示集成）。
+        "must_contain": ["独立项目"],
+    },
+    {
+        "path": SITE / "en" / "beauty-meter" / "index.html",
+        "pair": "beauty-meter",
+        "lang": "en",
+        "url": BM_EN_PAGE,
+        "type": "SoftwareApplication",
+        "name": "Beauty Meter",
+        "version": BM_VERSION,
+        "description": "Beauty Meter is a Chrome MV3 extension that scores how heavily a photo was beautified on a 0~100 scale using purely local pixel analysis, broken into five dimensions: skin smoothing, whitening, skin-tone uniformity, desaturation and contrast compression. Hover an image for 0.3s to see a badge, click it for the full report; drag, paste or pick a local file in the popup. No network, no uploads, no models, zero dependencies. It is a separate project by the same author as XrayTun.",
+        "os": "Chrome 109 or later (Manifest V3)",
+        "application_category": "BrowserApplication",
+        "help_url": BM_EN_PAGE,
+        "download_url": BM_DL,
+        "install_url": BM_DL,
+        "release_notes": BM_EN_PAGE,
+        "license_url": BM_LICENSE,
         "must_contain": ["separate project"],
     },
 ]

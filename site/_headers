@@ -28,6 +28,24 @@
 /en/wasm/
   Cache-Control: public, max-age=0, must-revalidate
 
+# 相关项目页：素颜镜 · 美颜程度检测（2026-09-24 新增）
+# HTML 与上面几条同一取向：文件名不变、没有构建步骤，必须重新验证。
+/beauty-meter/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/en/beauty-meter/
+  Cache-Control: public, max-age=0, must-revalidate
+
+# 下载包文件名里带版本号（beauty-meter-extension-1.0.0.zip）⇒ 内容变则 URL 变，可以放心长缓存。
+/beauty-meter/beauty-meter-extension-1.0.0.zip
+  Cache-Control: public, max-age=604800
+
+# 许可证全文：这个路径没有扩展名，CF 默认按 application/octet-stream 发；
+# JSON-LD 的 license 指向它，浏览器直接打开时应按文本显示。
+/beauty-meter/LICENSE
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=604800
+
 # 图标与社交卡片：内容稳定，给 7 天
 /favicon.ico
   Cache-Control: public, max-age=604800

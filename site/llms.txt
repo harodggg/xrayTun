@@ -28,8 +28,19 @@
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
 - 下载 v0.3.1：<https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip>（MIT，Chrome 120+）
 
-> 维护提示：XrayTun 的发版流程会重写本文件（最近一次发版提交就删掉过本节）。重写时请保留上面这一节，
-> 否则官网「相关项目」会缺一个；llms-full.txt 里的「收录页面（6 个）」也要一并保留。
+## 相关项目：素颜镜 · 美颜程度检测（**独立项目，与 XrayTun 无关**）
+
+- [素颜镜 · 美颜程度检测 页面（中文）](https://xraytun.top/beauty-meter/)：Chrome MV3 扩展，
+  用**纯本地像素分析**给一张图的「美颜程度」打 0~100 分，拆成磨皮去纹理、美白提亮、肤色均匀、
+  去色低饱和、通透度压缩五个维度；悬停网页图片 0.3 秒出角标，点击展开完整报告，
+  也可以拖拽/粘贴/选择本地图片在弹窗里分析。**不联网、不上传图片、不带模型**（零依赖）
+- [Beauty Meter page (English)](https://xraytun.top/en/beauty-meter/)：与中文页逐段等价
+- 下载 v1.0.0：<https://xraytun.top/beauty-meter/beauty-meter-extension-1.0.0.zip>（74.2 KiB，MIT，Chrome 109+）
+- 许可证全文：<https://xraytun.top/beauty-meter/LICENSE>（本项目**没有独立仓库**，源码随 zip 分发）
+
+> 维护提示：XrayTun 的发版流程会重写本文件（最近一次发版提交就删掉过本节）。重写时请保留上面两节
+> （信息过滤器 · Jev、素颜镜 · 美颜程度检测），否则官网「相关项目」会缺条目；
+> llms-full.txt 里的对应小节也要一并保留（那两节按 `<!-- BEGIN external:… -->` 区间保留）。
 
 ## 下载
 
