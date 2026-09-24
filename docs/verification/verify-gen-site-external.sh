@@ -110,6 +110,36 @@ for p in 'jev-x-filter' 'beauty-meter'; do
 done
 
 echo
+echo "== [6] 版本 bump 不被机制误拦（模拟提交 1：VERSION 0.8.38 + PUBLISHED=False）=="
+D6="$(fresh)"; snapshot "$D6"
+python3 - "$D6" <<'PY'
+import re, sys
+from pathlib import Path
+d = Path(sys.argv[1])
+g = d / "scripts/gen-site-geo.py"
+s = g.read_text(encoding="utf-8")
+s = s.replace('VERSION = "0.8.37"', 'VERSION = "0.8.38"')
+s = s.replace("PUBLISHED = True", "PUBLISHED = False", 1)
+s = re.sub(r'DMG_BYTES, DMG_MIB = "[^"]*", "[^"]*"', 'DMG_BYTES, DMG_MIB = "", ""', s)
+s = re.sub(r'ZIP_BYTES, ZIP_MIB = "[^"]*", "[^"]*"', 'ZIP_BYTES, ZIP_MIB = "", ""', s)
+s = re.sub(r'SHA_BYTES = "[^"]*"', 'SHA_BYTES = ""', s)
+g.write_text(s, encoding="utf-8")
+PY
+if python3 "$D6/scripts/gen-site-geo.py" >"$D6/out.txt" 2>&1; then
+  ok "版本 bump 时生成器正常退出 0（机制没有误拦）"
+else
+  bad "版本 bump 被机制拦下（会挡住发版）：$(head -3 "$D6/out.txt" | tr '\n' ' ')"
+fi
+if grep -q '0\.8\.38' "$D6/site/llms.txt"; then ok "产物确实换了版本号（0.8.38 已写入）"; else bad "产物没换版本号（案子无效）"; fi
+for f in "${FILES[@]}"; do
+  if diff <(external_lines "$D6/site/$f.before") <(external_lines "$D6/site/$f") >"$D6/d.txt"; then
+    ok "${f}：版本 bump 后外部条目仍逐行不变"
+  else
+    bad "${f}：版本 bump 后外部条目变了："; sed 's/^/      /' "$D6/d.txt" | head -4
+  fi
+done
+
+echo
 printf '== 汇总：pass=%d fail=%d ==\n' "$PASS" "$FAIL"
-rm -rf "$D1" "$D2" "$D4" "$D4b"
+rm -rf "$D1" "$D2" "$D4" "$D4b" "$D6"
 [ "$FAIL" = 0 ]

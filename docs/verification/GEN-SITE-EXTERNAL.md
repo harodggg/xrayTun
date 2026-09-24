@@ -31,7 +31,7 @@
 ## 3. 证据（`docs/verification/verify-gen-site-external.sh`，**全部在隔离副本里跑**）
 
 ```
-pass=14 fail=0
+pass=19 fail=0
 
 [1] 改前对照 GEN_SITE_EXTERNAL_OFF=1（旧行为）：
     ✓ 照常退出 0（不报错）
@@ -48,12 +48,16 @@ pass=14 fail=0
     ✓ `grep -nE 'jev|beauty' scripts/gen-site-geo.py`：逻辑里 **0 处**字面量（只有注释）
     ✓ 夹具 jev-x-filter：sitemap=8 / llms.txt=4（都在）
     ✓ 夹具 beauty-meter：sitemap=8 / llms.txt=4（都在）   ← **第三个外部项目**，真夹具
+[6] 版本 bump 不被机制误拦（模拟提交 1：VERSION 0.8.38 + PUBLISHED=False + 字节留空）
+    ✓ 生成器正常退出 0（发版流程不会被这条机制挡住）
+    ✓ 产物确实换了版本号（0.8.38 已写入）——证明它真的重算了
+    ✓ 三份产物的外部条目在版本 bump 后仍逐行不变
 ```
 
 **复核命令**：
 
 ```bash
-bash docs/verification/verify-gen-site-external.sh          # 五案，14/0
+bash docs/verification/verify-gen-site-external.sh          # 六案，19/0
 python3 scripts/gen-site-geo.py check                       # 只读：产物 == 生成器重算（当前 4/4 ✓）
 python3 scripts/gen-site-geo.py                             # 写模式；外部条目会被保留
 ```
