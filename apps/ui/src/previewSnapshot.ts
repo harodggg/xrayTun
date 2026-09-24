@@ -246,7 +246,7 @@ const BASE_SNAPSHOT: AppSnapshot = {
       enabled: true,
       listen_port: 10810,
       upstream_port: 10811,
-      domains: ["ads.example"],
+      domains: ["promoted.example"],
       block_quic: false,
       body_strip: { pointer: "/data/items", field: "promoted" },
     },

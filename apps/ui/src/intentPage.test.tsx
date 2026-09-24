@@ -24,6 +24,10 @@ const mocks = vi.hoisted(() => ({
   intentAllow: vi.fn(),
   intentApply: vi.fn(),
   intentClearCache: vi.fn(),
+  mitmStatus: vi.fn(),
+  mitmInstallCa: vi.fn(),
+  mitmRemoveCa: vi.fn(),
+  mitmApply: vi.fn(),
 }));
 
 vi.mock("./ipc", async (importOriginal) => {
@@ -40,6 +44,10 @@ vi.mock("./ipc", async (importOriginal) => {
       intentAllow: mocks.intentAllow,
       intentApply: mocks.intentApply,
       intentClearCache: mocks.intentClearCache,
+      mitmStatus: mocks.mitmStatus,
+      mitmInstallCa: mocks.mitmInstallCa,
+      mitmRemoveCa: mocks.mitmRemoveCa,
+      mitmApply: mocks.mitmApply,
     },
     subscribe: () => () => {},
   };
@@ -48,7 +56,35 @@ vi.mock("./ipc", async (importOriginal) => {
 import Intent from "./pages/Intent";
 import { scenarioSnapshot } from "./previewSnapshot";
 import { StoreProvider } from "./store";
-import type { IntentAuditRecord, IntentSummary } from "./types";
+import type { IntentAuditRecord, IntentSummary, MitmStatus } from "./types";
+
+function mitmStatus(over: Partial<MitmStatus> = {}): MitmStatus {
+  return {
+    enabled: true,
+    active: true,
+    running: true,
+    listen_port: 10810,
+    upstream_port: 10811,
+    domains: ["ads.example"],
+    block_quic: false,
+    ca_fingerprint: "AA:BB",
+    stats: {
+      accepted: 3,
+      blocked: 2,
+      passed: 1,
+      rejected_over_limit: 0,
+      failed: 0,
+      websocket_refused: 0,
+      body_rewritten: 1,
+      body_rewrite_declined: 2,
+    },
+    note: null,
+    applied: null,
+    core_steering: true,
+    core_restart_required: false,
+    ...over,
+  };
+}
 
 function summary(over: Partial<IntentSummary> = {}): IntentSummary {
   return {
@@ -100,10 +136,15 @@ function snapshotWithIntent(patch: Record<string, unknown>) {
   return { ...base, settings: { ...base.settings, intent: { ...base.settings.intent, ...patch } } };
 }
 
-async function mount(snapshot: unknown, anchor: string | undefined) {
+async function mount(
+  snapshot: unknown,
+  anchor: string | undefined,
+  mitm: MitmStatus = mitmStatus(),
+) {
   mocks.snapshot.mockResolvedValue(snapshot);
   mocks.intentStatus.mockResolvedValue(summary());
   mocks.intentAudit.mockResolvedValue([]);
+  mocks.mitmStatus.mockResolvedValue(mitm);
   render(
     <StoreProvider>
       <Intent />
@@ -132,6 +173,7 @@ describe("意图过滤页", () => {
     mocks.intentStatus.mockResolvedValue(summary({ rules_pending_apply: true }));
     mocks.snapshot.mockResolvedValue(snapshotWithIntent({ enabled: true }));
     mocks.intentAudit.mockResolvedValue([]);
+    mocks.mitmStatus.mockResolvedValue(mitmStatus());
     const { unmount } = render(
       <StoreProvider>
         <Intent />
@@ -217,5 +259,79 @@ describe("意图过滤页", () => {
     const row = (await screen.findByText("ads.example")).closest("tr")!;
     (within(row).getByRole("button", { name: "放行（直连）" }) as HTMLButtonElement).click();
     await vi.waitFor(() => expect(mocks.intentAllow).toHaveBeenCalledWith("ads.example", "direct"));
+  });
+
+  // ---- MITM（内容级判定）------------------------------------------------
+  //
+  // 这几条挑的都是**会让用户形成错误信念**的点：以为"开了就在拆包/就在拦"、
+  // 以为"装了证书就生效了"、以为"空名单也没关系"。
+
+  it("MITM 的「为什么没生效」由后端给的一句话显示，而不是界面自己猜", async () => {
+    const text = await mount(
+      scenarioSnapshot(),
+      "MITM（内容级判定，可选）",
+      mitmStatus({
+        running: false,
+        note: "根证书还没装进系统钥匙串：引导规则不会下发给核心，HTTPS 照常直连",
+      }),
+    );
+    expect(text).toContain("根证书还没装进系统钥匙串");
+    // 没在跑就必须显示"没在跑"，不能因为开关开着就显示成生效。
+    expect(text).toContain("没在跑");
+  });
+
+  it("证书刚装好但核心还没重连时，必须明说「要重连一次核心」", async () => {
+    const text = await mount(
+      scenarioSnapshot(),
+      "MITM（内容级判定，可选）",
+      mitmStatus({ core_restart_required: true, core_steering: false }),
+    );
+    expect(text).toContain("要重连一次核心才会下发引导规则");
+  });
+
+  it("名单为空时必须说「不会拆任何域名」，而不是让用户以为开关=在拆包", async () => {
+    const base = scenarioSnapshot();
+    mocks.snapshot.mockResolvedValue({
+      ...base,
+      settings: {
+        ...base.settings,
+        mitm: { ...base.settings.mitm, enabled: true, domains: [] },
+      },
+    });
+    mocks.mitmStatus.mockResolvedValue(mitmStatus({ active: false, domains: [], running: false }));
+    const { unmount } = render(
+      <StoreProvider>
+        <Intent />
+      </StoreProvider>,
+    );
+    await screen.findByText("MITM（内容级判定，可选）");
+    expect(document.body.textContent).toContain("空（不会拆任何域名）");
+    unmount();
+  });
+
+  it("「装入根证书」只调装证书那一个命令（那是唯一改系统状态的动作，必须可归因）", async () => {
+    mocks.mitmInstallCa.mockResolvedValue(mitmStatus());
+    mocks.mitmRemoveCa.mockResolvedValue(mitmStatus({ ca_fingerprint: null }));
+    mocks.mitmApply.mockResolvedValue(mitmStatus());
+    await mount(scenarioSnapshot(), "MITM（内容级判定，可选）");
+    (screen.getByRole("button", { name: "装入根证书" }) as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mocks.mitmInstallCa).toHaveBeenCalledTimes(1));
+    expect(mocks.mitmApply).not.toHaveBeenCalled();
+    expect(mocks.mitmRemoveCa).not.toHaveBeenCalled();
+  });
+
+  it("「应用（起/停代理）」只调起代理那一个命令", async () => {
+    mocks.mitmApply.mockResolvedValue(mitmStatus());
+    await mount(scenarioSnapshot(), "MITM（内容级判定，可选）");
+    (screen.getByRole("button", { name: "应用（起/停代理）" }) as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(mocks.mitmApply).toHaveBeenCalledTimes(1));
+    expect(mocks.mitmInstallCa).not.toHaveBeenCalled();
+  });
+
+  it("代理的账要如实显示（含「裁剪未生效」这一列，它是最容易沉默失败的一项）", async () => {
+    const text = await mount(scenarioSnapshot(), "MITM（内容级判定，可选）");
+    expect(text).toContain("阻断 2");
+    expect(text).toContain("裁剪生效 1");
+    expect(text).toContain("裁剪未生效 2");
   });
 });

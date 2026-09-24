@@ -28,13 +28,13 @@ use crate::state::AppState;
 /// 当前 MITM 状态（含"为什么没在跑"的一句人话）。
 #[tauri::command]
 pub async fn mitm_status(state: State<'_, AppState>) -> Result<MitmStatus, String> {
-    Ok(state
+    state
         .with(|i| {
             let settings = i.settings.mitm.clone();
             let trusted = crate::mitm::ca_is_trusted(i.mitm.existing_fingerprint().as_deref());
             i.mitm.status(&settings, trusted)
         })
-        .ok_or_else(|| "读取 MITM 状态失败（状态锁不可用）".to_string())?)
+        .ok_or_else(|| "读取 MITM 状态失败（状态锁不可用）".to_string())
 }
 
 /// 把本会话的根证书装进系统钥匙串。
