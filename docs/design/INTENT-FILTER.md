@@ -766,7 +766,9 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P2c 免重启热加规则 | ⏳ 未开始 | 目标：用 `RoutingService.AddRule/RemoveRule` 代替重启（§3.1）；验收判据是"切换拦截集合时已建立的连接不断" |
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
-| P4 MITM | ⏳ 未开始 | 目标：helper 装信任锚（进快照）、`freedom.redirect` 引导、ALPN 只 h1、`strip_json` 的 `Content-Length` 一致性 |
+| **P4 第一步：信任锚** | ✅ 完成 | `crates/xt-tun/src/macos/trust.rs`：纯参数构造（逐字断言 `/usr/bin/security`、`-d`、`-r trustRoot`、`System.keychain`）、PEM 形状与**私钥拒收**、指纹白名单（**路径穿越 = 提权面**）、`is_trusted` 读不出来就报错而不猜、install **校验→写文件→才动钥匙串**、remove 幂等、rollback **不删安装前就存在的证书**。`SessionSnapshot.trust_anchors` 带 `#[serde(default)]`（有旧快照 JSON 兼容测试），`controller::rollback` 第一步撤信任锚。xt-tun **79 → 86 passed**，另有 1 条 `#[ignore]` 真实用例（需 root） |
+| **P4 第二步：协议 + helper 接线** | ⏳ 未开始 | `Request::{InstallTrustAnchor, RemoveTrustAnchor}` + `PROTOCOL_VERSION +1` + helper dispatch（**穷尽匹配，编译器会强制补分支**） |
+| **P4 第三步：MITM 数据面** | ⏳ 未开始 | `freedom.redirect` 引导、ALPN 只 h1、`strip_json` 的 `Content-Length` 一致性 |
 
 ### P2b-2 的边界：规则**什么时候**生效
 
