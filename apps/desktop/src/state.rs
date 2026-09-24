@@ -278,18 +278,32 @@ pub struct UpdateStatus {
     #[serde(default)]
     pub app_update_available: bool,
     pub checked_at: Option<u64>,
-    /// 检查更新时的错误（**合并/手动路径**：核心 / geo / 客户端共用一条，语义未变）。
+    /// 检查更新时的错误（**派生字段**）：按 客户端 → 核心 → geo 取**第一条非空**的子系统错误。
     ///
-    /// 仪表盘判断「客户端有没有新版」**不要**用它 —— 它可能来自核心/geo 的失败，
-    /// 那会让界面把「客户端已确认为最新」说成「不知道有没有新版本」（under-claim）。
-    /// 客户端侧请看 [`UpdateStatus::check_error_app`]。
+    /// **为什么是派生而不是「谁最后写谁赢」**：它以前是三路共写的一条 ——
+    /// 于是 ① 客户端复查成功（`check_error.take()`）会把**核心**的失败一起清掉；
+    /// ② 客户端与核心**同时**失败时只留最后一次写入。两次都是**静默少报**。
+    /// 改成派生后「任一路成功都不清除别人的失败」由构造保证，不需要每个写入点
+    /// 各自记住一条非本地的不变量（`version_check::refresh_merged_error` 是唯一写点）。
+    ///
+    /// 界面上它只用于「更新检查有没有问题」的汇总；判断**客户端**有没有新版请看
+    /// [`UpdateStatus::check_error_app`] —— 核心/geo 的失败会让本字段非空，
+    /// 但**不改变**客户端结论。
     pub check_error: Option<String>,
     /// **客户端专属**的检查错误：只由 `check_app_update` 与自动检测写入
     /// （两条路共用 `version_check::apply_app_check_result`）。
     ///
-    /// 核心 / geo 的失败**绝不**写这里（`apply_core_geo_check_result` 只碰
-    /// `check_error`/`checked_at`/`latest_core`/`latest_geo`），由 version_check.rs 的单测钉住。
+    /// 核心 / geo 的失败**绝不**写这里（`apply_core_geo_check_result` 只写
+    /// `check_error_core` / `check_error_geo` / `checked_at` / `latest_core` / `latest_geo`），
+    /// 由 version_check.rs 的单测钉住。
     pub check_error_app: Option<String>,
+    /// **核心专属**的检查错误：只由 `check_updates` 的核心那一支写入（geo 的失败不写这里）。
+    pub check_error_core: Option<String>,
+    /// **geo 专属**的检查错误：只由 `check_updates` 的 geo 那一支写入。
+    ///
+    /// 这一格是补出来的缺口：此前 geo 的 `Err` **没有任何字段可承载** ⇒
+    /// geo 检查失败在界面上**永远看不到**（`apply_core_geo_check_result` 只在 `Ok` 分支处理 geo）。
+    pub check_error_geo: Option<String>,
     /// **客户端专属**的上次检查时刻：只由客户端检查写入。
     ///
     /// `checked_at` 仍是三路共用的旧字段（核心/geo 也会写，语义未变）；

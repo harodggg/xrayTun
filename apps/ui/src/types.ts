@@ -546,12 +546,19 @@ export interface UpdateStatus {
   progress: UpdateProgress | null;
   /** **合并/手动路径**的检查时刻（核心/geo/客户端共用；不能代表「客户端上次检查」）。 */
   checked_at: number | null;
-  /** **合并/手动路径**的检查错误（核心/geo/客户端共用）。 */
+  /**
+   * **派生**的检查错误：按 客户端 → 核心 → geo 取第一条非空的子系统错误。
+   * 后端唯一写点 `version_check::refresh_merged_error` —— 任一路成功**不会**清除别人的失败。
+   */
   check_error: string | null;
   /** **客户端专属**的上次检查时刻（只由客户端检查写入）。 */
   checked_at_app: number | null;
   /** **客户端专属**的检查错误（核心/geo 的失败不会写这里）。 */
   check_error_app: string | null;
+  /** **核心专属**的检查错误（只由 `check_updates` 的核心那一支写入）。 */
+  check_error_core: string | null;
+  /** **geo 专属**的检查错误（以前没有字段承载 ⇒ geo 失败在界面上看不到，task-195 补上）。 */
+  check_error_geo: string | null;
 }
 
 export interface ProbeResult {
