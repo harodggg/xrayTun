@@ -22,7 +22,7 @@
   "use strict";
 
   /** 页面写死的当前版本（与 HTML 正文/JSON-LD 保持一致）。 */
-  var PAGE_VERSION = "0.8.38";
+  var PAGE_VERSION = "0.8.37";
   var REPO_API = "https://api.github.com/repos/harodggg/xrayTun/releases/latest";
 
   // ---- 1. 语言切换记忆 -----------------------------------------------------

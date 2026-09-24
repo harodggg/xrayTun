@@ -34,12 +34,12 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 # 域名迁移时两处一起改（生成器里各只有一处，产物由脚本重写，别手改产物）。
 BASE = "https://xraytun.top"
 
-XRAYTUN_VERSION = "0.8.38"
+XRAYTUN_VERSION = "0.8.37"
 RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 # **发布两阶段**：资产还没发布时（提交 1），downloadUrl 指向 Releases 页面而不是
 # `.../download/v{版本}/...`（那会 404）。发布后（提交 2）把 PUBLISHED 置 True，
 # 结构化数据才写 pinned 直链 —— 与 `gen-site-geo.py` 的开关同名同义。
-PUBLISHED = False
+PUBLISHED = True
 XRAYTUN_DL = (
     f"https://github.com/harodggg/xrayTun/releases/download/v{XRAYTUN_VERSION}"
     f"/XrayTun_{XRAYTUN_VERSION}_x86_64_arm64.dmg"
@@ -69,7 +69,7 @@ PAGES = [
         # 必须与页面 <meta name="description"> 逐字一致 —— 由 check() 强制。
         # （2026-09-20 发现：这里的旧文案比页面 meta 少了关键词那半句，
         #  也就是结构化数据在描述一个页面上没有的旧说法；以页面为准改齐。）
-        "description": "XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.38，通用包（Apple Silicon + Intel），包内自带 Xray 核心。",
+        "description": "XrayTun 是面向 macOS 13 及以上的 Xray 图形客户端，使用 Xray-core 原生 TUN 入站接管系统流量，支持 vmess / vless / trojan / shadowsocks 节点、四种订阅格式、geoip/geosite 分流与 Fake-IP。当前版本 v0.8.37，通用包（Apple Silicon + Intel），包内自带 Xray 核心。",
         "os": "macOS 13.0 or later",
         # 许可证事实（2026-09-20 起）：源码 MIT 且仓库有 LICENSE；随包 Xray-core 是 MPL-2.0。
         "faq_must_contain": ["MPL-2.0"],
@@ -82,7 +82,7 @@ PAGES = [
         "type": "SoftwareApplication",
         "name": "XrayTun",
         "version": XRAYTUN_VERSION,
-        "description": "XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.38, universal build (Apple Silicon + Intel), Xray core included.",
+        "description": "XrayTun is an Xray GUI client for macOS 13 and later. It uses Xray-core's native TUN inbound to take over system traffic, supports vmess / vless / trojan / shadowsocks nodes, four subscription formats, geoip/geosite routing and Fake-IP. Current version v0.8.37, universal build (Apple Silicon + Intel), Xray core included.",
         "os": "macOS 13.0 or later",
         "faq_must_contain": ["MPL-2.0"],
     },

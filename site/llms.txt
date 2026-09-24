@@ -1,7 +1,7 @@
 # XrayTun
 
 > XrayTun 是 macOS 13.0+ 的 Xray 图形客户端，用 Xray-core 原生 TUN 入站接管系统流量（整机按规则走代理）。
-> 当前版本 v0.8.38（2026-09-23），通用包（Apple Silicon + Intel），**包内自带 Xray 核心**。
+> 当前版本 v0.8.37（2026-09-23），通用包（Apple Silicon + Intel），**包内自带 Xray 核心**。
 > 安装包是 ad-hoc 签名、**未公证**的，首次打开会被 Gatekeeper 拦截，需按系统版本手动放行。
 > 仅支持 macOS；没有 Windows / Linux / 移动端版本。本页所有断言都可在仓库文档里逐条核对。
 
@@ -28,15 +28,15 @@
 - [信息过滤器 · Jev 仓库](https://github.com/harodggg/jev-x-filter)（**另一个仓库**，不是本仓库的子目录）
 - 下载 v0.3.1：<https://github.com/harodggg/jev-x-filter/releases/download/v0.3.1/jev-x-filter-0.3.1.zip>（MIT，Chrome 120+）
 
-> 维护提示：XrayTun 的发版流程会重写本文件（v0.8.38 那次就删掉过本节）。重写时请保留上面这一节，
+> 维护提示：XrayTun 的发版流程会重写本文件（最近一次发版提交就删掉过本节）。重写时请保留上面这一节，
 > 否则官网「相关项目」会缺一个；llms-full.txt 里的「收录页面（6 个）」也要一并保留。
 
 ## 下载
 
-- **v0.8.38 正在发布**：资产发布后在本页给出直链与**真实字节数**；
-  在此之前请到 [GitHub Releases](https://github.com/harodggg/xrayTun/releases) 查看（文件名将是
-  `XrayTun_0.8.38_x86_64_arm64.dmg` 与 `XrayTun_0.8.38_x86_64_arm64.zip`）。
-- 不在这里预先写死字节数或直链 —— 发布前它们还不存在。
+- [XrayTun_0.8.37_x86_64_arm64.dmg](https://github.com/harodggg/xrayTun/releases/download/v0.8.37/XrayTun_0.8.37_x86_64_arm64.dmg)：47,469,092 字节（45.3 MiB），主下载
+- [XrayTun_0.8.37_x86_64_arm64.zip](https://github.com/harodggg/xrayTun/releases/download/v0.8.37/XrayTun_0.8.37_x86_64_arm64.zip)：42,954,264 字节（41.0 MiB），备用
+- [SHA256SUMS.txt](https://github.com/harodggg/xrayTun/releases/download/v0.8.37/SHA256SUMS.txt)：校验和（200 字节）
+- [所有版本](https://github.com/harodggg/xrayTun/releases)
 
 ## 安装（要点）
 
