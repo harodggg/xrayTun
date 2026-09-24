@@ -74,10 +74,10 @@ jobs:
               || { echo "  ✗ site/$f 缺少 /jev-x-filter/ 收录（发版重写时容易漏）" >&2; fail=1; }
           done
           # 「素颜镜 · 美颜程度检测」同样必须留在发现入口里（2026-09-24 新增的相关项目页）。
-          # 它目前收录在 sitemap.xml 与 llms.txt；llms-full.txt 的那一节由
-          # `<!-- BEGIN external:… -->` 区间机制维护（另一条工作流），落地后再把这里补成三个文件。
-          # 这里**如实只检查已经存在的入口**，不写一条当下就会红的检查。
-          for f in sitemap.xml llms.txt; do
+          # 与 Jev 一样是外部项目：sitemap / llms.txt 按归属保留，llms-full.txt 的正文分节放在
+          # `<!-- BEGIN external:body -->` 区间里；生成器 check 对四份产物逐字节一致（见
+          # docs/verification/SITE-BEAUTY-METER-PAGE.md）。
+          for f in sitemap.xml llms.txt llms-full.txt; do
             grep -q 'beauty-meter/' "site/$f" \
               && echo "  ✓ site/$f 收录了 /beauty-meter/" \
               || { echo "  ✗ site/$f 缺少 /beauty-meter/ 收录（发版重写时容易漏）" >&2; fail=1; }

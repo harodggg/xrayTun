@@ -43,18 +43,23 @@
 
 ## 与另一条工作流的边界（重要，别踩）
 
-`site/llms-full.txt` 与 `scripts/gen-site-geo.py` 当时正被**另一条工作流**（站点 GEO 生成器的
-「外部条目不许被静默抹掉」机制）改着且**未提交** —— 它的 `check` 在本页提交时仍是红的
-（`llms-full.txt` 与重算结果不一致，属对方的在制品）。
+第一次提交（`e79a735`）时，`site/llms-full.txt` 与 `scripts/gen-site-geo.py` 正被**另一条工作流**
+（task-180：站点 GEO 生成器的「外部条目不许被静默抹掉」机制）改着且**未提交**，它的 `check`
+当时还是红的。所以那次**没有动这两个文件**，发现入口只加在 `sitemap.xml` 与 `llms.txt`
+（对方的机制按 `<loc>` / `## ` 分节逐字保留，实测一致）。
 
-因此本页**只把发现入口加在 sitemap.xml 与 llms.txt**：这两个文件的外部件会被对方的机制
-按 `<loc>` / `## ` 分节**逐字保留**（实测：`check` 报「保留 4 条外部 `<url>`」「保留 2 个外部 `## ` 分节」，
-两者逐字节一致）。**没有动 `llms-full.txt`**，也就没有把别人的在制品一起提交。
+对方落地（`cb7c853`，其机制自测 `pass=21 fail=0`）之后，本页把 `llms-full.txt` 也补齐了：
 
-遗留一件事（对方的机制落地后补，约 5 分钟）：把本页的小节与索引行放进
-`llms-full.txt` 的 `<!-- BEGIN external:body --> … <!-- END external:body -->` 区间，
-并按对方当时的口径更新 `收录页面（…）` 计数行；随后把部署工作流里的
-`for f in sitemap.xml llms.txt` 补成三个文件。
+* 索引表 +2 行（`- 中文：… → https://xraytun.top/beauty-meter/`、`- English: …`），
+  计数行按对方口径从 `6 个，中英各 3` → **`8 个，中英各 4`**（4 个本产品页 + 4 条外部索引行）；
+* 头部提示与正文分节放在对方的保留区间里（`external:header` / `external:body`），
+  **不解析、不重排**；
+* 复核：`python3 scripts/gen-site-geo.py check` 四份产物**逐字节一致**
+  （`保留 4 条外部 <url>`、`保留 2 个外部 ## 分节`、`保留 4 条外部索引行`）；
+* 对方的机制自测 `docs/verification/verify-gen-site-external.sh` 用 **beauty-meter 作第三个外部项目夹具**，
+  我的改动后仍 `pass=21 fail=0`。
+
+部署门禁随之收紧：`beauty-meter/` 现在要求在 **sitemap.xml / llms.txt / llms-full.txt 三个文件**里都被收录。
 
 ## 线上验收
 
