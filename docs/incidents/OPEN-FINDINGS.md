@@ -53,6 +53,50 @@ netstat -rn -f inet | grep -E '^127'
 **口径提醒**：这是**核心自己**的拼写（`falied`），不是我们的笔误；四次采样窗口长度**都不同**，
 **不能说「恶化了 N 倍」** —— 只能说**四个时点都在刷**。要谈趋势必须**同窗口长度**重采。
 
+### F-2 根因（2026-09-24 定位，读上游源码确认）
+
+**不是我们的配置问题。** 上游 `XTLS/Xray-core` tag `v26.9.9`
+`proxy/tun/tun_darwin.go:596`：
+
+```go
+func setinterface(network, address string, fd uintptr, iface *net.Interface) error {
+	var err1, err2 error
+	switch network {
+	case "tcp6", "udp6", "ip6":
+		err1 = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_BOUND_IF, iface.Index)
+		fallthrough                    // ← 关键：v6 也会掉进 v4 分支
+	case "tcp4", "udp4", "ip4":
+		err2 = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, iface.Index)
+	}
+	return errors.Join(err1, err2)
+}
+```
+
+* 对 **IPv6** socket，它先设 `IPV6_BOUND_IF`（正确），再因为 `fallthrough` 去设
+  **IPv4 的 `IP_BOUND_IF`** —— 而这是个 **AF_INET6** socket ⇒ `EINVAL`（"invalid argument"）；
+* `errors.Join(err1, err2)` 把 `err2` 一起返回 ⇒ 调用方把它**记了一条日志**，
+  而**真正生效的那个选项（`IPV6_BOUND_IF`）是成功的**（两行日志里的级别是 `[Info]`，
+  不是 error/warn，与"只是记录"一致）。
+
+**⇒ 结论：每一次 IPv6 出站拨号都会打一行，功能不受影响。**
+也就是说它是**上游的噪音 bug**，不是"链路在坏"。
+
+**为什么它仍然值得处理（运维影响，而不是功能影响）**：
+它现在是本机分诊里**唯一命中的 signature**（6/min，阈值 1），
+于是**每一份现场包都会被分类成它**，真实信号被它盖住 ——
+这正是 `triage-incident.py` 那张信号表本想避免的事。
+
+**三条可选处置（按推荐顺序，都待定）**：
+
+1. **上报上游**：给出精确到行号的位置 + 复现条件（任何 IPv6 出站拨号 +
+   `autoOutboundsInterface` 非空）—— 这是唯一能真正消掉它的做法；
+2. **分诊侧降级为"已知上游噪音"**：但**不是静默忽略** —— 要写进 `SUMMARY.md` 的
+   "已知但不判"清单，并且**当它不再出现时要能发现**（否则将来真坏了也看不出来）；
+3. **不能靠关 `autoOutboundsInterface` 绕开**：它是防路由环的第三道保险
+   （`docs/07` 的 R3.5），关掉等于拿一个真实风险换一行日志。
+
+**本次仍不改判定**：F-2 保持开放，第四次采样与根因一起留档。
+
 **第四次采样的两个额外口径（必须一起读，否则会把它与前三行错比）**：
 
 * **窗口是退让口径**：采集时 `ps` 取不到 App 启动时刻 ⇒ 窗口退让成"最近一次核心启动"，
