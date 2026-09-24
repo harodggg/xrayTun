@@ -1,7 +1,9 @@
 # 意图过滤 · 把 Jev 判定接进 TUN 透明代理
 
-> 状态：**设计（Phase 0）**。本文只承诺能被证据支持的东西；凡是不确定的写法都标了
-> `⚠ 待核实` 并进 §13 清单。实现按 §10 分期推进，每期都有自己的「可运行证据」。
+> 状态：**P0–P4 已实现**（`§16` 是滚动进度；`§16.1` 列出**还没做**的，别当成已做）。
+> 本文只承诺能被证据支持的东西；凡是不确定的写法都标了 `⚠ 待核实` 并进 §13 清单。
+> 实现按 §10 分期推进，每期都有自己的「可运行证据」——**证据与代码在同一棵树上**，
+> 没跑过的不写成跑过。
 >
 > 输入诉求（用户原话）：*"可以把意图加入透明代理。在 tcp/udp 层直接把广告拦截了。
 > 这应该能够过滤所有的广告。取决于 Jev 的准确程度。思考怎么加入 xraytun。"*
@@ -767,8 +769,9 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 | P1.5 离线评测夹具 | ⏳ 未开始 | 目标：用本机 `access_log` 语料 + `geosite:category-ads-all` 标注，量出 holdout 精确率与 FP/1000 连接；**达不到 §10 的判据就不允许默认开启** |
 | P3 UI | ⏳ 未开始 | 目标：开关 / 演练 / 预算 / 阈值 / 白名单 / 审计 / "为什么被拦" |
 | **P4 第一步：信任锚** | ✅ 完成 | `crates/xt-tun/src/macos/trust.rs`：纯参数构造（逐字断言 `/usr/bin/security`、`-d`、`-r trustRoot`、`System.keychain`）、PEM 形状与**私钥拒收**、指纹白名单（**路径穿越 = 提权面**）、`is_trusted` 读不出来就报错而不猜、install **校验→写文件→才动钥匙串**、remove 幂等、rollback **不删安装前就存在的证书**。`SessionSnapshot.trust_anchors` 带 `#[serde(default)]`（有旧快照 JSON 兼容测试），`controller::rollback` 第一步撤信任锚。xt-tun **79 → 86 passed**，另有 1 条 `#[ignore]` 真实用例（需 root） |
-| **P4 第二步：协议 + helper 接线** | ⏳ 未开始 | `Request::{InstallTrustAnchor, RemoveTrustAnchor}` + `PROTOCOL_VERSION +1` + helper dispatch（**穷尽匹配，编译器会强制补分支**） |
-| **P4 第三步：MITM 数据面** | ⏳ 未开始 | `freedom.redirect` 引导、ALPN 只 h1、`strip_json` 的 `Content-Length` 一致性 |
+| **P4 第二步：协议 + helper 接线** | ✅ 完成 | `Request::{InstallTrustAnchor, RemoveTrustAnchor}` + `PROTOCOL_VERSION=2` + helper dispatch（穷尽匹配，编译器强制补分支）；`install` **没有活动会话就拒绝、且在动钥匙串之前就拒绝**（快照写失败会把刚装的锚回滚）；`remove` 幂等并记下"删的是一个没登记过的指纹"。xt-tun **86 passed**（含 1 条 `#[ignore]` 真实用例） |
+| **P4 第三步：MITM 数据面** | ✅ 完成 | `xt-mitm`：TLS 终结（**只广告 h1**）、按 SNI 现签叶子、判定与阻断、经 `mitm-upstream` 回连、响应体裁剪。`mitm-steer` 规则带 `inbound_tag=[tun,socks,http]` ⇒ 回连**构造上不可能自环**。**真实核心验收**：`crates/xt-core/tests/mitm_tls_live.rs`（真 MITM + 真 steer + 真 TLS + 真回连，见 §16.2） |
+| **P4 第四步：桌面与界面** | ✅ 完成 | 三道闸门（开关+名单 / **根证书已信任** / 代理在跑）；`core_settings()` 是 fail-open 的唯一闸门；四条命令（契约哨兵 43→47）；意图页新增 MITM 一节（逐条显示走到哪一步）；`body_strip` 进设置（默认 `None` = 连响应体都不看） |
 
 ### P2b-2 的边界：规则**什么时候**生效
 
@@ -806,6 +809,114 @@ MITM 组件的服务端 ALPN **只广告 `http/1.1`**，不广告 `h2`。于是�
 * `apps/desktop/src/{lib,state}.rs` + `commands/core.rs` + `commands/settings.rs`：接线
 * `crates/xt-core/src/xray/access_log.rs`：新增 `observe_with_record()`（`observe()` 变成薄封装，
   两边的计数与配对行为有对照测试钉住）
+* `crates/xt-mitm/`（新 crate）：`http1`（请求头解析/序列化，拒绝 obs-fold）/ `rewrite`（体裁剪与
+  `Content-Length` 一致性，**唯一改 body 的 API 必须同时改长度**）/ `decide`（判定接缝 +
+  `BlocklistDecider`）/ `tls`（进程内 CA + 按 SNI 现签 + `cert_der`）/ `proxy`（阻塞 IO、
+  每连接一线程、判定 → 阻断或经 `mitm-upstream` 回连）
+* `crates/xt-core/src/xray/routing_api.rs`：手写 protobuf + h2c 一元调用（`replace_rules` 用于免重启换规则）
+* `crates/xt-core/tests/mitm_steering_live.rs`（假 MITM 验引导与防自环）/ `tests/mitm_tls_live.rs`
+  （真 MITM 验整条链路）
+* `crates/xt-tun/src/macos/trust.rs`：信任锚参数构造/校验/装/卸/回滚 + `sha1_fingerprint`
+* `apps/desktop/src/mitm.rs` + `commands/mitm.rs`：桌面运行态与四条命令
+* `apps/ui/src/pages/Intent.tsx`：MITM 一节（三道闸门逐条显示）
+
+### 16.1 还没做的（**别当成已做**）
+
+* **UDP/QUIC 的拦截没有真实核心验收。** 规则生成了（`mitm-quic-fallback`：`network=udp` +
+  `port=443` + `inbound_tag=tun` → `blackhole type:none`），但"UDP 真的被丢掉"这件事
+  还没有一条跑真实核心的测试。TCP 侧有（`blocked.intent-dataplane` 拿到 403）。
+* **模型指标（Jev 在域名级问题上的精确率/误杀率）仍然是空的。** 免密钥档返回 429
+  （`gateway_errors=12`），需要一个 Key 或额度恢复。在这个数字出来之前：功能默认关闭，
+  即使打开也是演练模式。
+* **根证书每次启动重新生成**（私钥只活在内存里）。好处是不留长期信任面，代价是每次启动
+  都要重新信任一次。让 CA 稳定需要持久化私钥（0600、helper 目录），是独立的一步。
+* **真实 `install`/`remove` 只会跑 `#[ignore]` 的那条用例**（需要 root）。默认跑的路径只覆盖
+  参数构造与校验。
+* **WebSocket 经 MITM 回 501**（本版不支持双向长期搬运），所以 opt-in 名单里不要放这类端点。
+* **`assumed_port` 默认 443**：`freedom.redirect` 不传递原始目标，非 443 的 HTTPS 服务
+  要么改这个旋钮、要么拆不通。
+* 本分支（`intent-p4`，worktree `xray-tun-p4`）**还没合并回主树** —— 主树当时卡在另一个
+  会话的 rebase 中。
+
+### 16.2 真实核心验收：怎么跑、验的是什么
+
+全部**离线、不需要 root**（CA 在测试进程内生成，客户端用同一张 CA 的 DER 去信它；
+源站是本地 HTTP 服务，域名走核心 `dns.hosts`）。`XT_CORE` 指向随包的 26.9.9：
+
+```bash
+export XT_CORE="$PWD/apps/desktop/binaries/xray"
+cargo test -p xt-core --test mitm_tls_live    -- --nocapture   # 真 MITM：TLS 终结 + steer + 回连
+cargo test -p xt-core --test mitm_steering_live -- --nocapture # 假 MITM：引导与防自环（更细的负对照）
+cargo test -p xt-intent --test real_core_dataplane             # 域名层：对照 200 / 实验 403
+cargo test -p xt-core --test routing_api_live                  # 免重启换规则：新连接被拦、旧连接不断
+cargo test -p xt-intent --test real_core                       # 意图配置被真实核心接受
+cargo test -p xt-mitm                                          # 不需要核心：31 项（34 lib + 7 e2e 里的一部分）
+```
+
+`mitm_tls_live` 的三条断言互为对照，缺一条都能让错实现变绿：
+
+| # | 域名 | 断言 | 没有它会怎样 |
+|---|---|---|---|
+| ① | `blocked.intent-mitm`（名单内、判定为广告） | **TLS 握手真的成功**（证明证书按 SNI 现签）→ 204 + 可读原因 → `origin.hits()==0` | "什么都没做"也能过 |
+| ② | `allowed.intent-mitm`（名单内、判定放行） | 经 `mitm-upstream` 回连拿到源站 JSON，`origin.hits()==1`，`blocked` 仍是 1 | 自环或回连不通会被漏掉 |
+| ③ | `plain.intent-mitm`（**名单外**） | 照常 200，且 MITM 的 `accepted` **一个都没涨** | "全量拆包"也能过 ①② |
+
+配置由**产品自己的** `build_pretty` + `merge_rules_with_intent` 生成（不是手写 JSON），
+所以 steer 规则的位置、`mitm-out` 的 redirect、`mitm-upstream` 入站、QUIC 兜底
+全都是产品代码在起作用。
+
+当前证据（本机实测）：`mitm_tls_live` 1 passed；`mitm_steering_live` 1 passed；
+`real_core_dataplane` 2 passed；`routing_api_live` 通过；`xt-mitm` 41 passed（34 lib + 7 e2e）；
+桌面 `xraytun-desktop` 274 + 6 通过；界面 `vitest` 40 文件 / 404 通过。
+
+### 16.3 手动验收：根证书的装 / 卸 / 过期会话回滚（**需要 root，默认不跑**）
+
+自动化测试只覆盖到"参数构造 + 校验 + 幂等"；真正 `security(1)` 那一步必须手动跑一次
+（**没跑就是没跑，不许写成跑过**）：
+
+```bash
+# ① 信任锚模块的真实往返（需要一张自签 CA 的 PEM 与它的 SHA-1 指纹）
+#    指纹由 GUI 侧同一函数产出：xt_tun::macos::trust::sha1_fingerprint(ca.cert_der())
+export XT_TEST_CA_PEM=/tmp/xt-ca.pem
+export XT_TEST_CA_FP="AA:BB:..."            # 大写、冒号分隔
+sudo -E cargo test -p xt-tun --lib trust -- --ignored --nocapture
+# 期望：装完 is_trusted 为真 → rollback 之后（且装之前不存在时）为假
+
+# ② 经 helper 的真实路径（在 GUI 里点「装入根证书」），然后确认它进了系统钥匙串
+security find-certificate -a -Z /Library/Keychains/System.keychain | grep -i "$XT_TEST_CA_FP"
+
+# ③ 过期会话回滚：**杀掉 helper**（模拟崩溃），重启 App，锚应被自动撤掉
+sudo launchctl kickstart -k system/com.xraytun.helper
+# 期望：下次启动时 restore_stale 走快照回滚 → 上面那条 find-certificate 查不到
+```
+
+②③ 就是 §8.1 承诺的那条："唯一会改系统状态的东西"也必须**可回滚、且回滚是自动的**。
+
+### P4 踩过的坑（每一条都有测试钉住）
+
+1. **`accept()` 从非阻塞监听套接字返回的已连接套接字也是非阻塞的。** 于是 TLS 读立刻
+   `WouldBlock`，代理什么都不写就关连接 —— 客户端看到的是
+   "peer closed connection without sending TLS close_notify"，**看起来像证书/握手错误**，
+   其实完全不是。而且 `set_read_timeout` 对非阻塞套接字**无效**，光设超时救不回来。
+   现在显式 `set_nonblocking(false)`；测试替身（源站、假 SOCKS 转发器）犯的是同一个错。
+2. **必须显式发 `close_notify`。** `rustls` 的 `StreamOwned` 在 `Drop` 时只关 TCP、不发 TLS
+   关闭通知；少了它，客户端看到的是"unexpected EOF / 连接像被截断"，OpenSSL 默认报
+   `unexpected eof while reading` —— 严格应用会把**正常响应**当成请求失败。
+3. **`read_response` 取头块多留一个尾随 CRLF** ⇒ `split("
+")` 出一个尾随空行；
+   原样转发时 `join` 再补一个 CRLF 恰好把它凑成合法的头/体分隔，所以字节一直是对的、
+   没人发现头行列表多一项。裁剪器一见到没有冒号的行就放弃 ⇒ 症状是"功能开着却一直不生效"。
+4. **裁剪的"为什么没生效"必须有独立的原因码。** 一开始把"裁不动（framing 自检没过）"
+   并进了"对方不是 JSON"：前者是我们的 bug，后者是数据形状，混在一起排查只能靠猜。
+   现在是 `DeclineReason` 六种 + `ProxyStats.body_rewritten/body_rewrite_declined` 两个计数。
+5. **"装好证书" ≠ "已经生效"。** 引导规则挂在出站/入站上，没法热加，中间隔着一次核心重连 ——
+   这个差值被显式建模成 `core_restart_required`，而不是留给用户猜。
+6. **证书没装时必须摘掉引导规则（fail-open）。** 否则被 steer 的域名只能由 MITM 接手，
+   而 MITM 拿的是一张没人信的证书：用户看到"网站打不开"而不是"广告没拦住"。
+   `mitm::core_settings()` 就是这个闸门，有判别性测试。
+7. **界面守卫抓到的真错**：JSX 文本里写 markdown 粗体，用户在界面上看到星号原文
+   （`jsxTextGuard` 当场红）。同样，预览快照里的示例域名与审计夹具同名，会让页面出现
+   两处同名文本、把既有测试搞红。
 
 ### 一条仍然悬着、且**必须先量**的东西
 
