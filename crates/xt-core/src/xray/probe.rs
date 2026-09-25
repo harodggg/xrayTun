@@ -209,6 +209,16 @@ pub fn build_probe_config(nodes: &[Node], base_port: u16) -> Result<Value> {
     }))
 }
 
+/// 取一份并发许可；信号量被 `close()` 时返回 `None`，调用方**照常继续**。
+///
+/// 这里的信号量只被本模块自己的 `Arc` 持有，`close()` 从未被调用 —— 也就是说
+/// 旧实现里 `.expect("信号量不会关闭")` 逻辑上不可达。但它是一个**运行期** panic：
+/// 哪天有人在别处 close 了它，release（`panic = "abort"`）就是整个 App 消失。
+/// 探针失败本来只该表现为"这次没测出来"，所以拿不到许可时就不加限制地跑完。
+async fn acquire_permit(sem: &Arc<Semaphore>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    Arc::clone(sem).acquire_owned().await.ok()
+}
+
 /// 批量探测。返回结果顺序与 `nodes` 一致。
 pub async fn probe_nodes(
     nodes: &[Node],
@@ -263,7 +273,7 @@ pub async fn probe_nodes(
         let rtt_samples = opts.rtt_samples;
         let iface = opts.interface.clone();
         handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await.expect("信号量不会关闭");
+            let _permit = acquire_permit(&sem).await;
 
             // RTT 与可用性互不依赖，可以并行做。
             //
@@ -772,5 +782,14 @@ mod tests {
         });
         let err = socks5_connect(port, "example.com", 80, Instant::now() + Duration::from_secs(2)).await;
         assert!(err.is_err());
+    }
+
+    /// 判别性：信号量被 close 时必须返回 `None`（调用方照常跑），不许 panic。
+    /// 旧实现是 `.expect("信号量不会关闭")`，这条测试在旧代码上会直接炸。
+    #[tokio::test]
+    async fn a_closed_semaphore_yields_no_permit_instead_of_panicking() {
+        let sem = Arc::new(Semaphore::new(1));
+        sem.close();
+        assert!(acquire_permit(&sem).await.is_none());
     }
 }

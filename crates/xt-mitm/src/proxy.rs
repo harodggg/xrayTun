@@ -35,7 +35,7 @@
 //!   否则裁剪的字节数与 `Content-Length` 又会打架。
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,9 +75,11 @@ pub struct ProxyConfig {
 
 impl Default for ProxyConfig {
     fn default() -> Self {
+        // 用**无失败可能**的构造：`"127.0.0.1:10810".parse().expect(...)` 虽然对
+        // 字面量永远成立，但它把一条静态不变量写成了运行期 panic 点。
         Self {
-            listen: "127.0.0.1:10810".parse().expect("静态地址"),
-            upstream_socks: "127.0.0.1:10811".parse().expect("静态地址"),
+            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10810),
+            upstream_socks: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10811),
             io_timeout: Duration::from_secs(20),
             max_connections: 256,
             assumed_port: 443,
@@ -350,9 +352,11 @@ fn handle_connection(
 fn read_head<S: Read>(tls: &mut S) -> std::io::Result<Option<RequestHead>> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
-    loop {
-        if head_end(&buf).is_some() {
-            break;
+    // 把「找到头结尾」的下标直接从循环里带出来：旧实现先 `is_some()` 判断、
+    // 循环外再 `expect` 一次，等于在网络可达的路径上放了一个 panic 点。
+    let end = loop {
+        if let Some(e) = head_end(&buf) {
+            break e;
         }
         if buf.len() >= MAX_HEAD_BYTES {
             return Err(std::io::Error::new(
@@ -371,8 +375,7 @@ fn read_head<S: Read>(tls: &mut S) -> std::io::Result<Option<RequestHead>> {
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(e) => return Err(e),
         }
-    }
-    let end = head_end(&buf).expect("上面已经确认存在");
+    };
     let head = RequestHead::parse(&buf[..end])
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     // 本版只支持**没有 body** 的请求形态（GET/HEAD 之类）。带 body 的请求
@@ -484,7 +487,9 @@ fn apply_rewrite(
         return Some(DeclineReason::NotJson);
     };
     let mut headers: Vec<(String, String)> = Vec::with_capacity(resp_head.len());
-    for line in &resp_head[1..] {
+    // `skip(1)` 而不是 `&resp_head[1..]`：上面已经确认第一行存在，
+    // 但切片下标是运行期 panic 点，`skip` 在类型上就没有越界这回事。
+    for line in resp_head.iter().skip(1) {
         match line.split_once(':') {
             Some((k, v)) => headers.push((k.trim().to_string(), v.trim().to_string())),
             // 拆不动的畸形头：**放弃裁剪**，而不是去猜它想说什么。
@@ -543,14 +548,16 @@ fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<(Vec<String>, Vec
     // 于是症状是"功能开着却一直不生效"。这里必须精确。
     let head_text = String::from_utf8_lossy(&buf[..end - 4]).to_string();
     let lines: Vec<String> = head_text.split("\r\n").map(str::to_string).collect();
-    debug_assert!(
-        lines.first().is_some_and(|l| l.starts_with("HTTP/")),
-        "应答头第一行必须是状态行：{lines:?}"
-    );
-    debug_assert!(
-        !lines.iter().any(String::is_empty),
-        "应答头列表里不许有空行（见上面的注释）：{lines:?}"
-    );
+    // 下面两条是**诊断**，不是正确性判据：畸形应答照样原样转发（或在上面的
+    // chunked 检查里报错）。旧实现写成 `debug_assert!` —— debug 构建里一条
+    // 对端发来的畸形应答就能 panic，而 release（`panic = "abort"`）里它又
+    // 完全不存在。现在统一成 debug 日志：两个构建里行为一致，且不会 panic。
+    if !lines.first().is_some_and(|l| l.starts_with("HTTP/")) {
+        tracing::debug!("MITM：应答头第一行不是状态行，仍原样转发");
+    }
+    if lines.iter().any(String::is_empty) {
+        tracing::debug!("MITM：应答头列表里出现空行（裁剪路径会因此放弃）");
+    }
 
     let declared = lines
         .iter()
@@ -640,4 +647,135 @@ fn socks_connect(
         }
     }
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rewrite::{BodyRewrite, DeclineReason};
+    use std::io::Cursor;
+
+    /// 每次 `read` 只吐 `step` 字节的读端：用来验证"头跨多次 read 到达"。
+    struct ChunkyReader {
+        data: Vec<u8>,
+        pos: usize,
+        step: usize,
+    }
+
+    impl Read for ChunkyReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            let n = self.step.min(out.len()).min(self.data.len() - self.pos);
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    fn chunky(data: &[u8], step: usize) -> ChunkyReader {
+        ChunkyReader { data: data.to_vec(), pos: 0, step }
+    }
+
+    /// 旧的 `Default` 实现是 `"127.0.0.1:10810".parse().expect(...)`。
+    /// 现在用无失败构造，值必须**完全相同**。
+    #[test]
+    fn default_config_is_loopback_and_unchanged() {
+        let c = ProxyConfig::default();
+        assert_eq!(c.listen, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10810));
+        assert_eq!(c.upstream_socks, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10811));
+        assert_eq!(c.assumed_port, 443);
+    }
+
+    /// 判别性：头分 3 次到达时也要解析出来（旧实现在循环外 `expect` 一次
+    /// `head_end`，这条路径正是那个 panic 点的入口）。
+    #[test]
+    fn a_head_split_across_reads_is_parsed() {
+        let raw = b"GET /a HTTP/1.1\r\nHost: news.example\r\n\r\n";
+        let head = read_head(&mut chunky(raw, 3)).expect("不该报错").expect("应当解析出请求头");
+        assert_eq!(head.method, "GET");
+        assert_eq!(head.host(), Some("news.example"));
+    }
+
+    /// 客户端在请求边界前关连接 = 正常结束，**不是**错误、更不是 panic。
+    #[test]
+    fn eof_before_any_head_byte_is_a_clean_end() {
+        assert!(matches!(read_head(&mut std::io::empty()), Ok(None)));
+    }
+
+    /// 头读到一半就 EOF：明确报错（旧路径也会在 `expect` 之前返回，这条
+    /// 断言钉住"不许把半截头当成功"）。
+    #[test]
+    fn a_partial_head_reports_eof_instead_of_passing() {
+        let err = read_head(&mut chunky(b"GET / HTTP/1.1\r\nHost: a\r\n", 8)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// 判别性：应答头**不是**状态行时，不许 panic（旧实现是 `debug_assert!`，
+    /// 在 debug 构建/测试里会炸），而是原样把这一行当状态行返回。
+    #[test]
+    fn a_non_http_response_head_does_not_panic() {
+        let raw = b"NOT-HTTP 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let (lines, body) = read_response(&mut Cursor::new(raw.to_vec())).expect("应当原样接受");
+        assert_eq!(lines.first().map(String::as_str), Some("NOT-HTTP 200 OK"));
+        assert!(body.is_empty());
+    }
+
+    /// 空输入必须报错，不许 panic。
+    #[test]
+    fn an_empty_response_reports_eof() {
+        let err = read_response(&mut std::io::empty()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    /// 正常应答：状态行 + 头 + body 按 `Content-Length` 精确切出。
+    #[test]
+    fn a_normal_response_is_split_into_head_lines_and_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
+        let (lines, body) = read_response(&mut Cursor::new(raw.to_vec())).unwrap();
+        assert_eq!(lines.first().map(String::as_str), Some("HTTP/1.1 200 OK"));
+        assert_eq!(lines.len(), 3, "尾随空行不许进列表");
+        assert_eq!(body, b"{\"a\":1}");
+    }
+
+    /// chunked 明确拒绝（本版不支持），而不是把它当 Content-Length=0 放过去。
+    #[test]
+    fn a_chunked_response_is_refused_explicitly() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let err = read_response(&mut Cursor::new(raw.to_vec())).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported, "{err}");
+    }
+
+    struct NoopRewriter;
+
+    impl crate::rewrite::BodyRewriter for NoopRewriter {
+        fn rewrite(
+            &self,
+            _host: &str,
+            _path: &str,
+            _content_type: Option<&str>,
+            _body: &[u8],
+        ) -> BodyRewrite {
+            BodyRewrite::Unchanged(DeclineReason::NotJson)
+        }
+    }
+
+    /// 空头块走裁剪接缝时必须**放弃裁剪**（fail-open：原样转发），不许 panic。
+    #[test]
+    fn rewriting_an_empty_head_declines_instead_of_panicking() {
+        let mut head: Vec<String> = Vec::new();
+        let mut body: Vec<u8> = Vec::new();
+        let got = apply_rewrite(&mut head, &mut body, &NoopRewriter, "h.example", "/");
+        assert_eq!(got, Some(DeclineReason::NotJson));
+    }
+
+    /// 只有状态行、没有头字段：`skip(1)` 路径不许越界。
+    #[test]
+    fn rewriting_a_head_with_only_a_status_line_declines() {
+        let mut head = vec!["HTTP/1.1 200 OK".to_string()];
+        let mut body = b"{}".to_vec();
+        let got = apply_rewrite(&mut head, &mut body, &NoopRewriter, "h.example", "/");
+        assert_eq!(got, Some(DeclineReason::NotJson));
+    }
 }

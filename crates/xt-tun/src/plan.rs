@@ -15,7 +15,7 @@
 //! 第 2 步如果排在第 3 步之后，中间会有一个窗口：默认流量已经进隧道，
 //! 但隧道里的数据还要再连代理服务器 → 代理服务器本身又被送进隧道 → 路由环。
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use xt_proto::{Cidr, DnsMode, InstalledRoute, Ipv6Mode, RouteVia, TunUpRequest};
 
@@ -85,7 +85,9 @@ impl PlannedRoute {
     /// 那时不该阻止用户用 TUN。
     fn scoped_default(interface: &str, gateway: IpAddr) -> Self {
         Self {
-            destination: "0.0.0.0/0".parse().expect("常量合法"),
+            // `Cidr` 的字段是 `pub`，直接构造就没有 `parse().expect(...)` 那条
+            // 运行期 panic 点了（值相同：0.0.0.0/0）。
+            destination: Cidr { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix: 0 },
             via: RouteVia::ScopedInterface { name: interface.to_string(), gateway },
             kind: RouteKind::PhysicalScopedDefault,
             critical: false,
@@ -226,14 +228,32 @@ pub fn build_plan(req: &TunUpRequest, physical: PhysicalUplink) -> Result<TunPla
     // ---- 3) 接管默认路由 ----
     if req.routes.default_route == xt_proto::DefaultRouteMode::SplitDefault {
         // 接口名要到 utun 建好之后才知道，这里先用占位符，由 controller 替换。
+        //
+        // 这几条是**编译期常量**：直接构造 `Cidr`（字段 pub），
+        // 不走 `"…".parse().unwrap()` —— 常量解析写死成运行期 panic 点没有意义。
         let placeholder = RouteVia::Interface { name: String::new() };
-        routes.push(PlannedRoute::capture("0.0.0.0/1".parse().unwrap(), placeholder.clone()));
-        routes.push(PlannedRoute::capture("128.0.0.0/1".parse().unwrap(), placeholder.clone()));
+        routes.push(PlannedRoute::capture(
+            Cidr { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix: 1 },
+            placeholder.clone(),
+        ));
+        routes.push(PlannedRoute::capture(
+            Cidr { addr: IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), prefix: 1 },
+            placeholder.clone(),
+        ));
 
         match req.routes.ipv6 {
             Ipv6Mode::Override => {
-                routes.push(PlannedRoute::capture("::/1".parse().unwrap(), placeholder.clone()));
-                routes.push(PlannedRoute::capture("8000::/1".parse().unwrap(), placeholder));
+                routes.push(PlannedRoute::capture(
+                    Cidr { addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED), prefix: 1 },
+                    placeholder.clone(),
+                ));
+                routes.push(PlannedRoute::capture(
+                    Cidr {
+                        addr: IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)),
+                        prefix: 1,
+                    },
+                    placeholder,
+                ));
             }
             Ipv6Mode::Passthrough | Ipv6Mode::Disabled => {
                 // 不动 v6 默认路由：v6 流量继续走物理网卡。
@@ -336,6 +356,40 @@ mod tests {
         let dests: Vec<String> = plan.routes.iter().map(|r| r.destination.to_string()).collect();
         assert!(dests.contains(&"0.0.0.0/1".to_string()));
         assert!(dests.contains(&"128.0.0.0/1".to_string()));
+    }
+
+    /// 判别性：作用域默认路由就是 0.0.0.0/0，且**非** critical。
+    /// 旧实现是 `"0.0.0.0/0".parse().expect("常量合法")`。
+    #[test]
+    fn scoped_default_is_the_v4_default_route_and_optional() {
+        let gw: IpAddr = "192.168.1.1".parse().unwrap();
+        let r = PlannedRoute::scoped_default("en0", gw);
+        assert_eq!(r.destination, Cidr { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix: 0 });
+        assert_eq!(r.kind, RouteKind::PhysicalScopedDefault);
+        assert!(!r.critical, "作用域默认路由装不上不该阻止用户用 TUN");
+        assert_eq!(r.via, RouteVia::ScopedInterface { name: "en0".into(), gateway: gw });
+    }
+
+    /// 判别性：接管默认路由的四条是**精确的**常量 CIDR
+    /// （旧实现是四处 `"…".parse().unwrap()`）。
+    #[test]
+    fn capture_routes_are_the_exact_split_default_halves() {
+        let plan = build_plan(&request(DefaultRouteMode::SplitDefault, Ipv6Mode::Override), physical()).unwrap();
+        let captured: Vec<Cidr> = plan
+            .routes
+            .iter()
+            .filter(|r| r.kind == RouteKind::DefaultCapture)
+            .map(|r| r.destination)
+            .collect();
+        let want = [
+            Cidr { addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED), prefix: 1 },
+            Cidr { addr: IpAddr::V4(Ipv4Addr::new(128, 0, 0, 0)), prefix: 1 },
+            Cidr { addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED), prefix: 1 },
+            Cidr { addr: IpAddr::V6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0)), prefix: 1 },
+        ];
+        for w in want {
+            assert!(captured.contains(&w), "缺少 {w}：{captured:?}");
+        }
     }
 
     #[test]

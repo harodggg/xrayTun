@@ -275,7 +275,12 @@ fn parse_ss(line: &str) -> Result<Node> {
 
 fn parse_socks_like(line: &str, kind: &str) -> Result<Node> {
     // 两种写法：`socks://base64(user:pass)@host:port` 与标准 URL。
-    let scheme_end = line.find("://").unwrap() + 3;
+    // 用 `ok_or` 而不是 `unwrap`：本函数是私有的、当前调用点都先检查了前缀，
+    // 但把"调用点没检查"这种错误变成可读错误，而不是解析订阅时炸掉整个进程。
+    let scheme_end = line
+        .find("://")
+        .ok_or(Error::MissingField("socks/http 链接缺少 ://"))?
+        + 3;
     let scheme = &line[..scheme_end - 3];
     let rest = &line[scheme_end..];
     let (rest, frag_name) = split_fragment(rest);
@@ -289,8 +294,7 @@ fn parse_socks_like(line: &str, kind: &str) -> Result<Node> {
                 } else {
                     let raw = percent_decode(url.username());
                     // v2rayN 风格：userinfo 整体是 base64(user:pass)
-                    if raw.contains(':') {
-                        let (u, p) = raw.split_once(':').unwrap();
+                    if let Some((u, p)) = raw.split_once(':') {
                         (u.to_string(), p.to_string())
                     } else if let Ok(d) = b64_decode_lenient(&raw) {
                         match String::from_utf8(d) {
@@ -365,7 +369,17 @@ fn parse_standard(line: &str) -> Result<Node> {
             }
             Protocol::Trojan { password: user }
         }
-        _ => unreachable!("parse_standard 只处理 vless/trojan"),
+        _ => {
+            // 这里原来是 `unreachable!`：本函数只被 vless/trojan 的调用点使用。
+            // 但"调用点永远只传这两种"是一条**注释里的约定**，不是类型保证；
+            // 一旦哪天有人接错线，`unreachable!` 会把一次订阅解析失败升级成
+            // 整个进程 abort。改成带实际取值的可读错误。
+            return Err(Error::UnsupportedValue {
+                field: "scheme",
+                value: scheme.clone(),
+                supported: "vless/trojan",
+            });
+        }
     };
 
     let net = qget(&q, &["type", "net"]).unwrap_or("tcp").to_string();
@@ -676,5 +690,40 @@ mod tests {
         assert!(n.tls.enabled);
         assert_eq!(n.tls.server_name, "h.example.com");
         assert_eq!(n.protocol.name(), "http");
+    }
+
+    /// 判别性：拿不到 `://` 时返回可读错误，**不许 panic**
+    /// （旧实现是 `line.find("://").unwrap()`）。
+    #[test]
+    fn socks_like_without_a_scheme_separator_is_an_error() {
+        let err = parse_socks_like("socks:not-a-url", "socks").unwrap_err();
+        assert!(matches!(err, Error::MissingField(_)), "{err:?}");
+    }
+
+    /// 判别性：`parse_standard` 收到别的 scheme 时返回取值错误，
+    /// **不许**走到 `unreachable!`（旧实现在这条输入上直接 panic）。
+    #[test]
+    fn standard_parser_refuses_a_foreign_scheme_instead_of_panicking() {
+        let err = parse_standard("http://h.example.com:443").unwrap_err();
+        match err {
+            Error::UnsupportedValue { field, value, .. } => {
+                assert_eq!(field, "scheme");
+                assert_eq!(value, "http", "错误里必须带实际收到的取值");
+            }
+            other => panic!("应当是可读的取值错误，得到 {other:?}"),
+        }
+    }
+
+    /// 覆盖 userinfo 里**直接带 `:`** 的分支（旧实现 `contains` + `unwrap`）。
+    #[test]
+    fn socks_userinfo_with_an_encoded_colon_splits_into_user_and_password() {
+        let n = parse_share_link("socks://user%3Apass@h.example.com:1080#L").unwrap();
+        match n.protocol {
+            Protocol::Socks { username, password } => {
+                assert_eq!(username, "user");
+                assert_eq!(password, "pass");
+            }
+            other => panic!("协议不对: {other:?}"),
+        }
     }
 }

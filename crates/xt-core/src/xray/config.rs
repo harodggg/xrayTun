@@ -202,8 +202,22 @@ pub fn build(input: &CoreConfigInput<'_>) -> Value {
 }
 
 /// 序列化为带缩进的 JSON 字符串，便于落盘后人工排查。
+///
+/// **不 panic**：整棵树都是 `Value`（`build()` 只产出 `Object`，键就是 `String`），
+/// `to_string_pretty` 对 `Value` 实际上不会失败。但旧实现是
+/// `.expect("生成的配置一定可序列化")` —— 一条写死的"不可能失败"一旦被将来的
+/// 修改打破，release（`panic = "abort"`）就是整个 App 消失。真失败时退回
+/// **同一棵树的紧凑 JSON**（内容一字不少，只是不缩进）并记 error：
+/// 绝不 panic，也**绝不凭空造一份配置**。
 pub fn build_pretty(input: &CoreConfigInput<'_>) -> String {
-    serde_json::to_string_pretty(&build(input)).expect("生成的配置一定可序列化")
+    let cfg = build(input);
+    match serde_json::to_string_pretty(&cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "配置美化序列化失败，退回紧凑 JSON（内容不变）");
+            cfg.to_string()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,6 +1331,27 @@ mod tests {
             .iter()
             .filter_map(|i| i["tag"].as_str().map(str::to_string))
             .collect()
+    }
+
+    /// 判别性：`build_pretty` 输出必须是**合法且缩进**的 JSON，且内容与 `build()`
+    /// 逐字段相同。旧实现是 `.expect("生成的配置一定可序列化")` —— 一旦
+    /// （未来）序列化真的失败，release（`panic = "abort"`）就是整个 App 消失；
+    /// 这里钉住"不许 panic，也不许改变配置内容"。
+    #[test]
+    fn build_pretty_is_pretty_valid_and_content_identical() {
+        let s = settings();
+        let input = CoreConfigInput {
+            settings: &s,
+            nodes: &[],
+            selected: None,
+            rules: &[],
+            profile: InboundProfile::LocalProxy,
+            physical_interface: None,
+        };
+        let text = build_pretty(&input);
+        assert!(text.contains('\n'), "应当是带缩进的多行 JSON: {text}");
+        let parsed: Value = serde_json::from_str(&text).expect("输出必须是合法 JSON");
+        assert_eq!(parsed, build(&input), "美化不得改变配置内容");
     }
 
     /// **防自环的不变量**（这条是本轮最重要的断言）：steer 规则的 `inboundTag`

@@ -13,13 +13,26 @@
 //! 可以分开测量。
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use serde_json::Value;
 
 use crate::answer::Answers;
 use crate::audit::Usage;
 use crate::question::IntentRequest;
+
+/// 取锁，**中毒也继续**（不 panic）。
+///
+/// [`ScriptedGateway`] 的三把锁里装的是 `Vec` / `VecDeque` / `Option` 这类简单容器，
+/// 一次 `push` / `pop` / `clone` 不可能留下"改了一半"的状态，所以中毒时
+/// `into_inner()` 取回内部值继续用是安全的。
+///
+/// 为什么必须这么做：`lock().unwrap()` 的含义是"别的线程持锁时 panic 过 ⇒ 我也 panic"。
+/// 这个网关被用在**演练模式**与离线评测里，把一次可审计的判决失败升级成整个
+/// 进程 abort（release 是 `panic = "abort"`），与"过滤失败不许把用户的网搞坏"直接冲突。
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// 网关失败。**每一种都要能被翻译成 `Deferred`（放行）**，
 /// 所以这里不允许出现"未知错误"这种兜不住的东西 —— 传输层一律归 [`GatewayError::Transport`]。
@@ -129,19 +142,19 @@ impl ScriptedGateway {
     /// 每次都答同一份（用于"这个域名肯定被拦 / 肯定放行"的场景）。
     pub fn always(response: GatewayResponse) -> Self {
         let g = Self::new(Vec::new());
-        *g.fallback.lock().unwrap() = Some(Ok(response));
+        *lock(&g.fallback) = Some(Ok(response));
         g
     }
 
     /// 每次都失败（用于 fail-open 测试）。
     pub fn always_failing(error: GatewayError) -> Self {
         let g = Self::new(Vec::new());
-        *g.fallback.lock().unwrap() = Some(Err(error));
+        *lock(&g.fallback) = Some(Err(error));
         g
     }
 
     pub fn push(&self, item: Result<GatewayResponse, GatewayError>) {
-        self.script.lock().unwrap().push_back(item);
+        lock(&self.script).push_back(item);
     }
 
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
@@ -151,24 +164,21 @@ impl ScriptedGateway {
 
     /// 已经收到的请求（按顺序）。
     pub fn calls(&self) -> Vec<IntentRequest> {
-        self.calls.lock().unwrap().clone()
+        lock(&self.calls).clone()
     }
 
     pub fn call_count(&self) -> usize {
-        self.calls.lock().unwrap().len()
+        lock(&self.calls).len()
     }
 }
 
 impl Gateway for ScriptedGateway {
     fn ask(&self, request: &IntentRequest) -> Result<GatewayResponse, GatewayError> {
-        self.calls.lock().unwrap().push(request.clone());
-        let next = self.script.lock().unwrap().pop_front();
+        lock(&self.calls).push(request.clone());
+        let next = lock(&self.script).pop_front();
         match next {
             Some(item) => item,
-            None => self
-                .fallback
-                .lock()
-                .unwrap()
+            None => lock(&self.fallback)
                 .clone()
                 .unwrap_or_else(|| Err(GatewayError::Transport("script exhausted".into()))),
         }
@@ -187,7 +197,7 @@ pub fn scripted_response(
     risk_of_breakage: f32,
     confidence: f32,
 ) -> GatewayResponse {
-    GatewayResponse::from_wire(&serde_json::json!({
+    response_or_empty(serde_json::json!({
         "model": model,
         "answers": {
             crate::question::Q_ENDPOINT_KIND: {
@@ -200,7 +210,23 @@ pub fn scripted_response(
         "usage": { "input_tokens": 90, "output_tokens": 12 },
         "cost": "0"
     }))
-    .expect("夹具必须是合法响应")
+}
+
+/// 解析夹具响应体；失败时返回**空答案**并记日志，绝不 panic。
+///
+/// 输入是我们自己用 `json!` 造的，形状错了说明代码写错了 —— 但那是**开发期**
+/// 的错误，不该让用户的进程 abort。兜底取"没有任何答案"：`verdict::decide`
+/// 对空答案的处置是放行（fail-open），正是对外承诺的行为。
+fn response_or_empty(body: Value) -> GatewayResponse {
+    GatewayResponse::from_wire(&body).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "scripted_response 夹具不合法，退回空答案（fail-open：不据此阻断）");
+        GatewayResponse {
+            model: None,
+            answers: Answers::default(),
+            usage: None,
+            cost: None,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -294,5 +320,49 @@ mod tests {
         let r = scripted_response("m", KIND_AD_OR_MONETIZATION, 0.9, 0.1, 0.8);
         assert_eq!(r.answers.noul(Q_ADS_INTENT), Some(0.9));
         assert!(r.answers.has(crate::question::Q_ENDPOINT_KIND));
+    }
+
+    /// 判别性：`lock()` 中毒（有线程持锁时 panic 过）之后，网关必须照常可用，
+    /// **不许**把锁中毒升级成第二次 panic。
+    ///
+    /// 复现方式就是真的制造一次中毒：子线程拿住 `calls` 锁再 panic。
+    #[test]
+    fn a_poisoned_lock_does_not_take_the_gateway_down() {
+        use std::sync::Arc;
+
+        let g = Arc::new(ScriptedGateway::new(vec![Ok(scripted_response(
+            "m",
+            KIND_AD_OR_MONETIZATION,
+            0.9,
+            0.1,
+            0.9,
+        ))]));
+        let g2 = Arc::clone(&g);
+        let died = std::thread::spawn(move || {
+            let _guard = g2.calls.lock().expect("此刻还没人中毒");
+            panic!("故意在持锁时 panic —— 制造中毒");
+        })
+        .join();
+        assert!(died.is_err(), "前提：子线程真的 panic 了，锁已中毒");
+
+        // 中毒之后：读计数、取请求、ask 都必须正常返回。
+        assert_eq!(g.call_count(), 0);
+        assert!(g.calls().is_empty());
+        let req = crate::question::domain_request(&crate::question::FlowContext::default(), "m");
+        assert!(g.ask(&req).is_ok(), "中毒的锁不该让脚本网关整体失效");
+    }
+
+    /// 判别性：夹具 body 形状坏了（这里故意没有 `answers`）时，返回**空答案**
+    /// 而不是 panic（旧实现是 `.expect("夹具必须是合法响应")`）。
+    #[test]
+    fn a_broken_fixture_body_degrades_to_empty_answers() {
+        let body = json!({ "model": "m" });
+        assert!(
+            GatewayResponse::from_wire(&body).is_err(),
+            "前提：这个 body 确实解析不出来"
+        );
+        let r = response_or_empty(body);
+        assert!(r.answers.is_empty(), "解析不了就退回空答案（fail-open）");
+        assert!(r.model.is_none(), "不许从坏 body 里编出模型名");
     }
 }

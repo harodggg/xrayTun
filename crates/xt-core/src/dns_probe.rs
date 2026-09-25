@@ -45,9 +45,11 @@
 //! 元素（`first_or`），所以「把最快的排到最前」就等于「换掉正在用的那台」。
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::{Error, Result};
 use crate::util::median;
@@ -502,14 +504,22 @@ pub fn majority_suspects(answers: &[(String, Vec<IpAddr>)]) -> Vec<String> {
 /// 后台任务，值得。
 const FOREIGN_CONCURRENCY: usize = 1;
 
+/// 取一份并发许可；信号量被 `close()` 时返回 `None`，调用方**照常继续**。
+///
+/// 这里的信号量只被 `probe_pool` 自己的 `Arc` 持有，`close()` 从未被调用 ——
+/// 旧实现里 `.expect("信号量不会关闭")` 逻辑上不可达。但它是**运行期** panic：
+/// 一旦哪天有人在别处 close 了它，release（`panic = "abort"`）就是整个 App 消失，
+/// 而失败本来只该表现为"这一组没测出来"。所以拿不到许可就不加限制地跑完。
+async fn acquire_permit(sem: &Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
+    Arc::clone(sem).acquire_owned().await.ok()
+}
+
 /// 并发探测整池。顺序是「国内组在前、国外组在后，组内按可用 + 快排」。
 pub async fn probe_pool(
     candidates: &[DnsCandidate],
     spec: &ProbeSpec,
     concurrency: usize,
 ) -> Vec<DnsProbe> {
-    use std::sync::Arc;
-    use tokio::sync::Semaphore;
     // 两组各用一个信号量：国内是快而多的明文 UDP，放开并发；
     // 国外共享同一个节点，必须串行（见 `FOREIGN_CONCURRENCY`）。
     let dom_sem = Arc::new(Semaphore::new(concurrency.max(1)));
@@ -526,7 +536,7 @@ pub async fn probe_pool(
         let c = *c;
         let spec = spec.clone();
         handles.push(tokio::spawn(async move {
-            let _p = sem.acquire_owned().await.expect("信号量不会关闭");
+            let _p = acquire_permit(&sem).await;
             probe_one(&c, &spec).await
         }));
     }
@@ -766,5 +776,14 @@ mod tests {
     fn reference_domain_is_sane() {
         assert!(REFERENCE_DOMAIN.contains('.'));
         assert!(!REFERENCE_DOMAIN.starts_with('.'));
+    }
+
+    /// 判别性：信号量被 close 时必须返回 `None`（调用方照常跑），不许 panic。
+    /// 旧实现是 `.expect("信号量不会关闭")`，这条测试在旧代码上会直接炸。
+    #[tokio::test]
+    async fn a_closed_semaphore_yields_no_permit_instead_of_panicking() {
+        let sem = Arc::new(Semaphore::new(1));
+        sem.close();
+        assert!(acquire_permit(&sem).await.is_none());
     }
 }
