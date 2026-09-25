@@ -61,6 +61,30 @@ export CARGO_HOME="${CARGO_HOME:-$ROOT/../.cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/../.cargo-target}"
 export npm_config_cache="${npm_config_cache:-$ROOT/../.npm-cache}"
 
+# ---------------------------------------------------------------- Team ID 注入（安全 P0-1 / F1）
+#
+# 为什么必须在**这里、出包之前**判：
+#   `crates/xt-helper/src/peer.rs` 的 `PeerPolicy::from_build_env()` 用**编译期**
+#   `option_env!("XRAYTUN_TEAM_ID")` 决定授权策略。仓库以前从来没有注入过它
+#   （release.yml 只给 `XRAYTUN_TARGET`）⇒ 发行版里 helper 的第二道门是空的，
+#   只靠 socket `root:admin 0660`，等于「该用户能跑的任何进程都能让 helper 以 root
+#   装任意自签 CA」（安全审计 P0-1）。
+#
+# 判据与哨兵是**单一来源**：`scripts/team-id.sh`（那里写了为什么"空串"必须当错误、
+# 为什么不能靠 `.cargo/config.toml` 的 `[env]` 做默认值）。这里只做两件事：
+#   1. 判据不通过就**停下**（缺注入走不到打包）；
+#   2. 把它 `export` 出去，让下面每一次 `cargo build` 都能编进这个值。
+#
+# ⚠️ 注意：这一步**不猜默认值**。未设置 / 空串 / 形状不对 ⇒ 可读的报错 + 退出 1，
+#    并把两条出路（真实 Team ID / 显式哨兵 fail-closed）写清楚。
+echo "==> 0/4 校验 XRAYTUN_TEAM_ID 注入（发行版 helper 的第二道门）"
+# shellcheck source=./team-id.sh
+source "$ROOT/scripts/team-id.sh"
+if ! team_id_resolve --into /dev/null; then
+  exit 1
+fi
+export XRAYTUN_TEAM_ID
+
 # 可选：交叉/通用构建的目标三元组。
 #
 # 设成 `universal-apple-darwin` 就出一个同时含 x86_64 与 arm64 的包
@@ -186,6 +210,16 @@ if [ ! -f "$HELPER_SRC" ]; then
   exit 1
 fi
 install -m 0755 "$HELPER_SRC" "$APP/Contents/MacOS/xraytun-helper"
+
+# **产物断言**（不是"配置写了就行"）：证明这一版 helper 真的把注入值编了进去。
+# 判据：`from_build_env()` 只在 `option_env!` 为 None/空串时退化成 `InsecureAllowAny`；
+# 注入值是编译期字面量，一定在二进制里 ⇒ 找到它 = 拿到值 = 走 `RequireSignature`。
+# 为什么值得单独一条：F1 的形态就是"配置看起来有、产物其实是空的"，只查配置抓不住。
+if ! "$ROOT/scripts/verify-team-id-injection.sh" --assert-helper \
+     "$APP/Contents/MacOS/xraytun-helper" --expect "$XRAYTUN_TEAM_ID"; then
+  echo "✗ helper 产物没有带上注入的 Team ID ⇒ 这一版会退化成「信任任何对端」（P0-1），拒绝出货" >&2
+  exit 1
+fi
 
 fail=0
 check() {

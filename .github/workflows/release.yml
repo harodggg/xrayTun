@@ -31,6 +31,10 @@ env:
   # 见 ci.yml 里的说明：check.sh 的默认值在仓库隔壁，而 actions/cache
   # 缓存的是工作区里面的 `.npm-cache`，必须显式对齐。
   npm_config_cache: ${{ github.workspace }}/.npm-cache
+  # **发行版的第二道门**（安全审计 P0-1 / F1）在下面「预检 XRAYTUN_TEAM_ID 注入」那一步里
+  # 统一归一化后写进 `$GITHUB_ENV`。这里**故意不**在 workflow 层设 `XRAYTUN_TEAM_ID`：
+  # 同名同时出现在 workflow env 与 `$GITHUB_ENV` 会引入"谁优先"的歧义，而这一步的
+  # 全部意义就是把值变成**非空且唯一**。完整判据与哨兵见 `scripts/team-id.sh`（单一来源）。
 
 jobs:
   release:
@@ -46,6 +50,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ---------------------------------------------------------------- Team ID 预检
+      #
+      # 为什么排在最前面（早于任何编译）：缺注入的构建**必须走不到出包**。
+      # 判据在 `scripts/team-id.sh`（单一来源）：真实 Team ID / 显式哨兵（fail closed）
+      # 二选一；未设或空串一律失败。归一化后的值写进 `$GITHUB_ENV`，后续所有步骤
+      # （check.sh、package-macos.sh、产物断言）拿到的都是**非空**值 —— 这一步也顺手堵住
+      # 了"`${{ vars.X }}` 未定义 ⇒ 空串 ⇒ peer.rs 反而开门"这个最阴的形态。
+      #
+      # 输入用**另一个变量名**（`..._INPUT`）传进来：`$GITHUB_ENV` 与 workflow env 同名时
+      # 谁优先是个容易记错的细节，这里不让它成为判据的一部分。
+      - name: 预检 XRAYTUN_TEAM_ID 注入（发行版 helper 的第二道门）
+        env:
+          XRAYTUN_TEAM_ID_INPUT: ${{ vars.XRAYTUN_TEAM_ID }}
+        run: |
+          set -eu
+          # shellcheck source=./scripts/team-id.sh
+          source scripts/team-id.sh
+          XRAYTUN_TEAM_ID="${XRAYTUN_TEAM_ID_INPUT-}" team_id_resolve --into "$GITHUB_ENV"
+          # 自证：写进 GITHUB_ENV 的值必须非空（空串会让 helper 退化成 InsecureAllowAny）
+          grep -q '^XRAYTUN_TEAM_ID=.' "$GITHUB_ENV" || {
+            echo "✗ 归一化后的 XRAYTUN_TEAM_ID 为空 —— 拒绝继续" >&2; exit 1; }
+          grep -q '^XRAYTUN_TEAM_ID=.' "$GITHUB_ENV" &&
+            echo "已注入 XRAYTUN_TEAM_ID（非空；值本身不打印）"
 
       - name: 安装 Rust 与两个 target
         run: |
@@ -144,6 +172,19 @@ jobs:
           # 现在它不阻塞启动，但**公证与 Developer ID 分发必然被挡住**。
           # 清 xattr 的动作在 `scripts/package-macos.sh` 签名之前（逐文件，见该脚本）。
           codesign --verify --strict --verbose=1 "$APP"
+
+          # **发行版的第二道门必须是编进去的**（安全审计 P0-1 / F1）。
+          #
+          # 为什么单列一步：F1 的形态就是"配置看着有、产物其实是空的"。`package-macos.sh`
+          # 里也断言了一次（同一个脚本、同一个判据），这里再对**最终 .app 里那份 helper**
+          # 断言一次，让它在 CI 上有一个独立的、可见的判据：
+          #   `peer.rs` 只在 `option_env!("XRAYTUN_TEAM_ID")` 为 None/空串时才退化成
+          #   `InsecureAllowAny`；注入值是编译期字面量，必然落在二进制里 ⇒ 找到它 =
+          #   这一版走的是 `RequireSignature`。
+          # 注意断言的是 **产物**，不是"环境变量还在不在"——后者证明不了这一版编进了什么。
+          echo "== 断言 helper 产物带着注入的 Team ID（值本身不打印）=="
+          ./scripts/verify-team-id-injection.sh \
+            --assert-helper "$APP/Contents/MacOS/xraytun-helper" --expect "$XRAYTUN_TEAM_ID"
 
       - name: 收集产物
         id: collect

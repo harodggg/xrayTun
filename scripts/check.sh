@@ -234,7 +234,7 @@ check_site_ver site/en/index.html 's/.*XrayTun_\([0-9.]*\)_x86_64_arm64\.dmg.*/\
 
 if [ -n "$site_ver_problems" ]; then
   echo >&2
-  echo "  ✗ 站点声明的版本与 workspace 版本（$want）不一致 —— 访客会下载到旧的安装包。" >&2
+  echo "  ✗ 站点声明的版本与 workspace 版本（${want}）不一致 —— 访客会下载到旧的安装包。" >&2
   echo "    不一致的文件：${site_ver_problems}" >&2
   echo "    修法：先改两个生成器常量（真源），再改手写页面（含下载文件名、字节数、MiB 取整），" >&2
   echo "    最后重跑：python3 scripts/gen-site-jsonld.py gen && python3 scripts/gen-site-geo.py" >&2
@@ -283,6 +283,25 @@ python3 scripts/gen-site-jsonld.py check
 #    （本项目约定：75 = 环境问题，不是代码失败）并在 stderr 说清怎么处理。
 step "发版工具自测（bump-release.py self-test）"
 python3 scripts/bump-release.py self-test
+
+
+# ---------------------------------------------------------------- 发行版 Team ID 注入
+
+# 安全审计 P0-1 的 F1：`crates/xt-helper/src/peer.rs` 用**编译期**
+# `option_env!("XRAYTUN_TEAM_ID")` 决定授权策略，而发版流程从来没注入过它
+# ⇒ 发行版的 helper 退化成 `InsecureAllowAny`（只靠 socket `root:admin 0660`，
+# 等于"该用户能跑的任意进程都能让 helper 以 root 装任意自签 CA"）。
+#
+# 这条是**只读静态检查**（秒级、不编译）：断言发版路径真的接上了注入判据
+# （`scripts/team-id.sh` 是单一来源）、注入点没有被别处复制、预检排在打包之前、
+# 以及对**产物**有断言；顺带钉住 launchd plist 生成器不许下发 `XRAYTUN_HELPER_INSECURE`
+# （那是个能把签名校验整体关掉的运行期开关）。
+#
+# 为什么不在这里做"构建产物断言"：那是发版流水线的事（需要真编 universal 包），
+# 见 `.github/workflows/release.yml` 的 `--assert-helper` 步骤与本脚本同名的
+# `--evidence` 模式（`./scripts/verify-team-id-injection.sh --evidence`）。
+step "发行版 Team ID 注入静态检查（verify-team-id-injection.sh --static）"
+./scripts/verify-team-id-injection.sh --static
 
 
 # ---------------------------------------------------------------- Rust
