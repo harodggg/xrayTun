@@ -182,17 +182,37 @@ if [ "$MODE" = "assert" ]; then
     echo "✗ 找不到 helper 二进制：${HELPER:-<空>}" >&2
     exit 2
   fi
-  if [ -z "$EXPECT" ]; then
-    echo "✗ 没有期望值：给 --expect <Team ID>，或先把 XRAYTUN_TEAM_ID 设好（scripts/team-id.sh）" >&2
-    exit 2
-  fi
-  cls="$(team_id_classify "$EXPECT")"
-  if [ "$cls" = "empty" ] || [ "$cls" = "invalid" ]; then
-    echo "✗ 期望值不合法（${cls}）：'$EXPECT' ⇒ 这个产物本来就会被 helper 判成不可信，先修注入" >&2
-    exit 1
-  fi
+  # ⚠️ 校验顺序必须是**策略感知**的：`cdhash` 策略**不需要期望值**（它的判据是产物里的
+  #    策略标识 + 绑定的 App 路径，见 `policy_assert()`），所以不能"先查 EXPECT 非空"——
+  #    那会让 cdhash 形态（打包时本来就不注入）在产物断言处直接 exit 2。
+  cls=''
   if [ "$POLICY" = "auto" ]; then
+    if [ -z "$EXPECT" ]; then
+      echo "✗ 没有期望值：给 --expect <Team ID>，或先把 XRAYTUN_TEAM_ID 设好（scripts/team-id.sh）" >&2
+      exit 2
+    fi
+    cls="$(team_id_classify "$EXPECT")"
+    if [ "$cls" = "empty" ] || [ "$cls" = "invalid" ]; then
+      echo "✗ 期望值不合法（${cls}）：'$EXPECT' ⇒ 这个产物本来就会被 helper 判成不可信，先修注入" >&2
+      exit 1
+    fi
     POLICY="$(policy_of_value "$EXPECT")"
+  else
+    case "$POLICY" in
+      team-id | refuse-all)
+        if [ -z "$EXPECT" ]; then
+          echo "✗ 策略 '$POLICY' 需要 --expect <注入值>（它的产物判据就是"二进制里有没有这个字面量"）" >&2
+          exit 2
+        fi
+        cls="$(team_id_classify "$EXPECT")"
+        if [ "$cls" = "empty" ] || [ "$cls" = "invalid" ]; then
+          echo "✗ 期望值不合法（${cls}）：'$EXPECT' ⇒ 先修注入" >&2
+          exit 1
+        fi
+        ;;
+      cdhash) : ;;   # 不需要期望值
+      *) : ;;        # 未知策略：交给下面的 policy_status 判（exit 2）
+    esac
   fi
   case "$(policy_status "$POLICY")" in
     done) ;;
@@ -204,7 +224,11 @@ if [ "$MODE" = "assert" ]; then
       echo "✗ 未知策略 '$POLICY'（已知：${POLICY_STATUS}）" >&2
       exit 2 ;;
   esac
-  echo "[断言] 策略=$POLICY  $HELPER 里必须带着注入值（${cls}）：$EXPECT"
+  if [ "$POLICY" = "cdhash" ]; then
+    echo "[断言] 策略=$POLICY  $HELPER 里必须有策略标识 + 绑定的 App 路径，且不含 debug 标识"
+  else
+    echo "[断言] 策略=$POLICY  $HELPER 里必须带着注入值（${cls}）：$EXPECT"
+  fi
   # 判据在 `policy_assert()`（策略表），这里只负责报结论。
   # ⚠️ 只断言**正向**存在。不要用"回退警告串不在"当判据：那条是中文，BSD `strings`
   #    按非 ASCII 字节切分，实测 grep 不到（编码假红）；正向字面量是稳定的。
@@ -212,9 +236,23 @@ if [ "$MODE" = "assert" ]; then
   #    ⇒ `strings` 收到 SIGPIPE（141）⇒ 管道整体非 0 ⇒ **命中被判成失败**（第一版就
   #    因此报了假红）。判据里是直接对文件 grep（无管道）。
   if policy_assert "$POLICY" "$HELPER" "$EXPECT"; then
-    ok "产物带着注入值 ⇒ option_env! 是 Some(..) ⇒ PeerPolicy::RequireSignature（不是 InsecureAllowAny）"
+    case "$POLICY" in
+      cdhash)
+        ok "产物是 cdhash 绑定（策略标识 + 绑定路径在位、无 debug 标识）⇒ 不依赖证书，也不是「信任任何对端」"
+        ;;
+      *)
+        ok "产物带着注入值 ⇒ option_env! 是 Some(..) ⇒ PeerPolicy::RequireSignature（不是宽松策略）"
+        ;;
+    esac
   else
-    bad "产物里**找不到** '$EXPECT' ⇒ 这一版 helper 很可能编译成了 InsecureAllowAny（P0-1），拒绝出货"
+    case "$POLICY" in
+      cdhash)
+        bad "产物里没有 cdhash 绑定标识/绑定路径，或混进了 debug 专用标识 ⇒ 拒绝出货"
+        ;;
+      *)
+        bad "产物里**找不到** '$EXPECT' ⇒ 这一版 helper 的注入没生效（P0-1），拒绝出货"
+        ;;
+    esac
   fi
   exit $((fail > 0 ? 1 : 0))
 fi

@@ -178,13 +178,19 @@ jobs:
           # 为什么单列一步：F1 的形态就是"配置看着有、产物其实是空的"。`package-macos.sh`
           # 里也断言了一次（同一个脚本、同一个判据），这里再对**最终 .app 里那份 helper**
           # 断言一次，让它在 CI 上有一个独立的、可见的判据：
-          #   `peer.rs` 只在 `option_env!("XRAYTUN_TEAM_ID")` 为 None/空串时才退化成
-          #   `InsecureAllowAny`；注入值是编译期字面量，必然落在二进制里 ⇒ 找到它 =
-          #   这一版走的是 `RequireSignature`。
+          #   team-id / refuse-all：注入值是编译期字面量，必然落在二进制里 ⇒ 找到它 =
+          #   这一版走的是 `RequireSignature`；
+          #   cdhash（未注入）：判据是产物里有 `XRAYTUN_HELPER_POLICY=cdhash-binding`
+          #   + 绑定的 App 路径，且不含 debug 专用标识（task-17 之后 release 里
+          #   已经没有 `InsecureAllowAny` 这个变体了）。
           # 注意断言的是 **产物**，不是"环境变量还在不在"——后者证明不了这一版编进了什么。
-          echo "== 断言 helper 产物带着注入的 Team ID（值本身不打印）=="
+          echo "== 断言 helper 产物的策略（值本身不打印）=="
+          # 判据与哨兵是单一来源 `scripts/team-id.sh`；策略由注入值推导：
+          #   真 Team ID ⇒ team-id · 哨兵 ⇒ refuse-all · **未注入/空串 ⇒ cdhash**
+          . scripts/team-id.sh
           ./scripts/verify-team-id-injection.sh \
-            --assert-helper "$APP/Contents/MacOS/xraytun-helper" --expect "$XRAYTUN_TEAM_ID"
+            --assert-helper "$APP/Contents/MacOS/xraytun-helper" \
+            --policy "$(team_id_policy_for_env)" --expect "${XRAYTUN_TEAM_ID:-}"
 
       - name: 收集产物
         id: collect

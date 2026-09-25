@@ -219,13 +219,16 @@ if [ ! -f "$HELPER_SRC" ]; then
 fi
 install -m 0755 "$HELPER_SRC" "$APP/Contents/MacOS/xraytun-helper"
 
-# **产物断言**（不是"配置写了就行"）：证明这一版 helper 真的把注入值编了进去。
-# 判据：`from_build_env()` 只在 `option_env!` 为 None/空串时退化成 `InsecureAllowAny`；
-# 注入值是编译期字面量，一定在二进制里 ⇒ 找到它 = 拿到值 = 走 `RequireSignature`。
+# **产物断言**（不是"配置写了就行"）：证明这一版 helper 编进去的是**预期的策略**。
+#   · team-id / refuse-all：注入值是编译期字面量，一定在二进制里 ⇒ 找到它 = 走 RequireSignature；
+#   · cdhash：这一路**本来就不注入**（`$XRAYTUN_TEAM_ID` 为空）⇒ 判据是产物里有
+#     `XRAYTUN_HELPER_POLICY=cdhash-binding` + 绑定的 App 路径，且**不含** debug 专用标识。
 # 为什么值得单独一条：F1 的形态就是"配置看起来有、产物其实是空的"，只查配置抓不住。
+# ⚠️ 必须传 `--policy`：只传 `--expect` 在 cdhash 形态下会因为"期望值为空"直接失败。
 if ! "$ROOT/scripts/verify-team-id-injection.sh" --assert-helper \
-     "$APP/Contents/MacOS/xraytun-helper" --expect "$XRAYTUN_TEAM_ID"; then
-  echo "✗ helper 产物没有带上注入的 Team ID ⇒ 这一版会退化成「信任任何对端」（P0-1），拒绝出货" >&2
+     "$APP/Contents/MacOS/xraytun-helper" --policy "${TEAM_ID_POLICY}" \
+     --expect "${XRAYTUN_TEAM_ID:-}"; then
+  echo "✗ helper 产物的策略断言不成立（策略=${TEAM_ID_POLICY}）⇒ 拒绝出货" >&2
   exit 1
 fi
 
