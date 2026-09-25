@@ -28,7 +28,7 @@
  */
 
 import type { RecoveryView } from "./ipc";
-import { nextSteps } from "./failure";
+import { nextSteps, plainOneLine } from "./failure";
 import type { ProxyMode } from "./types";
 
 /**
@@ -225,14 +225,22 @@ function baseStatus(input: StatusInput): AppStatus {
   //     并且**同屏给出下一步**：连接失败时用户看到的不该只是一个错误码。
   //     动作由 `failure.ts::nextSteps` 按后端自己的文案推（换节点 / 重装助手 /
   //     看日志…），这里只负责把它接到状态里。
+  //
+  //     ⚠️ task-15：`sub`/`detail` **不是**横幅 —— 它们经 `App.tsx` 进的是
+  //     顶栏 `title`（悬停 tooltip）与 `role="status"` 的 `.sr-only`
+  //     （读屏 live region）。后端 `last_error` 是多行、带 `**` 的工程散文
+  //     （`supervisor.rs:459-462`）：原样拼进去时，tooltip 里放着星号记号，
+  //     而读屏会**逐字念出「星号 星号」**。横幅有 `.banner__reason { pre-wrap }`，
+  //     这两个载体没有 ⇒ 统一走 `plainOneLine()`（去记号、换行压成空格）。
   if (lastError !== null && !running) {
-    const steps = nextSteps(lastError);
+    const reason = plainOneLine(lastError);
+    const steps = nextSteps(reason);
     const advice = steps.length > 0 ? `下一步：${steps.join("；")}` : null;
     return {
       tone: "failed",
       label: "核心未运行",
-      sub: advice ? `${lastError} —— ${advice}` : lastError,
-      detail: advice ? `核心未运行 —— ${lastError}；${advice}` : `核心未运行 —— ${lastError}`,
+      sub: advice ? `${reason} —— ${advice}` : reason,
+      detail: advice ? `核心未运行 —— ${reason}；${advice}` : `核心未运行 —— ${reason}`,
     };
   }
 

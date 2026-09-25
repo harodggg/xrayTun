@@ -74,6 +74,7 @@ import {
   failureAdvice,
   humanError,
   nextSteps,
+  plainOneLine,
   stripMarkup,
 } from "./failure";
 import Logs, { PANIC_LOG_PATH } from "./pages/Logs";
@@ -296,6 +297,14 @@ describe("后端文案里的 `**` 与「断开」按钮名（原来用户看到�
     expect(buttonNameNote(text, true)).toBeNull();
     expect(buttonNameNote("节点超时", false)).toBeNull();
   });
+
+  it("plainOneLine：去 `**`、换行压成空格（tooltip / 读屏 live region 用）", () => {
+    const raw = "第一行。\n**第二行**；\n   第三行 有   多空格。";
+    const t = plainOneLine(raw);
+    expect(t).not.toContain("**");
+    expect(t).not.toContain("\n");
+    expect(t).toBe("第一行。 第二行； 第三行 有 多空格。");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -331,6 +340,40 @@ describe("appStatus：快照没回来时是「不知道」，不是「未找到�
     expect(st.sub).toContain("节点连接超时");
     expect(st.sub).toContain("下一步");
     expect(st.sub).toContain("换一个节点");
+  });
+
+  // ---- task-15：这条路径（tooltip + 读屏 live region）原来**没有任何断言** ----
+  //
+  // 原来用户/读屏用户会遇到什么错的：
+  // * 悬停顶栏时 tooltip 里是后端的工程散文，`**已在接管默认路由之前中止**`
+  //   带着星号；多行靠 `\n`，在 `title` 里时有时无；
+  // * 读屏用户的 `.sr-only role="status"` 会把这串文本**逐字念出来**，
+  //   包括「星号 星号」与换行 —— 那比视觉乱码更糟：听的人拿不到「这是记号」的线索。
+  // 42 个测试文件里没有一条覆盖 `sub`/`detail` 这两个载体 ⇒ 横幅修了、tooltip 没修。
+  const GATE_RAW =
+    "节点通过了 TCP 检查，但经它发出的真实请求拿不到响应：example.com。\n" +
+    "国内网络下「TCP 能连到服务器、代理协议握手被墙」是常见情形。\n" +
+    "**已在接管默认路由之前中止**，系统网络未被改动。\n" +
+    "**这次探测里失败的全是域名目标**；先试换一个节点。";
+
+  it("前置：这份 fixture 真的带 `**` 与换行（否则下面的断言是空转）", () => {
+    expect(GATE_RAW).toContain("**");
+    expect(GATE_RAW).toContain("\n");
+  });
+
+  it("appStatus 的 sub/detail 不许带 `**` 或换行（它们进 tooltip 与 live region，不是横幅）", () => {
+    const st = appStatus({ ...base, corePath: "/xray", lastError: GATE_RAW });
+    expect(st.tone).toBe("failed");
+    for (const [name, text] of [
+      ["sub", st.sub ?? ""],
+      ["detail", st.detail],
+    ] as const) {
+      expect(text, `${name} 里还留着 markdown 记号`).not.toContain("**");
+      expect(text, `${name} 里还留着裸换行`).not.toContain("\n");
+    }
+    // 去掉的是**记号**，不是内容：该说的原因与下一步都还在。
+    expect(st.detail).toContain("已在接管默认路由之前中止");
+    expect(st.detail).toContain("换一个节点");
   });
 });
 
@@ -378,6 +421,59 @@ describe("App 全局横幅：人话 + 下一步 + 可点的动作（原来只有
     fireEvent.click(within(box).getByRole("button", { name: "去换一个节点" }));
     // 节点页独有、侧栏没有的东西 —— 证明真的换了页，而不是只改了按钮文案。
     expect(await screen.findByRole("button", { name: "手动添加" })).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5b. task-15：tooltip 与读屏 live region（横幅之外的另两个载体）
+// ---------------------------------------------------------------------------
+
+describe("顶栏 tooltip 与读屏 live region：后端原文不许带 `**`/换行（task-15）", () => {
+  const GATE_RAW =
+    "节点通过了 TCP 检查，但经它发出的真实请求拿不到响应：example.com。\n" +
+    "**已在接管默认路由之前中止**，系统网络未被改动。\n" +
+    "**这次探测里失败的全是域名目标**；先试换一个节点。";
+
+  async function renderTopbarWithLastError() {
+    mocks.snapshot.mockResolvedValue(
+      snapshotWith({ runtime: { running: false, last_error: GATE_RAW } }),
+    );
+    const { container } = render(<App />);
+    // 顶栏在快照回来后才有 title（含 lastError）。等到它出现为止。
+    await vi.waitFor(() => {
+      const t = container.querySelector("header.topbar")?.getAttribute("title") ?? "";
+      if (!t.includes("已在接管默认路由之前中止")) throw new Error("title 还没更新");
+    });
+    return container;
+  }
+
+  it("`title`（悬停 tooltip）：不带 `**`、不带裸换行，但原因与下一步都还在", async () => {
+    const container = await renderTopbarWithLastError();
+    const title = container.querySelector("header.topbar")?.getAttribute("title") ?? "";
+    expect(title, "tooltip 里还留着 markdown 记号（原来用户看到 `**已在接管默认路由之前中止**`）").not.toContain("**");
+    expect(title, "tooltip 里还留着裸换行").not.toContain("\n");
+    expect(title).toContain("已在接管默认路由之前中止");
+    expect(title).toContain("下一步");
+  });
+
+  it("`role=status`（读屏 live region）：不许把「星号 星号」念给用户听", async () => {
+    await renderTopbarWithLastError();
+    const live = screen.getByRole("status");
+    const text = live.textContent ?? "";
+    expect(text, "读屏会逐字念出 `**`").not.toContain("**");
+    expect(text, "读屏会遇到裸换行").not.toContain("\n");
+    // 读屏用户同样要被告知下一步 —— 不能为了去掉记号把这句删掉。
+    expect(text).toContain("下一步");
+  });
+
+  it("看得到的那份状态文案（仪表盘 sub）也必须同样是干净的", async () => {
+    await renderTopbarWithLastError();
+    // Dashboard 状态区把同一个 `status.sub` 显示成可见文字。
+    const sub = document.querySelector(".dash__state-sub") as HTMLElement | null;
+    expect(sub).toBeTruthy();
+    expect(sub!.textContent ?? "").not.toContain("**");
+    // 整页都不该出现 markdown 记号：这条 fixture 里唯一的 `**` 来源就是 last_error。
+    expect(document.body.textContent ?? "").not.toContain("**");
   });
 });
 

@@ -220,6 +220,29 @@ export function stripMarkup(text: string): string {
 }
 
 /**
+ * 把后端散文压成**一行**：去掉 `**` 记号，并把换行与连续空白压成单个空格。
+ *
+ * # 为什么需要它（task-15）
+ *
+ * `stripMarkup` 保留换行是对的 —— 横幅有 `white-space: pre-wrap`，多行可读。
+ * 但同一段文本还会经 `topbarStatus.appStatus()` 进两个**不能保留换行**的地方：
+ *
+ * * `App.tsx` 顶栏的 `title={status.detail}`（悬停 tooltip）；
+ * * 同一个 `detail` 还进 `role="status"` 的 `.sr-only` live region（**读屏用户
+ *   唯一的通道**）。
+ *
+ * 那里换行要么被折叠得莫名其妙、要么被逐字念出来，而 `**` 会**被读屏逐字读成
+ * 「星号 星号 …」** —— 比视觉上的乱码更糟：听的人拿不到任何「这是记号」的线索。
+ * 所以这两个载体统一走本函数：记号去掉、换行压成空格。
+ */
+export function plainOneLine(text: string): string {
+  return stripMarkup(text)
+    .replace(/\s*\n+\s*/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/**
  * 「门禁未过」这一刻，后端文案可能叫用户「点『断开』」，而按钮写的是「连接」。
  *
  * 后端文案归 `supervisor.rs`，前端**不改它**（改了就是两处真源）；但同一屏里
