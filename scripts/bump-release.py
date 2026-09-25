@@ -23,6 +23,19 @@
 * **v0.8.35 的第二个教训**：Release 正文里那句「本版需要**重新**安装特权助手」靠人记，
   模板里没有 ⇒ 只能发布后手工 `gh release edit`。见 `notes` 子命令：
   **本版用户动作缺文件就失败**，不许静默退化成通用模板。
+* **phase1 连续卡死两次**（本版加固，两次都在真实发版里踩到）：
+  1. `Cargo.lock` 里多了一个 workspace 成员（P4 新增 `xt-intent` / `xt-mitm`），而
+     phase1 的**成员清单是手写的** —— 清单没跟着仓库长大 ⇒ 「替换后不许残留旧版本号」
+     拒绝落盘，报错却只有一句 `Cargo.lock: 替换后仍残留 0.8.38`，**不说是哪个 crate**。
+     现在成员清单**从 `Cargo.toml` 的 `[workspace] members` 派生**，落盘前先跑预检，
+     把「成员 ↔ Cargo.lock 条目 ↔ 版本」逐条对齐，**一次报全**并把成员名点到。
+  2. `scripts/gen-site-geo.py` 的注释里曾写「真实事故（v0.8.38 停发期间…）」，而它正是
+     phase1 的替换目标 ⇒ 用**裸子串**判定「旧版本号不许残留」时，这条注释让 phase1
+     **永远失败**（当时的解法只能是"注释里刻意不写版本字面"，靠纪律）。
+     现在旧版本字面先被分类成 **真版本字段**（必须替换）与 **注释 / 历史说明**（列出但不阻塞）；
+     判据集中在 `classify_line()`，只有 `field` 参与硬校验。
+  3. 两条加固都要求「**一次列全所有不匹配项**」：校验失败时逐条打印
+     `文件:行号 + 成因 + 上下文（Cargo.lock 会点到 crate 名）`，不再让人靠猜。
 
 # 边界
 
@@ -105,6 +118,248 @@ def mib(n: int) -> str:
 
 
 # --------------------------------------------------------------------------------------
+# 版本字面分类：**真版本字段** vs **注释 / 历史说明**
+# --------------------------------------------------------------------------------------
+# 为什么需要它（真实事故，见文件顶部第 3 条）：`scripts/gen-site-geo.py` 的注释里曾写
+# 「真实事故（v0.8.38 停发期间…）」，而该文件是 phase1 的替换目标 ⇒ 旧的「替换后不许残留
+# 旧版本号」用**裸子串**判定时，这条注释让 phase1 **永远失败**；当时的解法是"注释里刻意不写
+# 版本字面"，靠纪律。反过来，`Cargo.lock` 漏了成员时，报错也只有一句泛泛的「仍残留 0.8.38」。
+#
+# **判据（只认下面这几种"权威版本字段"的整行形态；其余一律不算）**：
+#   1. TOML / Cargo.lock ：  version = "X"
+#   2. JSON              ：  "version": "X",          （tauri.conf.json / package.json）
+#   3. Python / JS 常量  ：  XRAYTUN_VERSION / SITE_VERSION / PAGE_VERSION / VERSION = "X"
+#                            （允许前面的 `var `，允许结尾 `;`）
+#   4. HTML 角标         ：  <strong>vX</strong>      （site/{,en/}wasm/index.html）
+# 分类结果三选一：
+#   · `field`   —— 真版本字段。**必须**被 phase1 的规则替换掉，残留即硬失败。
+#   · `comment` —— 注释行（整行注释，或字面出现在 `#` / `//` / `/*` / `<!--` 之后）。
+#                  **列出但不阻塞**：注释是"历史说明"，不该逼着发版去改它。
+#   · `prose`   —— 正文 / 属性里的说明性字面（例：`（截至 v0.8.38）`、JSON 描述串）。
+#                  同样**列出但不阻塞**（真需要改的，靠规则表里显式的 pattern，而不是这条兜底）。
+# 注意：两个手写页面（`site/{index.html,en/index.html}`）走的是**整篇全量替换 + 裸子串残留检查**，
+# 所以判据 4 之外的页面字面不会漏网 —— 那条路径本来就要求"旧版本号在页面里为 0 处"。
+FIELD_PATTERNS = (
+    re.compile(r'^\s*version\s*=\s*"[^"]*"\s*$'),
+    re.compile(r'^\s*"version"\s*:\s*"[^"]*"\s*,?\s*$'),
+    re.compile(
+        r"^\s*(?:var\s+)?(?:XRAYTUN_VERSION|SITE_VERSION|PAGE_VERSION|VERSION)\s*=\s*"
+        r'"[^"]*"\s*;?\s*$'
+    ),
+    re.compile(r"^\s*<strong>v[^<]*</strong>\s*$"),
+)
+
+
+def _comment_start(line: str) -> int:
+    """→ 该行注释的起始列（没有注释则 -1）。
+
+    **`https://` 里的 `//` 不是注释**（第一版就把它当成了注释，把 `<meta … og-image-…>` 误报成
+    "注释"）——所以尾随 `//` 只认前面不是 `:` 的那种。整行注释认这几种起始：
+    `#` / `//` / `/*` / `<!--` / 块注释续行 `* ` 或 `*/`。
+    """
+    st = line.lstrip()
+    indent = len(line) - len(st)
+    for mk in ("<!--", "#", "//", "/*"):
+        if st.startswith(mk):
+            return indent
+    if st.startswith(("* ", "*/")):
+        return indent
+    m = re.search(r"\s#", line)          # 尾随注释：Python / TOML / YAML / JS
+    if m:
+        return m.start() + 1
+    m = re.search(r"(?<!:)\s//", line)   # 尾随 `//`，但排除 `://`
+    if m:
+        return m.start() + 1
+    return -1
+
+
+def classify_line(line: str, version: str) -> str:
+    """把「含旧版本字面的一行」分类成 `field` / `comment` / `prose`（判据见上面那块注释）。
+
+    做法：先切掉注释部分得到"代码段"，再看版本字面落在哪一段、代码段是不是权威字段形态。
+    · 字面只出现在注释里            ⇒ `comment`（例如 `# 真实事故（v0.8.38 停发期间…）`）
+    · 字面在代码段且是权威字段形态  ⇒ `field`  （例如 `version = "0.8.38"`）
+    · 其余                          ⇒ `prose`  （例如 `（截至 v0.8.38）`、JSON 描述串）
+    纯函数、无 IO —— self-test 能直接拿它做正反例（含"把注释当字段"的反向敏感性突变）。
+    """
+    if version not in line:
+        return "prose"
+    cut = _comment_start(line)
+    code = line[:cut] if cut >= 0 else line
+    if version not in code:
+        return "comment"
+    for p in FIELD_PATTERNS:
+        if p.match(code.rstrip()):
+            return "field"
+    return "prose"
+
+
+def field_leftovers(root: Path, state: dict, version: str, rel_allow=None):
+    """→ [(相对路径, 行号, 行内容, 所属包名或 None)]：模拟后的文本里**真版本字段**仍是旧版本。
+
+    `rel_allow` 为 None 表示扫全部被改动过的文件；否则只扫这些相对路径。
+    行号是给人指路用的：报错必须能直接跳过去，而不是让人全文搜。
+    """
+    out = []
+    # 增量解析 Cargo.lock 的包名，好让报错点到 crate（"哪个 crate 漏了"是那次事故的核心问题）
+    for f, text in state.items():
+        rel = str(f.relative_to(root))
+        if rel_allow is not None and rel not in rel_allow:
+            continue
+        lines = text.splitlines()
+        pkg = None
+        for i, line in enumerate(lines, 1):
+            m = re.match(r'^name = "([^"]+)"$', line)
+            if m:
+                pkg = m.group(1)
+            if version not in line:
+                continue
+            if classify_line(line, version) == "field":
+                out.append((rel, i, line.strip(), pkg))
+    return out
+
+
+def nonfield_leftovers(root: Path, state: dict, version: str):
+    """→ [(相对路径, 行号, 行内容, 分类)]：注释 / 说明里的旧版本字面（**不阻塞**，只提示）。"""
+    out = []
+    for f, text in state.items():
+        rel = str(f.relative_to(root))
+        for i, line in enumerate(text.splitlines(), 1):
+            if version not in line:
+                continue
+            kind = classify_line(line, version)
+            if kind != "field":
+                out.append((rel, i, line.strip(), kind))
+    return out
+
+
+# --------------------------------------------------------------------------------------
+# 仓库成员：从 Cargo.toml **派生**，不再手写清单
+# --------------------------------------------------------------------------------------
+def workspace_packages(root: Path):
+    """→ (包名列表, 问题列表)。包名 = 各成员 `Cargo.toml` 的 `[package] name`。
+
+    为什么派生而不是手写（P4 的真实事故）：手写清单不会跟着仓库长大，漏掉一项就变成
+    "替换后仍残留旧版本号"，而报错不说是哪个 crate。派生之后这类 bug 从**根上**消失；
+    预检再核对「成员 ↔ Cargo.lock 条目 ↔ 版本」三者，仍然不一致就一次报全。
+    """
+    problems, names = [], []
+    cargo = root / "Cargo.toml"
+    if not cargo.exists():
+        return [], [f"{cargo}: 文件不存在（仓库成员清单派生不出来）"]
+    text = read(cargo)
+    m = re.search(r"^\[workspace\]\s*$(.*?)(?=^\[|\Z)", text, re.M | re.S)
+    if not m:
+        return [], ["Cargo.toml: 没有 [workspace] 段，无法派生成员清单"]
+    mm = re.search(r"members\s*=\s*\[(.*?)\]", m.group(1), re.S)
+    if not mm:
+        return [], ["Cargo.toml: [workspace] 段里没有 members = [...]，无法派生成员清单"]
+    members = re.findall(r'"([^"]+)"', mm.group(1))
+    if not members:
+        return [], ["Cargo.toml: [workspace] members 为空，无法派生成员清单"]
+    for rel in members:
+        mc = root / rel / "Cargo.toml"
+        if not mc.exists():
+            problems.append(f"Cargo.toml: 成员 `{rel}` 的 {rel}/Cargo.toml 不存在")
+            continue
+        mt = read(mc)
+        pm = re.search(r"^\[package\]\s*$(.*?)(?=^\[|\Z)", mt, re.M | re.S)
+        nm = re.search(r'^name = "([^"]+)"', pm.group(1) if pm else mt, re.M)
+        if not nm:
+            problems.append(f"{rel}/Cargo.toml: 读不到 [package] name")
+            continue
+        names.append(nm.group(1))
+    return sorted(names), problems
+
+
+def lock_versions(root: Path):
+    """→ {包名: 版本}（Cargo.lock 的每个 [[package]] 块）。"""
+    out = {}
+    lock = root / "Cargo.lock"
+    if not lock.exists():
+        return out
+    for blk in read(lock).split("[[package]]")[1:]:
+        mn = re.search(r'^name = "([^"]+)"', blk, re.M)
+        mv = re.search(r'^version = "([^"]+)"', blk, re.M)
+        if mn and mv:
+            out[mn.group(1)] = mv.group(1)
+    return out
+
+
+def precheck_members(root: Path, old: str):
+    """预检 1（**不依赖规则表**）：→ (硬问题列表, 提示行列表)。
+
+    从 `Cargo.toml [workspace] members` 派生包名，逐个核 `Cargo.lock` 条目与版本；
+    问题**一次列全**（哪个成员、缺什么），不靠人猜哪个 crate 漏了。
+    """
+    problems, notes = [], []
+    pkgs, probs = workspace_packages(root)
+    problems += probs
+    lock = lock_versions(root)
+    if not lock:
+        problems.append("Cargo.lock: 读不到任何 [[package]]（文件缺失或格式变了）")
+    for pkg in pkgs:
+        if pkg not in lock:
+            problems.append(
+                f"仓库成员 `{pkg}` 在 Cargo.lock 里**没有条目**"
+                f"（新加的 crate 还没 `cargo update`/构建过？）"
+            )
+        elif lock[pkg] != old:
+            problems.append(
+                f"仓库成员 `{pkg}` 的 Cargo.lock 版本 = {lock[pkg]}，而 Cargo.toml = {old}（先对齐再发版）"
+            )
+    notes.append(f"仓库成员 {len(pkgs)} 个（派生自 Cargo.toml [workspace] members）：{', '.join(pkgs)}")
+    return problems, notes
+
+
+def precheck_literals(root: Path, old: str, rule_paths):
+    """预检 2：把 phase1 触及文件里的旧版本字面按 `classify_line()` 分类并**逐条列出**。
+
+    注释 / 正文说明类会被明确标注「**不参与**硬校验」—— 这样"注释里写了历史版本字面"
+    不会再卡住发版（那正是 phase1 连续卡死的第二个形态）。
+    """
+    notes = []
+    fields, comments, prose = 0, [], []
+    for rel in sorted(rule_paths):
+        p = root / rel
+        if not p.exists():
+            continue
+        for i, line in enumerate(read(p).splitlines(), 1):
+            if old not in line:
+                continue
+            kind = classify_line(line, old)
+            if kind == "field":
+                fields += 1
+            elif kind == "comment":
+                comments.append((rel, i, line.strip()))
+            else:
+                prose.append((rel, i, line.strip()))
+    notes.append(
+        f"旧版本 {old} 在 phase1 触及的文件里出现 {fields + len(comments) + len(prose)} 处："
+        f"真版本字段 {fields} 处（**必须**全被替换）、注释 {len(comments)} 处、正文/说明 {len(prose)} 处"
+    )
+    for kind, hits in (("注释", comments), ("说明", prose)):
+        shown = hits if kind == "注释" else hits[:5]
+        for rel, i, line in shown:
+            notes.append(
+                f"  · [{kind}] {rel}:{i} {line[:88]} —— **不参与**「不许残留旧版本号」硬校验，"
+                f"是否改写由规则表决定"
+            )
+        if len(hits) > len(shown):
+            notes.append(
+                f"  · [说明] 其余 {len(hits) - len(shown)} 处同类字面（页面正文/描述串）不再逐条列；"
+                f"**模拟之后**若仍有说明类残留，`post` 会把它们全部打出来"
+            )
+    return notes
+
+
+def print_notes(notes) -> None:
+    for n in notes:
+        print(f"[预检] {n}")
+
+
+
+# --------------------------------------------------------------------------------------
 # phase1：已发布态 → 「正在发布」态
 # --------------------------------------------------------------------------------------
 def rules_phase1(root: Path, old: str, new: str, date: str | None):
@@ -138,15 +393,14 @@ def rules_phase1(root: Path, old: str, new: str, date: str | None):
     # **清单必须覆盖全部 workspace 成员的版本字段**：漏掉一个，phase1 的
     # "替换后不许残留旧版本号" 校验就会拒绝落盘（P4 新增 xt-intent/xt-mitm 后正是这样被挡住的
     # —— 校验是对的，错的是这份清单没跟着仓库长大）。
-    for crate in [
-        "xraytun-desktop",
-        "xt-core",
-        "xt-helper",
-        "xt-intent",
-        "xt-mitm",
-        "xt-proto",
-        "xt-tun",
-    ]:
+    # ⇒ 现在**不写死**：从 Cargo.toml 的 [workspace] members 派生（`precheck_phase1`
+    #    保证派生出来的每个成员在 Cargo.lock 里都有条目、且版本 == old）。
+    crates, crate_problems = workspace_packages(root)
+    # 有问题的成员已经在 `precheck_members` 里报过并让 phase1 提前退出了；
+    # 这里再打一遍是为了**直接调用 rules_phase1 的路径**（例如将来的自测）也看得见。
+    for prob in crate_problems:
+        print(f"✗ {prob}", file=sys.stderr)
+    for crate in crates:
         add("Cargo.lock", f"{crate} 版本", f'name = "{crate}"\nversion = "{old}"', f'name = "{crate}"\nversion = "{new}"', 1, False)
 
     # ---- 两个手写页面：当前版本字面全量替换（顺序在这一步之后才做「过渡态」）----
@@ -315,19 +569,31 @@ def run_rules(root: Path, rules, dry: bool, forbid: list | None = None, post=Non
             continue
         state[f] = r.apply(state[f])
 
-    # 「旧东西不许残留」——这条比任何单条计数都强：v0.8.33 的中间态就是它抓住的形态
-    for rel, tok in (forbid or []):
+    # 「旧东西不许残留」——这条比任何单条计数都强：v0.8.33 的中间态就是它抓住的形态。
+    # `mode` 决定判定口径：
+    #   · "raw"   —— 裸子串，一处都不许留（**只给整篇全量替换的两个手写页面**用）；
+    #   · "field" —— 只有 `classify_line()` 认定的**真版本字段**才判红，
+    #               注释/历史说明不算（这是"注释里的历史版本字面永远不会卡住发版"的机制落点）。
+    # **逐行**报（文件:行号 + 行内容），不合并成一句泛泛的"仍残留"。
+    for rel, tok, mode in (forbid or []):
         p = root / rel
-        if p in state and tok in state[p]:
-            problems.append(f"{rel}: 替换后仍残留 `{tok}`")
+        if p not in state:
+            continue
+        for i, line in enumerate(state[p].splitlines(), 1):
+            if tok not in line:
+                continue
+            if mode == "field" and classify_line(line, tok) != "field":
+                continue
+            tag = "真版本字段残留" if mode == "field" else "裸子串残留"
+            problems.append(f"{rel}:{i} {tag} `{tok}` —— {line.strip()[:90]}")
 
     if post:
         problems.extend(post(root, state))
 
     if problems:
-        print("\n✗ 校验失败，**未落盘任何改动**：", file=sys.stderr)
-        for p in problems:
-            print(f"    {p}", file=sys.stderr)
+        print(f"\n✗ 校验失败：共 {len(problems)} 项，**未落盘任何改动**", file=sys.stderr)
+        for n, p in enumerate(problems, 1):
+            print(f"    {n}. {p}", file=sys.stderr)
         return 1, {}
 
     changed = [f for f in state if state[f] != orig[f]]
@@ -353,15 +619,35 @@ def cmd_phase1(a) -> int:
     else:
         print(f"[phase1] {old} → {new}（仓库 {root}）")
 
-    forbid = [(f"site/{p}", old) for p in ("index.html", "en/index.html")] + [("Cargo.lock", old)]
+    # ---- 预检 1：仓库成员（在**任何替换之前**；问题一次列全）----
+    problems, notes = precheck_members(root, old)
+    print_notes(notes)
+    if problems:
+        print(f"\n✗ 预检失败：共 {len(problems)} 项（未做任何替换、未落盘）", file=sys.stderr)
+        for n, p in enumerate(problems, 1):
+            print(f"    {n}. {p}", file=sys.stderr)
+        return 1
+
+    # 两个手写页面走**整篇全量替换** ⇒ 裸子串一处都不许留；
+    # Cargo.lock 之类只替换**字段** ⇒ 走 `field` 口径（注释/历史说明不阻塞）。
+    forbid = [(f"site/{p}", old, "raw") for p in ("index.html", "en/index.html")]
     rules = rules_phase1(root, old, new, a.date)
+
+    # ---- 预检 2：旧版本字面分类（注释/历史说明**列出但不阻塞**）----
+    print_notes(precheck_literals(root, old, {r.path for r in rules}))
 
     def post(r, st):
         out = []
-        for f, text in st.items():
-            rel = f.relative_to(r)
-            if old in text:
-                out.append(f"{rel}: 仍残留旧版本号 {old}")
+        # 真版本字段残留：**逐条列全**（文件:行号 + 上下文；Cargo.lock 点到 crate 名）
+        for rel, i, line, pkg in field_leftovers(r, st, old):
+            ctx = f"（crate `{pkg}`）" if pkg else ""
+            out.append(f"{rel}:{i} 真版本字段仍是旧版本 {old}{ctx} —— {line[:90]}")
+        # 注释 / 说明里的旧版本字面：**不算失败**，只提示（这就是不再卡死的落点）
+        rest = nonfield_leftovers(r, st, old)
+        if rest:
+            print(f"[信息] 旧版本字面仍在 {len(rest)} 处**注释/说明**里（按判据不算失败）：")
+            for rel, i, line, kind in rest:
+                print(f"    · [{kind}] {rel}:{i} {line[:88]}")
         for page in ("site/index.html", "site/en/index.html"):
             p = r / page
             if p in st and f"releases/download/v{new}" in st[p]:
@@ -565,8 +851,14 @@ def _fixture(dest: Path, ref: str) -> None:
         raise SystemExit(f"✗ 夹具解包失败：{p1.stderr}")
     subprocess.run(["git", "init", "-q", str(dest)], check=True)
     subprocess.run(["git", "-C", str(dest), "add", "-A"], check=True)
-    subprocess.run(["git", "-C", str(dest), "-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-qm", "fixture"], check=True)
+    subprocess.run(["git", "-C", str(dest), "-c", "commit.gpgsign=false",
+                    "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "fixture"], check=True)
+
+
+def _run_raw(tool: Path, *args):
+    """跑指定那份脚本并**原样返回** (rc, stdout, stderr) —— 断言报错内容用（_run_tool 只回退出码）。"""
+    r = subprocess.run([sys.executable, str(tool), *args], capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
 
 
 def _run_tool(tool: Path, *args) -> int:
@@ -724,6 +1016,132 @@ def cmd_self_test(a) -> int:
             fails.append("T4c 显式「无需额外动作」应当通过")
         else:
             print("  ✓ T4c 显式声明「本版无需用户额外动作」也允许（但必须写出来）")
+
+        # ---- T6 红/绿：仓库成员预检（Cargo.lock 漏了新 crate —— 真实事故形态）----
+        # 夹具是**已发布态**，直接在上面加一个 workspace 成员：
+        #   T6a：Cargo.toml 有了新成员、Cargo.lock 还没有条目 ⇒ 预检必须**点名**报红；
+        #   T6b：补上 Cargo.lock 条目 ⇒ phase1 必须自动覆盖它（成员清单已从 Cargo.toml 派生，
+        #        "清单没跟着仓库长大"这一整类 bug 消失）。
+        print("\n--- T6 红/绿：仓库成员预检（新 crate 漏进 Cargo.lock / 清单自动长大）---")
+        fx6 = tmp / "fixture-t6"
+        shutil.copytree(fx, fx6)
+        subprocess.run(["git", "-C", str(fx6), "checkout", "--", "."], check=True)
+        subprocess.run(["git", "-C", str(fx6), "clean", "-qfd"], check=True)
+        newcrate = "xt-selftest"
+        (fx6 / "crates" / newcrate).mkdir(parents=True)
+        (fx6 / "crates" / newcrate / "Cargo.toml").write_text(
+            f'[package]\nname = "{newcrate}"\nversion.workspace = true\nedition.workspace = true\n',
+            encoding="utf-8")
+        ct = read(fx6 / "Cargo.toml")
+        ct = ct.replace('    "crates/xt-tun",', f'    "crates/xt-tun",\n    "crates/{newcrate}",')
+        (fx6 / "Cargo.toml").write_text(ct, encoding="utf-8")
+        before6 = _status(fx6)
+        rc6, _o6, e6 = _run_raw(Path(__file__).resolve(), "phase1", "--repo", str(fx6),
+                                "--new", new, "--date", "2026-09-23", "--dry-run")
+        after6 = _status(fx6)
+        if rc6 == 0:
+            fails.append("T6a Cargo.lock 漏了仓库成员却通过（预检失效）")
+        elif newcrate not in e6:
+            fails.append(f"T6a 报错没点名 `{newcrate}`：{e6.strip()[:200]}")
+        elif after6 != before6:
+            fails.append(f"T6a 预检失败却改了工作树：{after6!r}")
+        else:
+            line6 = [l for l in e6.splitlines() if newcrate in l][0].strip()
+            print(f"  ✓ T6a 预检报红并**点到成员名**，且零落盘：{line6}")
+        # T6b：把 lock 条目补上（版本 = old）⇒ 必须自愈（新成员自动进入替换清单）
+        lk = read(fx6 / "Cargo.lock").replace(
+            'name = "xt-tun"\nversion = "' + old + '"',
+            f'name = "xt-tun"\nversion = "{old}"\n\n[[package]]\nname = "{newcrate}"\nversion = "{old}"')
+        (fx6 / "Cargo.lock").write_text(lk, encoding="utf-8")
+        rc6b = _run_tool(Path(__file__).resolve(), "phase1", "--repo", str(fx6),
+                         "--new", new, "--date", "2026-09-23")
+        locknow = read(fx6 / "Cargo.lock")
+        ok6b = (rc6b == 0
+                and f'name = "{newcrate}"\nversion = "{new}"' in locknow)
+        if ok6b:
+            print(f"  ✓ T6b 补上 lock 条目后 phase1 自动覆盖新成员 `{newcrate}`"
+                  f"（派生清单，不再是手写清单）")
+        else:
+            fails.append(f"T6b 派生清单没覆盖新成员（rc={rc6b}；expect `{newcrate}` version {new}）")
+
+        # ---- T7 绿：注释/历史说明里的旧版本字面**不再卡住** phase1 ----
+        # 这正是 `scripts/gen-site-geo.py:62` 那个真实事故的形态（当时只能靠"注释里别写版本"绕开）。
+        print("\n--- T7 绿：注释里的历史版本字面不再阻塞（含反向敏感性）---")
+        fx7 = tmp / "fixture-t7"
+        shutil.copytree(fx, fx7)
+        subprocess.run(["git", "-C", str(fx7), "checkout", "--", "."], check=True)
+        subprocess.run(["git", "-C", str(fx7), "clean", "-qfd"], check=True)
+        geo = read(fx7 / "scripts/gen-site-geo.py")
+        marker = f"# 历史：v{old} 停发期间发生过两次（**注释字面，刻意留着**）\n"
+        (fx7 / "scripts/gen-site-geo.py").write_text(geo + marker, encoding="utf-8")
+        rc7 = _run_tool(Path(__file__).resolve(), "phase1", "--repo", str(fx7),
+                        "--new", new, "--date", "2026-09-23")
+        geo_after = read(fx7 / "scripts/gen-site-geo.py")
+        if rc7 != 0:
+            fails.append("T7 注释里的历史版本字面又把 phase1 卡住了")
+        elif f'VERSION = "{new}"' not in geo_after:
+            fails.append("T7 phase1 通过了但真版本字段没被替换")
+        elif marker.strip() not in geo_after:
+            fails.append("T7 注释被改掉了（应当原样保留）")
+        else:
+            print(f"  ✓ T7 注释 `{marker.strip()[:40]}…` 原样保留，`VERSION` 已替换 ⇒ 退出 0，零误杀")
+        # 反向敏感性：把判据反过来（注释也算 field）⇒ 同一个夹具必须重新变红，
+        # 证明"不卡住"是**分类器**带来的，而不是这条校验被悄悄删掉了。
+        tool7 = tmp / "tool-mutant-t7.py"
+        _mutate(Path(__file__).resolve(), tool7,
+                [('        return "comment"\n', '        return "field"  # 反向敏感性突变\n')])
+        rc7b, _o7b, e7b = _run_raw(tool7, "phase1", "--repo", str(fx7), "--new", new,
+                                   "--date", "2026-09-23")
+        if rc7b == 0:
+            fails.append("T7 反向敏感性突变后仍然通过 ⇒ 「不卡住」不是分类器做到的")
+        else:
+            print(f"  ✓ T7 反向敏感性：把注释判成 field 后同一夹具退出非 0（{rc7b}）"
+                  f"⇒ 豁免确实来自分类器，不是校验被删")
+
+        # ---- T8 红：真版本字段残留必须**一次列全**（含文件:行号 + crate 名）----
+        # 形态：Cargo.lock 里留下两个**非成员**的旧版本条目（例如删 crate 后 lock 没重算）。
+        # 派生清单覆盖不到它们 ⇒ 必须被「真版本字段残留」抓住，而且**两条都要报**。
+        print('\n--- T8 红：真版本字段残留一次列全（不是「只报第一条」）---')
+        fx8 = tmp / "fixture-t8"
+        shutil.copytree(fx, fx8)
+        subprocess.run(["git", "-C", str(fx8), "checkout", "--", "."], check=True)
+        subprocess.run(["git", "-C", str(fx8), "clean", "-qfd"], check=True)
+        lk8 = read(fx8 / "Cargo.lock")
+        lk8 += (f'\n[[package]]\nname = "xt-stale-a"\nversion = "{old}"\n'
+                f'\n[[package]]\nname = "xt-stale-b"\nversion = "{old}"\n')
+        (fx8 / "Cargo.lock").write_text(lk8, encoding="utf-8")
+        rc8, _o8, e8 = _run_raw(Path(__file__).resolve(), "phase1", "--repo", str(fx8),
+                                "--new", new, "--date", "2026-09-23", "--dry-run")
+        if rc8 == 0:
+            fails.append("T8 残留真版本字段却通过")
+        elif not ("xt-stale-a" in e8 and "xt-stale-b" in e8):
+            fails.append(f"T8 没有一次列全两条残留（必须都带 crate 名）：{e8.strip()[:300]}")
+        else:
+            hits = [l.strip() for l in e8.splitlines() if "xt-stale-" in l]
+            print(f"  ✓ T8 两条残留**一次列全**（{len(hits)} 行，各带 crate 名与行号）：")
+            for h in hits:
+                print(f"      {h}")
+
+        # ---- T9 classify_line 的正反例（纯函数，快）----
+        print("\n--- T9 classify_line：真版本字段 vs 注释/说明 ---")
+        cases = [
+            ('version = "0.8.38"', "field"),
+            ('  "version": "0.8.38",', "field"),
+            ('XRAYTUN_VERSION = "0.8.38"', "field"),
+            ('  var PAGE_VERSION = "0.8.38";', "field"),
+            ("            <strong>v0.8.38</strong>", "field"),
+            ('VERSION = "0.8.38"  # 尾随注释', "field"),
+            ("# 真实事故（v0.8.38 停发期间发生两次）", "comment"),
+            ("  // as of v0.8.38", "comment"),
+            ('<meta property="og:image" content="https://xraytun.top/og-image-0.8.38.png" />', "prose"),
+            ('        "text": "不会（截至 v0.8.38）。"', "prose"),
+        ]
+        for line, want in cases:
+            got = classify_line(line, "0.8.38")
+            if got != want:
+                fails.append(f"T9 classify_line({line[:40]!r}) = {got}，期望 {want}")
+        if not [f for f in fails if f.startswith("T9")]:
+            print(f"  ✓ T9 {len(cases)} 个正反例全部符合判据（含 `://` 不算注释、尾随注释不误判）")
 
         print(f"\n[self-test] 结论：{'全部通过' if not fails else '有失败'}")
         for f in fails:
