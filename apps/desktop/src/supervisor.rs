@@ -154,21 +154,74 @@ where
 /// 也复用同一实现（那边只是薄封装 `tunnel_probe`）—— 一处实现、两处调用，
 /// 依赖方向仍是 `commands → supervisor`（本来就存在）。
 /// 复制第二份 curl 调用必然漂移，正是本项目反复踩过的坑。
+/// 域名由**谁**解析 —— 这是一个产品语义选择，不是 curl 参数细节。
+///
+/// # 为什么必须显式区分（2026-09-25 现场踩到）
+///
+/// 上面那条注释写着域名目标的职责是"**域名经核心 dns 模块能不能解析**"，
+/// 但实现一直是 `--socks5-hostname` ⇒ 实际测的是**节点解析**。两回事：
+///
+/// * **TUN 模式**：域名由**核心**的 `dns-out` 解析，节点只收到 IP
+///   ⇒ 节点侧 DNS 坏不坏**不影响**真实使用；
+/// * **系统代理（socks/http）模式**：客户端可能把域名交给节点
+///   ⇒ 节点侧 DNS 就是链路上真的一环。
+///
+/// 现场（用户报错）正是这个错位的后果：节点 IP 字面量目标全通、域名目标全挂
+/// （节点侧 DNS 被污染/不可用），于是**接管前的门禁在 TUN 模式下把用户拦在门外** ——
+/// 而按 TUN 的真实数据路径，这个节点是可用的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeResolve {
+    /// 让**节点**解析（`--socks5-hostname`）：系统代理模式下这才是真实路径。
+    AtNode,
+    /// **本机解析**后把 IP 交给节点（`--socks5`）：TUN 模式下这才是真实路径
+    /// （核心解析 → 节点只看到 IP）。
+    Locally,
+}
+
+/// curl 的参数表（**纯函数，可逐字断言**）。
+///
+/// 抽出来是因为这里每一个参数都决定"这条探测到底在证明什么"：
+/// `--socks5` 与 `--socks5-hostname` 只差一个后缀，语义却是"谁解析域名"。
+pub(crate) fn curl_probe_args(
+    port: u16,
+    target: &str,
+    timeout_secs: u32,
+    resolve: ProbeResolve,
+) -> Vec<String> {
+    vec![
+        "-sS".into(),
+        "-o".into(),
+        "/dev/null".into(),
+        "-w".into(),
+        "%{http_code}".into(),
+        "--max-time".into(),
+        timeout_secs.to_string(),
+        match resolve {
+            ProbeResolve::AtNode => "--socks5-hostname",
+            ProbeResolve::Locally => "--socks5",
+        }
+        .into(),
+        format!("127.0.0.1:{port}"),
+        target.to_string(),
+    ]
+}
+
+/// 经本机 SOCKS 发一次探测（**默认让节点解析**，与改造前的行为一致）。
 pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u32) -> String {
+    socks_http_probe_with(port, target, timeout_secs, ProbeResolve::AtNode).await
+}
+
+/// 同上，但显式指定"域名由谁解析"。
+pub(crate) async fn socks_http_probe_with(
+    port: u16,
+    target: String,
+    timeout_secs: u32,
+    resolve: ProbeResolve,
+) -> String {
     tokio::task::spawn_blocking(move || {
+        let args = curl_probe_args(port, &target, timeout_secs, resolve);
         std::process::Command::new("/usr/bin/curl")
-            .args([
-                "-sS",
-                "-o",
-                "/dev/null",
-                "-w",
-                "%{http_code}",
-                "--max-time",
-                &timeout_secs.to_string(),
-                "--socks5-hostname",
-                &format!("127.0.0.1:{port}"),
-                &target,
-            ])
+            .args(&args)
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -189,7 +242,7 @@ pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u3
 /// | 目标 | 路径 | 职责 |
 /// |---|---|---|
 /// | `http://1.1.1.1/` | 境外（代理链路） | **传输**：经隧道能不能把包送到（IP 字面量，**不依赖解析**） |
-/// | `http://cp.cloudflare.com/generate_204` | 境外 | **解析**：域名经核心 dns 模块能不能解析出来 |
+/// | `http://cp.cloudflare.com/generate_204` | 境外 | **解析/端到端**：域名这条路能不能走通（**由谁解析由模式决定**，见 [`ProbeResolve`]）|
 /// | `http://223.5.5.5/` | 境内（`geoip:cn` → direct） | **传输**：CN 直连路径通不通（IP 字面量，**不依赖解析**） |
 ///
 /// # 为什么要成对（task-92）
@@ -856,9 +909,25 @@ impl Supervisor {
             let session_id = self.session_id.clone().unwrap_or_default();
             let gate_started = std::time::Instant::now();
             let gate_targets = required_probe_urls();
+            // **按产品真实数据路径探测**：TUN 模式下域名由核心解析、节点只看到 IP，
+            // 所以用本机解析（`--socks5`）；系统代理模式下客户端可能把域名交给节点，
+            // 所以保持 `--socks5-hostname`。用错会 fail-closed 掉本来可用的节点。
+            let probe_resolve = if settings.mode == ProxyMode::Tun {
+                ProbeResolve::Locally
+            } else {
+                ProbeResolve::AtNode
+            };
+            tracing::info!(?probe_resolve, mode = ?settings.mode, "端到端门禁：域名解析位置");
             let gate = verify_paths_then_commit(
                 &gate_targets,
-                |target| socks_http_probe(socks_port, target, PRE_COMMIT_PROBE_TIMEOUT_SECS),
+                |target| {
+                    socks_http_probe_with(
+                        socks_port,
+                        target,
+                        PRE_COMMIT_PROBE_TIMEOUT_SECS,
+                        probe_resolve,
+                    )
+                },
                 || async {
                     let commit_started = std::time::Instant::now();
                     let result = helper
@@ -2441,6 +2510,38 @@ mod tests {
             msg.contains("分不开") || msg.contains("边界"),
             "只有一个域名目标 ⇒ 要写出诊断能力的边界，别把猜测说成结论：{msg}"
         );
+    }
+
+    /// **`--socks5` vs `--socks5-hostname` 是产品语义，不是 curl 细节。**
+    ///
+    /// 这条测试存在的理由：现场（2026-09-25）用户 TUN 模式连不上，门禁报"域名目标
+    /// 拿不到响应、IP 目标全通" —— 而那是**节点侧 DNS** 的问题，TUN 模式下产品的
+    /// 真实路径根本不用节点解析（核心 `dns-out` 解析，节点只看到 IP）。
+    /// 也就是说：门禁原本在验一个产品不用的能力，并在它上面 fail-closed。
+    /// 所以这里逐字钉住两种模式各自的参数。
+    #[test]
+    fn the_probe_asks_the_right_side_to_resolve_names() {
+        let at_node = curl_probe_args(10808, "http://cp.cloudflare.com/generate_204", 6, ProbeResolve::AtNode);
+        assert!(at_node.contains(&"--socks5-hostname".to_string()), "{at_node:?}");
+        assert!(!at_node.contains(&"--socks5".to_string()), "{at_node:?}");
+
+        let local =
+            curl_probe_args(10808, "http://cp.cloudflare.com/generate_204", 6, ProbeResolve::Locally);
+        assert!(
+            local.contains(&"--socks5".to_string()),
+            "TUN 模式要本机解析：{local:?}"
+        );
+        assert!(
+            !local.contains(&"--socks5-hostname".to_string()),
+            "本机解析就不能同时让节点解析：{local:?}"
+        );
+        // 其余参数两边一致（端口、目标、超时、只看状态码）。
+        for args in [&at_node, &local] {
+            assert!(args.contains(&"127.0.0.1:10808".to_string()));
+            assert!(args.contains(&"%{http_code}".to_string()));
+            assert!(args.contains(&"6".to_string()));
+            assert!(args.contains(&"http://cp.cloudflare.com/generate_204".to_string()));
+        }
     }
 
     /// **门禁的失败重试**：首次全失败、重试后拿到响应 ⇒ 继续（并只 commit 一次）。
