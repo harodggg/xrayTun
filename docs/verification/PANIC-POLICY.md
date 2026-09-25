@@ -2,8 +2,10 @@
 
 > **结论（TL;DR）**：**保留 `panic = "abort"`，本次不改 `Cargo.toml`。**
 > 理由不是「abort 更好」，而是三条可复算的事实叠加：
-> ① 0.8.38 那条启动崩溃链**已经在代码层修掉**（`task-1`，commit `eef3d10`），
-> abort 不再是「从可读错误变成 SIGABRT」的那一步；
+> ① 0.8.38 的启动崩溃不再需要靠 abort 才「能被看见」：`.build(...).expect(...)`
+> 那一环已被 `task-1` 改成「落盘 + `exit(1)`」；而**更可疑的真凶**是 `setup`
+> 里的裸 `tokio::spawn`（无 runtime context ⇒ panic ⇒ SIGABRT），见 §1.1，
+> 已由另一条工作流修复；
 > ② 上游 Tauri 2.11.5 **没有任何命令级 `catch_unwind`**，所以 unwind 换不来
 > 「单条命令 panic 不炸整个 App」；
 > ③ Cargo **禁止** `[profile.release.package.*] panic = ...`（实测报错），
@@ -35,6 +37,37 @@
 **关键推论**：事故里 `panic = "abort"` 的作用是**把 panic 放大成不可读的信号**。
 `task-1` 把 panic 从「启动失败」这条路径上拿掉之后，剩下的问题是：
 **还要不要为未预见的 panic 保留 abort 这个放大器的失败语义？** §3/§4 回答它。
+
+### 1.1 补记（同日，另一条工作流的发现）：还有第二条启动 panic，很可能才是 0.8.38 的真凶
+
+上面画的是「setup 返回 Err」那条链。同一天在 `apps/desktop/src/lib.rs` 的 `setup`
+闭包里发现了**第二条、独立**的 panic 源，而它更贴合 0.8.38 的现场
+（「双击启动即 abort、连一条 Err 都没有」）：
+
+```rust
+// 修复前（截至 task-1 的提交 eef3d10，树里仍是这个写法）
+tokio::spawn(async move { /* 意图判定节拍 */ });
+```
+
+`setup` 回调体**不在 tokio runtime context 里**（Tauri 用自己的全局 runtime
+handle 驱动 setup 与插件初始化，见 `tauri-2.11.5/src/async_runtime.rs` 模块文档
+与 `static RUNTIME: OnceLock<GlobalRuntime>` / `pub fn spawn`，`:29`、`:103-114`），
+所以裸 `tokio::spawn` 会 panic：
+`there is no reactor running, must be called from the context of a Tokio 1.x runtime`。
+`panic = "abort"` ⇒ **SIGABRT**。正确写法是同文件下方 `bootstrap` 一直在用的
+`tauri::async_runtime::spawn`。
+
+* 本文写作时，工作区里那处**已由另一条工作流**改成 `tauri::async_runtime::spawn`
+  （当时未提交）—— 本补记只记录事实与判据，**不冒领那个修复**。
+* 其余 `tokio::spawn` 站点（`commands/core.rs:290`、`commands/globe.rs:210,214`、
+  `traffic.rs:53`）都在 **`async fn` / async 命令体内**（Tauri 经
+  `async_runtime::spawn` 执行），context 存在 ⇒ 不受影响。
+  复算：`grep -rn 'tokio::spawn' apps/desktop/src`，逐个看所在函数是不是 `async fn`。
+
+**这暴露了 §6 判据的一个盲区**：裸 `tokio::spawn`（无 runtime）是**运行时语义**错误，
+不是 panic 家族**调用**，逐行扫描抓不到。它需要的判据是
+「`setup` 闭包体内不许出现 `tokio::spawn`」这种源级守卫，或把启动路径上所有
+spawn 统一走 `tauri::async_runtime::spawn`。**本文件不声称已覆盖这一类。**
 
 ---
 
@@ -306,6 +339,10 @@ cargo test -p xraytun-desktop production_source_has_no_panic_family_calls -- --n
    可能多跳/少跳。负例测试与「扫到 > 5000 行」的断言是它的护栏。
 4. **不扫依赖、不扫 helper**：本卡范围是 App 侧
    （`apps/desktop/src/**`），`crates/xt-helper`、`crates/xt-tun` 的策略另卡。
+5. **抓不到「运行时语义」型 panic**：`setup` 里的裸 `tokio::spawn`
+   （无 runtime context ⇒ panic）就是一类 —— 它不是 panic 家族调用，
+   行扫描看不见（§1.1）。这类要靠专门的源级守卫（例如「`setup` 闭包内不许
+   `tokio::spawn`」）或统一走 `tauri::async_runtime::spawn`。
 
 ---
 
