@@ -558,7 +558,7 @@ fn hostname_runs(name: &str) -> Vec<String> {
             i += len;
             continue;
         }
-        let Some(c) = name[i..].chars().next() else { break };
+        let Some(c) = char_at(name, i) else { break };
         i += c.len_utf8();
     }
     out
@@ -635,6 +635,18 @@ pub(crate) fn redact_secrets(line: &str, addresses: &ReportRedaction) -> String 
     redact_with(line, addresses, true)
 }
 
+/// 取 `line` 中下标 `i` 处的字符；`i` 越界或**不在字符边界**上时返回 `None`。
+///
+/// **为什么不用 `line[i..].chars().next().expect("i 落在字符边界上")`**：
+/// `line[i..]` 这个切片在「下标不是字符边界」时会**先 panic**，
+/// 而 `.expect` 的那句「不可达」保证就落空了；release profile 是
+/// `panic = "abort"` ⇒ 用户看到的是 SIGABRT 而不是一句可读的错误。
+/// `str::get` 在两种坏输入下都只返回 `None`（它自己不会 panic），
+/// `None` 由调用方降级处理。
+fn char_at(line: &str, i: usize) -> Option<char> {
+    line.get(i..).and_then(|rest| rest.chars().next())
+}
+
 fn redact_with(line: &str, addresses: &ReportRedaction, allow_url: bool) -> String {
     let mut out = String::with_capacity(line.len());
     let mut i = 0usize;
@@ -674,7 +686,16 @@ fn redact_with(line: &str, addresses: &ReportRedaction, allow_url: bool) -> Stri
             i += len;
             continue;
         }
-        let ch = line[i..].chars().next().expect("i 落在字符边界上");
+        let Some(ch) = char_at(line, i) else {
+            // 不可达：`i` 一直 < `line.len()`（while 条件）且落在字符边界上
+            // （各匹配函数都按 `char` 推进）。真出现（将来有人改坏推进逻辑）
+            // 也不能 panic：记一条日志，把剩余内容原样拼上后收尾。
+            tracing::warn!(index = i, len = line.len(), "脱敏扫描位置越界，剩余内容原样保留");
+            if let Some(rest) = line.get(i..) {
+                out.push_str(rest);
+            }
+            break;
+        };
         out.push(ch);
         i += ch.len_utf8();
     }
@@ -909,6 +930,20 @@ mod tests {
             // 恰好 36 字符但不是 UUID 形状 -> 不动
             let not_uuid = "a".repeat(36);
             assert_eq!(redact_secrets(&not_uuid, &empty), not_uuid);
+        }
+
+        /// task-1：`char_at` 在**越界/非字符边界**上必须返回 `None`，不许 panic。
+        ///
+        /// 判别性：把实现换回 `line[i..].chars().next().expect(...)`，下面
+        /// 下标 2/3/`usize::MAX` 三行会在**切片**处 panic ⇒ 红。
+        #[test]
+        fn char_at_returns_none_instead_of_panicking_on_bad_indices() {
+            assert_eq!(char_at("aé", 0), Some('a'));
+            assert_eq!(char_at("aé", 1), Some('é'), "é 是两字节，下标 1 是它的起点");
+            assert_eq!(char_at("aé", 2), None, "下标 2 落在 é 的第二个字节上，不是字符边界");
+            assert_eq!(char_at("aé", 3), None, "下标 == len 是末尾，没有字符");
+            assert_eq!(char_at("aé", usize::MAX), None, "越界也不能 panic");
+            assert_eq!(char_at("", 0), None);
         }
 
         // -------------------------------------------------------------------

@@ -151,13 +151,18 @@ impl MitmRuntime {
     /// 生成（或取回）本会话的 CA。
     ///
     /// 失败**不缓存**：下一次调用会再试一次，而不是把一个"永远失败"记成状态。
+    ///
+    /// 命中缓存走**早返回**，所以「生成 → 放进槽位 → 返回」不需要
+    /// `self.ca.as_ref().expect("刚放进去了")` 来收尾：那个 `expect` 逻辑上
+    /// 确实不可达，但只要它存在，「这里不可能为空」就是**靠人记住**的不变量；
+    /// release profile 是 `panic = "abort"`，将来改动打破它时用户看到的是 SIGABRT。
     pub fn ca(&mut self) -> Result<Arc<LocalCa>, String> {
-        if self.ca.is_none() {
-            self.ca = Some(Arc::new(
-                LocalCa::generate().map_err(|e| format!("生成本地根证书失败：{e}"))?,
-            ));
+        if let Some(ca) = &self.ca {
+            return Ok(ca.clone());
         }
-        Ok(self.ca.as_ref().expect("刚放进去了").clone())
+        let ca = Arc::new(LocalCa::generate().map_err(|e| format!("生成本地根证书失败：{e}"))?);
+        self.ca = Some(ca.clone());
+        Ok(ca)
     }
 
     /// 给 helper 的 PEM（**不含私钥** —— helper 会拒收含私钥的 PEM，这是安全边界）。
@@ -408,6 +413,22 @@ mod tests {
         assert_eq!(xt_tun::macos::trust::normalize_fingerprint(&fp).len(), 40);
         // 同一个 runtime 两次取必须一样（否则装进去的与查到的是两张证书）。
         assert_eq!(rt.ca_fingerprint().unwrap(), fp);
+    }
+
+    /// CA 只生成一次并被复用：删掉那句 `expect("刚放进去了")` 之后，
+    /// 「生成 → 放进槽位 → 返回」仍必须是一个原子动作（同一个 `Arc`）。
+    ///
+    /// 判别性：如果有人把 `ca()` 改回「每次生成一张新 CA」，两次调用返回的
+    /// 指针不同 ⇒ 这条红（已装进钥匙串的信任锚会对不上界面上显示的指纹）。
+    #[test]
+    fn ca_is_generated_once_and_reused() {
+        let mut rt = MitmRuntime::default();
+        let first = rt.ca().expect("第一次必须能生成 CA");
+        let second = rt.ca().expect("第二次必须走缓存，不许重新生成");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "两次 `ca()` 必须是**同一个** CA 实例；重新生成会让已装的信任锚对不上"
+        );
     }
 
     /// 起 → 真的在监听 → 停 → 真的不监听了。

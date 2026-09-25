@@ -102,13 +102,51 @@ fn install_panic_hook() {
     }));
 }
 
+/// 「启动失败」日志的文件名。
+const STARTUP_LOG_NAME: &str = "startup.log";
+
+/// 启动失败时写给用户看的整段文案（**纯函数**，可断言）。
+///
+/// # 为什么文案里必须有「下一步」
+///
+/// 现场只有一句「启动失败」时，用户既不知道文件在哪，也不知道怎么复现；
+/// 这条日志的全部价值就是把人直接送到原因上。所以文案固定包含：
+/// 原因、日志路径、以及**终端里怎么复现**。
+///
+/// 与 panic hook 的 `panic.log` **分开一个文件**：那里是 panic（带 backtrace），
+/// 这里是 `Builder::build` 返回 Err —— 两者成因不同，混在一起会互相误导。
+fn startup_failure_text(log_path: &std::path::Path, reason: &str) -> String {
+    format!(
+        "XrayTun 启动失败：窗口/运行时没能建立，进程以退出码 1 结束（不是 SIGABRT）。\n\
+         原因：{reason}\n\
+         下一步：\n\
+         ① 把下面这个文件发给开发者 —— 它就是这次失败的原因：\n     {}\n\
+         ② 想立刻看到完整输出，在「终端」里执行（把同样的原因直接打出来）：\n     \
+         /Applications/XrayTun.app/Contents/MacOS/xraytun-desktop\n",
+        log_path.display()
+    )
+}
+
+/// 把启动失败写进 `dir/startup.log`，返回实际写入的路径。
+///
+/// 覆盖写而不是追加：一个进程只可能「启动失败」一次，保留最新原因即可。
+fn write_startup_failure(
+    dir: &std::path::Path,
+    reason: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(STARTUP_LOG_NAME);
+    std::fs::write(&path, startup_failure_text(&path, reason))?;
+    Ok(path)
+}
+
 /// 应用入口。`main.rs` 只有一行，真正的逻辑都在这里，方便将来加集成测试。
 pub fn run() {
     // **第一件事**：装上 panic hook。晚一步都可能错过启动阶段的崩溃。
     install_panic_hook();
     init_tracing();
 
-    tauri::Builder::default()
+    let app = match tauri::Builder::default()
         .plugin(tauri_plugin_noop())
         .setup(|app| {
             let store = xt_core::store::Store::with_default_root();
@@ -222,18 +260,40 @@ pub fn run() {
             commands::incident_anomaly_count,
         ])
         .build(tauri::generate_context!())
-        .expect("Tauri 应用启动失败")
-        .run(|app, event| {
-            // ⌘Q 与菜单里的退出都会走到这里，而它们**不经过**托盘那个
-            // 「退出 XrayTun」菜单项 —— 不在这里接一手的话，退出时既不会
-            // 回滚路由，也不会杀掉核心：隧道留在系统上、核心变成孤儿并继续
-            // 占着入站端口，用户下次点连接会直接失败。
-            //
-            // `sync_cleanup` 是幂等的，所以托盘那条路已经清理过也没关系。
-            if let tauri::RunEvent::ExitRequested { .. } = event {
-                crate::tray::sync_cleanup(app);
+    {
+        // **绝不 `.expect(...)`。** `Builder::build` 返回 Err 是**真实存在**的路径：
+        // Tauri 2 的 `setup` 闭包返回 Err 会被包成 `Error::Setup` 从这里冒出来
+        // （tauri-2.11.5 `src/app.rs:2530-2531`），而 release profile 是
+        // `panic = "abort"` ⇒ `.expect` 把它变成 SIGABRT：用户只看到 `abort() called`，
+        // 拿不到任何可读信息 —— 0.8.38 的现场就是这个形态。
+        // 现在：把原因落盘（与 panic hook 同一个 `logs/` 目录），以**非零退出码**结束。
+        Ok(app) => app,
+        Err(e) => {
+            let reason = e.to_string();
+            let dir = xt_core::store::Store::default_root().join("logs");
+            match write_startup_failure(&dir, &reason) {
+                Ok(path) => {
+                    eprintln!("XrayTun 启动失败：{reason}\n（详情已写入 {}）", path.display());
+                }
+                Err(write_err) => {
+                    eprintln!("XrayTun 启动失败：{reason}\n（写日志也失败：{write_err}）");
+                }
             }
-        });
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|app, event| {
+        // ⌘Q 与菜单里的退出都会走到这里，而它们**不经过**托盘那个
+        // 「退出 XrayTun」菜单项 —— 不在这里接一手的话，退出时既不会
+        // 回滚路由，也不会杀掉核心：隧道留在系统上、核心变成孤儿并继续
+        // 占着入站端口，用户下次点连接会直接失败。
+        //
+        // `sync_cleanup` 是幂等的，所以托盘那条路已经清理过也没关系。
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            crate::tray::sync_cleanup(app);
+        }
+    });
 }
 
 /// 排障用的命令行入口。返回 `Some(退出码)` 表示「已处理，别启动 GUI」。
@@ -503,5 +563,268 @@ mod tests {
         let found = xt_core::xray::resolve_core_binary(None, None, None, Some(&dir))
             .expect("应当能在开发期目录里找到核心");
         assert_eq!(found, dir.join("xray"));
+    }
+
+    // ---- task-1：生产路径去 panic（`panic = "abort"` ⇒ 任何 panic 都是 SIGABRT）----
+
+    /// 生产源码 = `#[cfg(test)] mod tests` 之前的部分（仓库既有锚点约定，
+    /// 见 `supervisor.rs::core_shutdown_result_is_not_swallowed_in_production_source`）。
+    fn production_prefix(src: &str) -> &str {
+        src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src)
+    }
+
+    /// `Builder::build` 返回 Err 时**不许** panic，必须落盘后以非零码退出。
+    ///
+    /// 0.8.38 的现场：`.build(...).expect("Tauri 应用启动失败")` +
+    /// `[profile.release] panic = "abort"` ⇒ 双击启动即 `abort() called`，
+    /// 用户与我们都拿不到原因。这条测试钉住那个 `.expect` 不被写回来。
+    #[test]
+    fn build_failure_is_reported_not_panicked() {
+        let prod = production_prefix(include_str!("lib.rs"));
+        assert!(
+            !prod.contains(".expect(\"Tauri 应用启动失败\")"),
+            "`build(...).expect(...)` 会把启动失败变成 SIGABRT（0.8.38 事故）；\
+             必须改成 match + 落盘 + exit(1)"
+        );
+        assert!(
+            prod.contains("fn write_startup_failure"),
+            "启动失败必须落盘 —— 否则用户手上仍然没有任何证据"
+        );
+        assert!(
+            prod.contains("std::process::exit(1)"),
+            "启动失败必须走非零退出码（可预期），而不是 abort（不可读）"
+        );
+    }
+
+    /// `setup` 闭包**任何失败都不得返回 Err**：Tauri 会把它包成 `Error::Setup`
+    /// 让 `build()` 返回 Err（tauri-2.11.5 `src/app.rs:2530-2531`），
+    /// 于是启动路径直接失败。失败只允许「记日志后继续」。
+    #[test]
+    fn setup_closure_never_returns_err() {
+        let prod = production_prefix(include_str!("lib.rs"));
+        let start = prod.find(".setup(|app| {").expect("lib.rs 里的 setup 闭包不见了");
+        let rest = &prod[start..];
+        let end = rest
+            .find(".on_window_event(")
+            .expect("setup 之后的 on_window_event 不见了 —— 夹具锚点失效");
+        let setup = &rest[..end];
+        assert!(setup.contains("Ok(())"), "setup 必须显式以 Ok(()) 结束：{setup}");
+        assert!(
+            !setup.contains('?'),
+            "setup 里不许用 `?` 把 Err 冒泡出去 —— Tauri 会 panic 成 SIGABRT"
+        );
+        assert!(
+            !setup.contains("return Err("),
+            "setup 不许返回 Err —— 启动路径上任何失败都要记日志后继续"
+        );
+    }
+
+    /// 启动失败文案必须包含「下一步做什么」：原因 + 日志路径 + 终端复现命令。
+    /// 只写一句「启动失败」，用户拿到也没用。
+    #[test]
+    fn startup_failure_text_tells_the_user_where_to_look() {
+        let path = std::path::Path::new("/tmp/演示/startup.log");
+        let text = super::startup_failure_text(path, "模拟原因：WebView 初始化失败");
+        assert!(text.contains("模拟原因：WebView 初始化失败"), "必须原样带上原因：{text}");
+        assert!(text.contains("/tmp/演示/startup.log"), "必须给出日志文件路径：{text}");
+        assert!(text.contains("下一步"), "必须写「下一步做什么」：{text}");
+        assert!(
+            text.contains("xraytun-desktop"),
+            "必须给出终端复现命令（否则用户无法自助）：{text}"
+        );
+    }
+
+    /// 落盘必须真的写出文件，且内容里带上原因（不是只在内存里 format 一下）。
+    #[test]
+    fn startup_failure_is_written_to_disk_with_the_cause() {
+        let dir = std::env::temp_dir().join(format!("xt-startup-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = super::write_startup_failure(&dir, "模拟原因：核心上下文损坏")
+            .expect("启动失败日志必须能写出来（目录会自建）");
+        assert_eq!(path, dir.join(super::STARTUP_LOG_NAME));
+        let written = std::fs::read_to_string(&path).expect("日志文件必须存在");
+        assert!(written.contains("模拟原因：核心上下文损坏"), "落盘内容必须含原因：{written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 递归收集 `apps/desktop/src` 下的 `.rs` 文件（守卫要扫全 crate，不只是 lib.rs）。
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// 砍掉 `//` 之后的部分：注释里写 `.unwrap()` 不算生产调用。
+    ///
+    /// 不解析字符串字面量：判据找的是 panic 家族**调用**，它们不会嵌在字符串里；
+    /// `http://…` 被误砍也不影响（那一行不可能是 panic 调用）。
+    fn without_line_comment(line: &str) -> &str {
+        match line.find("//") {
+            Some(i) => &line[..i],
+            None => line,
+        }
+    }
+
+    /// 命中 panic 家族调用则返回名字。
+    ///
+    /// **明确允许** `unwrap_or_else` / `unwrap_or` / `unwrap_or_default` /
+    /// `unwrap_or_else(|e| e.into_inner())` 这类**不 panic 的降级写法** ——
+    /// 它们正是本卡要求的修复方向，不是违规。
+    fn panic_family_call(line: &str) -> Option<&'static str> {
+        for (needle, name) in [
+            (".unwrap()", "unwrap()"),
+            (".unwrap_unchecked()", "unwrap_unchecked()"),
+            (".expect(", "expect("),
+            ("panic!", "panic!"),
+            ("unreachable!", "unreachable!"),
+            ("todo!", "todo!"),
+            ("unimplemented!", "unimplemented!"),
+            ("std::process::abort", "std::process::abort"),
+        ] {
+            if line.contains(needle) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// 返回「生产行」的 (1-based 行号, 去注释后的内容)，跳过所有 `#[cfg(test)]` 项。
+    ///
+    /// **不能**只按第一个 `#[cfg(test)]` 截断：`version_check.rs:221`、
+    /// `supervisor.rs:377`、`commands/incident.rs:30` 这类测试专用项夹在生产代码中间，
+    /// 截断会把它们后面的生产代码一起漏掉（`supervisor.rs` 的守卫注释里记着这个假绿）。
+    fn production_lines(src: &str) -> Vec<(usize, String)> {
+        let lines: Vec<&str> = src.lines().collect();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        while i < lines.len() {
+            let bare = without_line_comment(lines[i]).trim().to_string();
+            if bare.contains("#[cfg(test)]") {
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                // 测试项的第一行（跳过空行/纯注释行）
+                let mut j = i + 1;
+                while j < lines.len() && without_line_comment(lines[j]).trim().is_empty() {
+                    j += 1;
+                }
+                if j >= lines.len() {
+                    break;
+                }
+                let first = without_line_comment(lines[j]).trim();
+                if first.contains(';') && !first.contains('{') {
+                    i = j + 1; // `#[cfg(test)] use …;` 这种没有花括号的项
+                    continue;
+                }
+                if first.contains('{') && first.contains('}') {
+                    i = j + 1; // 单行项
+                    continue;
+                }
+                // 多行项：跳到同缩进的收尾 `}`
+                let mut k = j;
+                while k < lines.len() {
+                    let ind = lines[k].len() - lines[k].trim_start().len();
+                    if lines[k].trim() == "}" && ind == indent {
+                        break;
+                    }
+                    k += 1;
+                }
+                i = k + 1;
+                continue;
+            }
+            out.push((i + 1, bare));
+            i += 1;
+        }
+        out
+    }
+
+    /// **task-1 的机器判据**：`apps/desktop/src/**` 的生产代码里不许有 panic 家族调用。
+    ///
+    /// 事故背景：release profile 是 `panic = "abort"` ⇒ 任何一个 `unwrap()`/`expect()`/
+    /// `panic!` 都是 **SIGABRT**，用户只看到 `abort() called`。「生产不该 panic」
+    /// 因此必须是可复算的规则，而不是一句口号。
+    ///
+    /// 已知盲区（如实记在 `docs/verification/PANIC-POLICY.md`）：切片/索引越界
+    /// 不在这条判据里 —— 那是另一类，用 `str::get`/`slice::get` 的写法兜。
+    #[test]
+    fn production_source_has_no_panic_family_calls() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&root, &mut files);
+        assert!(
+            files.len() >= 20,
+            "没扫到源文件（根 = {}，只看到 {} 个）—— 守卫不能空转",
+            root.display(),
+            files.len()
+        );
+        let mut scanned = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for file in &files {
+            let Ok(src) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            for (n, line) in production_lines(&src) {
+                scanned += 1;
+                if let Some(what) = panic_family_call(&line) {
+                    bad.push(format!("{}:{n}: {what} ⇒ {line}", file.display()));
+                }
+            }
+        }
+        assert!(
+            scanned > 5_000,
+            "判据只扫到 {scanned} 行生产代码 —— 可能被 `#[cfg(test)]` 切没了（假绿）"
+        );
+        assert!(
+            bad.is_empty(),
+            "生产代码里不许有 panic 家族调用（release 下 panic = abort ⇒ SIGABRT）：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// 负例：把历史上真实存在的写法注入生产段，判据必须抓住（否则是假绿）。
+    #[test]
+    fn panic_family_guard_catches_a_planted_unwrap() {
+        let src = include_str!("lib.rs");
+        let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("fn init_tracing"))
+            .expect("夹具锚点 `fn init_tracing` 不见了");
+        lines.insert(at, "    let _ = std::env::var(\"XRAYTUN_X\").unwrap();".to_string());
+        let planted = lines.join("\n");
+        let hits: Vec<String> = production_lines(&planted)
+            .into_iter()
+            .filter_map(|(n, l)| panic_family_call(&l).map(|w| format!("{n}: {w}")))
+            .collect();
+        assert_eq!(hits.len(), 1, "注入的 `.unwrap()` 必须被抓到：{hits:?}");
+    }
+
+    /// 判据不许误伤：`unwrap_or_else` 这类**不 panic** 的降级写法是修复方向，必须放行。
+    #[test]
+    fn panic_family_guard_allows_non_panicking_fallbacks() {
+        for ok in [
+            "let x = a.unwrap_or_else(|| 1);",
+            "let x = a.unwrap_or_default();",
+            "let x = a.unwrap_or(\"\");",
+            "let mut g = LOSS_NOTIFY.lock().unwrap_or_else(|e| e.into_inner());",
+            "if let Some(v) = opt { }",
+        ] {
+            assert!(
+                panic_family_call(ok).is_none(),
+                "`{ok}` 不该被 panic 判据抓住（它是降级写法，不是违规）"
+            );
+        }
+        assert_eq!(panic_family_call("let x = a.expect(\"boom\");"), Some("expect("));
+        assert_eq!(panic_family_call("panic!(\"boom\")"), Some("panic!"));
+        assert_eq!(
+            panic_family_call("(Some(_), Some(_)) => unreachable!(\"x\"),"),
+            Some("unreachable!")
+        );
     }
 }

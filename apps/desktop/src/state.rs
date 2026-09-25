@@ -525,8 +525,11 @@ impl AppState {
     /// `build_snapshot` 把一个内部要拿锁的 `update_status` 写进了快照闭包，
     /// 结果进程活着、连得上 helper、日志一句错都没有，界面却什么都加载不出来。
     ///
-    /// 所以这里显式检测重入并 **panic**：把「静默挂起」变成一句能读的报错。
-    /// 宁可炸响，也不要再让这种 bug 以「界面空白」的形式出现。
+    /// 所以这里显式检测重入，把「静默挂起」变成一句能读的 `error` 日志并
+    /// **返回 `None`**。**不能 panic**：本 App 的 release profile 是
+    /// `panic = "abort"`，一个编程错误不该以 SIGABRT / 界面闪退的形式落到
+    /// 用户头上（0.8.38 事故就是这个形态）。`None` 与「锁中毒」同义，
+    /// 调用方都按「拿不到状态」走已有的可读错误路径。
     pub fn with<T>(&self, f: impl FnOnce(&mut Inner) -> T) -> Option<T> {
         thread_local! {
             static IN_WITH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -540,12 +543,14 @@ impl AppState {
         }
 
         if IN_WITH.with(|c| c.replace(true)) {
-            // 先复位再抛，避免后续调用被这个标志连坐。
+            // 先复位再返回，避免后续调用被这个标志连坐。
             IN_WITH.with(|c| c.set(false));
-            panic!(
+            tracing::error!(
                 "AppState::with 重入：不能在 with 闭包内部再调用 state.with —— \
-                 非递归互斥量会自死锁。请先在外面把值算好再传进闭包。"
+                 非递归互斥量会自死锁。请先在外面把值算好再传进闭包。\
+                 （已降级为返回 None，调用方按「拿不到状态」处理）"
             );
+            return None;
         }
         let _reset = ResetGuard;
 
@@ -757,41 +762,51 @@ pub fn profile_for(
 mod tests {
     use super::*;
 
-    /// **重入 `state.with` 必须炸响，而不是静静地死锁。**
+    /// **重入 `state.with` 必须被抓住，而不是静静地死锁。**
     ///
     /// 这条钉住的是一个真实事故：`build_snapshot` 把一个内部要拿锁的
     /// `update_status` 写进了快照闭包，于是 `std::sync::Mutex` 自死锁。
     /// 症状是「进程活着、连得上 helper、日志一句错都没有，界面什么都
     /// 加载不出来」—— 我在发布前完全没发现，因为它不报任何错。
     ///
-    /// 现在重入会 panic。这条测试保证那个 panic 一直存在：
-    /// 万一有人把守卫删了，这里会从「panic 被捕获」变成「测试挂死」，
-    /// 而挂死的测试在 CI 里是超时失败，同样能被发现。
+    /// task-1 之后判据变成：重入**立即返回 `None`**（外层因此是 `Some(None)`），
+    /// 既不死锁、也不 panic —— release profile 是 `panic = "abort"`，
+    /// 在这里 panic 等于让用户看到 SIGABRT 而不是这句能读的报错。
+    ///
+    /// 判别性：把守卫删掉 ⇒ 内层 `with` 会永久等自己 ⇒ `recv_timeout` 超时 ⇒ 红；
+    /// 把降级改回 `panic!` ⇒ 线程结束但没有值发回 ⇒ 同样超时/断言红。
     #[test]
-    fn nested_with_panics_instead_of_deadlocking() {
-        let state = AppState::new(temp_store("nested-with"));
-        let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            state.with(|_| {
+    fn nested_with_reports_error_without_panicking_or_deadlocking() {
+        let state = std::sync::Arc::new(AppState::new(temp_store("nested-with")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let state = state.clone();
+            std::thread::spawn(move || {
                 // 在持有锁的闭包里再拿一次锁 —— 真实事故就是长这样的
-                let _ = state.with(|_| ());
+                let out = state.with(|_| state.with(|_| ()));
+                let _ = tx.send(out);
             });
-        }));
-        assert!(hit.is_err(), "重入必须在 panic 里被发现，而不是死锁");
+        }
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(out) => assert_eq!(
+                out,
+                Some(None),
+                "重入必须降级成 `None`（可读错误），不许 panic、也不许死锁"
+            ),
+            Err(_) => panic!("重入既没返回值也没报错：守卫可能被删了（现在会自死锁）"),
+        }
         let _ = std::fs::remove_dir_all(state.store.root());
     }
 
-    /// 守卫用完必须复位：一次 panic 不能把后续所有调用都连坐。
+    /// 守卫用完必须复位：一次重入不能把后续所有调用都连坐。
     #[test]
-    fn with_still_works_after_a_reentrancy_panic() {
+    fn with_still_works_after_a_reentrancy() {
         let state = AppState::new(temp_store("with-reset"));
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            state.with(|_| {
-                let _ = state.with(|_| ());
-            });
-        }));
-        // 若标志没复位，这一次会直接 panic
+        let nested = state.with(|_| state.with(|_| ()));
+        assert_eq!(nested, Some(None), "重入这一跳必须被识别出来");
+        // 若标志没复位，这一次会直接返回 None
         let v = state.with(|i| i.settings.mode);
-        assert!(v.is_some(), "panic 之后 with 应当照常可用");
+        assert!(v.is_some(), "重入之后 with 应当照常可用");
         let _ = std::fs::remove_dir_all(state.store.root());
     }
 

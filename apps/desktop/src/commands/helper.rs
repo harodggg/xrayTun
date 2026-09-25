@@ -187,18 +187,35 @@ pub(crate) fn classify_helper_versions(
             bundled: b.version,
         },
         (installed, bundled) => {
-            let reason = match (&installed, &bundled) {
-                (None, None) => "已安装的助手与包内助手的版本都读不到".to_string(),
-                (None, Some(_)) => "读不到已安装助手的版本（文件不存在或无法执行）".to_string(),
-                (Some(_), None) => "读不到包内助手的版本（App 包里没有或无法执行）".to_string(),
-                (Some(_), Some(_)) => unreachable!("两边都读到时上面已返回"),
-            };
+            let reason = unreadable_reason(&installed, &bundled);
             HelperVersionCheck::Unreadable {
                 installed: installed.map(|p| p.version),
                 bundled: bundled.map(|p| p.version),
                 reason,
             }
         }
+    }
+}
+
+/// 「读不到」的三种（理论上四种）情形各自的可读理由。
+///
+/// 单拎出来是为了让第四支 —— 两个探针**都读到了**、却仍落到 `Unreadable` ——
+/// 能被直接测到：它经由 [`classify_helper_versions`] 不可达（上面两个
+/// `(Some, Some)` 分支会先接住），但它接的是「兼容性判据自身异常」这条兜底路径。
+///
+/// **为什么不是 `unreachable!()`**：release profile 是 `panic = "abort"`，
+/// 一个不可达分支会变成 SIGABRT（用户只看到 `abort() called`，0.8.38 的形态）。
+/// 这里退化成一句可读的「下一步做什么」，与另外三支同级。
+fn unreadable_reason(installed: &Option<HelperProbe>, bundled: &Option<HelperProbe>) -> String {
+    match (installed, bundled) {
+        (None, None) => "已安装的助手与包内助手的版本都读不到".to_string(),
+        (None, Some(_)) => "读不到已安装助手的版本（文件不存在或无法执行）".to_string(),
+        (Some(_), None) => "读不到包内助手的版本（App 包里没有或无法执行）".to_string(),
+        (Some(i), Some(b)) => format!(
+            "助手版本的兼容性判据没有给出结论（已安装 {}，包内 {}）—— \
+             请按「读不到版本」处理，并重装助手后重试",
+            i.version, b.version
+        ),
     }
 }
 
@@ -492,6 +509,22 @@ mod tests {
             text(&bundled).contains("包内"),
             "要说清是包内那份读不到：{}",
             text(&bundled),
+        );
+    }
+
+    /// task-1：**第四支兜底不许 panic**（原来写的是 `unreachable!("两边都读到时上面已返回")`）。
+    ///
+    /// 这一支经由 `classify_helper_versions` 不可达（两个 `(Some, Some)` 分支先接住），
+    /// 所以单独把它拎成 `unreadable_reason` 才测得到。判别性：把实现换回
+    /// `unreachable!()`，这条会 panic ⇒ 红。
+    #[test]
+    fn unreadable_reason_for_two_readable_probes_is_a_message_not_a_panic() {
+        let reason = unreadable_reason(&probe("0.8.39", Some(2)), &probe("0.9.0", Some(1)));
+        assert!(reason.contains("0.8.39"), "理由要带上已安装版本：{reason}");
+        assert!(reason.contains("0.9.0"), "理由要带上包内版本：{reason}");
+        assert!(
+            reason.contains("重装") || reason.contains("重试"),
+            "错误文案必须写「下一步做什么」：{reason}"
         );
     }
 
