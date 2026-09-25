@@ -10,21 +10,34 @@
 #       生成的 launchd plist 会不会把 `XRAYTUN_HELPER_INSECURE=1` 塞给 helper。
 #       秒级，被 `scripts/check.sh` 调用 ⇒ 本地 / CI / 发版前同一条判据。
 #
-#   ./scripts/verify-team-id-injection.sh --assert-helper <二进制> [--expect <Team ID>]
+#   ./scripts/verify-team-id-injection.sh --assert-helper <二进制> [--expect <值>] [--policy <策略>]
 #       断言**产物**里真的带着注入值。`peer.rs` 的 `from_build_env()` 只在
 #       `option_env!("XRAYTUN_TEAM_ID")` 为 None/空串时退化成 `InsecureAllowAny`；
 #       注入值是编译期字面量，一定落在二进制里 ⇒ 找到它 = 编译期确实拿到值 = 走
 #       `RequireSignature`。发版流水线在打包之后跑这一条（对用户拿到的那份 helper）。
 #
 #   ./scripts/verify-team-id-injection.sh --evidence
-#       跑出四段**可复算**的绿/红证据（会编译 xt-helper，冷启动约 1–2 分钟）：
+#       跑出五段**可复算**的绿/红证据（会编译 xt-helper，冷启动约 1–2 分钟）：
 #         E1 修前可复现：未注入 ⇒ 既有测试打印"当前构建未注入…"标记 ⇒ InsecureAllowAny
 #         E1b 空串陷阱：`XRAYTUN_TEAM_ID=`（CI 里 vars 未定义的形态）同样开门
-#         E2 修后：注入哨兵 ⇒ 标记**不出现** ⇒ RequireSignature ⇒ 拒绝一切非 root 特权操作
-#         E3 注入真 Team ID ⇒ 产物带着它，且既有签名门测试全绿（拒绝不受信任的二进制/对端）
+#         E2 修后（策略 refuse-all）：注入哨兵 ⇒ 标记**不出现** ⇒ RequireSignature ⇒ 拒绝一切非 root 特权操作
+#         E3 修后（策略 team-id）：注入真 Team ID ⇒ 产物带着它，且既有签名门测试全绿
 #         E4 反向敏感性：判据/断言在缺注入时必须变红（证明不是"照单全收"）
+#         E5 扩展点自证：选未实现的 `cdhash` 策略必须**明确失败**（不静默通过）
 #
-# 退出码：0 = 通过；1 = 有判据不成立；2 = 用法错误；75 = 环境问题（缺工具，不是代码失败）。
+# # 三条策略的扩展点（**加第三态时只改这一处**）
+#
+# F1 的修复按可用凭据分三条形态；产物断言是**策略感知**的：
+#   · `team-id`    —— 注入真实 Apple Team ID（10 位 [A-Z0-9]）。已实现。
+#   · `refuse-all` —— 显式哨兵（当前无证书时的 fail-closed 形态）。已实现。
+#   · `cdhash`     —— **task-23（backend-2）计划中**：不依赖 Developer ID，把对端 cdhash 与
+#                     已安装 App 可执行文件的 cdhash 逐字节比对（ad-hoc 签名也有 cdhash）。
+#                     它的产物判据需要 backend-2 先定下"二进制里可断言的标识"，
+#                     所以这里先标 `PENDING`：**选中它会明确失败（退出 2），绝不静默通过**。
+# 落地时：在下面 `POLICY_STATUS` 把 `cdhash=pending` 改成 `done`，并在 `policy_assert()`
+# 的 `cdhash)` 分支填上判据（其余代码不用动）。
+#
+# 退出码：0 = 通过；1 = 有判据不成立；2 = 用法错误 / 策略未实现；75 = 环境问题（缺工具，不是代码失败）。
 # ---------------------------------------------------------------------------
 
 set -uo pipefail
@@ -36,6 +49,52 @@ source "$ROOT/scripts/team-id.sh"
 MODE=""
 HELPER=""
 EXPECT="${XRAYTUN_TEAM_ID-}"
+POLICY="auto"
+
+# ---------------------------------------------------------------------------
+# 策略表（**扩展点**，见文件头"三条策略的扩展点"）
+# ---------------------------------------------------------------------------
+# `<策略>=<done|pending>`，空格分隔。`pending` 表示判据还没定下来（例如 cdhash 需要
+# backend-2 先给出"二进制里可断言的标识"）：选中它会**明确失败**，绝不静默通过。
+# `--static` 会检查这张表本身没写错，防止"加了策略但脚本忘了跟上"。
+POLICY_STATUS="team-id=done refuse-all=done cdhash=pending"
+
+policy_status() { # <策略> → done | pending | unknown
+  local p="$1" e
+  for e in $POLICY_STATUS; do
+    [ "${e%%=*}" = "$p" ] && { printf '%s\n' "${e#*=}"; return 0; }
+  done
+  printf 'unknown\n'
+}
+
+policy_of_value() { # 由注入值推导策略（保持与旧调用兼容）
+  case "$(team_id_classify "${1-}")" in
+    real) printf 'team-id\n' ;;
+    sentinel) printf 'refuse-all\n' ;;
+    *) printf 'invalid\n' ;;
+  esac
+}
+
+# 产物断言：每种策略一行判据。**cdhash 落地时只改这里**。
+# 返回 0=通过 1=不通过 2=未实现/未知。
+policy_assert() { # <策略> <helper> <期望值>
+  local policy="$1" helper="$2" expect="$3"
+  # ⚠️ 直接对文件 grep（不接管道）：本脚本 `set -o pipefail`，`strings … | grep -q`
+  #    在命中时会让上游收到 SIGPIPE(141)，把"命中"判成"失败"（详见 assert 模式注释）。
+  case "$policy" in
+    team-id | refuse-all)
+      LC_ALL=C grep -qF -- "$expect" "$helper" 2>/dev/null
+      ;;
+    cdhash)
+      # PENDING（task-23）：ad-hoc 签名也有 cdhash，策略是"对端 cdhash == 已安装 App 的 cdhash"。
+      # 落地后在这里填判据，例如：断言二进制里带着绑定标识 / 绑定的可执行文件路径。
+      return 2
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -43,7 +102,8 @@ while [ $# -gt 0 ]; do
     --evidence) MODE="evidence"; shift ;;
     --assert-helper) MODE="assert"; HELPER="${2:-}"; shift 2 ;;
     --expect) EXPECT="${2:-}"; shift 2 ;;
-    -h | --help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --policy) POLICY="${2:-}"; shift 2 ;;
+    -h | --help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
 done
@@ -75,14 +135,27 @@ if [ "$MODE" = "assert" ]; then
     echo "✗ 期望值不合法（${cls}）：'$EXPECT' ⇒ 这个产物本来就会被 helper 判成不可信，先修注入" >&2
     exit 1
   fi
-  echo "[断言] $HELPER 里必须带着注入值（${cls}）：$EXPECT"
-  # `strings -a`：注入值是 ASCII 字面量（`option_env!` 展开成 `Some("…")`）。
+  if [ "$POLICY" = "auto" ]; then
+    POLICY="$(policy_of_value "$EXPECT")"
+  fi
+  case "$(policy_status "$POLICY")" in
+    done) ;;
+    pending)
+      echo "✗ 策略 '$POLICY' 的产物判据**还没实现**（见文件头「三条策略的扩展点」）：" >&2
+      echo "  选中它会明确失败，绝不静默通过。落地时改 POLICY_STATUS 与 policy_assert()。" >&2
+      exit 2 ;;
+    *)
+      echo "✗ 未知策略 '$POLICY'（已知：${POLICY_STATUS}）" >&2
+      exit 2 ;;
+  esac
+  echo "[断言] 策略=$POLICY  $HELPER 里必须带着注入值（${cls}）：$EXPECT"
+  # 判据在 `policy_assert()`（策略表），这里只负责报结论。
   # ⚠️ 只断言**正向**存在。不要用"回退警告串不在"当判据：那条是中文，BSD `strings`
   #    按非 ASCII 字节切分，实测 grep 不到（编码假红）；正向字面量是稳定的。
   # ⚠️ 也不用 `strings … | grep -q`：本脚本是 `set -o pipefail`，`grep -q` 命中即退出
   #    ⇒ `strings` 收到 SIGPIPE（141）⇒ 管道整体非 0 ⇒ **命中被判成失败**（第一版就
-  #    因此报了假红）。这里直接对文件 grep（无管道），`-q` 不会牵连上游。
-  if LC_ALL=C grep -qF -- "$EXPECT" "$HELPER" 2>/dev/null; then
+  #    因此报了假红）。判据里是直接对文件 grep（无管道）。
+  if policy_assert "$POLICY" "$HELPER" "$EXPECT"; then
     ok "产物带着注入值 ⇒ option_env! 是 Some(..) ⇒ PeerPolicy::RequireSignature（不是 InsecureAllowAny）"
   else
     bad "产物里**找不到** '$EXPECT' ⇒ 这一版 helper 很可能编译成了 InsecureAllowAny（P0-1），拒绝出货"
@@ -99,12 +172,50 @@ if [ "$MODE" = "static" ]; then
   PKG="$ROOT/scripts/package-macos.sh"
 
   # 1) 唯一允许的"注入点"清单。crates/** 里那句 `option_env!("XRAYTUN_TEAM_ID")` 是**读**，不是注。
+  #
+  # ⚠️ 判据必须**先砍注释**再看"是不是真的在设这个变量"——第一版用裸 `grep -E
+  #    'XRAYTUN_TEAM_ID[[:space:]]*[:=]'`，于是 backend-2 在 peer.rs 里写的一句**文档注释**
+  #    （`/// … ops 实测 XRAYTUN_TEAM_ID="" …`）被当成注入点 ⇒ 门禁假红。
+  #    现在：去掉注释（`#` / `//` / `/*` / `<!--`，`://` 不算）后，只认三种形态：
+  #      shell `export XRAYTUN_TEAM_ID` · 赋值 `XRAYTUN_TEAM_ID=…` · YAML env 键 `XRAYTUN_TEAM_ID:`。
   allowed='scripts/team-id.sh
 scripts/package-macos.sh
 scripts/verify-team-id-injection.sh
 .github/workflows/release.yml'
-  injectors="$(cd "$ROOT" && git grep -n -E 'XRAYTUN_TEAM_ID[[:space:]]*[:=]|export[[:space:]]+XRAYTUN_TEAM_ID' -- . 2>/dev/null \
-    | grep -v '^docs/' | awk -F: '{print $1}' | sort -u || true)"
+  injectors="$(cd "$ROOT" && git grep -n -E 'XRAYTUN_TEAM_ID|export[[:space:]]+XRAYTUN_TEAM_ID' -- . 2>/dev/null \
+    | grep -v '^docs/' \
+    | python3 -c '
+import re, sys
+
+def comment_start(line):
+    """注释起始列（-1 = 没有注释）。`://` 里的 `//` 不算注释。"""
+    st = line.lstrip()
+    indent = len(line) - len(st)
+    for mk in ("<!--", "#", "//", "/*"):
+        if st.startswith(mk):
+            return indent
+    if st.startswith(("* ", "*/")):
+        return indent
+    m = re.search(r"\s#", line)
+    if m:
+        return m.start() + 1
+    m = re.search(r"(?<!:)\s//", line)
+    if m:
+        return m.start() + 1
+    return -1
+
+# 只认"真的在设这个变量"：shell export / 赋值 / YAML env 键。
+INJ = re.compile(r"(?:^|\s)XRAYTUN_TEAM_ID\s*=(?!=)|export\s+XRAYTUN_TEAM_ID\b|XRAYTUN_TEAM_ID\s*:(?!=)")
+for raw in sys.stdin:
+    parts = raw.rstrip("\n").split(":", 2)
+    if len(parts) < 3:
+        continue
+    f, _ln, text = parts
+    cut = comment_start(text)
+    code = text if cut < 0 else text[:cut]
+    if INJ.search(code):
+        print(f)
+' | sort -u || true)"
   unexpected=""
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -190,6 +301,23 @@ scripts/verify-team-id-injection.sh
     fi
   done < <(cd "$ROOT" && grep -rln -- 'UNSET-REFUSE-PRIVILEGED-OPS' scripts .github 2>/dev/null || true)
 
+  # 5) 策略表自洽（扩展点在**本脚本**里）：状态只许是 done/pending，且 done 的必须有判据。
+  for entry in $POLICY_STATUS; do
+    pname="${entry%%=*}"
+    pstate="${entry#*=}"
+    case "$pstate" in
+      done) ;;
+      pending) ;;
+      *) bad "策略表项 '$entry' 状态不认识（只能是 done / pending）" ;;
+    esac
+    [ -n "$pname" ] || bad "策略表里有空名字：'$entry'"
+  done
+  ok "策略表现状：${POLICY_STATUS}（pending 的策略被选中时会**明确失败**，不会静默通过）"
+  if printf '%s' "$POLICY_STATUS" | grep -q 'cdhash=pending'; then
+    ok "cdhash（task-23：不依赖 Developer ID 的对端身份绑定）已留好扩展点：" \
+       "改 POLICY_STATUS + policy_assert() 的 cdhash 分支即可，其余代码不用动"
+  fi
+
   echo "[静态] 通过 $pass 项，失败 $fail 项"
   exit $((fail > 0 ? 1 : 0))
 fi
@@ -229,7 +357,7 @@ if [ "$MODE" = "evidence" ]; then
     local label="$1"; shift
     local log="$EVID_DIR/build-$label.log"
     if ! (cd "$ROOT" && env "$@" cargo build -p xt-helper) >"$log" 2>&1; then
-      bad "构建失败（$label）—— 见 $log"
+      bad "构建失败（${label}）—— 见 $log"
       tail -5 "$log" | sed 's/^/      /' >&2
       return 1
     fi
@@ -323,6 +451,22 @@ if [ "$MODE" = "evidence" ]; then
     bad "未注入的 helper 竟然通过了产物断言 ⇒ 断言是空话"
   else
     ok "未注入的 helper **不通过**产物断言 ⇒ 这条断言真的能拦住 F1 形态"
+  fi
+
+  echo
+  echo "== E5 扩展点自证：未实现的策略必须**明确失败**（task-23 cdhash 落地前的状态）=="
+  if (cd "$ROOT" && XRAYTUN_TEAM_ID="$FAKE_REAL" "$0" --assert-helper "$HELPER_BIN" \
+        --expect "$FAKE_REAL" --policy cdhash) >/dev/null 2>&1; then
+    bad "选 cdhash 策略竟然通过了 ⇒「未实现」被静默当成「通过」，扩展点是假的"
+  else
+    ok "cdhash 策略当前是 pending ⇒ 退出非 0（明确失败），不会被当成通过"
+    ok "落地方式：POLICY_STATUS 改 cdhash=done + policy_assert() 的 cdhash 分支填判据，其余不动"
+  fi
+  if (cd "$ROOT" && XRAYTUN_TEAM_ID="$FAKE_REAL" "$0" --assert-helper "$HELPER_BIN" \
+        --expect "$FAKE_REAL" --policy 不存在的策略) >/dev/null 2>&1; then
+    bad "未知策略竟然通过了 ⇒ 策略名写错会被静默吞掉"
+  else
+    ok "未知策略名也明确失败（拼错不会被静默吞掉）"
   fi
 
   echo
