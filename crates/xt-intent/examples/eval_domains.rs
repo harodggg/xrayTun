@@ -50,6 +50,18 @@ struct Args {
     /// 那样量到的是配额，不是模型（本机实测：第一轮 120 条拿到 36 条无答案，
     /// 紧接着的第二轮 196 条错误 / 106 条候选有 93 条无答案）。
     sleep_ms: u64,
+    /// `ads_intent_min`：判定"是广告"的概率下限。**默认取产品默认值 0.85**。
+    ///
+    /// 它是这次实验唯一要动的旋钮：把阈值调低看**无标注桶会不会真的产出 block** ——
+    /// 那是区分「阈值太保守」与「这个档位的模型根本判不动」的唯一办法。
+    ads_min: f32,
+    /// `risk_of_breakage_max`（风险刹车）。产品默认 0.3。
+    risk_max: f32,
+    /// `choice_confidence_min`（模型自报置信度下限）。产品默认 0.5。
+    ///
+    /// 第三个闸门。**不测它就说"不是阈值问题"是不严谨的** —— 模型可能给出很高的
+    /// `ads_intent` 但自报置信度很低，那样前两个旋钮怎么调都不会有 block。
+    choice_min: f32,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -64,6 +76,9 @@ fn parse_args() -> Result<Args, String> {
         api_key: std::env::var("JEV_API_KEY").ok(),
         limit: 200,
         sleep_ms: 1200,
+        ads_min: xt_intent::verdict::Thresholds::default().ads_intent_min,
+        risk_max: xt_intent::verdict::Thresholds::default().risk_of_breakage_max,
+        choice_min: xt_intent::verdict::Thresholds::default().choice_confidence_min,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -80,6 +95,21 @@ fn parse_args() -> Result<Args, String> {
                 a.limit = value("--limit")?
                     .parse()
                     .map_err(|_| "--limit 必须是数字".to_string())?
+            }
+            "--ads-min" => {
+                a.ads_min = value("--ads-min")?
+                    .parse()
+                    .map_err(|_| "--ads-min 必须是数字（0~1）".to_string())?
+            }
+            "--risk-max" => {
+                a.risk_max = value("--risk-max")?
+                    .parse()
+                    .map_err(|_| "--risk-max 必须是数字（0~1）".to_string())?
+            }
+            "--choice-min" => {
+                a.choice_min = value("--choice-min")?
+                    .parse()
+                    .map_err(|_| "--choice-min 必须是数字（0~1）".to_string())?
             }
             "--sleep-ms" => {
                 a.sleep_ms = value("--sleep-ms")?
@@ -173,6 +203,11 @@ fn main() {
     let mut notes = vec![
         format!("语料文件 {} 个，共读入 {lines_read} 行", args.corpus.len()),
         format!("候选之间间隔 {} ms（限速；用 --sleep-ms 0 关掉）", args.sleep_ms),
+        format!(
+            "阈值：ads_intent_min = {}（产品默认 0.85）、risk_of_breakage_max = {}（产品默认 0.3）、\
+             choice_confidence_min = {}（产品默认 0.5）",
+            args.ads_min, args.risk_max, args.choice_min
+        ),
         "否定样本刻意不含 `cn`（它里面既有正常站点也有投放域名，拿它当正常会系统性高估精确率）"
             .to_string(),
     ];
@@ -206,7 +241,14 @@ fn main() {
             cache_max_entries: args.limit + 16,
             ..Default::default()
         };
-        ic.thresholds = Default::default();
+        // 阈值：默认与产品默认一致（0.85 / 0.3），可用 `--ads-min` / `--risk-max` 覆盖。
+        // **报告里会写明用了哪一组**，否则两份数字放一起无法比较。
+        ic.thresholds = xt_intent::verdict::Thresholds {
+            ads_intent_min: args.ads_min,
+            risk_of_breakage_max: args.risk_max,
+            choice_confidence_min: args.choice_min,
+            ..Default::default()
+        };
 
         let mut engine = match IntentEngine::new(ic, gateway, None, 0) {
             Ok(e) => e,
