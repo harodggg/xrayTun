@@ -36,7 +36,9 @@ use std::collections::BTreeMap;
 
 use xt_core::xray::access_log::ObservedLine;
 
-use crate::verdict::Verdict;
+use crate::answer::Answers;
+use crate::question::{KIND_LABELS, Q_ADS_INTENT, Q_ENDPOINT_KIND, Q_RISK_OF_BREAKAGE};
+use crate::verdict::{AllowReason, Category, DeferReason, Thresholds, Verdict};
 
 /// 一条观测：某个主机名被连了多少次。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +454,461 @@ fn pct(part: u64, total: u64) -> f64 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 原始答案诊断（task-13）
+// ---------------------------------------------------------------------------
+//
+// 背景：两次实测都是「无标注桶 0 拦」，但我们只统计了**最终 verdict**，
+// 看不到模型实际答了什么。于是两种解释分不开：
+//
+//   (a) 模型高置信地说"不是广告"      ⇒ 能力/问题本身的问题；
+//   (b) 模型给了广告类别但被闸门挡下  ⇒ **是我们的阈值/白名单**；
+//   (c) 低置信 / 字段被解析丢         ⇒ **是我们的问法/解析**。
+//
+// 这一节把网关返回的**原始 answers**（每个 id 的原样 JSON）做成聚合统计。
+//
+// 隐私：输入记录含域名（只能落在仓库外）；本节的渲染函数**只输出聚合数字**，
+// 有一条测试直接断言渲染结果里不出现任何样例域名。
+
+/// `eval_domains --raw-answers` 写的一行：一次网关调用的原始答案。
+///
+/// **含域名**，所以文件只能落在仓库外（`/tmp`）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RawAnswerRecord {
+    pub host: String,
+    #[serde(default)]
+    pub ts_unix: u64,
+    /// `false` = 网关失败（超时/非 2xx/连接错误），这一条没拿到答案。
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub expected_ids: Vec<String>,
+    #[serde(default)]
+    pub answer_ids: Vec<String>,
+    /// `id → 原样 JSON`（服务器给什么形状就是什么形状）。
+    #[serde(default)]
+    pub answers: serde_json::Value,
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// 一条记录的归类。**(a)/(b)/(c) 的判定规则写在这里**，渲染时逐条给条数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerClass {
+    /// (b) 类别本身可拦，但被**数值闸门**挡下（阈值 或 风险刹车）。
+    AdCategoryStoppedByNumericGate,
+    /// (c) 类别可拦，但模型**自报置信度**低于阈值 —— 它自己在犹豫。
+    AdCategoryLowConfidence,
+    /// (c) 类别说"不是广告"，但模型自报置信度低于阈值 —— 在犹豫，不是明确否定。
+    ///
+    /// 单独一个变体而不是并进 [`Self::NotAdCategory`]：**(a) 的判据是"高置信"**，
+    /// 把犹豫的样本混进 (a) 会把"模型明确说不是"说重。
+    NonAdLowConfidence,
+    /// (a) 答案可解析、类别**不在**可拦集合、自报置信度也够 ⇒ 明确说"不是广告"。
+    NotAdCategory,
+    /// (c) 少字段 / `noul` 形状不对 / choice 标签不在白名单 ⇒ 解析这层丢了答案。
+    Unparsable,
+    /// 没拿到答案（网关错误 / 超时）——**不计入 a/b/c**，单独列。
+    NoAnswer,
+    /// 拿到了答案且真的被判成 block（无标注桶里的意外）——单独列。
+    Blocked,
+}
+
+impl AnswerClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AdCategoryStoppedByNumericGate => "ad_category_stopped_by_numeric_gate",
+            Self::AdCategoryLowConfidence => "ad_category_low_confidence",
+            Self::NonAdLowConfidence => "non_ad_low_confidence",
+            Self::NotAdCategory => "not_ad_category",
+            Self::Unparsable => "unparsable",
+            Self::NoAnswer => "no_answer",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    /// 归到 (a)/(b)/(c) 哪一桶；`None` = 不参与该三分（网关失败 / 真的拦了）。
+    pub fn bucket(self) -> Option<&'static str> {
+        match self {
+            Self::NotAdCategory => Some("a"),
+            Self::AdCategoryStoppedByNumericGate => Some("b"),
+            Self::AdCategoryLowConfidence | Self::NonAdLowConfidence | Self::Unparsable => Some("c"),
+            Self::NoAnswer | Self::Blocked => None,
+        }
+    }
+}
+
+/// 一条原始答案的逐条分析。`host` **绝不进渲染**（只在测试与 join 时用）。
+#[derive(Debug, Clone)]
+pub struct RecordAnalysis {
+    pub host: String,
+    pub class: AnswerClass,
+    /// 引擎实际挡下它的原因（`allow`/`deferred` 的原因名；`block`/`no_answer`）。
+    pub gate: String,
+    /// 解析出的类别标签（不在白名单时为 `None`）。
+    pub category: Option<String>,
+    /// 原始 `choice` 字段 —— **即使不在白名单也记**：词表太窄要看得见。
+    pub raw_choice: Option<String>,
+    pub raw_kind_type: Option<String>,
+    pub raw_ads_type: Option<String>,
+    pub raw_risk_type: Option<String>,
+    pub ads_intent: Option<f32>,
+    pub risk_of_breakage: Option<f32>,
+    pub choice_confidence: Option<f32>,
+    /// 期望但服务端没给的 id。
+    pub missing_ids: Vec<String>,
+    /// **反事实**：把风险刹车关掉（`risk_of_breakage_max = 1.0`）之后再走一遍闸门，
+    /// 下一条挡它的是什么。`None` = 参数不全（读不出来）或这一步会 block。
+    ///
+    /// 为什么需要它：刹车在闸门链里**最先**（`decide` 的第一条），所以
+    /// "被 risk 挡下"会把后面所有闸门都遮住。只看最终 verdict 会误以为
+    /// "把风险阈值放开就有 block" —— 这个字段直接给出答案。
+    pub next_gate_without_brake: Option<String>,
+}
+
+fn gate_str(verdict: &Verdict) -> String {
+    match verdict {
+        Verdict::Block(_) => "block".to_string(),
+        Verdict::Allow(AllowReason::BreakageRiskTooHigh { .. }) => {
+            "breakage_risk_too_high".to_string()
+        }
+        Verdict::Allow(AllowReason::CategoryNotBlockable { .. }) => {
+            "category_not_blockable".to_string()
+        }
+        Verdict::Allow(AllowReason::LowConfidence { .. }) => "low_confidence".to_string(),
+        Verdict::Allow(AllowReason::BelowThreshold { .. }) => "below_threshold".to_string(),
+        Verdict::Deferred(DeferReason::MissingAnswer { id }) => {
+            format!("missing_answer:{id}")
+        }
+        Verdict::Deferred(DeferReason::SchemaInvalid { id }) => {
+            format!("schema_invalid:{id}")
+        }
+        Verdict::Deferred(other) => other.as_str().to_string(),
+    }
+}
+
+fn raw_type(answers: &Answers, id: &str) -> Option<String> {
+    answers
+        .raw_of(id)
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// 分析一条原始答案。
+///
+/// `engine_verdict` 优先用**引擎实际给的判决**（含形状加分）；`None` 时用
+/// `thresholds` 重算一遍 `decide`（`bonus = 0`），结果一样可复算。
+pub fn analyze_record(
+    rec: &RawAnswerRecord,
+    engine_verdict: Option<&Verdict>,
+    thresholds: &Thresholds,
+) -> RecordAnalysis {
+    let mut a = RecordAnalysis {
+        host: rec.host.clone(),
+        class: AnswerClass::NoAnswer,
+        gate: rec
+            .error_kind
+            .clone()
+            .unwrap_or_else(|| "no_answer".to_string()),
+        category: None,
+        raw_choice: None,
+        raw_kind_type: None,
+        raw_ads_type: None,
+        raw_risk_type: None,
+        ads_intent: None,
+        risk_of_breakage: None,
+        choice_confidence: None,
+        missing_ids: Vec::new(),
+        next_gate_without_brake: None,
+    };
+    if !rec.ok {
+        return a;
+    }
+
+    let Some(answers) = Answers::from_wire(&serde_json::json!({ "answers": rec.answers }))
+    else {
+        a.class = AnswerClass::Unparsable;
+        a.gate = "answers_not_object".into();
+        return a;
+    };
+
+    a.raw_choice = answers
+        .raw_of(Q_ENDPOINT_KIND)
+        .and_then(|v| v.get("choice"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    a.raw_kind_type = raw_type(&answers, Q_ENDPOINT_KIND);
+    a.raw_ads_type = raw_type(&answers, Q_ADS_INTENT);
+    a.raw_risk_type = raw_type(&answers, Q_RISK_OF_BREAKAGE);
+    a.ads_intent = answers.noul(Q_ADS_INTENT);
+    a.risk_of_breakage = answers.noul(Q_RISK_OF_BREAKAGE);
+    a.missing_ids = rec
+        .expected_ids
+        .iter()
+        .filter(|id| !answers.has(id))
+        .cloned()
+        .collect();
+
+    let kind = answers.choice(Q_ENDPOINT_KIND, KIND_LABELS);
+    if let Some((label, conf)) = &kind {
+        a.category = Some(label.clone());
+        a.choice_confidence = Some(*conf);
+    }
+
+    let verdict = match engine_verdict {
+        Some(v) => v.clone(),
+        None => crate::verdict::decide(&answers, thresholds, 0.0),
+    };
+    a.gate = gate_str(&verdict);
+
+    // 反事实：刹车关掉之后再走一遍（只在这个字段能读出三个数时才做）。
+    if kind.is_some() && a.ads_intent.is_some() && a.risk_of_breakage.is_some() {
+        let mut without_brake = thresholds.clone();
+        without_brake.risk_of_breakage_max = 1.0;
+        a.next_gate_without_brake =
+            Some(gate_str(&crate::verdict::decide(&answers, &without_brake, 0.0)));
+    }
+
+    if matches!(verdict, Verdict::Block(_)) {
+        a.class = AnswerClass::Blocked;
+        return a;
+    }
+
+    // 只要有任何一个期望字段读不出来，就归 (c)：**先把"我们丢了答案"和
+    // "模型说不是"分开**，这是这份诊断的全部意义。
+    if kind.is_none() || a.ads_intent.is_none() || a.risk_of_breakage.is_none() {
+        a.class = AnswerClass::Unparsable;
+        return a;
+    }
+
+    let blockable = a
+        .category
+        .as_deref()
+        .and_then(Category::from_label)
+        .map(|c| thresholds.block_categories.contains(&c))
+        .unwrap_or(false);
+    // 自报置信度低于阈值 ⇒ 模型在犹豫。**即使类别说"不是广告"也归 (c)**：
+    // (a) 的判据是"高置信"，把犹豫的样本算进 (a) 会把结论说重。
+    let low_conf = a
+        .choice_confidence
+        .map(|c| c < thresholds.choice_confidence_min)
+        .unwrap_or(true);
+
+    a.class = match &verdict {
+        Verdict::Deferred(_) => AnswerClass::NoAnswer,
+        Verdict::Block(_) => AnswerClass::Blocked,
+        Verdict::Allow(AllowReason::LowConfidence { .. }) => {
+            if blockable {
+                AnswerClass::AdCategoryLowConfidence
+            } else {
+                AnswerClass::NonAdLowConfidence
+            }
+        }
+        Verdict::Allow(_) => {
+            if blockable {
+                AnswerClass::AdCategoryStoppedByNumericGate
+            } else if low_conf {
+                AnswerClass::NonAdLowConfidence
+            } else {
+                AnswerClass::NotAdCategory
+            }
+        }
+    };
+    a
+}
+
+fn bucket_of(v: Option<f32>, edges: &[f32], labels: &[&str]) -> usize {
+    match v {
+        None => labels.len() - 1,
+        Some(x) => edges.iter().position(|e| x < *e).unwrap_or(edges.len()),
+    }
+}
+
+fn hist_lines(name: &str, labels: &[&str], counts: &[usize], total: usize) -> String {
+    let mut out = format!("### {name}\n\n| 桶 | 条数 | 占比 |\n|---|---:|---:|\n");
+    for (l, c) in labels.iter().zip(counts.iter()) {
+        out.push_str(&format!("| {l} | {c} | {:.1}% |\n", pct(*c as u64, total as u64)));
+    }
+    out.push('\n');
+    out
+}
+
+/// 把一批分析渲染成**只有聚合数字**的 Markdown。
+///
+/// ⚠️ 这里绝不能出现 `RecordAnalysis.host`（有一条测试盯着）。
+pub fn render_diagnosis(analyses: &[RecordAnalysis], buckets_asked: usize) -> String {
+    let total = analyses.len();
+    let mut out = String::new();
+    out.push_str("## 无标注桶：原始答案分布（task-13）\n\n");
+    out.push_str(&format!(
+        "样本 {total} 条（排队问出的无标注域名 {buckets_asked} 条）。\
+         **本节的每个数字都来自 `--raw-answers` 里模型的实际回答，不是最终 verdict 的转述。**\n\n"
+    ));
+
+    // 三分桶
+    let mut a_n = 0usize;
+    let mut b_n = 0usize;
+    let mut c_n = 0usize;
+    let mut no_answer = 0usize;
+    let mut blocked = 0usize;
+    for x in analyses {
+        match x.class.bucket() {
+            Some("a") => a_n += 1,
+            Some("b") => b_n += 1,
+            Some("c") => c_n += 1,
+            _ => match x.class {
+                AnswerClass::NoAnswer => no_answer += 1,
+                _ => blocked += 1,
+            },
+        }
+    }
+    out.push_str("### 判定（三分）\n\n");
+    out.push_str("| 桶 | 含义 | 条数 | 占比 |\n|---|---|---:|---:|\n");
+    out.push_str(&format!(
+        "| **(a)** 模型高置信说\"不是广告\" | 答案可解析、类别不在可拦集合 | {a_n} | {:.1}% |\n",
+        pct(a_n as u64, total as u64)
+    ));
+    out.push_str(&format!(
+        "| **(b)** 给了广告类别、被数值/风险闸门挡下 | 阈值或风险刹车 | {b_n} | {:.1}% |\n",
+        pct(b_n as u64, total as u64)
+    ));
+    out.push_str(&format!(
+        "| **(c)** 低置信 / 字段被解析丢 | 置信度闸门 / 缺字段 / 形状不符 | {c_n} | {:.1}% |\n",
+        pct(c_n as u64, total as u64)
+    ));
+    out.push_str(&format!(
+        "| 未拿到答案（不计入三分） | 网关失败 / 超时 | {no_answer} | {:.1}% |\n",
+        pct(no_answer as u64, total as u64)
+    ));
+    out.push_str(&format!(
+        "| 真的被判 block（不计入三分） | 无标注桶里的意外收获 | {blocked} | {:.1}% |\n\n",
+        pct(blocked as u64, total as u64)
+    ));
+
+    // 细分归类
+    let mut classes: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for x in analyses {
+        *classes.entry(x.class.as_str()).or_insert(0) += 1;
+    }
+    out.push_str("### 每条记录的具体归类\n\n| 归类 | 条数 |\n|---|---:|\n");
+    for (k, v) in &classes {
+        out.push_str(&format!("| `{k}` | {v} |\n"));
+    }
+    out.push('\n');
+
+    // 闸门分布
+    let mut gates: BTreeMap<&str, usize> = BTreeMap::new();
+    for x in analyses {
+        *gates.entry(x.gate.as_str()).or_insert(0) += 1;
+    }
+    out.push_str("### 引擎实际挡下它的原因\n\n| 闸门 / 原因 | 条数 |\n|---|---:|\n");
+    for (k, v) in &gates {
+        out.push_str(&format!("| `{k}` | {v} |\n"));
+    }
+    out.push('\n');
+
+    // 反事实：刹车在闸门链里最先，会把后面的闸门全遮住。这里把刹车关掉再走一遍，
+    // 直接回答"把风险阈值放开是不是就有 block 了"。
+    let mut next_gates: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut next_unknown = 0usize;
+    for x in analyses {
+        match x.next_gate_without_brake.as_deref() {
+            Some(g) => *next_gates.entry(g).or_insert(0) += 1,
+            None => next_unknown += 1,
+        }
+    }
+    out.push_str(
+        "### 反事实：先关掉风险刹车（`risk_of_breakage_max = 1.0`），下一条挡它的是什么\n\n\
+         刹车是 `decide()` 的第一条，会遮住后面的闸门。这张表回答\"只把风险阈值放开\
+         会不会就有 block\"。\n\n| 下一条闸门 | 条数 |\n|---|---:|\n",
+    );
+    for (k, v) in &next_gates {
+        out.push_str(&format!("| `{k}` | {v} |\n"));
+    }
+    out.push_str(&format!("| （读不出三个数，无法判定） | {next_unknown} |\n\n"));
+
+    // 类别
+    let mut cats: BTreeMap<String, usize> = BTreeMap::new();
+    for x in analyses {
+        let key = match (&x.category, &x.raw_choice) {
+            (Some(c), _) => c.clone(),
+            (None, Some(raw)) => format!("<不在白名单: {raw}>"),
+            (None, None) => "<没有 choice 字段>".to_string(),
+        };
+        *cats.entry(key).or_insert(0) += 1;
+    }
+    out.push_str("### 类别计数（模型实际选的 `endpoint_kind`）\n\n| 类别 | 条数 |\n|---|---:|\n");
+    for (k, v) in &cats {
+        out.push_str(&format!("| {k} | {v} |\n"));
+    }
+    out.push('\n');
+
+    // 三个数
+    let ads_labels = ["[0,0.1)", "[0.1,0.3)", "[0.3,0.5)", "[0.5,0.7)", "[0.7,0.85)", "[0.85,1.0]", "缺"];
+    let ads_edges = [0.1f32, 0.3, 0.5, 0.7, 0.85, 1.01];
+    let mut ads_counts = vec![0usize; ads_labels.len()];
+    let risk_labels = ["[0,0.3] 不触刹车", "(0.3,0.5]", "(0.5,0.8]", "(0.8,1.0]", "缺"];
+    let risk_edges = [0.3001f32, 0.5, 0.8, 1.01];
+    let mut risk_counts = vec![0usize; risk_labels.len()];
+    let conf_labels = ["[0,0.5) 过不了置信度闸门", "[0.5,0.7)", "[0.7,0.9)", "[0.9,1.0]", "缺"];
+    let conf_edges = [0.5f32, 0.7, 0.9, 1.01];
+    let mut conf_counts = vec![0usize; conf_labels.len()];
+    for x in analyses {
+        ads_counts[bucket_of(x.ads_intent, &ads_edges, &ads_labels)] += 1;
+        risk_counts[bucket_of(x.risk_of_breakage, &risk_edges, &risk_labels)] += 1;
+        conf_counts[bucket_of(x.choice_confidence, &conf_edges, &conf_labels)] += 1;
+    }
+    out.push_str(&hist_lines("`ads_intent` 分桶", &ads_labels, &ads_counts, total));
+    out.push_str(&hist_lines("`risk_of_breakage` 分桶", &risk_labels, &risk_counts, total));
+    out.push_str(&hist_lines("`choice_confidence` 分桶", &conf_labels, &conf_counts, total));
+
+    // 解析失败细分
+    let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    let mut kind_types: BTreeMap<String, usize> = BTreeMap::new();
+    let mut ads_types: BTreeMap<String, usize> = BTreeMap::new();
+    let mut risk_types: BTreeMap<String, usize> = BTreeMap::new();
+    for x in analyses {
+        for id in &x.missing_ids {
+            *missing.entry(id.clone()).or_insert(0) += 1;
+        }
+        *kind_types
+            .entry(x.raw_kind_type.clone().unwrap_or_else(|| "<无>".into()))
+            .or_insert(0) += 1;
+        *ads_types
+            .entry(x.raw_ads_type.clone().unwrap_or_else(|| "<无>".into()))
+            .or_insert(0) += 1;
+        *risk_types
+            .entry(x.raw_risk_type.clone().unwrap_or_else(|| "<无>".into()))
+            .or_insert(0) += 1;
+    }
+    out.push_str("### 解析细查（为什么读不出答案）\n\n");
+    out.push_str("**期望但服务端没给的 id**：\n\n| id | 条数 |\n|---|---:|\n");
+    if missing.is_empty() {
+        out.push_str("| （没有缺失） | 0 |\n");
+    }
+    for (k, v) in &missing {
+        out.push_str(&format!("| `{k}` | {v} |\n"));
+    }
+    out.push('\n');
+    for (name, m) in [
+        ("`endpoint_kind` 的 `type` 字段", &kind_types),
+        ("`ads_intent` 的 `type` 字段", &ads_types),
+        ("`risk_of_breakage` 的 `type` 字段", &risk_types),
+    ] {
+        out.push_str(&format!("**{name}**：\n\n| 取值 | 条数 |\n|---|---:|\n"));
+        for (k, v) in m {
+            out.push_str(&format!("| `{k}` | {v} |\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,5 +1157,192 @@ mod tests {
         let report = render_report(&ds, Some(&m), &[]);
         assert!(!report.contains("没有任何证据"), "{report}");
         assert!(report.contains("无标注桶里拦了 1 条"), "{report}");
+    }
+
+    // -----------------------------------------------------------------------
+    // task-13：原始答案诊断
+    //
+    // 这一组测试钉住"模型判不动"与"我们的闸门/解析把答案丢了"**能被分开**。
+    // 每条都用真实的三个答案形状。
+    // -----------------------------------------------------------------------
+
+    fn answers_json(kind: &str, ads: f64, risk: f64, conf: f64) -> serde_json::Value {
+        serde_json::json!({
+            Q_ENDPOINT_KIND: { "type": "choice", "choice": kind, "confidence": conf },
+            Q_ADS_INTENT: { "type": "noul", "noul": ads },
+            Q_RISK_OF_BREAKAGE: { "type": "noul", "noul": risk }
+        })
+    }
+
+    /// 夹具域名刻意用 `secret-…` 前缀：渲染结果里**不许**出现它。
+    fn raw_record(answers: serde_json::Value) -> RawAnswerRecord {
+        let ids: Vec<String> = answers
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        serde_json::from_value(serde_json::json!({
+            "host": "secret-probe.example",
+            "ts_unix": 1,
+            "ok": true,
+            "expected_ids": [Q_ENDPOINT_KIND, Q_ADS_INTENT, Q_RISK_OF_BREAKAGE],
+            "answer_ids": ids,
+            "answers": answers,
+        }))
+        .expect("夹具必须是合法 RawAnswerRecord")
+    }
+
+    fn analyze(answers: serde_json::Value) -> RecordAnalysis {
+        analyze_record(&raw_record(answers), None, &Thresholds::default())
+    }
+
+    /// (a)：模型高置信说"这不是广告"（类别 human_site）。
+    #[test]
+    fn a_confident_non_ad_category_is_bucket_a() {
+        let a = analyze(answers_json("human_site", 0.02, 0.02, 0.95));
+        assert_eq!(a.class, AnswerClass::NotAdCategory);
+        assert_eq!(a.class.bucket(), Some("a"));
+        assert_eq!(a.gate, "category_not_blockable");
+        assert_eq!(a.category.as_deref(), Some("human_site"));
+        // 反事实：关掉刹车也一样 —— 挡住它的是类别本身。
+        assert_eq!(a.next_gate_without_brake.as_deref(), Some("category_not_blockable"));
+    }
+
+    /// (b)：模型给了**广告类别**，被阈值挡下 —— 这是"我们的闸门"。
+    #[test]
+    fn an_ad_category_under_the_threshold_is_bucket_b() {
+        let a = analyze(answers_json("ad_or_monetization", 0.80, 0.05, 0.95));
+        assert_eq!(a.class, AnswerClass::AdCategoryStoppedByNumericGate);
+        assert_eq!(a.class.bucket(), Some("b"));
+        assert_eq!(a.gate, "below_threshold");
+        assert_eq!(a.ads_intent, Some(0.80));
+        assert_eq!(a.next_gate_without_brake.as_deref(), Some("below_threshold"));
+    }
+
+    /// (b)：风险刹车也是"我们的闸门"（数值闸门），不是模型不判。
+    #[test]
+    fn the_risk_brake_also_counts_as_bucket_b() {
+        let a = analyze(answers_json("ad_or_monetization", 0.97, 0.90, 0.97));
+        assert_eq!(a.class, AnswerClass::AdCategoryStoppedByNumericGate);
+        assert_eq!(a.gate, "breakage_risk_too_high");
+        // **判别性**：这条如果关掉刹车就会 block —— 说明"打开阈值就有 block"
+        // 对这条成立，而对 (a) 那种（类别不对）永远不成立。
+        assert_eq!(a.next_gate_without_brake.as_deref(), Some("block"));
+    }
+
+    /// (c)：类别对、分数高，但模型**自报置信度低** —— 它自己在犹豫。
+    #[test]
+    fn an_ad_category_with_low_self_reported_confidence_is_bucket_c() {
+        let a = analyze(answers_json("ad_or_monetization", 0.97, 0.05, 0.20));
+        assert_eq!(a.class, AnswerClass::AdCategoryLowConfidence);
+        assert_eq!(a.class.bucket(), Some("c"));
+        assert_eq!(a.gate, "low_confidence");
+    }
+
+    /// (c)：类别说"不是广告"，但置信度低于阈值 ⇒ 犹豫，不算 (a) 的"明确否定"。
+    ///
+    /// 判别性：`decide()` 会先报 `category_not_blockable`（类别闸门在置信度之前），
+    /// 只看 verdict 会把它算进 (a) —— 这条测试钉住按**置信度**补判。
+    #[test]
+    fn a_non_ad_category_with_low_confidence_is_also_bucket_c() {
+        // 风险放低，让闸门链走到**类别**那一步（`decide` 先判刹车，再判类别）。
+        let a = analyze(answers_json("api_or_service", 0.28, 0.10, 0.30));
+        assert_eq!(a.gate, "category_not_blockable", "闸门链先报的是类别");
+        assert_eq!(a.class, AnswerClass::NonAdLowConfidence);
+        assert_eq!(a.class.bucket(), Some("c"));
+    }
+
+    /// (c) 的核心：`ads_intent` 被当成 `choice` 回给了我们 ⇒ 是**我们读不出**，
+    /// 不是模型说"不是"。
+    #[test]
+    fn a_noul_answer_delivered_as_choice_is_bucket_c_and_names_the_field() {
+        let answers = serde_json::json!({
+            Q_ENDPOINT_KIND: { "type": "choice", "choice": "human_site", "confidence": 0.99 },
+            Q_ADS_INTENT: { "type": "choice", "choice": "no", "confidence": 0.9 },
+            Q_RISK_OF_BREAKAGE: { "type": "noul", "noul": 0.01 }
+        });
+        let a = analyze(answers);
+        assert_eq!(a.class, AnswerClass::Unparsable);
+        assert_eq!(a.class.bucket(), Some("c"));
+        assert_eq!(a.gate, "schema_invalid:ads_intent");
+        assert_eq!(a.raw_ads_type.as_deref(), Some("choice"));
+        // 渲染要能说清是哪个字段、什么形状。
+        let md = render_diagnosis(std::slice::from_ref(&a), 1);
+        assert!(md.contains("ads_intent"), "{md}");
+        assert!(md.contains("`choice`"), "{md}");
+    }
+
+    /// (c)：字段直接缺失。
+    #[test]
+    fn a_missing_field_is_bucket_c_and_names_the_id() {
+        let answers = serde_json::json!({
+            Q_ENDPOINT_KIND: { "type": "choice", "choice": "ad_or_monetization", "confidence": 0.99 },
+            Q_ADS_INTENT: { "type": "noul", "noul": 0.99 }
+        });
+        let a = analyze(answers);
+        assert_eq!(a.class, AnswerClass::Unparsable);
+        assert_eq!(a.missing_ids, vec![Q_RISK_OF_BREAKAGE.to_string()]);
+        assert_eq!(a.gate, "missing_answer:risk_of_breakage");
+    }
+
+    /// (c)：choice 标签不在白名单 —— 词表太窄要看得见原始词。
+    #[test]
+    fn an_unknown_choice_label_is_bucket_c_and_the_raw_word_is_kept() {
+        let a = analyze(answers_json("totally_an_ad", 0.99, 0.0, 0.99));
+        assert_eq!(a.class, AnswerClass::Unparsable);
+        assert_eq!(a.raw_choice.as_deref(), Some("totally_an_ad"));
+        let md = render_diagnosis(std::slice::from_ref(&a), 1);
+        assert!(md.contains("totally_an_ad"), "越白名单的原始词必须出现在报告里：{md}");
+        assert!(md.contains("<不在白名单"), "{md}");
+    }
+
+    /// 网关失败**不许**被算进 (a)/(b)/(c)：那会把"没问到"读成"模型判不动"。
+    #[test]
+    fn a_gateway_error_is_not_silently_counted_in_any_bucket() {
+        let rec: RawAnswerRecord = serde_json::from_value(serde_json::json!({
+            "host": "secret-probe.example",
+            "ok": false,
+            "error_kind": "timeout",
+            "expected_ids": [Q_ENDPOINT_KIND, Q_ADS_INTENT, Q_RISK_OF_BREAKAGE],
+        }))
+        .unwrap();
+        let a = analyze_record(&rec, None, &Thresholds::default());
+        assert_eq!(a.class, AnswerClass::NoAnswer);
+        assert_eq!(a.class.bucket(), None);
+        assert_eq!(a.gate, "timeout");
+        let md = render_diagnosis(std::slice::from_ref(&a), 1);
+        assert!(md.contains("未拿到答案"), "{md}");
+        assert!(md.contains("| **(a)**") && md.contains("| **(c)**"), "{md}");
+    }
+
+    /// 引擎实际判决优先于重算（含形状加分时两者会不同）。
+    #[test]
+    fn the_engine_verdict_wins_over_recomputing() {
+        let rec = raw_record(answers_json("ad_or_monetization", 0.95, 0.05, 0.99));
+        let engine = Verdict::Allow(AllowReason::BelowThreshold {
+            ads_intent: 0.95,
+            effective_min: 0.99,
+        });
+        let a = analyze_record(&rec, Some(&engine), &Thresholds::default());
+        assert_eq!(a.gate, "below_threshold");
+        assert_eq!(a.class, AnswerClass::AdCategoryStoppedByNumericGate);
+    }
+
+    /// **隐私**：诊断渲染里一个域名都不许出现。
+    #[test]
+    fn the_diagnosis_contains_no_hostnames() {
+        let mut analyses = Vec::new();
+        for (kind, ads, risk, conf) in [
+            ("human_site", 0.02, 0.02, 0.95),
+            ("ad_or_monetization", 0.80, 0.05, 0.95),
+            ("ad_or_monetization", 0.97, 0.05, 0.20),
+        ] {
+            analyses.push(analyze(answers_json(kind, ads, risk, conf)));
+        }
+        let md = render_diagnosis(&analyses, analyses.len());
+        assert!(!md.contains("secret"), "诊断里不许出现域名：\n{md}");
+        assert!(md.contains("| **(a)**"), "{md}");
+        assert!(md.contains("| **(b)**"), "{md}");
+        assert!(md.contains("`ads_intent` 分桶"), "{md}");
+        assert!(md.contains("下一条挡它的是什么"), "反事实表必须在：{md}");
     }
 }

@@ -20,17 +20,20 @@
 //! 而且应该导到仓库之外 —— 那里面是这台机器的浏览记录。
 
 use std::collections::BTreeSet;
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use xt_core::xray::access_log::{ConnectionLog, ConnectionRecord};
 use xt_intent::engine::{IntentConfig, IntentEngine};
 use xt_intent::eval::{
-    metrics_from, render_report, CorpusObserver, GeoSiteLabels, Judgement, Label,
+    analyze_record, metrics_from, render_diagnosis, render_report, CorpusObserver, GeoSiteLabels,
+    Judgement, Label, RawAnswerRecord,
 };
+use xt_intent::gateway::{Gateway, GatewayError, GatewayResponse};
 use xt_intent::jev::{JevConfig, JevGateway};
 use xt_intent::observer::is_candidate;
+use xt_intent::question::IntentRequest;
 use xt_intent::transport::TlsTransport;
 
 struct Args {
@@ -62,6 +65,27 @@ struct Args {
     /// 第三个闸门。**不测它就说"不是阈值问题"是不严谨的** —— 模型可能给出很高的
     /// `ads_intent` 但自报置信度很低，那样前两个旋钮怎么调都不会有 block。
     choice_min: f32,
+    /// 把引擎的审计（含 outcome/reason）写到这里（**仓库外**）。
+    ///
+    /// 只是旁证：判定用的原始答案由 `--raw-answers` 单独录。给了它就等于给引擎
+    /// 一个 `data_root`，缓存与审计都在这个目录里（用**全新目录**才不会命中旧缓存）。
+    audit_dir: Option<PathBuf>,
+    /// 把**每一次网关调用的原始答案**写成 JSONL（**仓库外**，含域名）。
+    raw_answers: Option<PathBuf>,
+    /// 把聚合诊断（不含域名）另存一份 Markdown。
+    answers_summary: Option<PathBuf>,
+    /// 只把预算给**无标注桶**（task-13 的诊断跑法）。
+    ///
+    /// 不设它时 `--limit` 会先喂正负样本（那是为了量精确率/误杀率），
+    /// 无标注桶可能拿到很少的预算 —— 而"模型对无标注域名到底答了什么"
+    /// 需要整份预算都花在无标注桶上。
+    only_unknown: bool,
+    /// **只重算诊断，不联网、不读语料**：把已有的 `--raw-answers` 文件重新渲染成
+    /// 聚合表（用 `--ads-min` / `--risk-max` / `--choice-min` 这组阈值重算闸门）。
+    ///
+    /// 存在的理由：诊断结论必须能被别人**不复跑模型**地复核（跑模型要花钱，
+    /// 而且不同档位的额度窗口会让样本量变化）。
+    summarize: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -79,6 +103,11 @@ fn parse_args() -> Result<Args, String> {
         ads_min: xt_intent::verdict::Thresholds::default().ads_intent_min,
         risk_max: xt_intent::verdict::Thresholds::default().risk_of_breakage_max,
         choice_min: xt_intent::verdict::Thresholds::default().choice_confidence_min,
+        audit_dir: None,
+        raw_answers: None,
+        answers_summary: None,
+        only_unknown: false,
+        summarize: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -88,6 +117,13 @@ fn parse_args() -> Result<Args, String> {
             "--geosite-dir" => a.geosite_dir = PathBuf::from(value("--geosite-dir")?),
             "--report" => a.report = PathBuf::from(value("--report")?),
             "--dump-unknown" => a.dump_unknown = Some(PathBuf::from(value("--dump-unknown")?)),
+            "--audit-dir" => a.audit_dir = Some(PathBuf::from(value("--audit-dir")?)),
+            "--raw-answers" => a.raw_answers = Some(PathBuf::from(value("--raw-answers")?)),
+            "--answers-summary" => {
+                a.answers_summary = Some(PathBuf::from(value("--answers-summary")?))
+            }
+            "--only-unknown" => a.only_unknown = true,
+            "--summarize" => a.summarize = Some(PathBuf::from(value("--summarize")?)),
             "--live" => a.live = true,
             "--base-url" => a.base_url = value("--base-url")?,
             "--model" => a.model = value("--model")?,
@@ -117,16 +153,57 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|_| "--sleep-ms 必须是数字（毫秒）".to_string())?
             }
             "--help" | "-h" => {
-                println!("用法：--corpus <jsonl> [--corpus …] --geosite-dir <dir> --report <md> [--live] [--limit N] [--sleep-ms N] [--dump-unknown <path>]");
+                println!(
+                    "用法：--corpus <jsonl> [--corpus …] --geosite-dir <dir> --report <md> \
+                     [--live] [--limit N] [--sleep-ms N] [--dump-unknown <path>] \
+                     [--only-unknown] [--audit-dir <dir>] [--raw-answers <path>] \
+                     [--answers-summary <path>]\n\
+                     只重算：--summarize <raw.jsonl> [--ads-min X --risk-max X --choice-min X] \
+                     [--answers-summary <md>]"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("不认识的参数：{other}")),
         }
     }
-    if a.corpus.is_empty() {
-        return Err("至少要给一个 --corpus".into());
+    if a.corpus.is_empty() && a.summarize.is_none() {
+        return Err("至少要给一个 --corpus（或 --summarize <raw.jsonl>）".into());
     }
     Ok(a)
+}
+
+/// 只重算诊断：读已有的 `--raw-answers` 文件，不联网、不碰语料。
+fn run_summary_only(args: &Args, raw: &std::path::Path) {
+    let thresholds = xt_intent::verdict::Thresholds {
+        ads_intent_min: args.ads_min,
+        risk_of_breakage_max: args.risk_max,
+        choice_confidence_min: args.choice_min,
+        ..Default::default()
+    };
+    let text = match std::fs::read_to_string(raw) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("读不了 {}：{e}", raw.display());
+            std::process::exit(2);
+        }
+    };
+    let mut analyses = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let Ok(rec) = serde_json::from_str::<RawAnswerRecord>(line) else {
+            continue;
+        };
+        // 没有引擎判决 ⇒ 按给定阈值重算（`decide`，bonus=0）。
+        analyses.push(analyze_record(&rec, None, &thresholds));
+    }
+    let md = render_diagnosis(&analyses, analyses.len());
+    println!("{md}");
+    if let Some(out) = &args.answers_summary {
+        if let Err(e) = std::fs::write(out, &md) {
+            eprintln!("写聚合诊断失败：{e}");
+            std::process::exit(2);
+        }
+        eprintln!("聚合诊断已写入 {}（不含域名）", out.display());
+    }
 }
 
 /// 从一行日志里取出真正给 Xray 转发的那段文本。
@@ -144,6 +221,113 @@ fn message_of(line: &str) -> String {
     }
 }
 
+/// 网关装饰器：把**每一次调用的原始答案**录到仓库外的 JSONL。
+///
+/// # 为什么必须在这一层录，而不是读审计
+///
+/// `AuditRecord` 的 `category` / `ads_intent` / `risk_of_breakage` /
+/// `choice_confidence` 只在 **`Block`** 时才有值（来自 `block_evidence()`）。
+/// 而 task-13 要回答的问题恰恰是"**没被拦的那些**，模型到底答了什么"。
+/// 审计里那些字段全是 `None`，所以只看审计永远分不开"模型判不动"与
+/// "我们的闸门把答案丢了"。
+///
+/// 这里录的是 `GatewayResponse.answers` 的**原样 JSON**（每个 id 一个对象），
+/// 含 `type` / `choice` / `noul` / `confidence` 的真实形状。
+///
+/// # 隐私
+///
+/// 文件里**有域名** ⇒ 调用方只会把它写到仓库外（`/tmp`）。
+/// 聚合诊断由 `render_diagnosis` 生成，里面没有域名。
+struct RecordingGateway<G: Gateway> {
+    inner: G,
+    /// `None` = 不录（默认）。
+    path: Option<PathBuf>,
+}
+
+impl<G: Gateway> RecordingGateway<G> {
+    fn new(inner: G, path: Option<PathBuf>) -> Self {
+        Self { inner, path }
+    }
+
+    fn record(&self, request: &IntentRequest, result: &Result<GatewayResponse, GatewayError>) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        let host = request
+            .state
+            .lines()
+            .find_map(|l| l.strip_prefix("host="))
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        let rec = match result {
+            Ok(resp) => {
+                let mut answers = serde_json::Map::new();
+                for id in resp.answers.ids() {
+                    if let Some(v) = resp.answers.raw_of(id) {
+                        answers.insert(id.to_string(), v.clone());
+                    }
+                }
+                serde_json::json!({
+                    "ts_unix": xt_core::util::now_unix(),
+                    "host": host,
+                    "ok": true,
+                    "model": resp.model.clone(),
+                    "expected_ids": request.ids(),
+                    "answer_ids": resp.answers.ids(),
+                    "answers": answers,
+                })
+            }
+            Err(e) => serde_json::json!({
+                "ts_unix": xt_core::util::now_unix(),
+                "host": host,
+                "ok": false,
+                "expected_ids": request.ids(),
+                "answer_ids": [],
+                "answers": {},
+                "error_kind": e.as_str(),
+                "error": e.to_string(),
+            }),
+        };
+        match append_private_line(path, &serde_json::to_string(&rec).unwrap_or_default()) {
+            Ok(()) => {}
+            // 录不上不该让判定失败，但必须留痕（否则"诊断缺数据"无从解释）。
+            Err(e) => eprintln!("写原始答案失败（不影响判定）：{e}"),
+        }
+    }
+}
+
+impl<G: Gateway> Gateway for RecordingGateway<G> {
+    fn ask(&self, request: &IntentRequest) -> Result<GatewayResponse, GatewayError> {
+        let result = self.inner.ask(request);
+        self.record(request, &result);
+        result
+    }
+
+    fn describe(&self) -> String {
+        match &self.path {
+            Some(p) => format!("{}（原始答案 → {}）", self.inner.describe(), p.display()),
+            None => self.inner.describe(),
+        }
+    }
+}
+
+/// 追加一行到**仓库外**的私有文件（0600）。不经过 shell。
+fn append_private_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    writeln!(f, "{line}")
+}
+
 fn main() {
     let args = match parse_args() {
         Ok(a) => a,
@@ -152,6 +336,12 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    // 只重算诊断：不联网、不读语料（复核别人的原始答案时用这条）。
+    if let Some(raw) = args.summarize.clone() {
+        run_summary_only(&args, &raw);
+        return;
+    }
 
     // 1) 读语料。**不落盘、不外发**，只在内存里计数。
     let mut log = ConnectionLog::with_capacity(1024); // 环形缓冲不用来统计，小容量即可
@@ -228,6 +418,8 @@ fn main() {
                 std::process::exit(2);
             }
         };
+        // 原始答案录制（可选）：文件**含域名**，只能写到仓库外。
+        let gateway = RecordingGateway::new(gateway, args.raw_answers.clone());
         let mut ic = IntentConfig {
             enabled: true,
             // 评测**必须关掉演练模式**，否则拿不到 block 判决；但下发与否这里无关
@@ -250,13 +442,29 @@ fn main() {
             ..Default::default()
         };
 
-        let mut engine = match IntentEngine::new(ic, gateway, None, 0) {
+        // 用**真实时间**：审计的 ts、缓存的 TTL、预算窗口都要有意义。
+        // （以前传 0，审计里每条都是 1970 —— 诊断时要按时间对齐就做不了。）
+        let now = xt_core::util::now_unix();
+        let mut engine = match IntentEngine::new(ic, gateway, args.audit_dir.clone(), now) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("引擎建不起来：{e:?}");
                 std::process::exit(2);
             }
         };
+        if let Some(dir) = &args.audit_dir {
+            eprintln!(
+                "审计通道已开启：{}/intent-audit.jsonl（outcome/reason 旁证）",
+                dir.display()
+            );
+        }
+        if let Some(p) = &args.raw_answers {
+            eprintln!(
+                "原始答案录取到 {}（**含域名，勿入库**）",
+                p.display()
+            );
+        }
+        let thresholds_used = engine.config().thresholds.clone();
 
         // 预算怎么分给三个桶，**顺序就是优先级**：
         //   1. 正样本（通常很少）：漏拦它们说明模型失灵，必须全问；
@@ -265,20 +473,30 @@ fn main() {
         //
         // 之前写成"未知桶优先"是错的：`--limit` 一小，正负样本全被挤掉，
         // 于是精确率与误杀率都算不出来，报告只能给"证据不足"。
+        //
+        // `--only-unknown` 关掉 1/2：诊断"模型对无标注域名到底答了什么"时，
+        // 预算必须整份给未知桶（否则样本量不够，结论不可判）。
         let mut queue: Vec<(String, Label, u64)> = Vec::new();
-        for o in dataset.positives.iter() {
-            queue.push((o.host.clone(), Label::Positive, o.connections));
-        }
-        let half = args.limit / 2;
-        for o in dataset.negatives.iter().take(half) {
-            queue.push((o.host.clone(), Label::Negative, o.connections));
+        if !args.only_unknown {
+            for o in dataset.positives.iter() {
+                queue.push((o.host.clone(), Label::Positive, o.connections));
+            }
+            let half = args.limit / 2;
+            for o in dataset.negatives.iter().take(half) {
+                queue.push((o.host.clone(), Label::Negative, o.connections));
+            }
         }
         for o in dataset.unknown.iter() {
             queue.push((o.host.clone(), Label::Unknown, o.connections));
         }
         queue.truncate(args.limit);
 
-        eprintln!("开始判定：{} 个候选（预算 {}）", queue.len(), args.limit);
+        eprintln!(
+            "开始判定：{} 个候选（预算 {}，{}）",
+            queue.len(),
+            args.limit,
+            if args.only_unknown { "只跑无标注桶" } else { "正/负/未知混跑" }
+        );
         let mut samples: Vec<(Label, Judgement, u64)> = Vec::new();
         let mut totals = xt_intent::engine::ClassifyReport::default();
         for (host, label, connections) in &queue {
@@ -288,14 +506,14 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(args.sleep_ms));
             }
             let rec = synthetic_record(host);
-            engine.observe(&rec, 0);
+            engine.observe(&rec, now);
             // 立刻跑一轮，让每条候选都有判决（节拍在这里只是形式）。
             //
             // **`asked == 0` 也要退出**：网关失败会把候选放回队列（生产里等下一个
             // 10 秒节拍再试），而这个循环是紧的 —— 不退的话会拿同一条候选反复撞预算，
             // 把额度烧光并刷出一堆 budget_denied（实测 12 条候选产生了 2676 次拒绝）。
             for _ in 0..64 {
-                let r = engine.classify_pending(1);
+                let r = engine.classify_pending(now);
                 let done = r.candidates == 0 || r.asked == 0;
                 totals.asked += r.asked;
                 totals.gateway_errors += r.gateway_errors;
@@ -308,7 +526,7 @@ fn main() {
                     break;
                 }
             }
-            let judgement = match engine.explain_at(host, 1) {
+            let judgement = match engine.explain_at(host, now) {
                 Some(entry) => Judgement::from(&entry.verdict),
                 None => Judgement::Deferred,
             };
@@ -346,6 +564,36 @@ fn main() {
         notes.push(format!("本次只判定了 {} 个域名（--limit），不是全量", queue.len()));
         notes.push("未知桶里的 block **无法验证**，所以不计入精确率分子（那正是要量的东西）".to_string());
         metrics = Some(m);
+
+        // ---- 6) 原始答案的聚合诊断（task-13）----
+        //
+        // 只输出**聚合数字**；域名只存在于 `--raw-answers` 那个仓库外文件里。
+        if let Some(path) = &args.raw_answers {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let mut analyses = Vec::new();
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                let Ok(rec) = serde_json::from_str::<RawAnswerRecord>(line) else {
+                    continue;
+                };
+                // 引擎**实际**给的判决（含形状加分）；缓存里没有的（网关失败/预算）
+                // 就退回按本次阈值重算，保证每条都有个可读的原因。
+                let verdict = engine.explain_at(&rec.host, now).map(|e| e.verdict);
+                analyses.push(analyze_record(&rec, verdict.as_ref(), &thresholds_used));
+            }
+            let md = render_diagnosis(&analyses, queue.len());
+            println!("\n{md}");
+            if let Some(out) = &args.answers_summary {
+                if let Err(e) = std::fs::write(out, &md) {
+                    eprintln!("写聚合诊断失败：{e}");
+                } else {
+                    eprintln!("聚合诊断已写入 {}（不含域名）", out.display());
+                }
+            }
+            notes.push(format!(
+                "原始答案诊断：{} 条记录，见输出里的「无标注桶：原始答案分布」一节",
+                analyses.len()
+            ));
+        }
     } else {
         notes.push("未加 --live：只算了 L0 静态名单的覆盖，模型指标缺失".to_string());
     }
