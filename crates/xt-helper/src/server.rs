@@ -80,9 +80,13 @@ pub struct Helper {
 
 impl Helper {
     pub fn new(socket_path: PathBuf) -> Self {
+        let policy = PeerPolicy::from_build_env();
+        // 策略必须在**启动日志**里可见：排障时第一句要看的就是"这道门现在哪种"，
+        // 产物断言脚本也用它给出的 `XRAYTUN_HELPER_POLICY=…` 标识。
+        tracing::info!(policy = %policy.describe(), "对端授权策略");
         Self {
             state: Mutex::new(State { session: None }),
-            policy: PeerPolicy::from_build_env(),
+            policy,
             started_at: now_unix(),
             socket_path,
         }
