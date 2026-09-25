@@ -119,6 +119,11 @@ pub struct MitmStatus {
     /// 没生成过 CA 时是 `None`（"还没启用过 MITM"这件事必须能被区分出来，
     /// 不能让界面显示一个假的指纹）。
     pub ca_fingerprint: Option<String>,
+    /// 本会话 CA 的到期日（`YYYY-MM-DD`）。`None` = 还没生成过 CA。
+    ///
+    /// 根证书有效期必须**有界**（rcgen 默认等于永不过期）—— 到期日回传给界面，
+    /// 让"该轮换 CA 了"这件事可见，而不是靠人去记。
+    pub ca_expires_at: Option<String>,
     /// 当前这个代理的计数（没在跑时 `None`）。
     pub stats: Option<ProxyStatsSnapshot>,
     /// **一句话解释为什么没在跑**（`None` = 正常）。界面直接显示，不要自己猜。
@@ -173,7 +178,9 @@ impl MitmRuntime {
     /// CA 的 SHA-1 指纹（`security` 用这个值定位钥匙串条目）。
     pub fn ca_fingerprint(&mut self) -> Result<String, String> {
         let ca = self.ca()?;
-        Ok(xt_tun::macos::trust::sha1_fingerprint(ca.cert_der().as_ref()))
+        Ok(xt_tun::macos::trust::sha1_fingerprint(
+            ca.cert_der().as_ref(),
+        ))
     }
 
     pub fn is_running(&self) -> bool {
@@ -270,6 +277,7 @@ impl MitmRuntime {
                 .ca
                 .as_ref()
                 .map(|ca| xt_tun::macos::trust::sha1_fingerprint(ca.cert_der().as_ref())),
+            ca_expires_at: self.ca.as_ref().map(|ca| ca.expiry_ymd()),
             stats: self.handle.as_ref().map(|h| h.stats()),
             note: if core_restart_required {
                 Some(match note {
@@ -349,17 +357,17 @@ mod tests {
         let trusted = core_settings(&s, true);
         let untrusted = core_settings(&s, false);
 
-        let rules_trusted =
-            xt_core::xray::merge_rules_with_intent(&trusted, &[], &[]);
-        let rules_untrusted =
-            xt_core::xray::merge_rules_with_intent(&untrusted, &[], &[]);
+        let rules_trusted = xt_core::xray::merge_rules_with_intent(&trusted, &[], &[]);
+        let rules_untrusted = xt_core::xray::merge_rules_with_intent(&untrusted, &[], &[]);
         assert!(
             rules_trusted.iter().any(|r| r.id.starts_with("mitm-steer")),
             "证书已信任 ⇒ 引导规则必须在配置里：{:?}",
             rules_trusted.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert!(
-            !rules_untrusted.iter().any(|r| r.id.starts_with("mitm-steer")),
+            !rules_untrusted
+                .iter()
+                .any(|r| r.id.starts_with("mitm-steer")),
             "证书没信任 ⇒ **不许**有引导规则（否则 HTTPS 会被拆到一个没人信的证书上）"
         );
 
@@ -378,7 +386,11 @@ mod tests {
 
     #[test]
     fn self_loop_and_empty_list_are_refused_with_readable_reasons() {
-        let mut s = MitmSettings { enabled: true, domains: vec![], ..Default::default() };
+        let mut s = MitmSettings {
+            enabled: true,
+            domains: vec![],
+            ..Default::default()
+        };
         let e = proxy_config(&s).unwrap_err().to_string();
         assert!(e.contains("名单为空"), "{e}");
 
@@ -447,19 +459,25 @@ mod tests {
             block_quic: false,
             body_strip: None,
         };
-        rt.start(&s, vec!["ads.example".into()], None).expect("起代理");
+        rt.start(&s, vec!["ads.example".into()], None)
+            .expect("起代理");
         assert!(rt.is_running());
         assert!(
             std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(),
             "起完之后端口必须是通的"
         );
         // 幂等：同一份输入再起一次不该报错、也不该换端口。
-        rt.start(&s, vec!["ads.example".into()], None).expect("重复启动应当幂等");
+        rt.start(&s, vec!["ads.example".into()], None)
+            .expect("重复启动应当幂等");
         assert!(rt.is_running());
 
         let status = rt.status(&s, true);
         assert!(status.running && status.active);
-        assert!(status.note.is_none(), "一切正常时不该有解释文案：{:?}", status.note);
+        assert!(
+            status.note.is_none(),
+            "一切正常时不该有解释文案：{:?}",
+            status.note
+        );
         assert!(status.stats.is_some(), "跑着就必须有计数");
         assert!(status.ca_fingerprint.is_some(), "起过代理就一定有 CA");
 
@@ -475,15 +493,27 @@ mod tests {
     #[test]
     fn the_status_explains_exactly_why_it_is_not_running() {
         let rt = MitmRuntime::default();
-        let off = MitmSettings { enabled: false, domains: vec!["a.test".into()], ..Default::default() };
+        let off = MitmSettings {
+            enabled: false,
+            domains: vec!["a.test".into()],
+            ..Default::default()
+        };
         assert!(rt.status(&off, true).note.unwrap().contains("没开启"));
 
-        let empty = MitmSettings { enabled: true, domains: vec![], ..Default::default() };
+        let empty = MitmSettings {
+            enabled: true,
+            domains: vec![],
+            ..Default::default()
+        };
         let st = rt.status(&empty, true);
         assert!(!st.active);
         assert!(st.note.unwrap().contains("名单为空"));
 
-        let on = MitmSettings { enabled: true, domains: vec!["a.test".into()], ..Default::default() };
+        let on = MitmSettings {
+            enabled: true,
+            domains: vec!["a.test".into()],
+            ..Default::default()
+        };
         let st = rt.status(&on, false);
         assert!(st.active);
         assert!(

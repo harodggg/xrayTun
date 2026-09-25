@@ -258,6 +258,13 @@ export interface MitmStatus {
   block_quic: boolean;
   /** 本会话根证书的 SHA-1 指纹（没生成过时是 null）。 */
   ca_fingerprint: string | null;
+  /**
+   * 本会话根证书的到期日 `YYYY-MM-DD`（没生成过时是 null）。
+   *
+   * 有效期必须有界：rcgen 的默认是 1975→4096（等于永不过期），所以到期日要能在
+   * 界面上看到——"该轮换 CA 了"不能靠人记。
+   */
+  ca_expires_at: string | null;
   stats: {
     accepted: number;
     blocked: number;

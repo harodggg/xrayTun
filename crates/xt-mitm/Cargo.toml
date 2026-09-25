@@ -14,6 +14,9 @@ tracing.workspace = true
 # 运行时**真的要用**：CA 与叶子证书在进程内生成（每次启动新签），
 # 而 TLS 终结用的就是这两样。不是 dev-dependency。
 rcgen = "0.13"
+# 根证书有效期要**显式**设置（rcgen 默认是 1975→4096，等于永不过期）。
+# 版本已在 Cargo.lock 里（rcgen 的传递依赖），不引入新节点。
+time = "0.3"
 rustls = { workspace = true }
 
 # 刻意**不引** tokio / tokio-rustls：代理是阻塞 IO + 每连接一个线程

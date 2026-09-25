@@ -55,11 +55,22 @@ pub const ALPN_HTTP1: &[u8] = b"http/1.1";
 /// 叶子证书有效期（天）。
 pub const LEAF_DAYS: i64 = 7;
 
+/// 根证书有效期（天）。
+///
+/// ⚠️ **必须显式设置**：rcgen 的默认是 `1975-01-01 → 4096-01-01`（等于永不过期）。
+/// 根证书私钥一旦泄露（或被备份/同步带走），"永不过期"意味着无法靠时间化解 ——
+/// 只能逐台机器手动删。2 年是"够用 + 可轮换"的折中；到期日会通过
+/// `MitmStatus::ca_expires_at` 回传给界面，让轮换这件事可见。
+pub const CA_DAYS: i64 = 730;
+
 /// 内存里的本地 CA。
 pub struct LocalCa {
     cert: rcgen::Certificate,
     key: KeyPair,
     cert_pem: String,
+    /// 生效/到期时刻（UTC）。显式设置的原因见 [`CA_DAYS`]。
+    not_before: time::OffsetDateTime,
+    not_after: time::OffsetDateTime,
 }
 
 impl LocalCa {
@@ -72,16 +83,46 @@ impl LocalCa {
         params
             .distinguished_name
             .push(DnType::CommonName, "XrayTun Local CA");
+        // 有效期必须显式给：不吃 rcgen 的 1975→4096 默认值。
+        // `not_before` 回拨一天，容忍客户端与本机的时钟偏移（否则刚签出来就可能
+        // 被判成"尚未生效"）。
+        let now = time::OffsetDateTime::now_utc();
+        let not_before = now - time::Duration::days(1);
+        let not_after = now + time::Duration::days(CA_DAYS);
+        params.not_before = not_before;
+        params.not_after = not_after;
         let cert = params
             .self_signed(&key)
             .map_err(|e| TlsError::Cert(e.to_string()))?;
         let cert_pem = cert.pem();
-        Ok(Self { cert, key, cert_pem })
+        Ok(Self {
+            cert,
+            key,
+            cert_pem,
+            not_before,
+            not_after,
+        })
     }
 
     /// CA 的 PEM（交给 helper 装进钥匙串的就是它）。
     pub fn cert_pem(&self) -> &str {
         &self.cert_pem
+    }
+
+    /// 生效时刻（UTC）。
+    pub fn not_before(&self) -> time::OffsetDateTime {
+        self.not_before
+    }
+
+    /// 到期时刻（UTC）。
+    pub fn not_after(&self) -> time::OffsetDateTime {
+        self.not_after
+    }
+
+    /// 到期日 `YYYY-MM-DD`（给 `MitmStatus` 用，避免把 `time` 类型泄到 app 层）。
+    pub fn expiry_ymd(&self) -> String {
+        let d = self.not_after;
+        format!("{:04}-{:02}-{:02}", d.year(), u8::from(d.month()), d.day())
     }
 
     /// CA 的 DER（rustls 的根仓库只吃 DER）。
@@ -145,7 +186,9 @@ impl LocalCa {
 impl std::fmt::Debug for LocalCa {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // **绝不打印私钥**（哪怕在 Debug 里）。
-        f.debug_struct("LocalCa").field("cert_pem_len", &self.cert_pem.len()).finish()
+        f.debug_struct("LocalCa")
+            .field("cert_pem_len", &self.cert_pem.len())
+            .finish()
     }
 }
 
@@ -163,7 +206,10 @@ pub struct CertResolver {
 
 impl CertResolver {
     pub fn new(ca: Arc<LocalCa>) -> Self {
-        Self { ca, cache: Mutex::new(HashMap::new()) }
+        Self {
+            ca,
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 
     /// 已为多少个域名签过证书（诊断用 —— 也是"MITM 到底在看哪些站"的可见面）。
@@ -189,7 +235,9 @@ impl CertResolver {
 
 impl std::fmt::Debug for CertResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CertResolver").field("cached_hosts", &self.cached_hosts()).finish()
+        f.debug_struct("CertResolver")
+            .field("cached_hosts", &self.cached_hosts())
+            .finish()
     }
 }
 
@@ -220,12 +268,33 @@ mod tests {
         assert!(!dbg.contains("BEGIN"), "{dbg}");
     }
 
+    /// 根证书有效期必须**有界**：rcgen 的默认（1975→4096）等于永不过期。
+    #[test]
+    fn a_ca_validity_is_bounded_not_the_rcgen_default() {
+        let ca = LocalCa::generate().unwrap();
+        let span = ca.not_after() - ca.not_before();
+        assert_eq!(
+            span.whole_days(),
+            CA_DAYS + 1,
+            "not_before 回拨 1 天 ⇒ 跨度是 CA_DAYS+1"
+        );
+        assert!(
+            ca.not_after().year() < 2200,
+            "不许落到 rcgen 的 4096 默认值：{}",
+            ca.expiry_ymd()
+        );
+        assert_eq!(ca.expiry_ymd().len(), 10, "{}", ca.expiry_ymd());
+    }
+
     #[test]
     fn a_server_config_only_advertises_http1() {
         let ca = LocalCa::generate().unwrap();
         let cfg = ca.server_config("news.example").unwrap();
         assert_eq!(cfg.alpn_protocols, vec![ALPN_HTTP1.to_vec()]);
-        assert!(!cfg.alpn_protocols.iter().any(|p| p == b"h2"), "不许广告 h2");
+        assert!(
+            !cfg.alpn_protocols.iter().any(|p| p == b"h2"),
+            "不许广告 h2"
+        );
     }
 
     /// 非法域名**不许**被签 —— 拿它签等于替别人伪造身份。
@@ -233,8 +302,14 @@ mod tests {
     fn an_invalid_host_is_refused() {
         let ca = LocalCa::generate().unwrap();
         assert!(matches!(ca.server_config(""), Err(TlsError::BadHost(_))));
-        assert!(matches!(ca.server_config("evil\r\nhost"), Err(TlsError::BadHost(_))));
-        assert!(matches!(ca.server_config(&"a".repeat(300)), Err(TlsError::BadHost(_))));
+        assert!(matches!(
+            ca.server_config("evil\r\nhost"),
+            Err(TlsError::BadHost(_))
+        ));
+        assert!(matches!(
+            ca.server_config(&"a".repeat(300)),
+            Err(TlsError::BadHost(_))
+        ));
     }
 
     #[test]

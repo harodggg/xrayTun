@@ -69,6 +69,7 @@ function mitmStatus(over: Partial<MitmStatus> = {}): MitmStatus {
     domains: ["ads.example"],
     block_quic: false,
     ca_fingerprint: "AA:BB",
+    ca_expires_at: "2028-09-25",
     stats: {
       accepted: 3,
       blocked: 2,

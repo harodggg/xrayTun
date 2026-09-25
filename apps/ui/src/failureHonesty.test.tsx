@@ -99,6 +99,7 @@ function mitmStatus(over: Partial<MitmStatus> = {}): MitmStatus {
     domains: ["promoted.example"],
     block_quic: false,
     ca_fingerprint: "AA:BB",
+    ca_expires_at: "2028-09-25",
     stats: null,
     note: null,
     applied: null,
