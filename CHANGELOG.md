@@ -9,7 +9,11 @@
 > 把 v0.8.37 之后已经落地的修复送到用户机器上：**日志不再无界增长**（实测 311.8 MiB/天 ⇒ 上界 ≤160 MiB）、
 > **「国内全灭」现在会自愈**（境内探测目标 1 → 2，达到重建门槛）、
 > **「国内不通」下次可直接判读**（路由审计按采样时点落盘）。
-> **本版不需要重装特权助手**（helper 侧零行为改动，见文末依据）。
+> **⚠️ 本版必须重新安装特权助手**：`crates/xt-proto` 的 `PROTOCOL_VERSION` **1 → 2**，
+> `crates/xt-helper` 新增了 `InstallTrustAnchor` / `RemoveTrustAnchor` 的处理
+> （会往系统钥匙串装/卸本地根证书）。装旧助手的机器上设置页会报「助手版本不匹配」，
+> TUN 与 MITM 都无法工作。**注意：本节下面那段"不需要重装"的依据已作废** —— 它写于本版
+> 只含日志/自愈修复的时候；此后 P4（意图过滤 + MITM）改了 proto/helper/tun。
 
 ### 修复：日志轮转恢复「有界」—— 会话内不再无界增长（task-144）
 
@@ -105,7 +109,8 @@
 
 ```
 crates/xt-proto                          → 一行未改（协议号不变 ⇒ 设置页不会报「助手版本不匹配」）
-crates/xt-helper                         → 一行未改（git diff v0.8.37..v0.8.38 -- crates/xt-helper 为空）
+crates/xt-helper                         → **已改**（信任锚的装/卸；`git diff v0.8.37..HEAD -- crates/xt-helper` 非空）
+                                          ⇒ 上面那段"不需要重装"的依据**已作废**，本版**必须重装**
 crates/xt-tun/src/plan.rs                → +53 行**全在 `mod tests` 里**（只有两条 #[test]）
 crates/xt-tun/src/macos/route.rs         → +274 行新增审计 API；唯一调用方是
                                            apps/desktop/src/supervisor.rs 的 audit_routes ⇒ App 侧

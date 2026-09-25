@@ -135,7 +135,18 @@ def rules_phase1(root: Path, old: str, new: str, date: str | None):
     add("site/assets/site.js", "PAGE_VERSION", f'PAGE_VERSION = "{old}"', f'PAGE_VERSION = "{new}"', 1, False)
     add("site/wasm/index.html", "wasm 页版本", f"<strong>v{old}</strong>", f"<strong>v{new}</strong>", 1, False)
     add("site/en/wasm/index.html", "wasm 页版本(en)", f"<strong>v{old}</strong>", f"<strong>v{new}</strong>", 1, False)
-    for crate in ["xraytun-desktop", "xt-core", "xt-helper", "xt-proto", "xt-tun"]:
+    # **清单必须覆盖全部 workspace 成员的版本字段**：漏掉一个，phase1 的
+    # "替换后不许残留旧版本号" 校验就会拒绝落盘（P4 新增 xt-intent/xt-mitm 后正是这样被挡住的
+    # —— 校验是对的，错的是这份清单没跟着仓库长大）。
+    for crate in [
+        "xraytun-desktop",
+        "xt-core",
+        "xt-helper",
+        "xt-intent",
+        "xt-mitm",
+        "xt-proto",
+        "xt-tun",
+    ]:
         add("Cargo.lock", f"{crate} 版本", f'name = "{crate}"\nversion = "{old}"', f'name = "{crate}"\nversion = "{new}"', 1, False)
 
     # ---- 两个手写页面：当前版本字面全量替换（顺序在这一步之后才做「过渡态」）----

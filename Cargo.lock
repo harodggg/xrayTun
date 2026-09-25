@@ -4850,7 +4850,7 @@ dependencies = [
 
 [[package]]
 name = "xraytun-desktop"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "libc",
  "objc2",
@@ -4873,7 +4873,7 @@ dependencies = [
 
 [[package]]
 name = "xt-core"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -4895,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "xt-helper"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "clap",
  "libc",
@@ -4910,7 +4910,7 @@ dependencies = [
 
 [[package]]
 name = "xt-intent"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "rustls",
  "serde",
@@ -4923,7 +4923,7 @@ dependencies = [
 
 [[package]]
 name = "xt-mitm"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "rcgen",
  "rustls",
@@ -4935,7 +4935,7 @@ dependencies = [
 
 [[package]]
 name = "xt-proto"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "libc",
  "serde",
@@ -4945,7 +4945,7 @@ dependencies = [
 
 [[package]]
 name = "xt-tun"
-version = "0.8.37"
+version = "0.8.38"
 dependencies = [
  "libc",
  "ring",
