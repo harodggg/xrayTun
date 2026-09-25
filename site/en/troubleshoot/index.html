@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en" data-no-update-check>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>It won't open — troubleshooting — XrayTun</title>
+    <meta
+      name="description"
+      content="What to do when XrayTun won't open: how to confirm it crashed (the system crash report's abort() called / Abort trap: 6), where panic.log lives (by default ~/Library/Application Support/com.xraytun.desktop/logs/, and it may be overridden by XRAYTUN_DATA_DIR), how to send it to us, and why you should not change your system DNS or routes to troubleshoot."
+    />
+    <link rel="canonical" href="https://xraytun.top/en/troubleshoot/" />
+    <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/troubleshoot/" />
+    <link rel="alternate" hreflang="en" href="https://xraytun.top/en/troubleshoot/" />
+    <link rel="alternate" hreflang="x-default" href="https://xraytun.top/troubleshoot/" />
+    <meta name="theme-color" content="#0f1420" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="XrayTun" />
+    <meta property="og:title" content="It won't open — troubleshooting — XrayTun" />
+    <meta
+      property="og:description"
+      content="When double-clicking does nothing: confirm the crash, find panic.log, send it to us — and do not change your system DNS or routes to troubleshoot."
+    />
+    <meta property="og:url" content="https://xraytun.top/en/troubleshoot/" />
+    <meta property="og:locale" content="en" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="It won't open — troubleshooting — XrayTun" />
+    <meta
+      name="twitter:description"
+      content="When double-clicking does nothing: find panic.log first, don't touch system DNS or routes."
+    />
+    <!-- icons / manifest (relative paths) -->
+    <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="../../favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="../../apple-touch-icon.png" />
+    <link rel="manifest" href="../../manifest.webmanifest" />
+    <link rel="stylesheet" href="../../assets/site.css" />
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">Skip to main content</a>
+
+    <header class="site-header">
+      <div class="wrap site-header__inner">
+        <a class="brand" href="../">XrayTun</a>
+        <nav class="site-nav" aria-label="Page navigation">
+          <a href="#crash">Confirm the crash</a>
+          <a href="#paniclog">Find panic.log</a>
+          <a href="#send">Send it to us</a>
+          <a href="#hands-off">Don't touch the network</a>
+        </nav>
+        <nav class="lang-switch" aria-label="Language">
+          <a href="../../troubleshoot/" hreflang="zh-Hans" lang="zh-Hans">中文</a>
+          <a href="./" aria-current="page" lang="en">English</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============================================================ intro -->
+      <section class="hero wrap" id="top">
+        <h1>It won't open — what to do</h1>
+        <p class="lead">
+          This page is for the case where the app does not start at all — the one case where the
+          app's own UI cannot help you. Do these three things in order:
+          <strong>confirm it crashed</strong> → <strong>find panic.log</strong> →
+          <strong>send it to us</strong>. And the last point matters just as much:
+          <strong>do not change your system DNS or routes to troubleshoot</strong>.
+        </p>
+        <p>
+          If instead you see a dialog saying Apple cannot check the app for malicious software,
+          that is not a crash — that is Gatekeeper. The ways to allow it are in the
+          <a href="../#install">install section of the home page</a> (pick one by macOS version).
+        </p>
+      </section>
+
+      <!-- ============================================================ #crash -->
+      <section class="wrap prose" id="crash">
+        <h2>1. First: is it a crash, or Gatekeeper?</h2>
+        <ul>
+          <li>
+            <strong>Blocked by Gatekeeper</strong>: you get a dialog about an unverified developer.
+            The app never actually ran — allow it as described in the home page's install section.
+          </li>
+          <li>
+            <strong>A crash</strong>: no dialog at all, or the icon bounces once in the Dock and
+            disappears; the process never survives a second or two. macOS leaves a
+            <strong>crash report</strong> behind.
+          </li>
+        </ul>
+        <p>User-level crash reports live here (<code>*</code> is a timestamp):</p>
+        <pre><code>~/Library/Logs/DiagnosticReports/xraytun-desktop-*.ips</code></pre>
+        <p>
+          Paste that path into Finder → Go → Go to Folder (the <code>~</code> expands to your home
+          directory), or open Console.app and pick “Crash Reports” in the sidebar.
+          Two things in the report are the actual evidence of a crash:
+        </p>
+        <ul>
+          <li><code>"abort() called"</code> (inside the report's <code>asi</code> field)</li>
+          <li><code>Abort trap: 6</code> / <code>SIGABRT</code></li>
+        </ul>
+        <p>
+          If the report has <strong>no</strong> symbols and no location — only
+          <code>__pthread_kill → pthread_kill → abort</code> — that is expected: release builds
+          are stripped. The location is in <code>panic.log</code>, below.
+        </p>
+      </section>
+
+      <!-- ============================================================ #paniclog -->
+      <section class="wrap prose" id="paniclog">
+        <h2>2. Find panic.log (the important one)</h2>
+        <p>
+          When XrayTun crashes it writes “file:line + reason + backtrace” to a file. The default
+          path is:
+        </p>
+        <pre><code>~/Library/Application Support/com.xraytun.desktop/logs/panic.log</code></pre>
+        <p>The quickest way to open it is to paste this into Terminal:</p>
+        <pre><code>open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log</code></pre>
+        <p>Its first line carries the location, in this shape:</p>
+        <pre><code>[unix=…] PANIC apps/desktop/src/lib.rs:178:17
+&lt;why it panicked&gt;
+backtrace:
+…</code></pre>
+        <p>
+          <strong>The default path may be overridden by <code>XRAYTUN_DATA_DIR</code>.</strong>
+          If that environment variable was set for the app (by you or by a script), the whole data
+          directory moves and the log lands under <code>$XRAYTUN_DATA_DIR/logs/</code> — the default
+          path will be empty.
+        </p>
+        <p>So “the default path is empty” does not mean “no log was written”. Check the variable, then let the system search:</p>
+        <pre><code>echo "$XRAYTUN_DATA_DIR"
+find ~ -name panic.log 2&gt;/dev/null</code></pre>
+        <p>
+          If neither turns up anything, the crash happened <strong>before</strong> the logging hook
+          was installed (e.g. in an older version). In that case the system crash report above is
+          all there is — it has no symbols, but it still shows that it crashed in <code>abort</code>.
+          Send us whichever of the two you have.
+        </p>
+      </section>
+
+      <!-- ============================================================ #send -->
+      <section class="wrap prose" id="send">
+        <h2>3. Send it to us</h2>
+        <p>
+          Open an issue:
+          <a href="https://github.com/harodggg/xrayTun/issues/new">github.com/harodggg/xrayTun/issues/new</a>
+        </p>
+        <p>These four things are enough to locate the vast majority of “won't start” cases:</p>
+        <ul>
+          <li>
+            the <strong>first few lines</strong> of <code>panic.log</code> (the
+            <code>PANIC file:line</code> line plus the backtrace; if the file is huge, the first 30
+            lines are fine)
+          </li>
+          <li>the part of the <code>*.ips</code> crash report containing <code>abort() called</code></li>
+          <li>your macOS version and your chip (Intel / Apple silicon)</li>
+          <li>how you started it: double-click, or a command line — if a command line, paste the command</li>
+        </ul>
+        <p>
+          <strong>Have a look before you paste.</strong> Logs and crash reports can contain your node
+          hostnames, subscription URLs or configuration fragments — delete any line you would rather
+          not publish; it does not hurt the diagnosis.
+        </p>
+      </section>
+
+      <!-- ============================================================ #hands-off -->
+      <section class="wrap prose" id="hands-off">
+        <h2>4. Do not change your system DNS or routes to troubleshoot</h2>
+        <p>Three reasons, all about not disturbing the scene:</p>
+        <ul>
+          <li>
+            <strong>The process that failed to start changed nothing about your network.</strong>
+            It never finished starting; taking over routes / changing DNS only happens once the app
+            is actually running. So your network configuration is almost certainly unrelated to this
+            crash, and changing it will not make the app start.
+          </li>
+          <li>
+            <strong>The app only rolls back its own changes.</strong> Every network change it makes is
+            first written to a snapshot and rolled back on exit or crash. Your manual
+            <code>networksetup</code> / <code>route</code> edits are in no snapshot, so they are
+            <strong>never restored automatically</strong> — you can end up offline.
+          </li>
+          <li>
+            <strong>It makes diagnosis harder.</strong> Whoever reads the log next cannot tell “a bug
+            in the app” apart from “something changed while troubleshooting”, so we may have to ask
+            you to undo it first.
+          </li>
+        </ul>
+        <p>
+          The right order is: <strong>change nothing</strong> → send us the two logs above → we will
+          give you <strong>reversible</strong> commands when we need them (the kind that record the
+          old value first and can be put back).
+        </p>
+        <p>
+          If you already changed something: stop adding changes, and write down what you changed
+          (the command and which network service it affected) in the issue — we will restore the
+          original values together.
+        </p>
+      </section>
+
+      <!-- ============================================================ #other -->
+      <section class="wrap prose" id="other">
+        <h2>5. While you are here: the other logs</h2>
+        <ul>
+          <li>
+            <strong><code>startup.log</code></strong>: the same <code>logs/</code> directory as
+            <code>panic.log</code>. It records a readable reason for a failed startup (overwritten
+            each time, so it only keeps the latest one).
+          </li>
+          <li>
+            <strong>The app's own “Logs” page</strong>: if the app does start, the sidebar's Logs
+            page shows runtime logs, and it also tells you where <code>panic.log</code> is.
+          </li>
+        </ul>
+        <p>Back to the <a href="../">home page</a>, or see <a href="https://github.com/harodggg/xrayTun/releases">all releases</a>.</p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap prose">
+        <p>
+          This page only covers “the app won't start”. If it does open, the Logs page in the sidebar
+          is the faster entry point.
+        </p>
+        <p class="site-footer__meta">
+          <a href="../">XrayTun home</a> ·
+          <a href="https://github.com/harodggg/xrayTun/issues/new">Report an issue</a> ·
+          <a href="#top">Back to top</a>
+        </p>
+      </div>
+    </footer>
+
+    <script src="../../assets/site.js" defer></script>
+  </body>
+</html>

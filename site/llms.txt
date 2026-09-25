@@ -9,6 +9,11 @@
 
 - [中文站（完整正文）](https://xraytun.top/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
 - [English site (equivalent content)](https://xraytun.top/en/)：与中文站逐段等价，不是半份翻译
+- [打不开怎么办（排障）](https://xraytun.top/troubleshoot/)：App 起不来时先做的三件事 —— 确认是崩溃（崩溃报告里的
+  `abort() called` / `Abort trap: 6`）、找到 `panic.log`（默认
+  `~/Library/Application Support/com.xraytun.desktop/logs/panic.log`，**可能被 `XRAYTUN_DATA_DIR` 覆盖**）、
+  把日志发给我们；以及为什么**不要为了排障去改系统 DNS / 路由**
+- [It won't open — troubleshooting](https://xraytun.top/en/troubleshoot/)：与中文排障页逐段等价
 - [本站全文（供一次性摄取）](https://xraytun.top/llms-full.txt)：官网所有页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
 
 ## 相关项目：xray-wasm（**独立项目，XrayTun 不使用它**）

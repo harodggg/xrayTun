@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-Hans" data-no-update-check>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>打不开怎么办（排障）— XrayTun</title>
+    <meta
+      name="description"
+      content="XrayTun 双击打不开时的排障步骤：怎么确认是崩溃（系统崩溃报告里的 abort() called / Abort trap: 6）、panic.log 在哪（默认在 ~/Library/Application Support/com.xraytun.desktop/logs/，可能被 XRAYTUN_DATA_DIR 覆盖）、怎么把日志发给我们，以及为什么不要为了排障去改系统 DNS / 路由。"
+    />
+    <link rel="canonical" href="https://xraytun.top/troubleshoot/" />
+    <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/troubleshoot/" />
+    <link rel="alternate" hreflang="en" href="https://xraytun.top/en/troubleshoot/" />
+    <link rel="alternate" hreflang="x-default" href="https://xraytun.top/troubleshoot/" />
+    <meta name="theme-color" content="#0f1420" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="XrayTun" />
+    <meta property="og:title" content="打不开怎么办（排障）— XrayTun" />
+    <meta
+      property="og:description"
+      content="双击没反应时：怎么确认是崩溃、panic.log 在哪里、怎么发给我们，以及为什么不要为了排障去改系统 DNS / 路由。"
+    />
+    <meta property="og:url" content="https://xraytun.top/troubleshoot/" />
+    <meta property="og:locale" content="zh_Hans" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="打不开怎么办（排障）— XrayTun" />
+    <meta
+      name="twitter:description"
+      content="双击没反应时：先找 panic.log，不要先改系统 DNS / 路由。"
+    />
+    <!-- 图标 / manifest（相对路径） -->
+    <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="../favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="../apple-touch-icon.png" />
+    <link rel="manifest" href="../manifest.webmanifest" />
+    <link rel="stylesheet" href="../assets/site.css" />
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header">
+      <div class="wrap site-header__inner">
+        <a class="brand" href="../">XrayTun</a>
+        <nav class="site-nav" aria-label="页面导航">
+          <a href="#crash">确认是崩溃</a>
+          <a href="#paniclog">找 panic.log</a>
+          <a href="#send">发给我们</a>
+          <a href="#hands-off">先别改网络</a>
+        </nav>
+        <nav class="lang-switch" aria-label="语言">
+          <a href="./" aria-current="page" lang="zh-Hans">中文</a>
+          <a href="../en/troubleshoot/" hreflang="en" lang="en">English</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <!-- ============================================================ 开场 -->
+      <section class="hero wrap" id="top">
+        <h1>双击打不开怎么办</h1>
+        <p class="lead">
+          这一页给的是「App 根本起不来」时的步骤 —— 也就是界面帮不上忙的那种情况。
+          先按顺序做三件事：<strong>确认它是不是崩溃</strong> → <strong>找到 panic.log</strong> →
+          <strong>发给我们</strong>。最后一条同样重要：<strong>不要为了排障去改系统 DNS 或路由</strong>。
+        </p>
+        <p>
+          如果你看到的是一句「Apple 无法检查它是否包含恶意软件」的弹窗，那不是崩溃，是
+          Gatekeeper 拦截 —— 放行方式在<a href="../#install">首页的安装小节</a>（按 macOS 版本三选一）。
+        </p>
+      </section>
+
+      <!-- ============================================================ #crash -->
+      <section class="wrap prose" id="crash">
+        <h2>1. 先确认：是崩溃，还是被 Gatekeeper 拦下</h2>
+        <ul>
+          <li>
+            <strong>被 Gatekeeper 拦下</strong>：会有一个弹窗，告诉你无法验证开发者。这种情况 App
+            其实没运行过 —— 按首页安装小节放行即可。
+          </li>
+          <li>
+            <strong>崩溃</strong>：没有任何弹窗，或者图标在程序坞里跳一下就消失；进程撑不过一两秒。
+            这时系统会留下一份<strong>崩溃报告</strong>。
+          </li>
+        </ul>
+        <p>macOS 的用户级崩溃报告在这里（`*` 是时间戳）：</p>
+        <pre><code>~/Library/Logs/DiagnosticReports/xraytun-desktop-*.ips</code></pre>
+        <p>
+          在「访达 → 前往 → 前往文件夹」里粘贴上面这段路径（`~` 会展开成你的用户目录），
+          或者在「启动台 → 其它 → 控制台」里左侧选「崩溃报告」。
+          报告里能看到这几字样，它们就是崩溃的判据：
+        </p>
+        <ul>
+          <li><code>"abort() called"</code>（出现在崩溃报告的 <code>asi</code> 字段里）</li>
+          <li><code>Abort trap: 6</code> / <code>SIGABRT</code></li>
+        </ul>
+        <p>
+          如果崩溃报告里<strong>没有</strong>符号与位置，只有
+          <code>__pthread_kill → pthread_kill → abort</code>，那是正常的：发布版被 strip 过。
+          位置信息在下面那份 <code>panic.log</code> 里。
+        </p>
+      </section>
+
+      <!-- ============================================================ #paniclog -->
+      <section class="wrap prose" id="paniclog">
+        <h2>2. 找到 panic.log（最重要的一份）</h2>
+        <p>XrayTun 自己在崩溃时会把「文件:行号 + 原因 + 调用栈」写成一个文件。默认路径是：</p>
+        <pre><code>~/Library/Application Support/com.xraytun.desktop/logs/panic.log</code></pre>
+        <p>最快的打开方式是把这行粘进「终端」：</p>
+        <pre><code>open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log</code></pre>
+        <p>文件的第一行就带着位置，形如：</p>
+        <pre><code>[unix=…] PANIC apps/desktop/src/lib.rs:178:17
+&lt;崩溃原因&gt;
+backtrace:
+…</code></pre>
+        <p>
+          <strong>默认路径可能被 <code>XRAYTUN_DATA_DIR</code> 覆盖。</strong>
+          如果你（或某个脚本）给 App 设过这个环境变量，数据目录就整体换了地方，日志会落在
+          <code>$XRAYTUN_DATA_DIR/logs/</code> 下，默认路径里什么都没有。
+        </p>
+        <p>所以「默认路径没有」并不等于「没写日志」。先看变量，再让系统帮你找：</p>
+        <pre><code>echo "$XRAYTUN_DATA_DIR"
+find ~ -name panic.log 2&gt;/dev/null</code></pre>
+        <p>
+          如果这两条都找不到：说明那次崩溃发生在日志钩子装上<strong>之前</strong>（例如更早的版本），
+          这时只能拿上面那份系统崩溃报告 —— 它没有符号，但仍然能证明「它崩了、崩在 abort」。
+          把两份里你有的那份发给我们即可。
+        </p>
+      </section>
+
+      <!-- ============================================================ #send -->
+      <section class="wrap prose" id="send">
+        <h2>3. 把它发给我们</h2>
+        <p>
+          开一个 issue 就行：
+          <a href="https://github.com/harodggg/xrayTun/issues/new">github.com/harodggg/xrayTun/issues/new</a>
+        </p>
+        <p>贴这几样，足够定位绝大多数「起不来」：</p>
+        <ul>
+          <li>
+            <code>panic.log</code> 的<strong>开头几行</strong>（第一行 <code>PANIC 文件:行号</code>
+            加调用栈；整份太大就只贴前 30 行）
+          </li>
+          <li>崩溃报告（<code>*.ips</code>）里含 <code>abort() called</code> 的那一段</li>
+          <li>你的 macOS 版本与芯片（Intel / Apple 芯片）</li>
+          <li>你是怎么启动的：双击 App、还是命令行；如果是命令行，把命令也贴上</li>
+        </ul>
+        <p>
+          <strong>贴之前先扫一眼。</strong>日志与崩溃报告里可能带有你的节点域名、订阅地址或配置片段 ——
+          不想公开的行删掉再贴，不影响定位问题。
+        </p>
+      </section>
+
+      <!-- ============================================================ #hands-off -->
+      <section class="wrap prose" id="hands-off">
+        <h2>4. 不要为了排障去改系统 DNS / 路由</h2>
+        <p>三条理由，都跟「别把现场弄乱」有关：</p>
+        <ul>
+          <li>
+            <strong>起不来的那个进程什么网络都没改。</strong>它连自己的启动都没走完，
+            所谓的「接管路由 / 改 DNS」只在 App 正常跑起来之后才发生。所以网络配置与这次崩溃
+            多半无关，改它不会让它能启动。
+          </li>
+          <li>
+            <strong>App 只回滚它自己做的改动。</strong>它对网络的每一处改动都先落盘成快照、
+            退出或崩溃后按快照回滚；你手动敲的 <code>networksetup</code> / <code>route</code>
+            不在任何快照里，<strong>不会被自动恢复</strong>，可能让机器停在断网状态。
+          </li>
+          <li>
+            <strong>它会把诊断变难。</strong>下一个看到日志的人无法区分「App 的问题」与
+            「排障时手动改的东西」。所以我们可能需要先让你把改动还原，多绕一圈。
+          </li>
+        </ul>
+        <p>
+          正确的顺序是：<strong>什么都别改</strong> → 把上面两份日志发给我们 → 我们需要时会给
+          <strong>可回滚</strong>的具体命令（改之前能记下原值、之后能改回去的那种）。
+        </p>
+        <p>
+          如果你已经手动改过：不要继续叠加改动。把「改了什么」写进 issue（命令与它影响的网络服务名），
+          我们一起把它还原回原值。
+        </p>
+      </section>
+
+      <!-- ============================================================ #other -->
+      <section class="wrap prose" id="other">
+        <h2>5. 顺带：还有这些日志</h2>
+        <ul>
+          <li>
+            <strong><code>startup.log</code></strong>：与 <code>panic.log</code> 同一个
+            <code>logs/</code> 目录。它记的是「启动失败」这类<strong>可读原因</strong>（覆盖写，只留最新一次）。
+          </li>
+          <li>
+            <strong>App 内的「日志」页</strong>：能起来的话，侧栏「日志」里有运行日志，
+            那一页也会告诉你 <code>panic.log</code> 在哪。
+          </li>
+        </ul>
+        <p>回到<a href="../">首页</a>，或直接看<a href="https://github.com/harodggg/xrayTun/releases">所有版本</a>。</p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap prose">
+        <p>
+          这一页只讲「App 起不来」这条路径。能打开 App 的话，侧栏「日志」页是更快的入口。
+        </p>
+        <p class="site-footer__meta">
+          <a href="../">XrayTun 首页</a> ·
+          <a href="https://github.com/harodggg/xrayTun/issues/new">反馈一个问题</a> ·
+          <a href="#top">回到顶部</a>
+        </p>
+      </div>
+    </footer>
+
+    <script src="../assets/site.js" defer></script>
+  </body>
+</html>

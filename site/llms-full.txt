@@ -2,9 +2,11 @@
 
 > 站点：https://xraytun.top/ ｜ 版本：v0.8.39（2026-09-25）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
-> 结构化数据见各页面 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是 SoftwareApplication，
-> xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与 `/en/wasm/`
-> 另有 BreadcrumbList。
+> 结构化数据见**有结构化数据的那些页面**的 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是
+> SoftwareApplication，xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与
+> `/en/wasm/` 另有 BreadcrumbList。**排障页 `/troubleshoot/` 与 `/en/troubleshoot/` 没有
+> JSON-LD**（它是操作步骤，不是软件实体，硬套结构化数据只会说出不实的话）—— 这里写明，
+> 免得读的人以为它漏了。
 >
 > **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**官网所有页面的完整正文**
 > 与官网里的「事实与边界」清单。仓库 `docs/` 下的**完整设计文档（数千行规范）没有逐字复制**
@@ -32,15 +34,17 @@
 > 它**与 XrayTun 无任何集成关系**。
 <!-- END external:header -->
 
-收录页面（10 个，中英各 5）：
+收录页面（12 个，中英各 6）：
 
 - 中文：XrayTun 主页面 → https://xraytun.top/
 - 中文：xray-wasm（同一作者的另一个项目） → https://xraytun.top/wasm/
+- 中文：打不开怎么办（排障） → https://xraytun.top/troubleshoot/
 - 中文：信息过滤器 · Jev（同一作者的另一个项目） → https://xraytun.top/jev-x-filter/
 - 中文：素颜镜 · 美颜程度检测（同一作者的另一个项目） → https://xraytun.top/beauty-meter/
 - 中文：一目十行 · SpeedRead（同一作者的另一个项目） → https://xraytun.top/speed-read/
 - English: XrayTun home → https://xraytun.top/en/
 - English: xray-wasm (a separate project by the same author) → https://xraytun.top/en/wasm/
+- English: it won't open (troubleshooting) → https://xraytun.top/en/troubleshoot/
 - English: Info Filter · Jev (a separate project by the same author) → https://xraytun.top/en/jev-x-filter/
 - English: Beauty Meter (a separate project by the same author) → https://xraytun.top/en/beauty-meter/
 - English: SpeedRead (a separate project by the same author) → https://xraytun.top/en/speed-read/
@@ -608,6 +612,110 @@ docker run --rm -p 8443:8443 \
 
 ---
 
+# 中文：打不开怎么办（排障）
+
+来源：https://xraytun.top/troubleshoot/
+
+# 双击打不开怎么办
+
+这一页给的是「App 根本起不来」时的步骤 —— 也就是界面帮不上忙的那种情况。 先按顺序做三件事：**确认它是不是崩溃** → **找到 panic.log** → **发给我们**。最后一条同样重要：**不要为了排障去改系统 DNS 或路由**。
+
+如果你看到的是一句「Apple 无法检查它是否包含恶意软件」的弹窗，那不是崩溃，是 Gatekeeper 拦截 —— 放行方式在[首页的安装小节](../#install)（按 macOS 版本三选一）。
+
+## 1. 先确认：是崩溃，还是被 Gatekeeper 拦下
+
+- **被 Gatekeeper 拦下**：会有一个弹窗，告诉你无法验证开发者。这种情况 App 其实没运行过 —— 按首页安装小节放行即可。
+
+- **崩溃**：没有任何弹窗，或者图标在程序坞里跳一下就消失；进程撑不过一两秒。 这时系统会留下一份**崩溃报告**。
+
+macOS 的用户级崩溃报告在这里（`*` 是时间戳）：
+
+```bash
+~/Library/Logs/DiagnosticReports/xraytun-desktop-*.ips
+```
+
+在「访达 → 前往 → 前往文件夹」里粘贴上面这段路径（`~` 会展开成你的用户目录）， 或者在「启动台 → 其它 → 控制台」里左侧选「崩溃报告」。 报告里能看到这几字样，它们就是崩溃的判据：
+
+- `"abort() called"`（出现在崩溃报告的 `asi` 字段里）
+
+- `Abort trap: 6` / `SIGABRT`
+
+如果崩溃报告里**没有**符号与位置，只有 `__pthread_kill → pthread_kill → abort`，那是正常的：发布版被 strip 过。 位置信息在下面那份 `panic.log` 里。
+
+## 2. 找到 panic.log（最重要的一份）
+
+XrayTun 自己在崩溃时会把「文件:行号 + 原因 + 调用栈」写成一个文件。默认路径是：
+
+```bash
+~/Library/Application Support/com.xraytun.desktop/logs/panic.log
+```
+
+最快的打开方式是把这行粘进「终端」：
+
+```bash
+open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log
+```
+
+文件的第一行就带着位置，形如：
+
+```bash
+[unix=…] PANIC apps/desktop/src/lib.rs:178:17
+<崩溃原因>
+backtrace:
+…
+```
+
+**默认路径可能被 `XRAYTUN_DATA_DIR` 覆盖。** 如果你（或某个脚本）给 App 设过这个环境变量，数据目录就整体换了地方，日志会落在 `$XRAYTUN_DATA_DIR/logs/` 下，默认路径里什么都没有。
+
+所以「默认路径没有」并不等于「没写日志」。先看变量，再让系统帮你找：
+
+```bash
+echo "$XRAYTUN_DATA_DIR"
+find ~ -name panic.log 2>/dev/null
+```
+
+如果这两条都找不到：说明那次崩溃发生在日志钩子装上**之前**（例如更早的版本）， 这时只能拿上面那份系统崩溃报告 —— 它没有符号，但仍然能证明「它崩了、崩在 abort」。 把两份里你有的那份发给我们即可。
+
+## 3. 把它发给我们
+
+开一个 issue 就行： [github.com/harodggg/xrayTun/issues/new](https://github.com/harodggg/xrayTun/issues/new)
+
+贴这几样，足够定位绝大多数「起不来」：
+
+- `panic.log` 的**开头几行**（第一行 `PANIC 文件:行号` 加调用栈；整份太大就只贴前 30 行）
+
+- 崩溃报告（`*.ips`）里含 `abort() called` 的那一段
+
+- 你的 macOS 版本与芯片（Intel / Apple 芯片）
+
+- 你是怎么启动的：双击 App、还是命令行；如果是命令行，把命令也贴上
+
+**贴之前先扫一眼。**日志与崩溃报告里可能带有你的节点域名、订阅地址或配置片段 —— 不想公开的行删掉再贴，不影响定位问题。
+
+## 4. 不要为了排障去改系统 DNS / 路由
+
+三条理由，都跟「别把现场弄乱」有关：
+
+- **起不来的那个进程什么网络都没改。**它连自己的启动都没走完， 所谓的「接管路由 / 改 DNS」只在 App 正常跑起来之后才发生。所以网络配置与这次崩溃 多半无关，改它不会让它能启动。
+
+- **App 只回滚它自己做的改动。**它对网络的每一处改动都先落盘成快照、 退出或崩溃后按快照回滚；你手动敲的 `networksetup` / `route` 不在任何快照里，**不会被自动恢复**，可能让机器停在断网状态。
+
+- **它会把诊断变难。**下一个看到日志的人无法区分「App 的问题」与 「排障时手动改的东西」。所以我们可能需要先让你把改动还原，多绕一圈。
+
+正确的顺序是：**什么都别改** → 把上面两份日志发给我们 → 我们需要时会给 **可回滚**的具体命令（改之前能记下原值、之后能改回去的那种）。
+
+如果你已经手动改过：不要继续叠加改动。把「改了什么」写进 issue（命令与它影响的网络服务名）， 我们一起把它还原回原值。
+
+## 5. 顺带：还有这些日志
+
+- **`startup.log`**：与 `panic.log` 同一个 `logs/` 目录。它记的是「启动失败」这类**可读原因**（覆盖写，只留最新一次）。
+
+- **App 内的「日志」页**：能起来的话，侧栏「日志」里有运行日志， 那一页也会告诉你 `panic.log` 在哪。
+
+回到[首页](../)，或直接看[所有版本](https://github.com/harodggg/xrayTun/releases)。
+
+---
+
 # English: XrayTun home
 
 来源：https://xraytun.top/en/
@@ -1038,3 +1146,107 @@ No, they solve different problems. XrayTun's TUN mode uses the official Xray-cor
 - XrayTun (the macOS client this site is about): [home page](../../)
 
 - Site summary for AI: [llms.txt](../../llms.txt)
+
+---
+
+# English: it won't open (troubleshooting)
+
+来源：https://xraytun.top/en/troubleshoot/
+
+# It won't open — what to do
+
+This page is for the case where the app does not start at all — the one case where the app's own UI cannot help you. Do these three things in order: **confirm it crashed** → **find panic.log** → **send it to us**. And the last point matters just as much: **do not change your system DNS or routes to troubleshoot**.
+
+If instead you see a dialog saying Apple cannot check the app for malicious software, that is not a crash — that is Gatekeeper. The ways to allow it are in the [install section of the home page](../#install) (pick one by macOS version).
+
+## 1. First: is it a crash, or Gatekeeper?
+
+- **Blocked by Gatekeeper**: you get a dialog about an unverified developer. The app never actually ran — allow it as described in the home page's install section.
+
+- **A crash**: no dialog at all, or the icon bounces once in the Dock and disappears; the process never survives a second or two. macOS leaves a **crash report** behind.
+
+User-level crash reports live here (`*` is a timestamp):
+
+```bash
+~/Library/Logs/DiagnosticReports/xraytun-desktop-*.ips
+```
+
+Paste that path into Finder → Go → Go to Folder (the `~` expands to your home directory), or open Console.app and pick “Crash Reports” in the sidebar. Two things in the report are the actual evidence of a crash:
+
+- `"abort() called"` (inside the report's `asi` field)
+
+- `Abort trap: 6` / `SIGABRT`
+
+If the report has **no** symbols and no location — only `__pthread_kill → pthread_kill → abort` — that is expected: release builds are stripped. The location is in `panic.log`, below.
+
+## 2. Find panic.log (the important one)
+
+When XrayTun crashes it writes “file:line + reason + backtrace” to a file. The default path is:
+
+```bash
+~/Library/Application Support/com.xraytun.desktop/logs/panic.log
+```
+
+The quickest way to open it is to paste this into Terminal:
+
+```bash
+open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log
+```
+
+Its first line carries the location, in this shape:
+
+```bash
+[unix=…] PANIC apps/desktop/src/lib.rs:178:17
+<why it panicked>
+backtrace:
+…
+```
+
+**The default path may be overridden by `XRAYTUN_DATA_DIR`.** If that environment variable was set for the app (by you or by a script), the whole data directory moves and the log lands under `$XRAYTUN_DATA_DIR/logs/` — the default path will be empty.
+
+So “the default path is empty” does not mean “no log was written”. Check the variable, then let the system search:
+
+```bash
+echo "$XRAYTUN_DATA_DIR"
+find ~ -name panic.log 2>/dev/null
+```
+
+If neither turns up anything, the crash happened **before** the logging hook was installed (e.g. in an older version). In that case the system crash report above is all there is — it has no symbols, but it still shows that it crashed in `abort`. Send us whichever of the two you have.
+
+## 3. Send it to us
+
+Open an issue: [github.com/harodggg/xrayTun/issues/new](https://github.com/harodggg/xrayTun/issues/new)
+
+These four things are enough to locate the vast majority of “won't start” cases:
+
+- the **first few lines** of `panic.log` (the `PANIC file:line` line plus the backtrace; if the file is huge, the first 30 lines are fine)
+
+- the part of the `*.ips` crash report containing `abort() called`
+
+- your macOS version and your chip (Intel / Apple silicon)
+
+- how you started it: double-click, or a command line — if a command line, paste the command
+
+**Have a look before you paste.** Logs and crash reports can contain your node hostnames, subscription URLs or configuration fragments — delete any line you would rather not publish; it does not hurt the diagnosis.
+
+## 4. Do not change your system DNS or routes to troubleshoot
+
+Three reasons, all about not disturbing the scene:
+
+- **The process that failed to start changed nothing about your network.** It never finished starting; taking over routes / changing DNS only happens once the app is actually running. So your network configuration is almost certainly unrelated to this crash, and changing it will not make the app start.
+
+- **The app only rolls back its own changes.** Every network change it makes is first written to a snapshot and rolled back on exit or crash. Your manual `networksetup` / `route` edits are in no snapshot, so they are **never restored automatically** — you can end up offline.
+
+- **It makes diagnosis harder.** Whoever reads the log next cannot tell “a bug in the app” apart from “something changed while troubleshooting”, so we may have to ask you to undo it first.
+
+The right order is: **change nothing** → send us the two logs above → we will give you **reversible** commands when we need them (the kind that record the old value first and can be put back).
+
+If you already changed something: stop adding changes, and write down what you changed (the command and which network service it affected) in the issue — we will restore the original values together.
+
+## 5. While you are here: the other logs
+
+- **`startup.log`**: the same `logs/` directory as `panic.log`. It records a readable reason for a failed startup (overwritten each time, so it only keeps the latest one).
+
+- **The app's own “Logs” page**: if the app does start, the sidebar's Logs page shows runtime logs, and it also tells you where `panic.log` is.
+
+Back to the [home page](../), or see [all releases](https://github.com/harodggg/xrayTun/releases).

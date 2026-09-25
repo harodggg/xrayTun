@@ -89,6 +89,10 @@ PRESERVE_EXTERNAL = os.environ.get("GEN_SITE_EXTERNAL_OFF") != "1"
 PRODUCT_PAGES = [
     ("/", "/en/", "1.0", "0.9"),
     ("/wasm/", "/en/wasm/", "0.8", "0.7"),
+    # 排障页（task-16）：App 起不来时 App 内的界面帮不上忙，载体必须在站点上。
+    # 优先级低（不是获客页），但**必须在这里注册** —— 注册了才会被 sitemap 归属为
+    # "本产品页面"并**生成**条目；否则它会被当成"外部条目"去**保留**，那是另一条路径。
+    ("/troubleshoot/", "/en/troubleshoot/", "0.5", "0.4"),
 ]
 
 # `llms-full.txt` 外部内容的**标记区间**：`(区间名, 生成文本里的插入锚点, 插在锚点前/后)`。
@@ -507,6 +511,11 @@ def build_llms(old: str = "") -> str:
 
 - [中文站（完整正文）]({BASE}/)：是什么、解决什么问题、核心能力与刻意不做的边界、下载、安装、FAQ、链接
 - [English site (equivalent content)]({BASE}/en/)：与中文站逐段等价，不是半份翻译
+- [打不开怎么办（排障）]({BASE}/troubleshoot/)：App 起不来时先做的三件事 —— 确认是崩溃（崩溃报告里的
+  `abort() called` / `Abort trap: 6`）、找到 `panic.log`（默认
+  `~/Library/Application Support/com.xraytun.desktop/logs/panic.log`，**可能被 `XRAYTUN_DATA_DIR` 覆盖**）、
+  把日志发给我们；以及为什么**不要为了排障去改系统 DNS / 路由**
+- [It won't open — troubleshooting]({BASE}/en/troubleshoot/)：与中文排障页逐段等价
 - [本站全文（供一次性摄取）]({BASE}/llms-full.txt)：官网所有页面的**完整正文** + 事实与边界清单；**不含**仓库 `docs/` 下的全量设计文档（那是另一处，见下）
 
 ## 相关项目：xray-wasm（**独立项目，XrayTun 不使用它**）
@@ -566,9 +575,12 @@ def build_llms_full(old: str = "") -> str:
     pages = [
         ("中文：XrayTun 主页面", "/", SITE / "index.html", "zh"),
         ("中文：xray-wasm（同一作者的另一个项目）", "/wasm/", SITE / "wasm" / "index.html", "zh"),
+        ("中文：打不开怎么办（排障）", "/troubleshoot/", SITE / "troubleshoot" / "index.html", "zh"),
         ("English: XrayTun home", "/en/", SITE / "en" / "index.html", "en"),
         ("English: xray-wasm (a separate project by the same author)", "/en/wasm/",
          SITE / "en" / "wasm" / "index.html", "en"),
+        ("English: it won't open (troubleshooting)", "/en/troubleshoot/",
+         SITE / "en" / "troubleshoot" / "index.html", "en"),
     ]
 
     bodies = []
@@ -606,9 +618,11 @@ def build_llms_full(old: str = "") -> str:
 
 > 站点：{BASE}/ ｜ 版本：v{VERSION}（{LAST_PUB}）｜ 生成方式：由页面 HTML 直接转换，
 > 因此与网页**等价**（不是摘要）。改页面文案后应重新生成，避免 AI 读到旧内容。
-> 结构化数据见各页面 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是 SoftwareApplication，
-> xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与 `/en/wasm/`
-> 另有 BreadcrumbList。
+> 结构化数据见**有结构化数据的那些页面**的 `<head>` 里的 JSON-LD：软件块（XrayTun 页面是
+> SoftwareApplication，xray-wasm 页面是 SoftwareSourceCode）+ FAQPage + WebSite；`/wasm/` 与
+> `/en/wasm/` 另有 BreadcrumbList。**排障页 `/troubleshoot/` 与 `/en/troubleshoot/` 没有
+> JSON-LD**（它是操作步骤，不是软件实体，硬套结构化数据只会说出不实的话）—— 这里写明，
+> 免得读的人以为它漏了。
 >
 > **完整性说明（重要，别把 "full" 读成全量文档）**：本文件包含的是**官网所有页面的完整正文**
 > 与官网里的「事实与边界」清单。仓库 `docs/` 下的**完整设计文档（数千行规范）没有逐字复制**

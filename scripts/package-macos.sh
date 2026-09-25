@@ -336,6 +336,58 @@ cp -R "$APP" "$STAGE/XrayTun.app"
 # 没有它，用户面对一个孤零零的 .app 只能自己猜该放哪。
 ln -s /Applications "$STAGE/Applications"
 
+# 「打不开怎么办」说明 —— 用户双击 App **没反应**时，这是他能看到的**第一手**载体。
+#
+# 为什么必须有它（task-16 / U4）：App 内的「日志」页已经能引导用户找到 panic.log，
+# 但那条引导的载体**在 App 里面** —— App 起不来时它一个字都看不到。载体必须在 App 之外：
+# 挂载 dmg 的那一刻就是唯一必然发生的交互，所以把说明放在镜像根目录。
+#
+# 内容与站点页 `https://xraytun.top/troubleshoot/`（中英）同源：确认是不是崩溃（系统崩溃报告里的
+# `abort() called` / `Abort trap: 6`）→ 去哪找 panic.log（默认路径 + `XRAYTUN_DATA_DIR` 可能覆盖）
+# → 怎么发给我们 → **不要**为排障去改系统 DNS/路由（App 只回滚它自己的快照，手动改动不会自动恢复）。
+#
+# ⚠️ 这份说明里**不写版本号、不写日期**：它不会随发版流程更新（bump-release.py 只管
+#    `site/index.html` 与 `site/en/index.html` 的页脚），写死的数字只会变成过期的事实。
+cat > "$STAGE/打不开怎么办.txt" <<'TROUBLESHOOTING_TXT'
+打不开怎么办（XrayTun）
+
+双击没反应、或图标跳一下就消失？先做三件事：
+
+1) 确认是不是崩溃（不是 Gatekeeper 弹窗）
+   系统会留下崩溃报告：
+     ~/Library/Logs/DiagnosticReports/xraytun-desktop-*.ips
+   报告里出现下面字样就是崩溃：
+     "abort() called"     （在 asi 字段里）
+     Abort trap: 6 / SIGABRT
+   如果看到的是「Apple 无法检查它是否包含恶意软件」的弹窗，那是 Gatekeeper 拦截，
+   不是崩溃 —— 放行方式见 https://xraytun.top/#install
+
+2) 找到 panic.log（最重要）
+     ~/Library/Application Support/com.xraytun.desktop/logs/panic.log
+   第一行就是位置与原因，形如：
+     [unix=…] PANIC apps/desktop/src/lib.rs:178:17
+   ⚠️ 默认路径可能被环境变量 XRAYTUN_DATA_DIR 覆盖：设过它的话，日志在
+      $XRAYTUN_DATA_DIR/logs/panic.log。默认路径找不到时，先 `echo "$XRAYTUN_DATA_DIR"`，
+      再 `find ~ -name panic.log`。
+
+3) 发给我们
+     https://github.com/harodggg/xrayTun/issues/new
+   贴：panic.log 开头几行（含 PANIC 文件:行号 与调用栈）+ 崩溃报告里 abort() called 那段
+      + macOS 版本与芯片 + 你是怎么启动的。
+   贴之前先扫一眼：日志里可能带你的节点域名或订阅地址，不想公开的行删掉再贴。
+
+**不要为了排障去改系统 DNS / 路由。**
+   起不来的那个进程什么网络都没改（接管路由/改 DNS 只在 App 正常跑起来之后发生）；
+   App 只回滚它**自己**做的改动（每一步都先落盘成快照），你手动敲的 networksetup / route
+   不在任何快照里，**不会被自动恢复**，可能把机器留在断网状态，还会让诊断变难。
+   正确顺序：什么都别改 → 把上面两份日志发给我们 → 需要时我们给**可回滚**的具体命令。
+
+详细说明（中英）：
+   https://xraytun.top/troubleshoot/
+   https://xraytun.top/en/troubleshoot/
+TROUBLESHOOTING_TXT
+echo "  ✓ dmg 内已放入「打不开怎么办.txt」（指向站点排障页与 panic.log 路径）"
+
 # 造镜像 → 在可写镜像里逐文件清 `com.apple.FinderInfo` → 转 UDZO。
 #
 # 为什么不能只靠「签名前清一次」：见上面那段 —— makehybrid 的 HFS 文件系统
