@@ -83,7 +83,15 @@ source "$ROOT/scripts/team-id.sh"
 if ! team_id_resolve --into /dev/null; then
   exit 1
 fi
-export XRAYTUN_TEAM_ID
+# 三种模式（判据见 scripts/team-id.sh）：
+#   real / sentinel ⇒ 有值，注入给编译期（`option_env!`）；
+#   **cdhash**      ⇒ 这里**刻意不注入**（空/未设）：helper 改成"对端 cdhash == 已安装 App 的 cdhash"，
+#                     找不到已安装 App 时全拒。所以下面只在有值时才 export。
+if [ -n "${XRAYTUN_TEAM_ID-}" ]; then
+  export XRAYTUN_TEAM_ID
+fi
+TEAM_ID_POLICY="$(team_id_policy_for_env)"
+echo "  · 策略：${TEAM_ID_POLICY}（产物断言按它选判据）"
 
 # 可选：交叉/通用构建的目标三元组。
 #

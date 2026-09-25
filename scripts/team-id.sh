@@ -31,16 +31,24 @@
 #     · `empty`    —— 未设或空串 ⇒ **失败**（见下）。
 #     · `invalid`  —— 其它形状 ⇒ **失败**（十有八九是拼错了，不能放行）。
 #
-#   `empty` 为什么必须**失败**而不是"自动用哨兵"：
-#     · `XRAYTUN_TEAM_ID=` 显式空串会**盖掉**任何默认值，而 `peer.rs` 的判据是
-#       `Some(team) if !team.is_empty()` ⇒ 空串直接退化成 `InsecureAllowAny`（实机复核：
-#       `XRAYTUN_TEAM_ID= cargo test -p xt-helper build_env_policy_never_silently_trusts_everything
-#        -- --nocapture` 会打印"当前构建未注入 XRAYTUN_TEAM_ID"，即宽松分支被走到）。
-#       所以"空"是一个**会静默开门的值**，必须当成显式错误。
-#     · GitHub Actions 里 `${{ vars.X }}` 未定义时展开成**空串**（不是"未设置"），
-#       所以这条判据正是 CI 上最容易踩的形态。
-#     · 出错信息里给出两条明确出路（真实 Team ID / 显式哨兵），让人**有意识地**选，
-#       而不是让流水线替他默认。
+#   `empty`（task-17 之后）为什么**不再是错误**，而是第三条路 `cdhash`：
+#     · 旧代码里 `XRAYTUN_TEAM_ID=""`（GitHub Actions 里 `${{ vars.X }}` 未定义时正是空串）
+#       会让 `option_env!` 拿到 `Some("")`，而判据是 `!is_empty()` ⇒ 直接退化成
+#       `InsecureAllowAny`（实机复核过）。**那是当时**把 empty 当错误的原因。
+#     · task-17 之后 `peer.rs` 的 `policy_for()` 把 `None` 与 `Some("")` **一律**当"未配置"，
+#       于是未注入不再是洞：装了 App ⇒ `cdhash-binding`（对端 cdhash 必须逐字节等于已安装 App 的
+#       可执行文件），没装 App ⇒ `refuse-service`（拒绝一切非 root 特权操作）。
+#       两条都**不是**"信任任何对端"。
+#     · 所以本文件对 empty 的处理是："**不注入**（= 让 helper 走 cdhash 绑定），并把后果说清楚"。
+#       发行包要走 cdhash 绑定就**不注入** `XRAYTUN_TEAM_ID`；哨兵路径语义不变（仍是全拒）。
+#     · 形状不合法的值（例如 `lower-case`）**仍然是错误** —— 那十有八九是拼错了，不能放行。
+#
+#   三条路与产物标识的对应（`peer.rs` 的 `PeerPolicy::describe()`，可 grep）：
+#     real     → `XRAYTUN_HELPER_POLICY=require-signature`（要求串含该 OU）
+#     sentinel → `XRAYTUN_HELPER_POLICY=require-signature`（要求串的 OU 是哨兵 ⇒ 匹配不上任何签名 ⇒ 全拒）
+#     不注入    → `XRAYTUN_HELPER_POLICY=cdhash-binding`（装了 App）或 `…=refuse-service`（没装）
+#     以上三者都**不许**出现 `…=insecure-allow-any-debug`（该变体被 `#[cfg(debug_assertions)]` 门住，
+#     release 产物里出现它 = 编译期门失效）。产物断言见 `verify-team-id-injection.sh --assert-helper`。
 #
 #   ⚠️ 为什么不用 `.cargo/config.toml` 的 `[env]` 做默认值（试过，行不通）：
 #     · `/.cargo` 在 `.gitignore:3` 里 ⇒ 该文件无法被 `git commit --only` 提交
@@ -78,27 +86,33 @@ team_id_classify() {
   fi
 }
 
-# team_id_fail_message —— 缺注入 / 形状不对时的可读出路（打印到 stderr）。
+# team_id_policy_for_env —— 当前 `XRAYTUN_TEAM_ID` 对应哪条策略（给产物断言选判据用）。
+# → team-id | refuse-all | cdhash | invalid
+team_id_policy_for_env() {
+  case "$(team_id_classify "${XRAYTUN_TEAM_ID-}")" in
+    real) printf 'team-id\n' ;;
+    sentinel) printf 'refuse-all\n' ;;
+    empty) printf 'cdhash\n' ;;
+    *) printf 'invalid\n' ;;
+  esac
+}
+
+# team_id_fail_message —— 形状不合法时的可读出路（打印到 stderr）。
 team_id_fail_message() {
   cat >&2 <<'EOF'
-✗ 发行包必须显式注入 XRAYTUN_TEAM_ID（编译期选项，决定 helper 的授权策略）。
+✗ XRAYTUN_TEAM_ID 形状不合法。三条合法输入（**没有第四条**）：
 
-  不注入的后果是 helper 退化成 InsecureAllowAny（只靠 socket 权限位）——
-  该用户能跑的任何进程都能让 helper 以 root 装任意自签 CA，这是安全审计的 P0-1。
-
-  两条出路，二选一（**没有默认值**，因为两条路的后果完全不同）：
-
-  A. 真实 Team ID（门真正起作用）：
+  A. 真实 Team ID（门最强）：10 位 [A-Z0-9]。
        在 GitHub 仓库 Settings → Variables 里设 XRAYTUN_TEAM_ID=<10 位大写字母数字>，
        或本机 `XRAYTUN_TEAM_ID=ABCDE12345 ./scripts/package-macos.sh`。
        注意：需要 **Developer ID 证书** 才能签出带该 Team ID 的 App，
        而本仓库当前没有（ad-hoc 签名，`security find-identity` 为 0 个身份）。
 
-  B. 显式哨兵（fail closed：helper 拒绝一切非 root 特权操作）：
-       XRAYTUN_TEAM_ID=UNSET-REFUSE-PRIVILEGED-OPS ./scripts/package-macos.sh
-       或把仓库变量设成同一个字符串。
-       后果要知情：TUN 模式 / 安装 helper / MITM 信任锚**全部不可用**，
-       但绝不会"信任任何对端"。这比留一个静默的门要安全。
+  B. 显式哨兵（全拒）：`XRAYTUN_TEAM_ID=UNSET-REFUSE-PRIVILEGED-OPS`。
+       后果要知情：TUN 模式 / 安装 helper / MITM 信任锚**全部不可用**，但绝不会"信任任何对端"。
+
+  C. **不注入**（cdhash 绑定，无证书时的可用形态）：别设这个变量，或设成空串。
+       helper 只接受"对端 cdhash == 已安装 App 可执行文件的 cdhash"；找不到已安装 App 时全拒。
 EOF
 }
 
@@ -133,14 +147,19 @@ team_id_resolve() {
 EOF
       ;;
     empty)
-      echo "✗ XRAYTUN_TEAM_ID 未设置或为空串 —— 空串会让 peer.rs 的判据（Some(team) 且非空）" >&2
-      echo "  直接退化成 InsecureAllowAny，所以这里当**错误**处理，不猜默认值。" >&2
-      team_id_fail_message
-      return 1
+      cat >&2 <<'EOF'
+[team-id] ✓ 未注入 XRAYTUN_TEAM_ID（或空串）⇒ **不注入**，让 helper 走 **cdhash 绑定**：
+[team-id]     · 装了 App（/Applications/XrayTun.app/Contents/MacOS/xraytun-desktop）⇒
+[team-id]       只接受"对端 cdhash == 该可执行文件 cdhash"的对端；
+[team-id]     · 找不到已安装 App ⇒ refuse-service（拒绝一切非 root 特权操作）。
+[team-id]   两条都**不是**"信任任何对端"（task-17 起 `None` 与 `Some("")` 一律视为未配置）。
+EOF
+      # 不写出任何 `XRAYTUN_TEAM_ID=…`：这一路的意义就是**不注入**。
+      return 0
       ;;
     *)
       echo "✗ XRAYTUN_TEAM_ID 形状不合法：'${value}'" >&2
-      echo "  期望：10 位 [A-Z0-9]（Apple Team ID），或显式哨兵 ${XRAYTUN_TEAM_ID_SENTINEL}。" >&2
+      echo "  期望：10 位 [A-Z0-9]（Apple Team ID）、显式哨兵 ${XRAYTUN_TEAM_ID_SENTINEL}，或留空（cdhash 绑定）。" >&2
       team_id_fail_message
       return 1
       ;;
