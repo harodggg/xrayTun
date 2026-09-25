@@ -51,8 +51,61 @@ pub fn dev_binaries_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// 把 panic 写进**文件** —— 否则发行版里的崩溃"没有任何证据"。
+///
+/// # 为什么必须有它（2026-09-25 现场）
+///
+/// release profile 是 `panic = "abort"` ⇒ 任何 panic 都变成 `SIGABRT`；
+/// 而经 LaunchServices（双击图标）启动时，**stderr 不落在我们能读到的任何地方**：
+/// 系统崩溃报告里只有 `abort() called`，没有 Rust 的 panic 消息与位置。
+/// 用户报"一打开就崩"，我们手上什么都没有 —— 那次诊断就是这么卡住的。
+///
+/// 另外 `[profile.release] strip = true` 会**剥掉符号**，所以文件里的 backtrace
+/// 只有地址、读不出函数名；但 panic 的**位置字符串**（`文件:行号`）一定在二进制里，
+/// 而它已经足够把人直接送到出问题那一行。所以这里优先保证那两行一定落盘。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<未知位置>".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<非字符串 panic 负载>".to_string());
+        let text = format!(
+            "[unix={}] PANIC {location}\n{payload}\nbacktrace:\n{}\n",
+            xt_core::util::now_unix(),
+            std::backtrace::Backtrace::force_capture()
+        );
+
+        // ① 文件：App 数据目录下的 `logs/panic.log`（用户能直接打开、能发给我们）。
+        let dir = xt_core::store::Store::default_root().join("logs");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+            {
+                use std::io::Write as _;
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        // ② stderr：终端里直接跑时仍然看得到（`open` 启动时这条会丢，所以①才是主路径）。
+        eprintln!("{text}");
+
+        // 保留默认 hook："thread panicked at ..." 那行也别丢。
+        default_hook(info);
+    }));
+}
+
 /// 应用入口。`main.rs` 只有一行，真正的逻辑都在这里，方便将来加集成测试。
 pub fn run() {
+    // **第一件事**：装上 panic hook。晚一步都可能错过启动阶段的崩溃。
+    install_panic_hook();
     init_tracing();
 
     tauri::Builder::default()
