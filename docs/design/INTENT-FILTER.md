@@ -1036,6 +1036,31 @@ UI `vitest` **41 文件 / 418 通过**、`tsc --noEmit` 干净。
 `cargo test -p xraytun-desktop` **287 + 8 通过**（含契约测试 —— 它读 TS 形状，
 是这次 UI 改动最该跑的 Rust 侧）。
 
+### 16.7 P4 收尾：设计 §10 的验收判据逐条对照
+
+| 判据（§10 的 P4 行） | 证据 | 状态 |
+|---|---|---|
+| `cargo test -p xt-tun -p xt-helper` | xt-tun **87**（+1 需 root 的 `#[ignore]`）、xt-helper **18**、xt-proto **24** | ✅ |
+| ALPN **只广告 http/1.1** | `xt-mitm/tls.rs` 单测 + e2e 断言协商结果就是 `http/1.1` | ✅ |
+| **防自环**：回连的 socks 入站不命中名单规则 | `xray/config.rs` 单测（`mitm-steer` 的 `inboundTag` 只含 tun/socks/http）+ **真核** `mitm_steering_live` | ✅ |
+| `strip_json` 的 `Content-Length` 一致性 | `rewrite.rs` 单测（唯一改 body 的 API 同时改长度）+ e2e（含"没命中就不动它"的负对照） | ✅ |
+| MITM 数据面（真核 + 真 TLS 终结 + 判定 + 回连） | `mitm_tls_live`：① 拦 204 且源站 0 次 ② 放行经 `mitm-upstream` 回连 ③ 名单外一字不过 | ✅ |
+| TUN 配置形状被真核接受 | `real_core_tun`：纯 TUN / +意图规则 / +MITM 引导，三组合核心自检 `exit 0` | ✅ |
+| UDP 侧拦截 | `real_core_udp` 四组对照（含 `block-silent` 真静默） | ✅ |
+| CA 安装 → **杀掉 helper** → 重启 → 自动回滚 | 快照/回滚单测齐全；**真机那一步还没跑**（要 root），步骤见 §16.3 | ⚠️ 待手动 |
+| 一个**真实站点**开关前后对比（广告请求数下降） | **未做** —— 已有的是"真核 + 真 MITM + 本地源站"的对照，不是公网真实站点 | ❌ 未做 |
+
+**P4 的四条已知限制**（都在各自模块的文档里，不是隐藏行为）：
+
+1. **WebSocket 经 MITM 回 501**（不做双向长期搬运）⇒ opt-in 名单别放这类端点；
+2. **CA 每次启动重新生成**（私钥只在内存）⇒ 每次启动都要重新信任一次根证书；
+3. **"TCP+UDP"混合拦截规则在 UDP 上不静默**（回 403 字节）；UDP-only 规则已静默；
+4. **非 443 的 HTTPS 服务**要调 `ProxyConfig::assumed_port`（`redirect` 丢端口，生产默认 443）。
+
+**所以"P4 完成"的准确说法**：代码与自动化验收全部到位（上表 7 条 ✅），
+剩下两条一条**需要 root 手动跑一遍**（§16.3）、一条是**真实站点对比**（未做，
+它同时也受制于 §16.4 那个结论：免密钥档的模型增量是 0，真实站点上也量不出"广告请求数下降"）。
+
 ### P4 踩过的坑（每一条都有测试钉住）
 
 1. **`accept()` 从非阻塞监听套接字返回的已连接套接字也是非阻塞的。** 于是 TLS 读立刻
