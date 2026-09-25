@@ -513,6 +513,13 @@ def rules_phase2(root: Path, new: str, dmg_b: int, zip_b: int, sha_b: int, date:
     add("site/index.html", "表格 caption",
         r"真实资产（v" + re.escape(new) + r"）：\*\*正在发布\*\*，资产发布后本表填入\*\*真实字节数\*\*",
         f"真实资产（v{new}，{date} 发布）", 1)
+    # 页脚「最后更新」：**phase1 有自己的页脚规则**（提交 1 那天），但真正把它推进到
+    # "已发布"态的是 phase2 —— 于是 phase1 的日期会一直留在页脚上，而 sitemap 的
+    # `<lastmod>`（LAST_PUB）已经变成发布日，站点自己前后矛盾。
+    # v0.8.39 真跑时就是这个形态：页脚 2026-09-23、lastmod/meta 2026-09-25。
+    # 判据与 phase1 同一条（`页面最后更新 \d{4}-\d{2}-\d{2}`），改成 phase2 的 `--date`。
+    add("site/index.html", "页脚更新日期",
+        r"页面最后更新 \d{4}-\d{2}-\d{2}", f"页面最后更新 {date}", 1)
 
     # 英文页
     add("site/en/index.html", "dmg 按钮文案",
@@ -542,6 +549,9 @@ def rules_phase2(root: Path, new: str, dmg_b: int, zip_b: int, sha_b: int, date:
     add("site/en/index.html", "表格 caption",
         r"Release assets \(v" + re.escape(new) + r"\): \*\*publishing\*\*; real byte sizes will be filled in here once published",
         f"Release assets (v{new}, released {date})", 1)
+    # 同中文页：英文页脚也必须在 phase2 跟着发布日走（否则与 `<lastmod>` 矛盾）
+    add("site/en/index.html", "页脚更新日期",
+        r"page last updated \d{4}-\d{2}-\d{2}", f"page last updated {date}", 1)
     return R
 
 
@@ -940,29 +950,35 @@ def cmd_self_test(a) -> int:
 
         # ---- T5 绿：phase2 在同一夹具上把「正在发布」推进到已发布态 ----
         # （phase2 的规则在真实仓库上没机会演练 —— 当前仓库已是已发布态；这里用夹具补上，
-        #   否则那 28 条规则要等到下一次发版才第一次被执行。）
+        #   否则那些规则要等到下一次发版才第一次被执行。）
+        # phase2 用**与 phase1 不同的日期**（2026-09-24 vs 09-23），这样"页脚必须跟着发布日走"
+        # 才是一条真断言 —— 用同一天的话，规则有没有生效看起来一样（v0.8.39 真跑时就漏了页脚：
+        # 页脚停在 phase1 的 09-23，而 lastmod / meta 已是 09-25）。
         print("\n--- T5 绿：phase2（真实字节数 → 已发布态）---")
         rc = _run_tool(Path(__file__).resolve(), "phase2", "--repo", str(fx),
                        "--dmg-bytes", "47431435", "--zip-bytes", "42919784",
-                       "--sha-bytes", "200", "--date", "2026-09-23")
+                       "--sha-bytes", "200", "--date", "2026-09-24")
         if rc != 0:
             fails.append("T5 phase2 应当成功")
         else:
             geo = read(fx / "scripts/gen-site-geo.py")
             zh = read(fx / "site/index.html")
+            en = read(fx / "site/en/index.html")
             checks = [( "PUBLISHED 打开", "PUBLISHED = True" in geo),
                       ("真实 dmg 字节", "47,431,435" in geo),
                       ("MiB 四舍五入为 45.2", "45.2" in geo),
                       ("页面上出现真实字节数", "47,431,435 字节（45.2 MiB）" in zh),
                       ("「正在发布」已消失", "正在发布" not in zh),
-                      ("pinned 直链已出现", f"releases/download/v{new}/" in zh)]
+                      ("pinned 直链已出现", f"releases/download/v{new}/" in zh),
+                      ("中文页脚跟着发布日", "页面最后更新 2026-09-24" in zh),
+                      ("英文页脚跟着发布日", "page last updated 2026-09-24" in en)]
             for label, good in checks:
                 if good:
                     print(f"  ✓ T5 {label}")
                 else:
                     fails.append(f"T5 {label} 不成立")
         _run_tool(Path(__file__).resolve(), "phase2", "--repo", str(fx), "--dmg-bytes", "1",
-                  "--zip-bytes", "1", "--sha-bytes", "1", "--date", "2026-09-23")  # 期望失败（已发布态）
+                  "--zip-bytes", "1", "--sha-bytes", "1", "--date", "2026-09-24")  # 期望失败（已发布态）
         print("  （已发布态上再跑一次 phase2 应当失败 —— 上面那次非 0 就是预期的）")
 
         # ---- T2 红（计数不符）⇒ 非 0 且**零落盘** ----
