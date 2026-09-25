@@ -449,12 +449,14 @@ impl GateFailure {
                      （IP 字面量那条路有响应），是这个域名在**节点侧**没解析出来或连不上\
                      （节点自身 DNS 不可用/被污染，或该域名在节点出口不可达）。\
                      **这不是本机 DNS 的问题**，改本机 DNS 不会有用。\
-                     先试换一个节点；如果整台 Mac 都上不了网，先点「断开」恢复直连。\
+                     先试换一个节点；如果整台 Mac 都上不了网，那是另一回事：\
+                     先确认本机网关通不通（与上面这个域名的解析无关）—— 系统网络此刻还没被接管。\
                      （边界：目标表里只有**一个**域名目标，所以「节点侧解析坏了」与\
                      「只有这一个域名不可达」目前分不开 —— 这是诊断能力的边界，不是结论。）"
                 } else {
                     "可能是这个节点不可用，也可能本机网络本身不通（或被链路干扰）；\
-                     先试换一个节点；如果整台 Mac 都上不了网，先点「断开」恢复直连。"
+                     先试换一个节点；如果整台 Mac 都上不了网，先排查本机网络（网关/DNS）——\
+                     系统网络此刻还没被接管。"
                 };
                 format!(
                     "节点通过了 TCP 检查，但经它发出的真实请求拿不到响应：{list}。\n\
@@ -2467,7 +2469,7 @@ mod tests {
         // 具体的探测证据要保留（哪个目标、拿到什么码）
         assert!(msg.contains("www.baidu.com") && msg.contains("000"), "实际：{msg}");
         // 自救动作必须留着。
-        assert!(msg.contains("断开"), "实际：{msg}");
+        assert!(msg.contains("先试换一个节点"), "自救动作（换节点）必须留着：{msg}");
         // 「不把因果唯一归到一处」这条要求仍在，但**候选原因必须是这条路线上真有的**：
         // 域名由节点解析 ⇒ 列出的是节点侧 DNS 与"该域名在节点出口不可达"两种，
         // 而不是旧文案里那个没参与这条路径的"本机网络/DNS"（2026-09-25 更正）。
@@ -2505,7 +2507,7 @@ mod tests {
             "必须明说本机 DNS 不在这条路径上，否则用户会去修它：{msg}"
         );
         assert!(!msg.contains("本机网络/DNS 被干扰"), "旧文案的错信念不许回来：{msg}");
-        assert!(msg.contains("断开"), "自救动作保留：{msg}");
+        assert!(msg.contains("先试换一个节点"), "自救动作保留：{msg}");
         assert!(
             msg.contains("分不开") || msg.contains("边界"),
             "只有一个域名目标 ⇒ 要写出诊断能力的边界，别把猜测说成结论：{msg}"
@@ -2622,7 +2624,45 @@ mod tests {
         );
         assert!(!msg.contains("解析链路"), "同上：{msg}");
         // 这种情况仍要给原本的多种可能与自救动作
-        assert!(msg.contains("本机网络") && msg.contains("断开"), "实际：{msg}");
+        assert!(msg.contains("本机网络") && msg.contains("先试换一个节点"), "实际：{msg}");
+    }
+
+    /// **task-14（tester 复核）**：门禁失败文案**不许指名一个当下可能不存在的按钮**。
+    ///
+    /// 现场：门禁失败那一刻代理**没在跑**（`running=false`），顶栏按钮写的是「连接」；
+    /// 旧文案却说「先点『断开』恢复直连」—— 用户先读到错话，再读到前端的更正。
+    /// 而且门禁是在接管默认路由**之前**中止的（同一段文案里就写着「系统网络未被改动」），
+    /// 本来就没有东西需要"断开"。
+    ///
+    /// 判别性：把文案改回含「断开」/「连接」⇒ 本测试红。两个分支都要查
+    /// （只有域名失败 = `resolution_only`，以及一般失败）。
+    #[test]
+    fn gate_failure_copy_never_names_a_button_that_may_not_exist() {
+        let resolution_only = GateFailure::Probe {
+            failed: vec![ProbeOutcome {
+                target: xt_core::xray::DEFAULT_PROBE_URL.into(),
+                http_code: "000".into(),
+            }],
+        };
+        let general = GateFailure::Probe {
+            failed: vec![ProbeOutcome {
+                target: "http://1.1.1.1/".into(),
+                http_code: "000".into(),
+            }],
+        };
+        for (branch, failure) in [("resolution_only", resolution_only), ("general", general)] {
+            let msg = failure.describe();
+            for button in ["断开", "连接"] {
+                assert!(
+                    !msg.contains(button),
+                    "{branch} 分支不许指名按钮「{button}」（那一刻它可能不存在）：{msg}"
+                );
+            }
+            assert!(
+                msg.contains("系统网络"),
+                "{branch} 分支必须说清系统网络有没有被动过：{msg}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

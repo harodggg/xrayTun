@@ -287,7 +287,12 @@ pub(crate) async fn start_core(
     // 日志转发任务：核心的 stdout/stderr → 状态环形缓冲 + UI 事件。
     let app_handle = app.clone();
     let forward_pid = runtime.pid;
-    tokio::spawn(async move {
+    // **统一走 `tauri::async_runtime::spawn`，不用裸 `tokio::spawn`。**
+    // 这里在 `async fn` 里，裸 `tokio::spawn` 目前也能跑；但 App 侧一旦有人在
+    // **同步上下文**（Tauri 的 `setup` 回调就是）沿用这个写法，就会 panic
+    // `there is no reactor running…` ⇒ `panic = "abort"` ⇒ 双击即 SIGABRT
+    // （0.8.39 的真实事故）。Tauri 的 runtime 在同步/异步上下文里都能用。
+    tauri::async_runtime::spawn(async move {
         let mut throttle = LogThrottle::default();
         let mut persist_gate = PersistSummaryGate::default();
         // **一秒一次心跳**，但两条通路**分开兑现**（`throttle_tick` 是纯函数，可测）：

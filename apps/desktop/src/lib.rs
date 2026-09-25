@@ -175,7 +175,13 @@ pub fn run() {
                 }
                 // 判定节拍：与看门狗一样 10 秒一跳。没有引擎时它什么都不做。
                 let tick_handle = handle.clone();
-                tokio::spawn(async move {
+                // ⚠️ 必须走 `tauri::async_runtime::spawn`：Tauri 的 `setup` 回调**不在
+                // tokio runtime context 里**，`tokio::spawn` 会直接 panic
+                // （`there is no reactor running, must be called from the context of a
+                // Tokio 1.x runtime`）。release 里 panic=abort ⇒ 整个 App SIGABRT，
+                // 被自动拉起后再次 panic，用户侧表现就是「图标一直在跳、打不开」。
+                // 同文件下方 bootstrap 用的 `tauri::async_runtime::spawn` 才是正确写法。
+                tauri::async_runtime::spawn(async move {
                     let mut ticker = tokio::time::interval(crate::intent::TICK_INTERVAL);
                     // 第一跳立刻发生（interval 的默认行为）—— 跳过它，避免刚启动就白跑一轮。
                     ticker.tick().await;
@@ -825,6 +831,104 @@ mod tests {
         assert_eq!(
             panic_family_call("(Some(_), Some(_)) => unreachable!(\"x\"),"),
             Some("unreachable!")
+        );
+    }
+
+    // ---- task-14：启动路径不许裸 `tokio::spawn`（0.8.39 双击 SIGABRT 的真实根因）----
+
+    /// 扫出生产代码里的裸 `tokio::spawn(` 调用（1-based 行号 + 去注释后的内容）。
+    ///
+    /// 只认 `tokio::spawn(`：`tokio::task::spawn_blocking(` 与 `JoinSet::spawn`
+    /// 是另外的 API，且全部写在 `async fn` 体内（那里 runtime context 一定存在），
+    /// 不在本判据范围 —— 本判据针对的是「同步上下文里裸 spawn」这一类。
+    fn naked_tokio_spawn_sites(src: &str) -> Vec<(usize, String)> {
+        production_lines(src)
+            .into_iter()
+            .filter(|(_, l)| l.contains("tokio::spawn("))
+            .collect()
+    }
+
+    /// **task-14 的机器判据**：生产代码里**一个裸 `tokio::spawn` 都不许有**。
+    ///
+    /// # 为什么原来抓不到（0.8.39 的事故）
+    ///
+    /// Tauri 的 `setup` 回调**不在 tokio runtime context 里**，裸 `tokio::spawn`
+    /// 会 panic：`there is no reactor running, must be called from the context of a
+    /// Tokio 1.x runtime`；release profile 是 `panic = "abort"` ⇒ **双击即 SIGABRT**。
+    /// 而 `scripts/check.sh` 全绿时这个 panic 依然在：clippy / `cargo test --workspace` /
+    /// release 构建**没有任何一步会启动 App** ——「编译得过 + 单测全绿」与
+    /// 「一启动就 abort」可以同时成立（真机 panic.log：`lib.rs:178:17`）。
+    ///
+    /// 这是**运行时语义**错误、不是 panic 家族调用，所以
+    /// `production_source_has_no_panic_family_calls` 抓不到它（`tokio::spawn`
+    /// 文本上没有 panic 特征），必须单独一条。
+    ///
+    /// 判据的形状取「统一走 `tauri::async_runtime::spawn`」：它在同步与异步上下文
+    /// 里都能调，因此规则不依赖调用方是不是 `async`（`traffic::spawn`、
+    /// `commands/globe.rs` 的并发查询、`core.rs` 的日志转发都已统一）。
+    #[test]
+    fn production_never_calls_naked_tokio_spawn() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&root, &mut files);
+        let mut scanned = 0usize;
+        let mut tauri_spawns = 0usize;
+        let mut bad: Vec<String> = Vec::new();
+        for file in &files {
+            let Ok(src) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            let lines = production_lines(&src);
+            scanned += lines.len();
+            tauri_spawns += lines
+                .iter()
+                .filter(|(_, l)| l.contains("tauri::async_runtime::spawn"))
+                .count();
+            for (n, line) in lines {
+                if line.contains("tokio::spawn(") {
+                    bad.push(format!("{}:{n}: {line}", file.display()));
+                }
+            }
+        }
+        assert!(
+            scanned > 5_000,
+            "判据只扫到 {scanned} 行生产代码 —— 可能被 `#[cfg(test)]` 切没了（假绿）"
+        );
+        assert!(
+            tauri_spawns > 0,
+            "一个 `tauri::async_runtime::spawn` 都没看到 —— 夹具锚点失效，判据在空转"
+        );
+        assert!(
+            bad.is_empty(),
+            "生产代码里不许有裸 `tokio::spawn`：同步上下文（Tauri `setup` 回调）会 panic \
+             `there is no reactor running…` ⇒ release 下 SIGABRT ⇒ 双击即崩。\
+             统一改用 `tauri::async_runtime::spawn`：\n{}",
+            bad.join("\n")
+        );
+    }
+
+    /// 负例：把 0.8.38 那行原样放回夹具，判据必须变红。
+    ///
+    /// 判别性：把 setup 里的 `tauri::async_runtime::spawn` 换回 `tokio::spawn`
+    /// （0.8.38 与 task-1 提交 `eef3d10` 里的真实写法）⇒ 命中数 1 ⇒ 这条测试红。
+    #[test]
+    fn naked_tokio_spawn_guard_catches_the_0_8_38_pattern() {
+        let src = include_str!("lib.rs");
+        assert!(
+            naked_tokio_spawn_sites(src).is_empty(),
+            "当前源码不该有裸 `tokio::spawn`"
+        );
+        let mutated = src.replacen(
+            "tauri::async_runtime::spawn(async move {",
+            "tokio::spawn(async move {",
+            1,
+        );
+        assert_ne!(mutated, src, "夹具必须真的改到源码（锚点不见了就是空改）");
+        let hits = naked_tokio_spawn_sites(&mutated);
+        assert_eq!(
+            hits.len(),
+            1,
+            "0.8.38 的裸 `tokio::spawn` 必须被抓到（否则判据是假绿）：{hits:?}"
         );
     }
 }

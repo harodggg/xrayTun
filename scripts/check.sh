@@ -304,6 +304,56 @@ step "发行版 Team ID 注入静态检查（verify-team-id-injection.sh --stati
 ./scripts/verify-team-id-injection.sh --static
 
 
+# ---------------------------------------------------------------- App 启动路径守卫
+
+# 0.8.39 的真实事故：Tauri 的 `setup` 回调**不在 tokio runtime context 里**，
+# 裸 `tokio::spawn` 会 panic（`there is no reactor running, must be called from the
+# context of a Tokio 1.x runtime`），而 release profile 是 `panic = "abort"`
+# ⇒ 双击即 SIGABRT（真机 panic.log：`apps/desktop/src/lib.rs:178:17`）。
+#
+# **为什么原来抓不到**：本脚本原先的每一步（clippy / `cargo test --workspace` /
+# release 构建）都**不会启动 App** ⇒「编译得过 + 单测全绿」与「一启动就 abort」
+# 可以同时成立。这里补上静态判据：生产代码里不许出现裸 `tokio::spawn(`，
+# 统一走 `tauri::async_runtime::spawn`（同步/异步上下文都能用）。
+#
+# 判据是 `apps/desktop/src/lib.rs` 的两条测试：
+#   · production_never_calls_naked_tokio_spawn       —— 正向（扫全部生产代码）
+#   · naked_tokio_spawn_guard_catches_the_0_8_38_pattern —— 负例（放回旧写法必须红）
+#
+# ⚠️ 不能只写 `cargo test … <filter>`：**过滤器匹配 0 条测试时退出码是 0**（假绿，
+# 本仓库在 R4 里记过同类坑）。所以下面同时断言两条测试**各自出现了 ok 行**。
+step "App 启动路径守卫（禁止 setup/回调里裸 tokio::spawn）"
+GUARD_LOG="$(mktemp)"
+if ! cargo test -p xraytun-desktop --lib naked_tokio_spawn >"$GUARD_LOG" 2>&1; then
+  cat "$GUARD_LOG" >&2
+  echo "✗ App 启动路径守卫红了（裸 tokio::spawn 会 panic ⇒ release 下 SIGABRT）" >&2
+  rm -f "$GUARD_LOG"
+  exit 1
+fi
+if ! grep -q 'production_never_calls_naked_tokio_spawn \.\.\. ok' "$GUARD_LOG" \
+   || ! grep -q 'naked_tokio_spawn_guard_catches_the_0_8_38_pattern \.\.\. ok' "$GUARD_LOG"; then
+  cat "$GUARD_LOG"
+  echo "✗ 启动路径守卫的两条测试没有都跑到（过滤器匹配 0 条 = 假绿；测试被改名/删掉了？）" >&2
+  rm -f "$GUARD_LOG"
+  exit 1
+fi
+grep -E 'test result:' "$GUARD_LOG" | tail -1
+rm -f "$GUARD_LOG"
+
+# 真启动烟测：需要真实 .app 产物，默认不跑（设 XRAYTUN_SMOKE_APP=<path> 就跑）。
+# 它用独立数据目录 + mode=direct + was_connected=false，**不动系统网络**；
+# `XRAYTUN_SMOKE_MODE=open` 可切到忠实双击路径——那条会先查真实 settings，
+# 不安全（was_connected=true 且 mode!=direct）就**拒绝运行**（退出码 75）。
+# 判据与退出码见脚本头部。没设变量时**明确打印原因**，不静默跳过。
+if [ -n "${XRAYTUN_SMOKE_APP:-}" ]; then
+  step "App 启动烟测（独立数据目录 / 不动系统网络）"
+  ./scripts/smoke-app-startup.sh --app "$XRAYTUN_SMOKE_APP" --mode "${XRAYTUN_SMOKE_MODE:-direct}"
+else
+  echo "  · 未运行 App 启动烟测：未设 XRAYTUN_SMOKE_APP（静态守卫已覆盖已知形态）。"
+  echo "    要真启动一次：XRAYTUN_SMOKE_APP=<XrayTun.app> ./scripts/check.sh"
+fi
+
+
 # ---------------------------------------------------------------- Rust
 
 step "clippy（warning 视为错误）"

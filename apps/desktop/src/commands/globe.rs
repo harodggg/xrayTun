@@ -207,11 +207,14 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
     // 位置**（实测过：不绑查到香港、绑了查到本机所在的大理）。
     let exit_ip_str = exit_ip.map(|ip| ip.to_string());
 
-    let self_task = tokio::spawn(query_self(iface.clone()));
+    // **统一走 `tauri::async_runtime::spawn`**：与 `tokio::spawn` 同样可 `.await`
+    // （`tauri::async_runtime::JoinHandle` 实现了 `Future`），但同步/异步上下文都能用。
+    // 裸 `tokio::spawn` 在同步上下文（`setup` 回调）会 panic ⇒ release 下 SIGABRT（0.8.39 事故）。
+    let self_task = tauri::async_runtime::spawn(query_self(iface.clone()));
     let exit_task = {
         let ip = exit_ip_str.clone();
         let iface = iface.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             match ip {
                 Some(ip) => query_ip(&ip, iface.as_deref()).await,
                 None => None,

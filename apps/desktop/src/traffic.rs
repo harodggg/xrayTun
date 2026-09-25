@@ -35,7 +35,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 采样任务的把手。停止核心时用它把任务收掉。
 pub struct TrafficMonitor {
-    task: tokio::task::JoinHandle<()>,
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl TrafficMonitor {
@@ -46,11 +46,16 @@ impl TrafficMonitor {
 
 /// 启动采样任务。
 pub fn spawn(app: AppHandle, api_port: u16) -> TrafficMonitor {
-    // 用 tokio::spawn 而不是 tauri::async_runtime::spawn：后者的
-    // JoinHandle 是 Tauri 自己的类型，`abort()` 拿不到。Tauri 的
-    // 异步命令本来就跑在 tokio 上，这里和 start_core 里的日志转发
-    // 任务用的是同一个运行时。
-    let task = tokio::spawn(async move {
+    // **`tauri::async_runtime::spawn`，不用裸 `tokio::spawn`。**
+    //
+    // 旧注释说「Tauri 的 JoinHandle 拿不到 `abort()`」—— 不成立：
+    // `tauri::async_runtime::JoinHandle` **有** `abort()`（`tauri-2.11.5/src/async_runtime.rs`）。
+    // 裸 `tokio::spawn` 要求**当前线程已进入 tokio runtime context**：在
+    // `start_core`（async fn）里能跑，但任何人从同步上下文（Tauri 的 `setup`
+    // 回调就是）调用本函数就会 panic `there is no reactor running…`，
+    // 而 `panic = "abort"` ⇒ 双击即 SIGABRT（0.8.39 的真实事故）。
+    // 统一走 Tauri 的 runtime，同步/异步都能调，且不再依赖"调用方恰好是 async"。
+    let task = tauri::async_runtime::spawn(async move {
         let addr: SocketAddr = ([127, 0, 0, 1], api_port).into();
         let mut previous: Option<(u64, u64)> = None;
 
