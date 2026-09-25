@@ -194,28 +194,28 @@ def classify_line(line: str, version: str) -> str:
     return "prose"
 
 
-def field_leftovers(root: Path, state: dict, version: str, rel_allow=None):
+def field_leftovers(root: Path, state: dict, version: str):
     """→ [(相对路径, 行号, 行内容, 所属包名或 None)]：模拟后的文本里**真版本字段**仍是旧版本。
 
-    `rel_allow` 为 None 表示扫全部被改动过的文件；否则只扫这些相对路径。
     行号是给人指路用的：报错必须能直接跳过去，而不是让人全文搜。
+    包名只在 `Cargo.lock` 上解析（"哪个 crate 漏了"是那次事故的核心问题）；
+    其它文件里的 `name = "…"` 与版本无关，报出来只会误导。
     """
     out = []
-    # 增量解析 Cargo.lock 的包名，好让报错点到 crate（"哪个 crate 漏了"是那次事故的核心问题）
     for f, text in state.items():
         rel = str(f.relative_to(root))
-        if rel_allow is not None and rel not in rel_allow:
-            continue
+        is_lock = rel == "Cargo.lock"
         lines = text.splitlines()
         pkg = None
         for i, line in enumerate(lines, 1):
-            m = re.match(r'^name = "([^"]+)"$', line)
-            if m:
-                pkg = m.group(1)
+            if is_lock:
+                m = re.match(r'^name = "([^"]+)"$', line)
+                if m:
+                    pkg = m.group(1)
             if version not in line:
                 continue
             if classify_line(line, version) == "field":
-                out.append((rel, i, line.strip(), pkg))
+                out.append((rel, i, line.strip(), pkg if is_lock else None))
     return out
 
 
