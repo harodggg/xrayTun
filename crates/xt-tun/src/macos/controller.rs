@@ -34,6 +34,47 @@ pub struct BringUpOutcome {
     pub handed_fd: Option<RawFd>,
 }
 
+/// 建一份新会话快照，并把**上一个会话的信任锚记录带过来**。
+///
+/// # 为什么必须带（P0-2）
+///
+/// `bring_up` 紧接着会 `save()`，那是**整份覆盖**磁盘上的旧快照。旧快照里若记着
+/// 信任锚，而它对应的根证书已经装进 `System.keychain`，记录一丢就再也找不回来：
+/// GUI 只按**本会话** CA 的指纹删，helper 的 `RemoveTrustAnchor` 又要求活跃会话。
+/// 结果是用户**再也删不掉**那张证书。
+///
+/// 带过来之后，这份记录会跟着新会话走：`TunDown`/`rollback`/`force_cleanup`
+/// 都会遍历 `trust_anchors` 并调用 `trust::rollback`（安装前已存在的锚按记录跳过，
+/// 我们装的那些会被删掉），于是旧指纹**始终可被列出、可被删除**。
+///
+/// 抽成独立函数是为了能在**没有 root、没有 utun** 的测试里钉住这条不变量
+/// （`bring_up` 本身要先建 utun，没法在普通用户下跑）。
+fn new_snapshot_adopting_leftover_anchors(
+    session_id: String,
+    interface: String,
+    physical: PhysicalUplink,
+) -> Result<SessionSnapshot> {
+    let mut snap = SessionSnapshot::new(session_id, interface, physical);
+    match SessionSnapshot::load() {
+        Ok(Some(prev)) if prev.has_trust_anchors() => {
+            tracing::warn!(
+                old_session = %prev.session_id,
+                anchors = prev.trust_anchors.len(),
+                "上一个会话留下了信任锚记录；已并入新会话（否则这些证书会永久留在钥匙串里）"
+            );
+            // 顺序刻意不翻转：`rollback` 自己按 `.rev()` 撤销。
+            snap.trust_anchors = prev.trust_anchors;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            // 读不出来不该让建立失败 —— 但必须可见：读不出就带不走记录，
+            // 那正是"证书会永久残留"的入口。
+            tracing::error!(error = %e, "读取旧快照失败，无法把遗留信任锚并入新会话");
+        }
+    }
+    Ok(snap)
+}
+
 /// 建立 TUN 会话。
 pub fn bring_up(req: &TunUpRequest) -> Result<BringUpOutcome> {
     // ---- 0) 前置校验：把非法输入挡在动系统之前 ----
@@ -67,7 +108,13 @@ pub fn bring_up(req: &TunUpRequest) -> Result<BringUpOutcome> {
     tracing::info!(interface = %ifname, "utun 已创建");
 
     // 立刻落一笔「我开始动手了」，这是崩溃可恢复的关键。
-    let mut snap = SessionSnapshot::new(req.session_id.clone(), ifname.clone(), physical);
+    //
+    // ⚠️ **不能直接 `SessionSnapshot::new`**：这一步的 `save()` 会整份覆盖磁盘上的
+    // 旧快照。旧快照里若记着信任锚（本地根证书已经装进 `System.keychain`），
+    // 记录一丢，那张证书就再也没有任何路径能删掉（见 P0-2 与
+    // `new_snapshot_adopting_leftover_anchors`）。
+    let mut snap =
+        new_snapshot_adopting_leftover_anchors(req.session_id.clone(), ifname.clone(), physical)?;
     snap.save()?;
 
     // ---- 3) 逐步施加，任何一步失败都整体回滚 ----
@@ -339,14 +386,78 @@ pub fn tear_down(session_id: &str) -> Result<SessionSnapshot> {
     Ok(snap)
 }
 
+/// 只撤信任锚，不碰路由 / DNS。
+///
+/// 供 [`restore_stale`] 在"快照是 `Up`、但记录里还有信任锚"时使用：那种情况下
+/// 路由/DNS 可能仍在生效（不该在启动时擅自拆一条活隧道），但那些根证书是上一个
+/// 进程装的，必须收回来。
+///
+/// **尽力而为 + 失败保留记录**：撤成功的从记录里拿掉；撤失败的留在
+/// `snap.trust_anchors` 里，下次启动（或本次会话的 `rollback`/`force_cleanup`）
+/// 会重试 —— 不允许把失败悄悄吞掉（那正是"永久残留"的另一半原因）。
+fn rollback_trust_anchors(snap: &mut SessionSnapshot) -> Result<()> {
+    let mut failures: Vec<String> = Vec::new();
+    let anchors = std::mem::take(&mut snap.trust_anchors);
+    let mut kept: Vec<_> = Vec::new();
+    for backup in anchors.into_iter().rev() {
+        match crate::macos::trust::rollback(&backup) {
+            Ok(()) => {}
+            Err(e) => {
+                failures.push(format!("移除信任锚 {} 失败: {e}", backup.fingerprint));
+                kept.push(backup);
+            }
+        }
+    }
+    // `kept` 是倒序收的，翻回来仍保持"安装顺序"的语义。
+    kept.reverse();
+    snap.trust_anchors = kept;
+    // 记录必须立刻落盘：删成功的不能复活，删失败的不能在覆盖中丢失。
+    snap.save()?;
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Invalid(failures.join("; ")))
+    }
+}
+
 /// 回滚上次遗留的会话（GUI 崩溃 / helper 被杀之后调用）。
 pub fn restore_stale() -> Result<Option<SessionSnapshot>> {
-    let Some(snap) = SessionSnapshot::load()? else {
+    let Some(mut snap) = SessionSnapshot::load()? else {
         return Ok(None);
     };
+
+    // ---- 信任锚：与会话状态**解耦**（P0-2）----
+    //
+    // helper 被 `kill -9` / 机器重启后，磁盘上的快照可能仍是 `Up`：上个进程已经
+    // 不在了，但它装进钥匙串的根证书还在。旧实现只看 `is_stale()`，于是这条记录
+    // 被跳过；下一次 `TunUp` 又整份覆盖快照 ⇒ 证书永久残留、界面再也删不掉。
+    //
+    // 能走到这里的只有**启动路径**（`recover_from_crash`）—— 也就是说这份快照
+    // 一定来自上一个进程。所以只要记着信任锚就无条件撤掉，与 is_stale 无关。
+    let mut anchor_failure: Option<Error> = None;
+    if snap.has_trust_anchors() {
+        tracing::warn!(
+            session = %snap.session_id,
+            state = ?snap.state,
+            anchors = snap.trust_anchors.len(),
+            "发现上个进程遗留的信任锚记录：无条件撤销（与 is_stale 无关）"
+        );
+        if let Err(e) = rollback_trust_anchors(&mut snap) {
+            anchor_failure = Some(e);
+        }
+    }
+
     if !snap.is_stale() {
+        // 会话本身没崩在半路 ⇒ 路由/DNS 可能仍在生效，交给 `force_cleanup`
+        // （GUI 的「修复网络」/「退出」）判断，不在启动时擅自拆一条活隧道。
+        //
+        // 但信任锚的失败必须让调用方看见：否则又是一次静默残留。
+        if let Some(e) = anchor_failure {
+            return Err(e);
+        }
         return Ok(None);
     }
+
     tracing::warn!(
         session = %snap.session_id,
         interface = %snap.interface,
@@ -613,5 +724,218 @@ mod tests {
         );
         assert!(gone, "只有全部成功才允许删快照");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // P0-2：孤儿信任锚不许被会话覆盖吞掉
+    //
+    // 场景：helper 在会话 `Up` 时被 kill -9 / 机器重启。磁盘快照仍是 `Up`
+    // （`is_stale()` == false），而根证书已经在 System.keychain 里。
+    // 修前：`restore_stale()` 直接跳过；下一次 `TunUp` 又用
+    // `SessionSnapshot::new(...).save()` 整份覆盖快照 ⇒ 指纹记录消失、
+    // 界面再也删不掉那张证书。
+    // -----------------------------------------------------------------------
+
+    const ORPHAN_FP: &str = "AB:CD:EF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00";
+
+    fn orphan_backup() -> crate::macos::trust::TrustAnchorBackup {
+        crate::macos::trust::TrustAnchorBackup {
+            fingerprint: ORPHAN_FP.into(),
+            cert_path: "/nonexistent/orphan-ca.pem".into(),
+            existed_before: false,
+        }
+    }
+
+    /// 旧会话：`Up`（`is_stale()` == false）+ 一条信任锚记录。
+    fn save_orphaned_up_session(root: &std::path::Path) {
+        use crate::macos::snapshot::with_test_root;
+        let mut old = SessionSnapshot::new("old-session".into(), "utun3".into(), fixture_uplink());
+        old.state = SessionState::Up;
+        old.trust_anchors.push(orphan_backup());
+        assert!(!old.is_stale(), "前提：旧会话自认 Up、不算崩在半路");
+        with_test_root(root, || old.save()).expect("写旧快照");
+    }
+
+    /// 记录 `security(1)` 收到的每一条命令；不碰真钥匙串。
+    fn recording_stub(
+        ok: bool,
+        stderr: &'static str,
+    ) -> (
+        crate::macos::trust::SecurityStub,
+        std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&seen);
+        let stub: crate::macos::trust::SecurityStub =
+            Rc::new(move |args: &[String]| {
+                sink.borrow_mut().push(args.to_vec());
+                (ok, Vec::new(), stderr.as_bytes().to_vec())
+            });
+        (stub, seen)
+    }
+
+    fn saw_delete_of(seen: &[Vec<String>], fingerprint: &str) -> bool {
+        seen.iter().any(|args| {
+            args.first().map(String::as_str) == Some("delete-certificate")
+                && args.iter().any(|a| a == fingerprint)
+        })
+    }
+
+    /// **核心判别测试**：旧会话是 `Up`，helper 重启后 `restore_stale()` 也必须
+    /// 把它的信任锚撤掉。
+    ///
+    /// 修前：`!is_stale()` ⇒ 直接 `Ok(None)`，一条 `security delete-certificate`
+    /// 都不会发出 ⇒ 证书永久留在钥匙串。（这条测试在旧代码上 `seen` 为空。）
+    #[test]
+    fn restore_stale_revokes_an_up_sessions_orphaned_trust_anchor() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::trust::with_security_stub;
+
+        let root = tmp_snapshot_root("p02-restore-up");
+        save_orphaned_up_session(&root);
+
+        let (stub, seen) = recording_stub(true, "");
+        let (result, left, cmds) = with_test_root(&root, || {
+            let r = with_security_stub(stub, restore_stale);
+            let left = SessionSnapshot::load().ok().flatten();
+            (r.map(|o| o.is_some()), left, seen.borrow().clone())
+        });
+
+        assert!(
+            !result.expect("撤销孤儿锚不该失败"),
+            "Up 会话不在启动时整体拆掉（路由/DNS 可能仍在生效）"
+        );
+        assert!(
+            saw_delete_of(&cmds, ORPHAN_FP),
+            "旧指纹必须真的被交给 `security delete-certificate`：{cmds:?}"
+        );
+        let left = left.expect("快照文件本身仍在（会话记录没被清）");
+        assert!(left.trust_anchors.is_empty(), "撤成功的锚不许留在记录里");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 判别测试：模拟「旧会话 `Up` + 新会话建立」之后，旧指纹仍然
+    /// **可被列出**（快照里还在）且**可被删除**（回滚新会话时真的下发 delete）。
+    #[test]
+    fn a_new_session_adopts_the_previous_trust_anchor_so_it_stays_revocable() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::trust::with_security_stub;
+
+        let root = tmp_snapshot_root("p02-adopt");
+        save_orphaned_up_session(&root);
+
+        // 先跑一遍**旧行为**（裸 `SessionSnapshot::new` + `save`）作为对照：
+        // 它确实会当场把记录覆盖掉 —— 这正是要修的病。
+        {
+            let mut overwritten =
+                SessionSnapshot::new("new-session".into(), "utun4".into(), fixture_uplink());
+            with_test_root(&root, || overwritten.save()).expect("旧行为写快照");
+            let after = with_test_root(&root, SessionSnapshot::load)
+                .expect("读快照")
+                .expect("快照仍在");
+            assert!(
+                after.trust_anchors.is_empty(),
+                "对照：旧写法确实丢记录（不是理论，是这一步真的发生了）"
+            );
+        }
+        // 恢复现场，再走新路径。
+        save_orphaned_up_session(&root);
+
+        // 新会话建立（`bring_up` 里的那一步）。
+        let mut fresh = with_test_root(&root, || {
+            new_snapshot_adopting_leftover_anchors(
+                "new-session".into(),
+                "utun4".into(),
+                fixture_uplink(),
+            )
+        })
+        .expect("建新快照");
+        assert_eq!(fresh.session_id, "new-session");
+        assert!(
+            fresh.trust_anchors.iter().any(|b| b.fingerprint == ORPHAN_FP),
+            "旧指纹必须被带进新会话；否则那张根证书再也删不掉"
+        );
+        with_test_root(&root, || fresh.save()).expect("写新快照");
+
+        // 「可被列出」：读快照就能看到旧指纹。
+        let listed = with_test_root(&root, SessionSnapshot::load)
+            .expect("读快照")
+            .expect("快照应当存在");
+        assert!(
+            listed.trust_anchors.iter().any(|b| b.fingerprint == ORPHAN_FP),
+            "旧指纹必须可被列出"
+        );
+
+        // 「可被删除」：对新会话走 force_cleanup（GUI「修复网络」/「退出」那条路），
+        // 用替身捕获命令行 —— 必须看到 `delete-certificate -Z <旧指纹>`。
+        let (stub, seen) = recording_stub(true, "");
+        let rolled = with_test_root(&root, || with_security_stub(stub, force_cleanup));
+        assert!(rolled.is_ok(), "回滚新会话应当成功: {rolled:?}");
+        assert!(
+            saw_delete_of(&seen.borrow(), ORPHAN_FP),
+            "旧指纹必须被真的交给 `security delete-certificate`：{:?}",
+            seen.borrow()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 撤销失败时：**记录留在快照里**（下次还能重试），并且错误必须往上传
+    /// （`recover_from_crash` 会记 error）—— 不许静默、不许吞。
+    #[test]
+    fn restore_stale_keeps_the_anchor_record_when_revocation_fails() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::trust::with_security_stub;
+
+        let root = tmp_snapshot_root("p02-retry");
+        save_orphaned_up_session(&root);
+
+        let (stub, _seen) = recording_stub(false, "SecKeychain: permission denied");
+        let (result, left) = with_test_root(&root, || {
+            let r = with_security_stub(stub, restore_stale);
+            (r, SessionSnapshot::load().ok().flatten())
+        });
+
+        let err = result.expect_err("撤销失败必须往上抛，不许静默");
+        assert!(err.to_string().contains(ORPHAN_FP), "错误要点出指纹：{err}");
+        let left = left.expect("快照仍在");
+        assert!(
+            left.trust_anchors.iter().any(|b| b.fingerprint == ORPHAN_FP),
+            "失败的锚必须留在记录里以便重试"
+        );
+        assert!(!left.is_stale(), "这条会话本身不算崩在半路");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 文本守卫：`bring_up` 不许再裸用 `SessionSnapshot::new`。
+    ///
+    /// 裸用 = 新会话建立时整份覆盖旧快照 = 旧信任锚记录当场丢失（P0-2）。
+    #[test]
+    fn bring_up_never_overwrites_a_snapshot_without_adopting_anchors() {
+        let prod = include_str!("controller.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("");
+        // 先去掉行注释：本文件的解释性注释里引用了裸写法。
+        let code = prod
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = code
+            .split("pub fn bring_up")
+            .nth(1)
+            .and_then(|r| r.split("\nfn ").next())
+            .unwrap_or("");
+        assert!(!body.is_empty(), "没找到 bring_up 的函数体（锚点变了？）");
+        assert!(
+            body.contains("new_snapshot_adopting_leftover_anchors"),
+            "bring_up 必须通过 adopting 构造函数建快照"
+        );
+        assert!(
+            !body.contains("SessionSnapshot::new"),
+            "bring_up 不许裸建快照 —— 那会整份覆盖旧快照、丢掉旧信任锚记录"
+        );
     }
 }

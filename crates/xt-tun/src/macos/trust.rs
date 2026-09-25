@@ -132,6 +132,66 @@ pub fn validate_fingerprint(fingerprint: &str) -> Result<()> {
     Ok(())
 }
 
+/// 跑一次 `security(1)`，拿回原始输出。
+///
+/// 抽出来**只为可测**：回滚路径要执行 `security delete-certificate`，而
+/// 「旧指纹到底有没有被交给 `security`」必须有断言（P0：孤儿信任锚删不掉）。
+/// 生产构建里没有任何注入点，就是 [`std::process::Command`]，行为与以前逐字一致。
+fn security_output(args: &[String]) -> std::io::Result<std::process::Output> {
+    #[cfg(test)]
+    {
+        if let Some(stub) = current_security_stub() {
+            let (ok, stdout, stderr) = stub(args);
+            return Ok(stub_output(ok, stdout, stderr));
+        }
+    }
+    Command::new(SECURITY).args(args).output()
+}
+
+/// 测试替身：收到参数，回 `(是否成功, stdout, stderr)`。
+///
+/// 单独起别名有两个理由：让接缝形状可读；避免 `clippy::type_complexity`
+/// （本仓 `-D warnings`）。
+#[cfg(test)]
+pub(crate) type SecurityStub = std::rc::Rc<dyn Fn(&[String]) -> (bool, Vec<u8>, Vec<u8>)>;
+
+#[cfg(test)]
+thread_local! {
+    /// 测试注入的 `security(1)` 替身（**只在测试构建里存在**）。
+    static SECURITY_STUB: std::cell::RefCell<Option<SecurityStub>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn current_security_stub() -> Option<SecurityStub> {
+    SECURITY_STUB.with(|c| c.borrow().clone())
+}
+
+/// 在 `f()` 期间把 `security(1)` 换成 `stub`；退出（含 panic）自动还原。
+#[cfg(test)]
+pub(crate) fn with_security_stub<R>(stub: SecurityStub, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<SecurityStub>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SECURITY_STUB.with(|c| *c.borrow_mut() = self.0.take());
+        }
+    }
+    let prev = SECURITY_STUB.with(|c| c.borrow_mut().replace(stub));
+    let _guard = Restore(prev);
+    f()
+}
+
+#[cfg(test)]
+fn stub_output(ok: bool, stdout: Vec<u8>, stderr: Vec<u8>) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::Output {
+        // `from_raw(0)` = 正常退出；`from_raw(1 << 8)` = 退出码 1。
+        status: std::process::ExitStatus::from_raw(if ok { 0 } else { 1 << 8 }),
+        stdout,
+        stderr,
+    }
+}
+
 /// 是否已经信任了这个指纹。
 ///
 /// 用 `security find-certificate -Z` 列出**全部**证书的 SHA-1 再比对：
@@ -139,10 +199,13 @@ pub fn validate_fingerprint(fingerprint: &str) -> Result<()> {
 pub fn is_trusted(fingerprint: &str) -> Result<bool> {
     validate_fingerprint(fingerprint)?;
     let want = normalize_fingerprint(fingerprint);
-    let out = Command::new(SECURITY)
-        .args(["find-certificate", "-a", "-Z", SYSTEM_KEYCHAIN])
-        .output()
-        .map_err(|e| Error::Invalid(format!("跑 {SECURITY} 失败: {e}")))?;
+    let out = security_output(&crate::macos::args(&[
+        "find-certificate",
+        "-a",
+        "-Z",
+        SYSTEM_KEYCHAIN,
+    ]))
+    .map_err(|e| Error::Invalid(format!("跑 {SECURITY} 失败: {e}")))?;
     if !out.status.success() {
         // 读不出来 ⇒ **不许猜成 false**（那会让回滚去删一个本来不该删的东西的邻域）。
         return Err(Error::Invalid(format!(
@@ -204,9 +267,7 @@ pub fn install(pem: &str, fingerprint: &str) -> Result<TrustAnchorBackup> {
     write_owner_only(&cert_path, pem.as_bytes())?;
 
     let args = add_args(&cert_path.to_string_lossy());
-    let out = Command::new(SECURITY)
-        .args(&args)
-        .output()
+    let out = security_output(&args)
         .map_err(|e| Error::Invalid(format!("跑 {SECURITY} 失败: {e}")))?;
     if !out.status.success() {
         return Err(Error::Invalid(format!(
@@ -225,9 +286,7 @@ pub fn install(pem: &str, fingerprint: &str) -> Result<TrustAnchorBackup> {
 /// 移除信任锚。**幂等**：本来就不在 ⇒ `Ok`（回滚最怕"删不到就卡住"）。
 pub fn remove(fingerprint: &str) -> Result<()> {
     validate_fingerprint(fingerprint)?;
-    let out = Command::new(SECURITY)
-        .args(delete_args(fingerprint))
-        .output()
+    let out = security_output(&delete_args(fingerprint))
         .map_err(|e| Error::Invalid(format!("跑 {SECURITY} 失败: {e}")))?;
     if out.status.success() {
         return Ok(());

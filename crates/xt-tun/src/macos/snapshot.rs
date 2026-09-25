@@ -163,6 +163,15 @@ impl SessionSnapshot {
             // 「已 Up 但还有未提交路由」也算未完成：说明两阶段启动中途崩了。
             || !self.pending_routes.is_empty()
     }
+
+    /// 快照里是否记着**我们装进系统钥匙串的信任锚**。
+    ///
+    /// 这与「会话是不是崩在半路」（[`is_stale`]）是**两件事**：一条 `Up` 的会话
+    /// 同样可能记着信任锚；而 helper 一旦重启，那个进程已经不在了，锚就是孤儿。
+    /// 孤儿锚必须被撤销，判据只能是这个，不能是 `is_stale()`。
+    pub fn has_trust_anchors(&self) -> bool {
+        !self.trust_anchors.is_empty()
+    }
 }
 
 fn set_owner_only(path: &std::path::Path) {
@@ -245,6 +254,27 @@ mod tests {
         assert!(snap.is_stale());
         snap.state = SessionState::Up;
         assert!(!snap.is_stale());
+    }
+
+    /// 判别性（P0-2）：**一条正常 `Up` 的会话同样可能是孤儿锚的持有者**。
+    ///
+    /// `is_stale()` 特意只表示"崩在半路"（见下一条测试）。信任锚的清理必须另立
+    /// 判据，否则 helper 重启后这条记录会被跳过，证书永久留在钥匙串里。
+    #[test]
+    fn a_committed_session_can_still_hold_orphaned_trust_anchors() {
+        let physical = PhysicalUplink { interface: "en0".into(), gateway: None, service: None };
+        let mut snap = SessionSnapshot::new("s".into(), "utun4".into(), physical);
+        snap.state = SessionState::Up;
+        assert!(!snap.is_stale(), "正常连接的会话不算崩在半路");
+        assert!(!snap.has_trust_anchors());
+
+        snap.trust_anchors.push(crate::macos::trust::TrustAnchorBackup {
+            fingerprint: "AB:CD".into(),
+            cert_path: "/tmp/x.pem".into(),
+            existed_before: false,
+        });
+        assert!(!snap.is_stale(), "加了锚也不改变 is_stale 的语义");
+        assert!(snap.has_trust_anchors(), "但锚必须被看见 —— 这是清理的判据");
     }
 
     #[test]

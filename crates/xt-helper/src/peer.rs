@@ -22,9 +22,15 @@
 //! ## 关于可验证性
 //!
 //! 下面的 `Security.framework` / `CoreFoundation` FFI 只保证**类型层面**正确；
-//! 函数语义与常量名必须在**真实签名的构建**上通过集成测试验证
+//! 函数语义与常量名必须在运行时验证。这里不再只靠注释：
+//!
+//! * audit token 的选项号由真实 `getsockopt` 钉住 —— `0x006` 回 32 字节，
+//!   `0x005`（`LOCAL_PEEREUUID`）只回 16 字节，长度不对必须拒绝；
+//! * 签名校验分支由 `SecCodeCopySelf()` + 生产形状要求串钉住：
+//!   一个不受信任的二进制必须被拒（`the_signature_check_rejects_...`）。
+//!
+//! 仍未在 CI 覆盖的是"真签名的 App 能通过"这条正路径 —— 那需要发行构建
 //! （见 `docs/06-helper-protocol.md` 的「必须补的测试」一节）。
-//! 类型检查通过 ≠ 运行时正确，这里不能自欺欺人。
 
 use std::ffi::c_void;
 use std::os::unix::io::RawFd;
@@ -87,16 +93,29 @@ extern "C" {
         flags: SecCSFlags,
         code: *mut SecCodeRef,
     ) -> OSStatus;
+    /// 取**本进程**的 `SecCode`。生产路径不用它；测试用它来钉住
+    /// "要求串真的会拒绝一个不受信任的二进制"（见 `the_signature_check_...`）。
+    /// 只编进测试构建，生产二进制里连符号都不需要。
+    #[cfg(test)]
+    fn SecCodeCopySelf(flags: SecCSFlags, code: *mut SecCodeRef) -> OSStatus;
     fn SecCodeCheckValidity(code: SecCodeRef, flags: SecCSFlags, requirement: SecRequirementRef) -> OSStatus;
 }
 
-/// `SOL_LOCAL` / `LOCAL_PEERTOKEN`（Darwin）。
+/// `SOL_LOCAL`（Darwin）。**audit token 的选项号不手写**：见 [`LOCAL_PEERTOKEN`]。
 const SOL_LOCAL: libc::c_int = 0;
-const LOCAL_PEERTOKEN: libc::c_int = 0x005;
+
+/// audit token 的 socket 选项号。
+///
+/// **绝不要把它写成字面量**：这里曾经手工写着 `0x005`，而 `0x005` 是
+/// `LOCAL_PEEREUUID`（只回 16 字节）；真正的 `LOCAL_PEERTOKEN` 是 `0x006`（32 字节）。
+/// 后果不是"少一点信息"，而是签名校验拿一个形状不对的 token 去问
+/// Security.framework ⇒ **合法 App 也会被一律拒掉**、这道门在生产上等于不存在。
+/// `libc` 里两个常量都有定义，直接用它的值，语义由测试用真实 `getsockopt` 钉住。
+const LOCAL_PEERTOKEN: libc::c_int = libc::LOCAL_PEERTOKEN;
 
 /// `audit_token_t` 是 8 个 `u32`。
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct AuditToken {
     val: [u32; 8],
 }
@@ -144,25 +163,66 @@ pub fn identify(fd: RawFd) -> Result<PeerIdentity> {
     Ok(PeerIdentity { uid, gid, pid })
 }
 
-fn audit_token(fd: RawFd) -> Result<AuditToken> {
-    let mut token = AuditToken { val: [0; 8] };
-    let mut len = std::mem::size_of::<AuditToken>() as libc::socklen_t;
-    // SAFETY: 读 LOCAL_PEERTOKEN 到 32 字节的 audit token 缓冲区。
+/// 从 socket 上读一个 `SOL_LOCAL` 选项的原始字节，返回内核写入的字节数。
+///
+/// 抽出来是为了让测试能用**真的** `getsockopt` 对比 `LOCAL_PEERTOKEN`（0x006，
+/// 32 字节）与 `LOCAL_PEEREUUID`（0x005，16 字节）的返回长度，
+/// 而不是把"常量是对的"只写在注释里。
+fn read_local_option(fd: RawFd, option: libc::c_int, buf: &mut [u8]) -> Result<usize> {
+    let mut len = buf.len() as libc::socklen_t;
+    // SAFETY: `buf` 是调用方提供的有效可写切片，初始长度就是 `len`；
+    // getsockopt 只会写入不超过 `len` 字节，并在 `len` 里回写实际长度。
     let rc = unsafe {
         libc::getsockopt(
             fd,
             SOL_LOCAL,
-            LOCAL_PEERTOKEN,
-            &mut token as *mut AuditToken as *mut c_void,
+            option,
+            buf.as_mut_ptr() as *mut c_void,
             &mut len,
         )
     };
     if rc != 0 {
         return Err(HelperError::new(
             crate::error::ErrorCode::Unauthorized,
-            format!("无法取得对端 audit token: {}", std::io::Error::last_os_error()),
+            format!(
+                "getsockopt(SOL_LOCAL, {option:#06x}) 失败: {}",
+                std::io::Error::last_os_error()
+            ),
         ));
     }
+    Ok(len as usize)
+}
+
+/// audit token 必须是完整的 32 字节。
+///
+/// 长度不对就**拒绝**：半截 token 交给 `SecCodeCopyGuestWithAttributes`
+/// 只会得到"不是合法 audit token"，既看不出根因，也谈不上安全。
+fn check_token_len(got: usize) -> Result<()> {
+    let want = std::mem::size_of::<AuditToken>();
+    if got != want {
+        return Err(HelperError::new(
+            crate::error::ErrorCode::Unauthorized,
+            format!(
+                "对端 audit token 只有 {got} 字节（应为 {want}）—— \
+                 取错了 socket 选项或对端不支持 LOCAL_PEERTOKEN；拒绝授权"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn audit_token(fd: RawFd) -> Result<AuditToken> {
+    let mut token = AuditToken { val: [0; 8] };
+    // SAFETY: `AuditToken` 是 `#[repr(C)]` 的 8×u32、无填充；
+    // 按字节视图写满 `size_of::<AuditToken>()` 字节是有效的。
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            token.val.as_mut_ptr() as *mut u8,
+            std::mem::size_of::<AuditToken>(),
+        )
+    };
+    let got = read_local_option(fd, LOCAL_PEERTOKEN, bytes)?;
+    check_token_len(got)?;
     Ok(token)
 }
 
@@ -298,10 +358,30 @@ fn verify_signature(fd: RawFd, requirement: &str) -> Result<()> {
             ));
         }
 
-        // 4) 要求串 -> SecRequirement
+        // 4) + 5) 要求串 -> SecRequirement -> 校验。
+        //
+        // 抽成 [`sec_code_satisfies`] 是为了能在测试里拿 `SecCodeCopySelf()` 的结果
+        // 走**同一段**校验代码：一个不受信任的二进制必须在这里被拒。
+        let verdict = sec_code_satisfies(guest, requirement);
+        CFRelease(guest);
+        verdict?;
+    }
+    Ok(())
+}
+
+/// 一个已取得的 `SecCode` 是否满足要求串。失败返回**可读**原因。
+fn sec_code_satisfies(code: SecCodeRef, requirement: &str) -> Result<()> {
+    if code.is_null() {
+        return Err(HelperError::new(
+            crate::error::ErrorCode::Internal,
+            "SecCode 为空（内核没有给出对端代码对象）",
+        ));
+    }
+    // SAFETY: 标准 CoreFoundation / Security 对象生命周期；创建出来的
+    // CFString / SecRequirement 都在本函数作用域内 Release。
+    unsafe {
         let cf_req = cfstring(requirement);
         if cf_req.is_null() {
-            CFRelease(guest);
             return Err(HelperError::new(
                 crate::error::ErrorCode::Internal,
                 "构造 CFString 失败",
@@ -311,17 +391,14 @@ fn verify_signature(fd: RawFd, requirement: &str) -> Result<()> {
         let status = SecRequirementCreateWithString(cf_req, K_SEC_CS_DEFAULT_FLAGS, &mut req);
         CFRelease(cf_req);
         if status != 0 || req.is_null() {
-            CFRelease(guest);
             return Err(HelperError::new(
                 crate::error::ErrorCode::Unauthorized,
                 format!("代码签名要求串本身非法（OSStatus {status}）: {requirement}"),
             ));
         }
 
-        // 5) 校验
-        let status = SecCodeCheckValidity(guest, K_SEC_CS_DEFAULT_FLAGS, req);
+        let status = SecCodeCheckValidity(code, K_SEC_CS_DEFAULT_FLAGS, req);
         CFRelease(req);
-        CFRelease(guest);
         if status != 0 {
             return Err(HelperError::new(
                 crate::error::ErrorCode::Unauthorized,
@@ -407,5 +484,139 @@ mod tests {
         assert_eq!(identity.gid, unsafe { libc::getegid() });
         // socketpair 上没有真正的「对端进程」，pid 取不到是正常的 —— 只要求不 panic。
         let _ = identity.pid;
+    }
+
+    // -----------------------------------------------------------------------
+    // P0-1：audit token 的选项号必须是 0x006
+    //
+    // 这些测试用**真的** `getsockopt` 跑，而不是断言注释。修前常量是 0x005
+    // （LOCAL_PEEREUUID）：内核只回 16 字节，而代码按 32 字节的 AuditToken
+    // 交给 Security.framework ⇒ 合法 App 也会被一律拒掉。
+    // -----------------------------------------------------------------------
+
+    fn socket_pair() -> (std::os::unix::net::UnixStream, std::os::unix::net::UnixStream) {
+        std::os::unix::net::UnixStream::pair().expect("socketpair 应可用")
+    }
+
+    /// 判别性：`0x006` 才是 audit token（32 字节）；`0x005` 是 16 字节的 UUID。
+    /// 谁把常量改回 0x005，这条测试就会红。
+    #[test]
+    fn the_peer_token_option_is_the_32_byte_audit_token_not_the_euuid_one() {
+        use std::os::unix::io::AsRawFd;
+        assert_eq!(LOCAL_PEERTOKEN, 0x006, "LOCAL_PEEREUUID(0x005) 不是 audit token");
+        assert_eq!(libc::LOCAL_PEEREUUID, 0x005, "libc 的定义也要对上（我们按它对照）");
+
+        let (a, _b) = socket_pair();
+        let fd = a.as_raw_fd();
+
+        let mut uuid = [0u8; 32];
+        let uuid_len = read_local_option(fd, libc::LOCAL_PEEREUUID, &mut uuid)
+            .expect("LOCAL_PEEREUUID 应当可读");
+        let mut token = [0u8; 32];
+        let token_len =
+            read_local_option(fd, LOCAL_PEERTOKEN, &mut token).expect("LOCAL_PEERTOKEN 应当可读");
+
+        // **实测**：0x005 回 16 字节，0x006 回 32 字节（本机复算见提交说明）。
+        assert_eq!(uuid_len, 16, "0x005 = LOCAL_PEEREUUID，只回 16 字节");
+        assert_eq!(token_len, 32, "0x006 = LOCAL_PEERTOKEN，回满 32 字节 audit token");
+        // 判别性：半截 token 必须被 `check_token_len` 拒掉，而 32 字节通过。
+        assert!(check_token_len(uuid_len).is_err(), "16 字节必须被拒");
+        assert!(check_token_len(token_len).is_ok(), "32 字节必须通过");
+    }
+
+    /// 正路径：真的 socketpair 上能取到完整 32 字节 token。
+    #[test]
+    fn audit_token_accepts_a_real_socket_pair_peer() {
+        use std::os::unix::io::AsRawFd;
+        let (a, _b) = socket_pair();
+        let token = audit_token(a.as_raw_fd()).expect("32 字节 token 应当被接受");
+        assert_eq!(token.val.len(), 8, "audit_token_t = 8×u32");
+    }
+
+    /// 判别性：长度不对时**拒绝**，且原因可读（指得出 socket 选项）。
+    #[test]
+    fn a_short_token_is_refused_with_a_readable_reason() {
+        let err = check_token_len(16).expect_err("16 字节必须被拒");
+        assert_eq!(err.code, crate::error::ErrorCode::Unauthorized);
+        let msg = err.to_string();
+        assert!(msg.contains("16") && msg.contains("32"), "要说清 16 vs 32：{msg}");
+        assert!(msg.contains("LOCAL_PEERTOKEN"), "要指得出错的 socket 选项：{msg}");
+        assert!(check_token_len(32).is_ok());
+    }
+
+    /// 判别性：拿不到 token 时返回 `Unauthorized`，**不许 fail-open**（不 panic）。
+    #[test]
+    fn a_bad_fd_is_refused_with_a_readable_reason() {
+        let err = audit_token(-1).expect_err("坏 fd 必须被拒");
+        assert_eq!(err.code, crate::error::ErrorCode::Unauthorized);
+        assert!(err.to_string().contains("getsockopt"), "{err}");
+    }
+
+    /// 生产形状的要求串（用 `from_build_env` 的同一模板 + 一个不可能是本进程的 Team ID）。
+    fn production_shaped_requirement(team: &str) -> String {
+        format!(
+            "anchor apple generic and identifier \"com.xraytun.desktop\" \
+             and certificate leaf[subject.OU] = \"{team}\""
+        )
+    }
+
+    /// 判别性：拿**本测试二进制**的 SecCode 去跑生产形状的要求串，必须被拒。
+    ///
+    /// 这条钉住签名分支不是"永远 Ok"：它走的是 `verify_signature` 里同一段
+    /// `SecRequirementCreateWithString` + `SecCodeCheckValidity`，只是把
+    /// "对端" 换成了"自己"。测试二进制没有 `com.xraytun.desktop` 这个标识符，
+    /// 所以任何签名状态都必须失败。
+    #[test]
+    fn the_signature_check_rejects_an_untrusted_binary() {
+        let mut code: SecCodeRef = std::ptr::null();
+        // SAFETY: SecCodeCopySelf 写一个我们提供的有效指针。
+        let status = unsafe { SecCodeCopySelf(K_SEC_CS_DEFAULT_FLAGS, &mut code) };
+        assert_eq!(status, 0, "SecCodeCopySelf 应当成功（OSStatus {status}）");
+        assert!(!code.is_null());
+
+        let verdict = sec_code_satisfies(code, &production_shaped_requirement("0000000000"));
+        // SAFETY: `code` 是 SecCodeCopySelf 返回的、需要 CFRelease 的对象。
+        unsafe { CFRelease(code) };
+
+        let err = verdict.expect_err("不受信任的二进制必须被拒");
+        assert_eq!(err.code, crate::error::ErrorCode::Unauthorized);
+        assert!(err.to_string().contains("SecCodeCheckValidity"), "{err}");
+    }
+
+    /// 判别性：真实 socket 上的签名校验必须拒绝一个不受信任的对端。
+    /// 这条把 `getsockopt(0x006)` → CFData → `SecCodeCopyGuestWithAttributes`
+    /// → `SecCodeCheckValidity` 整条链路真的跑一遍（旧常量 0x005 时会在
+    /// token 长度那一步就拒绝，同样是 Err，但那是"取不到 token"而不是"校验不过"）。
+    #[test]
+    fn verify_signature_rejects_an_untrusted_peer_over_a_real_socket() {
+        use std::os::unix::io::AsRawFd;
+        let (a, _b) = socket_pair();
+        let err = verify_signature(a.as_raw_fd(), &production_shaped_requirement("0000000000"))
+            .expect_err("不受信任的对端不许通过");
+        assert_eq!(err.code, crate::error::ErrorCode::Unauthorized);
+    }
+
+    /// 判别性：`authorize` 在签名校验失败时必须返回 `Unauthorized` 并带上可读原因，
+    /// **不许**把 `Err` 吞掉变成 `Ok`（那才是"门是空的"）。
+    #[test]
+    fn authorize_refuses_when_the_signature_check_fails() {
+        // SAFETY: geteuid 无副作用。
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("提醒：以 root 运行，authorize 会直接放行（root 本来就能做任何事）—— 跳过");
+            return;
+        }
+        if PeerPolicy::allow_insecure_override() {
+            eprintln!("提醒：XRAYTUN_HELPER_INSECURE=1 已设，authorize 会降级 —— 跳过");
+            return;
+        }
+        use std::os::unix::io::AsRawFd;
+        let (a, _b) = socket_pair();
+        let policy = PeerPolicy::RequireSignature {
+            requirement: production_shaped_requirement("0000000000"),
+        };
+        let err = authorize(a.as_raw_fd(), &policy).expect_err("不受信任的对端必须被拒");
+        assert_eq!(err.code, crate::error::ErrorCode::Unauthorized);
+        let msg = err.to_string();
+        assert!(msg.contains("签名校验未通过"), "原因要能读懂：{msg}");
     }
 }
