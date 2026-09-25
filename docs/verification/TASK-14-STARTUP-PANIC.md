@@ -179,3 +179,33 @@ cargo clippy -p xraytun-desktop --all-targets -- -D warnings
    留档 `open -a` 3/3 崩（真机 panic.log 3 条：1311 B）。
 2. **独立复验**：按 Lead 要求，发现者不自证 —— 请 tester 独立跑
    `--mode open`（在安全前置条件下）与本文件的突变反证。
+
+## §7 独立复验（tester，commit `b435a49`，报告 `TASK-14-INDEPENDENT-VERIFY.md`）
+
+tester 用**自己写的扫描器**（不复用本文的实现）复验，结论：
+
+* 静态：`apps/desktop/src` 生产代码 **12,615 行 → 裸 `tokio::spawn` 命中 0**、
+  `tauri::async_runtime::spawn` 34 处；
+* 守卫：`cargo test … --lib naked_tokio_spawn` → 2 passed；并确认「过滤器匹配 0 条 =
+  退出码 0」的假绿会被 `check.sh` 的两条 grep 断言拦住；
+* **运行时负例（旧必须红）**：修复前 App `--mode direct` → **3/3 `Abort trap: 6`（exit=134）**，
+  隔离 panic.log 3/3 `lib.rs:178:17` + `there is no reactor running…`，smoke **exit=1**；
+* **运行时正例（新必须绿）**：新构建 `--mode direct` → **3/3 绿、exit=0**
+  （存活 10s、有启动证据、`NEW_IPS=0`、真实 panic.log 未增长、网络未变），
+  本卡产出的 App 同样 3/3 绿；
+* `--mode open` 的安全门：独立确认不安全 settings 下 **exit=75 且未拉起进程**，
+  路由 / panic.log / IPS 不变；
+* **唯一缺口**：忠实的 `open -a` 双方都跑不了（沙箱拒写真实数据目录与父目录、
+  `launchctl setenv` 无权限）⇒ 记「因沙箱写权限无法完成，未验证」，
+  **没有**用 wrapper/direct 凑成 open 的绿。
+
+### tester 指出的两条边界与处置
+
+| 边界 | 处置 |
+|---|---|
+| 守卫只覆盖 `apps/desktop/src/**`（不含 `crates/**`） | 保持 —— 本卡范围如此；边界已写进本文件 §3 与守卫注释 |
+| `without_line_comment` 不处理 `/* */` ⇒ 块注释里的调用会**假红** | **已修**：改为 `strip_comments`（保留换行 ⇒ 行号不变；支持嵌套块注释；跳过字符串字面量，避免 `"http://…"` 把同行后续代码吞成假绿），新增用例 `comments_and_strings_do_not_trip_or_hide_the_guards`（旧实现下必红） |
+
+> 假红不是假绿，但它会让守卫在「注释里提到被禁写法」时误报；修完本次重跑门禁：
+> `cargo test -p xraytun-desktop` **309 run / 304 passed / 0 failed / 5 ignored**
+> + 8 条 `tests/type_contract`，`cargo clippy … -D warnings` **exit 0**。

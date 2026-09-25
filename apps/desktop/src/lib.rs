@@ -668,15 +668,76 @@ mod tests {
         }
     }
 
-    /// 砍掉 `//` 之后的部分：注释里写 `.unwrap()` 不算生产调用。
+    /// 去掉注释（`//` 行注释与**可嵌套的** `/* */` 块注释），**保留换行** ⇒ 行号不变。
     ///
-    /// 不解析字符串字面量：判据找的是 panic 家族**调用**，它们不会嵌在字符串里；
-    /// `http://…` 被误砍也不影响（那一行不可能是 panic 调用）。
-    fn without_line_comment(line: &str) -> &str {
-        match line.find("//") {
-            Some(i) => &line[..i],
-            None => line,
+    /// # 为什么不能只截 `//`（tester 在 task-14 独立复验里指出的假红）
+    ///
+    /// 判据是「生产代码里有没有某个调用」，所以注释里的 `tokio::spawn(` / `panic!(` /
+    /// `#[cfg(test)]` 都不该算数。旧实现只按 `//` 截断 ⇒ **块注释里的调用会假红**，
+    /// 而块注释里的 `#[cfg(test)]` 还会让「跳过测试项」的判定错位。
+    ///
+    /// 顺带跳过字符串字面量：否则 `"http://…"` 会被当成注释起始，把它后面的代码吞掉
+    /// （那种吞法会**假绿**，比假红更危险）。
+    ///
+    /// 已知边界：不做字符字面量 `'…'` 解析（`'"'` 这种会让状态机误入字符串）。
+    /// 本仓库源码里没有这种写法；若将来出现，加一条用例即可暴露。
+    fn strip_comments(src: &str) -> String {
+        #[derive(PartialEq)]
+        enum S {
+            Code,
+            Line,
+            Block(usize),
+            Str,
         }
+        let mut out = String::with_capacity(src.len());
+        let mut chars = src.chars().peekable();
+        let mut state = S::Code;
+        while let Some(c) = chars.next() {
+            match state {
+                S::Code => {
+                    if c == '/' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        state = S::Line;
+                    } else if c == '/' && chars.peek() == Some(&'*') {
+                        chars.next();
+                        state = S::Block(1);
+                    } else if c == '"' {
+                        out.push(c);
+                        state = S::Str;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                S::Line => {
+                    if c == '\n' {
+                        out.push('\n');
+                        state = S::Code;
+                    }
+                }
+                S::Block(depth) => {
+                    if c == '\n' {
+                        out.push('\n'); // 保留行号
+                    } else if c == '/' && chars.peek() == Some(&'*') {
+                        chars.next();
+                        state = S::Block(depth + 1); // Rust 块注释可嵌套
+                    } else if c == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        state = if depth == 1 { S::Code } else { S::Block(depth - 1) };
+                    }
+                }
+                S::Str => {
+                    out.push(c);
+                    if c == '\\' {
+                        if let Some(n) = chars.next() {
+                            out.push(n);
+                        }
+                    } else if c == '"' || c == '\n' {
+                        state = S::Code;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// 命中 panic 家族调用则返回名字。
@@ -708,22 +769,24 @@ mod tests {
     /// `supervisor.rs:377`、`commands/incident.rs:30` 这类测试专用项夹在生产代码中间，
     /// 截断会把它们后面的生产代码一起漏掉（`supervisor.rs` 的守卫注释里记着这个假绿）。
     fn production_lines(src: &str) -> Vec<(usize, String)> {
-        let lines: Vec<&str> = src.lines().collect();
+        // 先去注释（保留换行 ⇒ 行号不变）：注释里的调用/`#[cfg(test)]` 都不算数。
+        let code = strip_comments(src);
+        let lines: Vec<&str> = code.lines().collect();
         let mut out = Vec::new();
         let mut i = 0usize;
         while i < lines.len() {
-            let bare = without_line_comment(lines[i]).trim().to_string();
+            let bare = lines[i].trim().to_string();
             if bare.contains("#[cfg(test)]") {
                 let indent = lines[i].len() - lines[i].trim_start().len();
                 // 测试项的第一行（跳过空行/纯注释行）
                 let mut j = i + 1;
-                while j < lines.len() && without_line_comment(lines[j]).trim().is_empty() {
+                while j < lines.len() && lines[j].trim().is_empty() {
                     j += 1;
                 }
                 if j >= lines.len() {
                     break;
                 }
-                let first = without_line_comment(lines[j]).trim();
+                let first = lines[j].trim();
                 if first.contains(';') && !first.contains('{') {
                     i = j + 1; // `#[cfg(test)] use …;` 这种没有花括号的项
                     continue;
@@ -831,6 +894,58 @@ mod tests {
         assert_eq!(
             panic_family_call("(Some(_), Some(_)) => unreachable!(\"x\"),"),
             Some("unreachable!")
+        );
+    }
+
+    /// 注释与字符串里的「调用」不算数（tester 在 task-14 独立复验里指出的**假红**）。
+    ///
+    /// 判别性：
+    /// * 旧实现只截 `//` ⇒ 块注释里的 `tokio::spawn(` / `panic!()` 会被判据抓住 ⇒ 本测试红；
+    /// * 字符串里的 `//` 若被当成注释起始，同一行后面的真实 `panic!()` 会被吞掉 ⇒
+    ///   下面 `let g = "http://x"; let h = panic!();` 这条会**少抓一个** ⇒ 同样红。
+    #[test]
+    fn comments_and_strings_do_not_trip_or_hide_the_guards() {
+        let src = "\
+// 行注释：tokio::spawn( 与 panic!() 都不算
+let a = 1; // 行尾注释：.unwrap()
+/* 单行块注释：tokio::spawn( 与 #[cfg(test)] 都不算 */
+let b = 2;
+/* 多行块注释
+   tokio::spawn(async move {
+   panic!(\"nope\")
+   */
+let c = 3;
+/* 嵌套：/* tokio::spawn( */ 仍然在注释里 */
+let d = 4;
+let f = panic!(); // 这一行必须被抓到
+let g = \"http://example.com\"; let h = panic!(); // 字符串里的 // 不许吞掉后面的 panic!
+";
+        let lines = production_lines(src);
+        let spawn_hits: Vec<_> = lines
+            .iter()
+            .filter(|(_, l)| l.contains("tokio::spawn("))
+            .collect();
+        assert!(
+            spawn_hits.is_empty(),
+            "注释里的 tokio::spawn( 不许被算成生产调用：{spawn_hits:?}"
+        );
+        assert_eq!(
+            naked_tokio_spawn_sites(src).len(),
+            0,
+            "行/块/嵌套注释里的 tokio::spawn( 都不算"
+        );
+        let panic_hits: Vec<_> = lines
+            .iter()
+            .filter(|(_, l)| panic_family_call(l).is_some())
+            .collect();
+        assert_eq!(
+            panic_hits.len(),
+            2,
+            "只该抓到两行真实的 panic!()（f 与 h）：{panic_hits:?}"
+        );
+        assert!(
+            panic_hits.iter().any(|(_, l)| l.contains("let h = panic!()")),
+            "同一行字符串里的 `//` 不许把后面的 panic!() 吞掉：{panic_hits:?}"
         );
     }
 
