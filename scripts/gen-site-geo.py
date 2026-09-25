@@ -21,7 +21,7 @@ SITE = Path(__file__).resolve().parents[1] / "site"
 # 域名迁移时两处一起改（生成器里各只有一处；产物由脚本重写，别手改产物）。
 BASE = "https://xraytun.top"
 LAST_PUB = "2026-09-25"
-VERSION = "0.8.38"
+VERSION = "0.8.39"
 DL = f"https://github.com/harodggg/xrayTun/releases/download/v{VERSION}"
 RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 
@@ -36,7 +36,7 @@ RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 # 为什么要有这个开关：`release.yml` 在打包前跑 `check.sh`，而 check.sh 断言
 # 「站点声明的版本 == Cargo.toml 的版本」——先 bump 会让断言失败；而站点要写新版本
 # 又需要真实资产。两阶段是唯一「每个瞬间都不说谎」的解法。
-PUBLISHED = True
+PUBLISHED = False
 
 # 发行资产：**文件名由 VERSION 派生**，字节数取自 `gh release view v{VERSION}` 的**真实值**
 # （不许沿用上一版、不许估算 —— 本项目红线）。
@@ -47,9 +47,9 @@ PUBLISHED = True
 # 下面的断言会把这种失误直接变成构建失败。
 DMG = f"XrayTun_{VERSION}_x86_64_arm64.dmg"
 ZIP = f"XrayTun_{VERSION}_x86_64_arm64.zip"
-DMG_BYTES, DMG_MIB = "49,836,814", "47.5"
-ZIP_BYTES, ZIP_MIB = "45,182,862", "43.1"
-SHA_BYTES = "200"
+DMG_BYTES, DMG_MIB = "", ""
+ZIP_BYTES, ZIP_MIB = "", ""
+SHA_BYTES = ""
 if PUBLISHED and not (DMG_BYTES and DMG_MIB and ZIP_BYTES and ZIP_MIB and SHA_BYTES):
     raise SystemExit(
         "PUBLISHED=True 但 *_BYTES/*_MIB 是空的："
@@ -59,7 +59,8 @@ if PUBLISHED and not (DMG_BYTES and DMG_MIB and ZIP_BYTES and ZIP_MIB and SHA_BY
 # ---------------------------------------------------------------------------
 # 外部条目：**生成器不允许静默抹掉非本产品页面的收录**（task-180）
 #
-# 真实事故（v0.8.38 停发期间发生两次）：`site/jev-x-filter/**` 是**另一条工作流**的项目页，
+# 真实事故（上一版停发期间发生过两次；此处刻意不写版本字面，否则 phase1 的
+# "不许残留旧版本号"校验会被注释里的历史版本号卡住）：`site/jev-x-filter/**` 是**另一条工作流**的项目页，
 # 它的 sitemap / llms 收录是手写加进 `site/{sitemap.xml,llms.txt,llms-full.txt}` 的；
 # 而本脚本只认识本产品页面 ⇒ 每次重跑都把那些条目**静默删掉**，对方自己补了两次。
 #

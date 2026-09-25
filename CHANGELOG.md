@@ -1,4 +1,13 @@
 # 更新记录
+## v0.8.39（2026-09-25）
+
+> **不需要重装特权助手**（本版只改 App；`crates/` 零改动）。
+
+* **崩溃可诊断**：App 装 panic hook，把 panic 的 `文件:行:列` + 消息 + backtrace 写进
+  `logs/panic.log`。起因是 v0.8.38 那次启动 `SIGABRT` 除了 `abort() called` 什么都没留下
+  （release 是 `panic = "abort"`、stderr 被 launchd 吞掉、符号被 strip），根因因此无法定位。
+  **hook 只让它可诊断，不修那个崩溃** —— 下一次拿到 panic.log 才能真修。
+
 
 ## 未发布（v0.8.38，等本工作流收口后发）
 
