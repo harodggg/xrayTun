@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from "react";
 import { api, errorText, parseRecovery, subscribe } from "./ipc";
+import { nextSteps } from "./failure";
 import type { RecoveryState } from "./types";
 import { isCount, isObject, isText, rejectPayload } from "./eventGuards";
 import type { AppSnapshot, ProbeResult, UiLogEntry } from "./types";
@@ -65,6 +66,12 @@ interface StoreValue {
   /** 正在执行的操作名，用于按钮转圈与防重复点击。 */
   busy: string | null;
   error: string | null;
+  /**
+   * 失败时的**下一步动作**（`failure.ts::nextSteps`）。与 `error` 同时写入、
+   * 同时清空 —— 界面必须在说「失败了」的**同一处**给出「那我现在做什么」，
+   * 只报错误码等于把用户留在原地。
+   */
+  errorSteps: string[];
   /** 延迟测量是否正在进行。 */
   probing: boolean;
   probeProgress: { done: number; total: number } | null;
@@ -133,6 +140,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [logsLoad, setLogsLoad] = useState<LogsLoad>({ phase: "loading", error: null });
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorSteps, setErrorSteps] = useState<string[]>([]);
   const [probing, setProbing] = useState(false);
   const [probeProgress, setProbeProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -213,53 +221,74 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!shapeBadRef.current) {
       shapeBadRef.current = true;
       setError(SNAPSHOT_SHAPE_NOTICE);
+      // 形状异常不是「后端给了一条命令错误」，它自带说明与出路（见常量文案），
+      // 所以这里**不**再叠一层通用建议 —— 清空即可，免得留下上一次的步骤。
+      setErrorSteps([]);
     }
     return false;
+  }, []);
+
+  /**
+   * 失败**只有这一个出口**：写原因 + 写下一步，或者两者都清。
+   *
+   * 分开写的好处是「清错误」和「报错误」永远同步；以前只清 `error`、
+   * 不管别的状态时漏过一次（task-146 就踩过这种「同一件事两处维护」的坑）。
+   */
+  const fail = useCallback((e: unknown) => {
+    const text = errorText(e);
+    setError(text);
+    // 线索来自后端自己的文案；线索不足时只给「看日志」——不编具体归因。
+    setErrorSteps(nextSteps(text));
+  }, []);
+
+  const succeed = useCallback(() => {
+    setError(null);
+    setErrorSteps([]);
   }, []);
 
   const refresh = useCallback(async () => {
     try {
       const next = await api.snapshot();
-      if (acceptSnapshot(next, "snapshot")) setError(null);
+      if (acceptSnapshot(next, "snapshot")) succeed();
     } catch (e) {
-      setError(errorText(e));
+      fail(e);
     }
-  }, [acceptSnapshot]);
+  }, [acceptSnapshot, fail, succeed]);
 
   const run = useCallback(
     async (name: string, action: () => Promise<AppSnapshot>): Promise<boolean> => {
       if (busyRef.current) return false;
       setBusy(name);
-      setError(null);
+      succeed();
       try {
         const next = await action();
         return acceptSnapshot(next, "command");
       } catch (e) {
-        setError(errorText(e));
+        fail(e);
         return false;
       } finally {
         setBusy(null);
       }
     },
-    [acceptSnapshot],
+    [acceptSnapshot, fail, succeed],
   );
 
   const runVoid = useCallback(
     async (name: string, action: () => Promise<void>): Promise<boolean> => {
       if (busyRef.current) return false;
       setBusy(name);
-      setError(null);
+      succeed();
       try {
         await action();
         return true;
       } catch (e) {
-        setError(errorText(e));
+        fail(e);
         return false;
       } finally {
         setBusy(null);
       }
     },
-    [],
+    [fail, succeed],
   );
 
   // ---- 初始加载 + 事件订阅 ----
@@ -432,7 +461,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setLogs([]);
       setLogsLoad({ phase: "loaded", error: null });
     } catch (e) {
-      setError(`清空日志失败：${errorText(e)}`);
+      const text = `清空日志失败：${errorText(e)}`;
+      setError(text);
+      setErrorSteps(nextSteps(text));
     }
   }, []);
 
@@ -446,6 +477,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       logsLoad,
       busy,
       error,
+      errorSteps,
       probing,
       probeProgress,
       recovery,
@@ -454,7 +486,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       refresh,
       run,
       runVoid,
-      clearError: () => setError(null),
+      clearError: () => {
+        setError(null);
+        setErrorSteps([]);
+      },
       clearLogs,
       reloadLogs: loadLogs,
     }),
@@ -464,6 +499,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       logsLoad,
       busy,
       error,
+      errorSteps,
       probing,
       probeProgress,
       recovery,

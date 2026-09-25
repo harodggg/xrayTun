@@ -23,6 +23,7 @@
 import { useState } from "react";
 
 import { api, recoveryView } from "../ipc";
+import { buttonNameNote, failureActions, nextSteps, stripMarkup } from "../failure";
 import { InlineConfirm } from "../InlineConfirm";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
 import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
@@ -499,12 +500,42 @@ export function collectNotices(
 
   // rank 越小越急：先「现在就是坏的」，再「需要修」，最后「仅供参考」。
   if (runtime.last_error) {
+    // U3：连接失败最忌讳的是一句错误码就完事。这里做三件事，全部与全局横幅同源
+    // （`failure.ts`）——
+    // ① 原文里成对的 `**` 记号去掉（用户不该看到工程记号）；
+    // ② 给出下一步（换节点 / 重装助手 / 看日志）；
+    // ③ **给一个能点的动作**：助手类 → 「去重装助手」（落在设置页的助手分节），
+    //    门禁/节点类 → 「去换一个节点」，其余 → 「查看日志」。
+    // 以前这条 rank 0 的红条**没有任何 action**，用户看完只能自己去侧栏找。
+    const raw = runtime.last_error;
+    const steps = nextSteps(raw);
+    const note = buttonNameNote(raw, runtime.running);
+    const primary = failureActions(raw)[0] ?? null;
     out.push({
       key: "last-error",
       tone: "error",
       icon: "✕",
       rank: 0,
-      text: <>上次运行出错：{runtime.last_error}</>,
+      text: (
+        <>
+          <span className="banner__reason">
+            上次运行出错：{stripMarkup(raw)}
+            {steps.length > 0 && <> —— 下一步：{steps.join("；")}</>}
+          </span>
+          {/* U8：文案叫用户「点『断开』」而按钮写「连接」时，把真实按钮名说清。 */}
+          {note && <div className="banner__steps">{note}</div>}
+        </>
+      ),
+      action: primary
+        ? {
+            label: primary.label,
+            run: () => {
+              if (primary.id === "reinstall-helper") onNavigate("settings", "set-helper");
+              else if (primary.id === "change-node") onNavigate("nodes");
+              else onNavigate("logs");
+            },
+          }
+        : undefined,
     });
   }
 

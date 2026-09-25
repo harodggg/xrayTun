@@ -41,6 +41,21 @@ const LEVEL_LABEL: Record<Level, string> = {
 /** 只有真正出问题时才值得用颜色强调的等级。 */
 const NOTABLE: readonly Level[] = ["error", "warn"];
 
+/**
+ * 崩溃证据（panic.log）的**默认**路径。
+ *
+ * 来源可复核：`xt_core::store::Store::default_root()`（`crates/xt-core/src/store.rs:41-51`）
+ * = `~/Library/Application Support/<APP_IDENTIFIER>`，而 `APP_IDENTIFIER` 是
+ * `com.xraytun.desktop`（`crates/xt-core/src/lib.rs:39`，与 `tauri.conf.json` 的
+ * `identifier` 一致）；panic hook 写在它下面的 `logs/panic.log`
+ * （`apps/desktop/src/lib.rs:85-96`，内容含 `文件:行` 与 backtrace）。
+ *
+ * 措辞用「默认」而不是「就是」：数据目录可以被 `XRAYTUN_DATA_DIR` 覆盖
+ * （`store.rs:42-46`），所以下面那个按钮打开的是**实际**目录，路径只作指路。
+ */
+export const PANIC_LOG_PATH =
+  "~/Library/Application Support/com.xraytun.desktop/logs/panic.log";
+
 export default function Logs() {
   const { logs, logsLoad, reloadLogs, clearLogs, runVoid, snapshot } = useStore();
   // 「核心有没有在跑」取自**后端快照**（`runtime.running`），不是按日志条数或时间猜。
@@ -224,6 +239,27 @@ export default function Logs() {
           <pre className="logs-diag__body">{diagnostics}</pre>
         </div>
       )}
+
+      {/* U4：panic.log 的可发现性。
+          App **启动即崩**时，用户双击图标、图标闪一下没了，系统崩溃报告里只有一句
+          `abort() called`；而唯一的证据链（`logs/panic.log`，含 `文件:行` 与 backtrace）
+          在 App 内**0 命中** —— 也就是没有任何地方告诉用户它存在（v0.8.39 发布说明里
+          有这条路径，但那要用户先找得到发布说明）。这里常驻一行，动作复用既有的
+          `api.openDataDir()`（仪表盘折叠区里那个按钮的同一个命令）。 */}
+      <div className="logs-panic">
+        <span>
+          如果 App 曾经<strong>启动就退出</strong>：崩溃证据在数据目录的{" "}
+          <code>logs/panic.log</code>（默认 <code>{PANIC_LOG_PATH}</code>，内含{" "}
+          <code>文件:行</code> 与 backtrace）。
+        </span>
+        <span className="spacer" />
+        <button
+          className="btn btn--ghost"
+          onClick={() => void runVoid("open-data-dir", () => api.openDataDir())}
+        >
+          打开数据目录
+        </button>
+      </div>
 
       <div className="logs" ref={boxRef} onScroll={onScroll}>
         {filtered.length === 0 ? (

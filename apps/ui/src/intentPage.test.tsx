@@ -9,8 +9,9 @@
  *    所以"应用（会重连一次）"这个按钮的存在与否，取决于 `rules_pending_apply`；
  *    页面上不能出现任何自动重连的路径。
  * 3. **缺密钥要在"还差什么"里说清楚**，而不是让用户对着一个永远不动的引擎猜。
- * 4. **审计里的 `applied` 必须如实显示**（演练模式下是"否"）——
- *    这一列是"这条判决到底有没有生效"的唯一依据。
+ * 4. **审计里的 `applied` 必须如实显示**（演练模式下是"不会（演练模式）"）——
+ *    这一列是"这条判决会不会构成规则"的唯一依据。task-3 起列名从「生效」改成
+ *    「会生成规则」：`applied` 与「已下发到核心」无关（engine.rs:444-446）。
  */
 import { render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -237,8 +238,13 @@ describe("意图过滤页", () => {
     );
 
     const row = (await screen.findByText("ads.example")).closest("tr")!;
-    // 演练模式下 applied=false ⇒ 这一列必须是「否」，不能显示成已生效。
-    expect(within(row).getByText("否")).toBeTruthy();
+    // U2（task-3）：这一列的判据是 `!drill && verdict.is_block()`（engine.rs:444-446），
+    // 只说明「这条判决构成一条拦截规则」，与「是否已下发到核心」无关 ⇒
+    // 演练模式下显示「不会（演练模式）」，并且结论徽章不再是绿色「拦截」
+    // （绿色在这套配色里 = 已完成，会读成「正在被拦」）。
+    expect(within(row).getByText("不会（演练模式）")).toBeTruthy();
+    expect(within(row).getByText("本该拦截（演练）")).toBeTruthy();
+    expect(within(row).queryByText("拦截")).toBeNull();
     expect(within(row).getByText("0.97")).toBeTruthy();
 
     (within(row).getByRole("button", { name: "为什么" }) as HTMLButtonElement).click();

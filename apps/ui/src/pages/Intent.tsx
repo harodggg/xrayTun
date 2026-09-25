@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, errorText } from "../ipc";
+import { nextSteps } from "../failure";
 import { useStore } from "../store";
 import type {
   AppSettings,
@@ -33,6 +34,7 @@ import type {
   IntentExplain,
   IntentPreset,
   IntentSummary,
+  MitmSettings,
   MitmStatus,
 } from "../types";
 
@@ -57,31 +59,206 @@ function fmtTime(unix: number): string {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+// ---------------------------------------------------------------------------
+// MITM 的三道闸门（内容级判定的全部前提）
+// ---------------------------------------------------------------------------
+
+/**
+ * 闸门状态只有三种，`mark` 就是**证据强度**：
+ *
+ * * `✓` 已确证通过；
+ * * `✗` 已确证没过；
+ * * `？` **读不到** —— 后端没有把这一项做成结构化字段，界面不许猜。
+ *
+ * 「根证书已装」这一道特别容易撒谎：`ca_fingerprint` 只说明**本会话生成过**
+ * 一张证书，不说明它被系统信任（`mitm.rs` 的 `trusted` 来自
+ * `ca_is_trusted(existing_fingerprint())`，**没有**出现在 `MitmStatus` 里）。
+ * 所以只有两种证据能证明它过了：① 代理在跑（`mitm_apply` 在证书不被信任时
+ * **拒绝启动**代理）；② 后端没给 `note`（`note` 为 null 只在「开着 + 名单非空 +
+ * 已信任 + 代理在跑」这一支成立）。其余一律 `？`。
+ */
+export interface MitmGate {
+  id: "switch-list" | "ca" | "proxy";
+  mark: "✓" | "✗" | "？";
+  title: string;
+  detail: string;
+  /** 这一道没过时可以立刻做的事；`null` = 不需要动作。 */
+  next: string | null;
+}
+
+export function mitmGates(settings: MitmSettings, status: MitmStatus | null): MitmGate[] {
+  const domains = settings.domains;
+  const listDetail = !settings.enabled
+    ? "开关没开（下面「启用 MITM」还没勾）"
+    : domains.length === 0
+      ? "开关开着，但名单是空的 —— 空名单不会拆任何域名"
+      : `${domains.length} 个域名：${domains.slice(0, 3).join("、")}${
+          domains.length > 3 ? "…" : ""
+        }`;
+  const switchList: MitmGate = {
+    id: "switch-list",
+    mark: settings.enabled && domains.length > 0 ? "✓" : "✗",
+    title: "开关 + 名单",
+    detail: listDetail,
+    next: !settings.enabled
+      ? "勾上「启用 MITM」"
+      : domains.length === 0
+        ? "在「只拆这些域名」里至少写一个域名"
+        : null,
+  };
+
+  let ca: MitmGate;
+  if (status === null) {
+    ca = {
+      id: "ca",
+      mark: "？",
+      title: "根证书已装",
+      detail: "读不到 MITM 状态 —— 不知道证书装了没有（上面的读取错误是唯一线索）",
+      next: "先排除上面的读取错误；点「装入根证书」可确保本会话的证书已装",
+    };
+  } else if (status.ca_fingerprint === null) {
+    ca = {
+      id: "ca",
+      mark: "✗",
+      title: "根证书已装",
+      detail: "本会话还没生成过根证书（指纹为空）",
+      next: "点「装入根证书」—— 这是唯一会改系统钥匙串的动作",
+    };
+  } else if (status.running) {
+    ca = {
+      id: "ca",
+      mark: "✓",
+      title: "根证书已装",
+      detail: `已装（证书不被信任时后端不会启动这个代理）· 指纹 ${status.ca_fingerprint}`,
+      next: null,
+    };
+  } else if (status.note === null) {
+    ca = {
+      id: "ca",
+      mark: "✓",
+      title: "根证书已装",
+      detail: `已装 · 指纹 ${status.ca_fingerprint}`,
+      next: null,
+    };
+  } else {
+    ca = {
+      id: "ca",
+      mark: "？",
+      title: "根证书已装",
+      detail: `读不到：本会话已生成证书（指纹 ${status.ca_fingerprint}），但后端没有单独给「是否已装」这一项；上面那句是后端的原话`,
+      next: "如果上面那句说证书没装，点「装入根证书」",
+    };
+  }
+
+  const proxy: MitmGate =
+    status === null
+      ? {
+          id: "proxy",
+          mark: "？",
+          title: "代理在跑",
+          detail: "读不到 MITM 状态 —— 不知道代理在不在跑",
+          next: "先排除上面的读取错误，再点「应用（起/停代理）」",
+        }
+      : status.running
+        ? {
+            id: "proxy",
+            mark: "✓",
+            title: "代理在跑",
+            detail: `在跑：127.0.0.1:${status.listen_port}`,
+            next: null,
+          }
+        : {
+            id: "proxy",
+            mark: "✗",
+            title: "代理在跑",
+            detail: "没在跑（没有进程在监听那个端口）",
+            next: "点「应用（起/停代理）」",
+          };
+
+  return [switchList, ca, proxy];
+}
+
+/**
+ * 三道闸门的**一句话总结**。
+ *
+ * 核心事实：**只要有一道没过，就一个域名的 TLS 都不会被拆**（`mitm_apply` 在
+ * 设置不活跃或证书不被信任时直接停代理）。所以「差一道」不是「差不多能用」。
+ *
+ * 第二件同样重要的事：**三道闸门只管「本机准备好了没有」，不管「核心有没有在按
+ * 它跑」**。所以三道全过时也必须把核心那一侧说出来（U1）：`core_steering === null`
+ * ＝核心没在跑＝引导规则现在不在任何核心里＝**此刻没有域名被拆 TLS**。
+ */
+export function mitmGateSummary(gates: MitmGate[], status: MitmStatus | null): string {
+  const passed = gates.filter((g) => g.mark === "✓").length;
+  const failed = gates.filter((g) => g.mark === "✗").length;
+  const unknown = gates.filter((g) => g.mark === "？").length;
+  if (failed === gates.length) {
+    return "三道闸门都没过 —— MITM 默认全关（开关关、名单空、证书没装）：此刻一个域名的 TLS 都不会被拆。";
+  }
+  if (failed > 0) {
+    return `过了 ${passed} 道，还差 ${failed} 道 —— 只要有一道没过，一个域名的 TLS 都不会被拆。`;
+  }
+  if (unknown > 0) {
+    return `过了 ${passed} 道，还有 ${unknown} 道读不到 —— 无法判断此刻是否在拆 TLS。`;
+  }
+  // 三道全过：还差「核心那一侧」，而它**不属于**这三道闸门。
+  if (status === null) return "三道闸门全过，但读不到核心那一侧的状态。";
+  if (status.core_steering === null) {
+    return "三道闸门全过 —— 但核心没在跑，引导规则现在不在任何核心里：此刻没有域名被拆 TLS（先连接核心）。";
+  }
+  if (status.core_restart_required) {
+    return "三道闸门全过 —— 但核心正在用旧配置，要重连一次核心才会真的生效。";
+  }
+  if (status.core_steering) {
+    return "三道闸门全过，且核心已带上引导规则：名单里的域名会被拆 TLS。";
+  }
+  return "三道闸门全过 —— 但核心这次启动没带引导规则（证书或名单是在它启动之后才满足的，重连一次即可）。";
+}
+
 export default function Intent() {
   const { snapshot, runVoid } = useStore();
   const settings = snapshot?.settings ?? null;
 
   const [summary, setSummary] = useState<IntentSummary | null>(null);
+  /**
+   * 意图引擎状态**读失败**（区别于「还没读回来」）。
+   *
+   * 没有它就会出现这一页最严重的一种假陈述：`intentStatus()` 挂了 ⇒ `summary`
+   * 是 null ⇒ 界面照样写「生效的规则 拦截 0 条 / 引擎未运行 / 缓存 0 条」——
+   * 把一次 IPC 故障说成了**三项确定事实**（而且都是「没在拦/没在跑」这种
+   * 让人以为功能是坏的结论）。
+   */
+  const [statusFailed, setStatusFailed] = useState(false);
   const [audit, setAudit] = useState<IntentAuditRecord[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [explain, setExplain] = useState<IntentExplain | null>(null);
   const [explainHost, setExplainHost] = useState<string | null>(null);
   const [mitm, setMitm] = useState<MitmStatus | null>(null);
+  /**
+   * MITM 状态读失败的原因。以前这里是 `catch { setMitm(null); }` —— **静默**。
+   * 于是「读不到」在界面上长得和「没在跑」一模一样（见 `mitmErr` 的消费处）。
+   */
+  const [mitmErr, setMitmErr] = useState<string | null>(null);
   /** 编辑中的名单文本。`null` = 没在编辑（显示设置里的值）。 */
   const [domainsText, setDomainsText] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       setSummary(await api.intentStatus());
+      setStatusFailed(false);
       setErr(null);
     } catch (e) {
+      setStatusFailed(true);
       setErr(errorText(e));
     }
-    // MITM 的状态单独取：它的失败**不该**把意图那半页也变成错误态。
+    // MITM 的状态单独取：它的失败**不该**把意图那半页也变成错误态，
+    // 但**必须**留下痕迹 —— 否则「读不到」会被渲染成「没在跑 / 还没生成过」。
     try {
       setMitm(await api.mitmStatus());
-    } catch {
+      setMitmErr(null);
+    } catch (e) {
       setMitm(null);
+      setMitmErr(errorText(e));
     }
   }, []);
 
@@ -175,6 +352,14 @@ export default function Intent() {
   }
   const s = settings.intent;
   const m = settings.mitm;
+  const gates = mitmGates(m, mitm);
+  const gateLine = mitmGateSummary(gates, mitm);
+  const errSteps = err ? nextSteps(err) : [];
+  /**
+   * `summary` 缺席时的说法。**必须区分两种缺席**：读失败（不知道）与还没读回来。
+   * 两者都**不许**退化成「0 条 / 未运行」。
+   */
+  const summaryUnknown = statusFailed ? "读不到（见上面的错误）" : "读取中…";
 
   return (
     <div className="page">
@@ -185,7 +370,16 @@ export default function Intent() {
         要碰内容只有 MITM 一条路，见下面那一节：它默认全关，且<strong>只对你点名的域名</strong>生效。
       </p>
 
-      {err && <div className="banner banner--error">{err}</div>}
+      {err && (
+        <div className="banner banner--error">
+          <div>
+            {err}
+            {errSteps.length > 0 && (
+              <div className="banner__steps">下一步：{errSteps.join("；")}</div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ---- 状态 ---- */}
       <section className="card">
@@ -196,31 +390,65 @@ export default function Intent() {
         </div>
         <div className="kv">
           <span>演练模式</span>
-          <strong>{s.drill ? "开（只记录，不下发规则）" : "关（会生成拦截规则）"}</strong>
+          {/* U13：开关关掉时不该再说「会生成拦截规则」—— 那时什么都没生成。 */}
+          <strong>
+            {!s.enabled
+              ? "未启用（开关打开后才谈得上）"
+              : s.drill
+                ? "开（只记录，不下发规则）"
+                : "关（会生成拦截规则）"}
+          </strong>
+        </div>
+        {/* 这一个行回答用户唯一真正关心的问题：「现在到底拦不拦？」 */}
+        <div className="kv">
+          <span>现在会真的拦吗</span>
+          <strong>
+            {!s.enabled
+              ? "不会：功能开关没开"
+              : s.drill
+                ? "不会：演练模式只记录本来该拦谁，不下发任何拦截规则"
+                : summary === null
+                  ? `读不到：${summaryUnknown}`
+                  : summary.block_rules > 0
+                    ? `会：当前有 ${summary.block_rules} 条拦截规则`
+                    : "暂时不会：当前 0 条拦截规则（规则要核心重连后才生效）"}
+          </strong>
         </div>
         <div className="kv">
           <span>引擎</span>
           <strong>
-            {summary?.active ? `${summary.model} · ${summary.gateway}` : "未运行"}
+            {summary ? (summary.active ? `${summary.model} · ${summary.gateway}` : "未运行") : summaryUnknown}
           </strong>
         </div>
         <div className="kv">
-          <span>生效的规则</span>
+          {/*
+            U5：这里给的是**当前规则集合**（`intent.rs::rules()` = 现在「应该」
+            生效的那一份），不是「核心已经加载的规则」。标题写「生效的规则」会和
+            同屏的「还没下发给核心」当场互相否定。所以在待下发时把这件事写出来。
+          */}
+          <span>当前规则集合</span>
           <strong>
-            拦截 {summary?.block_rules ?? 0} 条 · 放行 {summary?.allow_rules ?? 0} 条
+            {summary
+              ? `拦截 ${summary.block_rules} 条 · 放行 ${summary.allow_rules} 条${
+                  summary.rules_pending_apply ? "（尚未下发到核心）" : ""
+                }`
+              : summaryUnknown}
           </strong>
         </div>
         <div className="kv">
           <span>判决缓存</span>
           <strong>
-            {summary?.cache_len ?? 0} 条（其中判为拦截 {summary?.blocked ?? 0} 个域名）
+            {summary
+              ? `${summary.cache_len} 条（其中判为拦截 ${summary.blocked} 个域名）`
+              : summaryUnknown}
           </strong>
         </div>
         <div className="kv">
           <span>问过网关</span>
           <strong>
-            {summary?.gateway_calls ?? 0} 次 · 失败 {summary?.gateway_errors ?? 0} 次 · 缓存命中{" "}
-            {summary?.cache_hits ?? 0} 次
+            {summary
+              ? `${summary.gateway_calls} 次 · 失败 ${summary.gateway_errors} 次 · 缓存命中 ${summary.cache_hits} 次`
+              : summaryUnknown}
           </strong>
         </div>
         {summary?.note && <p className="note">{summary.note}</p>}
@@ -323,7 +551,11 @@ export default function Intent() {
 
       {/* ---- 阈值 ---- */}
       <section className="card">
-        <h2>闸门（三条件全满足才拦）</h2>
+        {/*
+          U6：「闸门」在本页下方指的是 MITM 的三道前提（开关+名单 / 证书 / 代理），
+          而这里讲的是三个**判定阈值**。同一个词指两件事会让用户拿滑块去修 MITM。
+        */}
+        <h2>命中判据（三条全满足才拦）</h2>
         <p className="note">
           误杀与漏拦的代价不对称：漏一个广告用户无感，误杀一个正常站点用户会立刻关掉功能。
           所以第三条不是装饰 —— 它让模型有机会说"我知道它像广告，但拦了会坏"。
@@ -430,16 +662,59 @@ export default function Intent() {
         <h2>MITM（内容级判定，可选）</h2>
         <p className="note">
           域名层拦不住同域广告（时间线里的推广条目、同一站点接口里的推广位）。
-          要做这件事只能在本机终结 TLS —— 代价与边界都写在下面，默认<strong>全关</strong>。
+          要做这件事只能在本机终结 TLS —— 代价与边界都写在下面，默认<strong>全关</strong>：
+          开关关着、名单是空的、根证书没装，你不动它，它一个域名都不会碰。
         </p>
         <p className="note note--warn">
           这是整个功能里<strong>唯一会改系统状态</strong>的部分：会把一张本地根证书装进
           系统钥匙串，并<strong>只对你点名的域名</strong>拆 TLS。本版每次启动重新生成一张，
-          退出（或下次启动的过期会话回滚）会撤掉。装之前请想清楚：被拆的域名，其内容
-          在本机是明文可见的。
+          正常退出时（或下次启动回滚过期会话时）会撤掉。装之前请想清楚：被拆的域名，
+          其内容在本机是明文可见的。
+          {/*
+            U9：「退出会撤掉」不是无条件事实 —— helper 忙的时候这一步会被**跳过**
+            （`tray.rs:186` 的 `Err(_) => warn!("helper 正忙，跳过退出前回滚…")`），
+            留到下次启动修复。这句话是用户决定装不装证书的唯一凭据，所以要说全。
+          */}
+          <br />
+          注意：如果退出时特权助手没有应答，撤证书这一步会被<strong>跳过</strong>，
+          留到下次启动自动回滚过期会话时才做。
         </p>
 
         {mitm?.note && <div className="banner banner--muted">{mitm.note}</div>}
+
+        {/*
+         * MITM 状态读失败以前是**静默**的（`catch {}`），于是「读不到」被下面的
+         * 状态表渲染成「代理没在跑 / 证书还没生成过」—— 一次 IPC 故障看起来像两项
+         * 确定事实。这里把原因和下一步都摆出来。
+         */}
+        {mitmErr && (
+          <div className="banner banner--error">
+            <div>
+              读不到 MITM 状态（下面的「代理 / 根证书 / 生效」现在都显示「读不到」）：
+              {mitmErr}
+              <div className="banner__steps">
+                下一步：{nextSteps(mitmErr).join("；")}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ---- 三道闸门：一眼看懂到底走到哪一步 ---- */}
+        <h3>三道闸门（全过才会真的拆 TLS）</h3>
+        <div className="note">
+          {gateLine}
+        </div>
+        <ul className="list">
+          {gates.map((g) => (
+            <li key={g.id}>
+              <strong>
+                {g.mark} {g.title}
+              </strong>
+              <span> —— {g.detail}</span>
+              {g.next && <div className="note">下一步：{g.next}</div>}
+            </li>
+          ))}
+        </ul>
 
         <div className="kv">
           <span>开关</span>
@@ -447,16 +722,36 @@ export default function Intent() {
           <span>名单</span>
           <strong>{m.domains.length === 0 ? "空（不会拆任何域名）" : `${m.domains.length} 个域名`}</strong>
           <span>代理</span>
-          <strong>{mitm?.running ? `在跑（127.0.0.1:${mitm.listen_port}）` : "没在跑"}</strong>
+          <strong>
+            {mitm === null
+              ? "读不到"
+              : mitm.running
+                ? `在跑（127.0.0.1:${mitm.listen_port}）`
+                : "没在跑"}
+          </strong>
           <span>根证书指纹</span>
-          <strong>{mitm?.ca_fingerprint ? <code>{mitm.ca_fingerprint}</code> : "还没生成过"}</strong>
+          <strong>
+            {mitm === null ? "读不到" : mitm.ca_fingerprint ? <code>{mitm.ca_fingerprint}</code> : "还没生成过"}
+          </strong>
           <span>生效</span>
           <strong>
-            {mitm?.core_restart_required
-              ? "要重连一次核心才会下发引导规则"
-              : mitm?.active
-                ? "引导规则已随核心生效"
-                : "不生效（见上面的原因）"}
+            {/*
+              U1：「核心没在跑」必须自己一态。
+              `core_restart_required` 在 `core_steering === null`（核心从没启动过 /
+              已经停了）时后端直接给 false（`mitm.rs:252-255`），而 `mitm.active`
+              只等于「开关开 + 名单非空」、**与核心无关**（`model.rs:1134-1136`）。
+              所以旧的三态写法会在「装了证书 + 起了代理 + 从没点过连接」时写出
+              「引导规则已随核心生效」—— 把「没发生」说成「已发生」。
+            */}
+            {mitm === null
+              ? "读不到（MITM 状态读取失败，不知道引导规则生效了没有）"
+              : mitm.core_steering === null
+                ? "核心没在跑 —— 引导规则现在不在任何核心里（先连接核心）"
+                : mitm.core_restart_required
+                  ? "核心正在用旧配置：要重连一次核心才会下发引导规则（顶栏点「断开」再点「连接」）"
+                  : mitm.core_steering
+                    ? "引导规则已随核心生效"
+                    : "本次核心没带引导规则（证书或名单是在它启动之后才满足的，重连一次即可）"}
           </strong>
         </div>
 
@@ -567,6 +862,9 @@ export default function Intent() {
                 setMitm(await api.mitmInstallCa());
               })
             }
+            // U7：`mitm_ca_install` 装完信任锚之后会**自己调一次 `mitm_apply`**
+            // （`commands/mitm.rs:86`），所以「应用」不是装完之后必须的第二步。
+            title="会把根证书装进系统钥匙串，并顺手启动本地代理（你只剩「重连核心」这一步）"
           >
             装入根证书
           </button>
@@ -577,6 +875,9 @@ export default function Intent() {
                 setMitm(await api.mitmRemoveCa());
               })
             }
+            // U10：`mitm_ca_remove` 撤锚之后**必定停掉本地代理**
+            // （`commands/mitm.rs:114-117`）；不说的话用户会以为代理还在跑。
+            title="会同时停掉本地代理，并让核心下次重连时不再带引导规则"
           >
             撤掉根证书
           </button>
@@ -592,8 +893,9 @@ export default function Intent() {
           </button>
         </div>
         <p className="note">
-          顺序是<strong>装证书 → 应用 → 重连核心</strong>：引导规则挂在核心的出站/入站上，
-          没法热加，所以最后那一步必须重连一次（和上面意图规则的「应用」一样）。
+          顺序是<strong>装证书（会顺手起代理） → 重连核心</strong>：引导规则挂在核心的
+          出站/入站上，没法热加，所以最后那一步必须重连一次（和上面意图规则的「应用」一样）。
+          「应用（起/停代理）」是<strong>另一件事</strong>——它只起停本地代理，不会重连核心。
           证书没装时<strong>不会</strong>下发引导规则 —— 否则那几个域名的 HTTPS 会撞上一张
           没人信的证书，那就不是过滤而是把网站搞坏。
         </p>
@@ -603,8 +905,18 @@ export default function Intent() {
       <section className="card">
         <h2>审计（最近 200 条）</h2>
         <p className="note">
-          每一条判决都可复查：结论、原因、分数、<strong>是否真的变成了规则</strong>。
-          `applied=false` 表示当时在演练模式或还没下发。
+          每一条判决都可复查：结论、原因、分数、<strong>这条判决会不会构成一条拦截规则</strong>。
+          {/*
+            U2：这一列（`applied`）的判据是 `!drill && verdict.is_block()`
+            （`crates/xt-intent/src/engine.rs:444-446`），它**只**说明「判定那一刻这条
+            判决构成规则」，与「规则有没有被下发到正在跑的核心」**完全无关**。
+            原来的页面注释说「applied=false 可能是还没下发」—— 那是反的：
+            后端永远不会因为「还没下发」把 applied 置 false。列名「生效」会让用户
+            以为这些域名当下正在被黑洞掉。
+          */}
+          拦截判决里的「会」= 它会成为一条拦截规则；演练模式下一律是
+          <strong>不会</strong>（只记录）。<strong>「会」不代表规则已经下发到核心</strong>
+          —— 规则只在核心启动时下发，所以还要看上面的「应用（会重连一次）」。
         </p>
         {audit.length === 0 ? (
           <p className="empty">还没有判决记录。</p>
@@ -617,7 +929,8 @@ export default function Intent() {
                 <th>结论</th>
                 <th>原因</th>
                 <th>广告概率</th>
-                <th>生效</th>
+                {/* U2：原来的表头是「生效」——它会读成「正在被拦」。 */}
+                <th>会生成规则</th>
                 <th />
               </tr>
             </thead>
@@ -627,23 +940,40 @@ export default function Intent() {
                   <td className="mono">{fmtTime(row.ts_unix)}</td>
                   <td className="mono">{row.host}</td>
                   <td>
-                    <span
-                      className={
-                        row.outcome === "block"
-                          ? "badge badge--ok"
-                          : row.outcome === "allow"
-                            ? "badge"
-                            : "badge badge--unknown"
-                      }
-                    >
-                      {OUTCOME_LABEL[row.outcome] ?? row.outcome}
-                    </span>
+                    {/*
+                      U2 + U11：演练模式下的「拦截」原来是一个**绿色**徽章，
+                      而绿色在这套配色里 = 已完成/受保护（`topbarStatus.ts:34-43`）。
+                      它旁边那一列还写着「否」—— 同屏两句话互相否定。
+                      现在：没构成规则时用中性徽章，并明说「本该拦截（演练）」。
+                    */}
+                    {row.outcome === "block" && !row.applied ? (
+                      <span className="badge badge--unknown">本该拦截（演练）</span>
+                    ) : (
+                      <span
+                        className={
+                          row.outcome === "block"
+                            ? "badge badge--ok"
+                            : row.outcome === "allow"
+                              ? "badge"
+                              : "badge badge--unknown"
+                        }
+                      >
+                        {OUTCOME_LABEL[row.outcome] ?? row.outcome}
+                      </span>
+                    )}
                   </td>
                   <td>{row.reason ?? "—"}</td>
                   <td className="mono">
                     {row.ads_intent === null ? "—" : row.ads_intent.toFixed(2)}
                   </td>
-                  <td>{row.applied ? "是" : "否"}</td>
+                  {/* 「没有构成规则」有两种完全不同的原因，不许混成一句。 */}
+                  <td>
+                    {row.applied
+                      ? "会"
+                      : row.outcome === "block"
+                        ? "不会（演练模式）"
+                        : "不会（不是拦截判决）"}
+                  </td>
                   <td>
                     <button
                       className="btn btn--ghost"

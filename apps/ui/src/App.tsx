@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, recoveryView } from "./ipc";
+import {
+  buttonNameNote,
+  failureActions,
+  stripMarkup,
+  type FailureActionId,
+} from "./failure";
 // 状态语义的**唯一真源**（task-45 建、task-47 合并）：顶栏的线/点与仪表盘的状态区
 // 都从 `appStatus` 取，任何地方再抄一份判断都是把同一族「假陈述」种回去。
 import {
@@ -85,7 +91,7 @@ function Shell({ initialView }: { initialView?: View }) {
   // 要跳到的设置分节。只有「从别处带着目标进设置」时才非空（深链、或状态卡片
   // 上的按钮）；用户自己点侧栏进设置时是 null，设置页就按记忆/默认分类走。
   const [settingsTarget, setSettingsTarget] = useState<string | null>(() => initialSectionFromHash());
-  const { snapshot, error, clearError, recoveredAttempt, dismissRecovered } = useStore();
+  const { snapshot, error, errorSteps, clearError, recoveredAttempt, dismissRecovered } = useStore();
 
   // 入参用 string 而不是 View：Dashboard 的 onNavigate 契约就是 `(view: string)`，
   // 这里收窄一次即可；等它加上可选的 target 参数（状态卡片直接指到某个设置分节）
@@ -99,6 +105,29 @@ function Shell({ initialView }: { initialView?: View }) {
   useEffect(() => {
     if (view !== "settings") setSettingsTarget(null);
   }, [view]);
+
+  const running = snapshot?.runtime.running ?? false;
+  /** 失败横幅上的动作与「按钮现在叫什么」（都由 `failure.ts` 推，见那里）。 */
+  const errorActions = error ? failureActions(error) : [];
+  const errorNameNote = error ? buttonNameNote(error, running) : null;
+
+  /**
+   * 失败横幅上的动作（U3）。
+   *
+   * 「重装助手」**只做导航、不静默执行**：`install_helper` 是特权操作
+   * （要一次管理员授权），和设置页那颗按钮同一个口径 —— 由用户点。
+   * 目标带分节（`set-helper`），否则会落到设置页的默认分类上看不到它。
+   */
+  const onFailureAction = (id: FailureActionId) => {
+    if (id === "reinstall-helper") {
+      setView("settings");
+      setSettingsTarget("set-helper");
+    } else if (id === "change-node") {
+      setView("nodes");
+    } else {
+      setView("logs");
+    }
+  };
 
   const nodeCount = snapshot?.nodes.length ?? 0;
   const subCount = snapshot?.subscriptions.length ?? 0;
@@ -159,7 +188,40 @@ function Shell({ initialView }: { initialView?: View }) {
           {error && (
             <div className="banner banner--error">
               <span>⚠︎</span>
-              <div style={{ flex: 1 }}>{error}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {/*
+                 * `stripMarkup` + `.banner__reason`：后端文案是多行、带 `**` 的
+                 * 工程散文（`supervisor.rs:459-462`）。以前它被塞进一个普通 div：
+                 * 换行塌成一个空格、`**已在接管默认路由之前中止**` 带着星号显示，
+                 * 用户会以为是乱码或渲染 bug。
+                 */}
+                <div className="banner__reason">{stripMarkup(error)}</div>
+                {/*
+                 * 「下一步」必须和错误同屏。只给一个错误码（或一句「失败了」）
+                 * 等于把用户留在原地：他不知道该换节点、重装助手还是看日志。
+                 * 原因与动作**都只**由 `failure.ts` 推出（同一套线索），
+                 * 这里不另写一份判断。
+                 */}
+                {errorSteps.length > 0 && (
+                  <div className="banner__steps">下一步：{errorSteps.join("；")}</div>
+                )}
+                {/*
+                 * 文案可能叫用户点「断开」，而这一刻核心没在跑、按钮写的是「连接」
+                 * （U8）。后端文案不归前端改，我们只把**按钮现在叫什么**说清楚。
+                 */}
+                {errorNameNote && <div className="banner__steps">{errorNameNote}</div>}
+                <div className="banner__actions">
+                  {errorActions.map((a) => (
+                    <button
+                      key={a.id}
+                      className="btn btn--ghost"
+                      onClick={() => onFailureAction(a.id)}
+                    >
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <button className="btn btn--ghost" onClick={clearError}>
                 关闭
               </button>
@@ -225,6 +287,12 @@ export function TopBar({ view }: { view: View }) {
     // 端口只用于「系统代理」模式的文案；快照缺席时给 null（那就一个数字都不写）。
     socksPort: snapshot?.settings.socks_port ?? null,
     httpPort: snapshot?.settings.http_port ?? null,
+    /*
+     * 快照**还没到**与「快照说没有核心」是两件事：前者是「不知道」，后者才是
+     * 「未找到核心」。旧写法用 `?? null` 把前者压成后者 —— 冷启动那一瞬顶栏
+     * 会红着说「未找到核心」，而其实只是一个还没回来的 IPC。
+     */
+    snapshotLoaded: snapshot !== null,
   });
   const socksPort = snapshot?.settings.socks_port ?? null;
   /** 只有在「核心运行中 + 系统代理模式」时才有内容（task-72，见 `systemProxyBadge`）。 */

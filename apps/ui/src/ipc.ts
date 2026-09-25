@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isObject } from "./eventGuards";
+import { humanError } from "./failure";
 import type { IncidentPreview, IncidentUpload } from "./incident";
 import type {
   GlobeData,
@@ -392,17 +393,19 @@ export function subscribe(handlers: {
 }
 
 /**
- * 把后端返回的错误统一成可显示的文本。
+ * 把后端返回的错误统一成**人能读**的文本。
  *
- * 后端命令的 `Err` 已经是给用户看的中文消息，这里只兜住少数几种
- * 非字符串情况（例如 IPC 序列化失败）。
+ * 后端命令的 `Err` 已经是给用户看的中文消息（`Result<_, String>`），
+ * 但 `invoke` 的 reject 载荷**不保证**是字符串（序列化失败、桥接层包装、
+ * 命令不存在…）。旧实现最后两条兜底是
+ * `JSON.stringify(e)` → `"{}"` 与 `catch { String(e) }` → `"[object Object]"`，
+ * 也就是用户会看到一句既不是原因也不是办法的乱码 —— 而且它看起来**像**一个
+ * 结论，用户没法判断「界面是不是根本没拿到错误」。
+ *
+ * 现在把这件事交给 `failure.ts::humanError`：能读出人话就读，读不出来就
+ * **明说读不出来**（`null` / `{}` / 循环引用都有各自的说法）。
+ * 「下一步动作」在 `failure.ts::nextSteps`，两者都不解析事件 notice。
  */
 export function errorText(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e instanceof Error) return e.message;
-  try {
-    return JSON.stringify(e);
-  } catch {
-    return String(e);
-  }
+  return humanError(e);
 }

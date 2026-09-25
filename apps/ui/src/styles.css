@@ -606,6 +606,42 @@ input[type="checkbox"] {
   word-break: break-word;
 }
 
+/* 崩溃证据指引（panic.log）：常驻一行，不抢日志列表的高度。 */
+.logs-panic {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  word-break: break-word;
+}
+
+/* 全局错误横幅里的原因：后端文案是多行散文，换行必须保留（不能塌成空格）。 */
+.banner__reason {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 全局错误横幅里的「下一步」：与原因同屏，但压一级（原因是事实、动作是建议）。 */
+.banner__steps {
+  margin-top: 4px;
+  opacity: 0.85;
+}
+
+/* 失败横幅上的动作按钮：行内一组，别把横幅撑成两行。 */
+.banner__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
 /* ---------------------------------------------------------------- 日志 */
 
 .logs {

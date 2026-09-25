@@ -28,6 +28,7 @@
  */
 
 import type { RecoveryView } from "./ipc";
+import { nextSteps } from "./failure";
 import type { ProxyMode } from "./types";
 
 /**
@@ -95,6 +96,16 @@ export interface StatusInput {
   socksPort: number | null;
   /** 本地 HTTP 入站端口（`settings.http_port`）；缺席时同样不写数字。 */
   httpPort: number | null;
+  /**
+   * 快照**是否已经拿到**（`store.snapshot !== null`）。
+   *
+   * 为什么要单独一个字段：`corePath` 缺席有两种**完全相反**的来源 ——
+   * ① 快照还没回来（**不知道**）；② 快照回来了、`core.path === null`
+   * （**确实找不到核心**）。旧写法把 `snapshot?.core.path ?? null` 压成同一个
+   * `null`，于是冷启动那一瞬顶栏会红着说「未找到核心」，用户看到的是故障、
+   * 其实只是一个还没回来的 IPC。默认 `true` = 老调用方语义不变。
+   */
+  snapshotLoaded?: boolean;
 }
 
 export interface AppStatus {
@@ -156,6 +167,17 @@ function baseStatus(input: StatusInput): AppStatus {
   const { mode, running, routesCommitted, lastError, corePath, recovery, socksPort, httpPort } =
     input;
 
+  // 0) 快照还没到 ⇒ **什么都不知道**。既不能说「未找到核心」（那是故障），
+  //    更不能是绿色（那是「已受保护」）。「不知道」只能显示成「不知道」。
+  if (input.snapshotLoaded === false) {
+    return {
+      tone: "off",
+      label: "正在读取状态…",
+      sub: null,
+      detail: "还没有拿到后端状态 —— 现在无法判断流量是否受保护（这不等于「未找到核心」）",
+    };
+  }
+
   // 1) 核心可执行文件都不在 —— 没有任何「受保护」的可能。
   if (corePath === null) {
     return {
@@ -199,12 +221,18 @@ function baseStatus(input: StatusInput): AppStatus {
   }
 
   // 5a) 上次运行出错且现在没在跑 —— 如实说故障，不装成普通的「未连接」。
+  //
+  //     并且**同屏给出下一步**：连接失败时用户看到的不该只是一个错误码。
+  //     动作由 `failure.ts::nextSteps` 按后端自己的文案推（换节点 / 重装助手 /
+  //     看日志…），这里只负责把它接到状态里。
   if (lastError !== null && !running) {
+    const steps = nextSteps(lastError);
+    const advice = steps.length > 0 ? `下一步：${steps.join("；")}` : null;
     return {
       tone: "failed",
       label: "核心未运行",
-      sub: lastError,
-      detail: `核心未运行 —— ${lastError}`,
+      sub: advice ? `${lastError} —— ${advice}` : lastError,
+      detail: advice ? `核心未运行 —— ${lastError}；${advice}` : `核心未运行 —— ${lastError}`,
     };
   }
 
