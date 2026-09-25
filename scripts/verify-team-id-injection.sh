@@ -17,25 +17,31 @@
 #       `RequireSignature`。发版流水线在打包之后跑这一条（对用户拿到的那份 helper）。
 #
 #   ./scripts/verify-team-id-injection.sh --evidence
-#       跑出五段**可复算**的绿/红证据（会编译 xt-helper，冷启动约 1–2 分钟）：
-#         E1 修前可复现：未注入 ⇒ 既有测试打印"当前构建未注入…"标记 ⇒ InsecureAllowAny
-#         E1b 空串陷阱：`XRAYTUN_TEAM_ID=`（CI 里 vars 未定义的形态）同样开门
-#         E2 修后（策略 refuse-all）：注入哨兵 ⇒ 标记**不出现** ⇒ RequireSignature ⇒ 拒绝一切非 root 特权操作
-#         E3 修后（策略 team-id）：注入真 Team ID ⇒ 产物带着它，且既有签名门测试全绿
-#         E4 反向敏感性：判据/断言在缺注入时必须变红（证明不是"照单全收"）
-#         E5 扩展点自证：选未实现的 `cdhash` 策略必须**明确失败**（不静默通过）
+#       跑出五段**可复算**的绿/红证据（会编译 xt-helper；release 冷启动几分钟）：
+#         E1  新契约（task-17 后）：**未注入 ⇒ 绝不宽松**（release）：装了 App 走 cdhash 绑定，
+#             没装 App 走拒绝服务；且 release 产物里 grep 不到 debug 专用的宽松标识
+#         E1b 空串同样不再开门：`XRAYTUN_TEAM_ID=`（CI 里 vars 未定义的形态）与"未注入"同一结论
+#         E1c 反向敏感性：宽松标识**只在 debug 存在** ⇒ "release 里没有它"是 cfg 门做到的，不是空话
+#         E2  注入哨兵 ⇒ `require-signature`（fail closed：要求串匹配不上任何签名 ⇒ 一律拒绝）
+#         E3  注入真 Team ID ⇒ `require-signature`；产物带着该值，且 xt-helper 全量测试全绿
+#         E4  cdhash 绑定（第三条策略）在产物层面可断言
+#         E5  判据/断言不许「照单全收」（空串/未设/形状不合法/未知策略一律非 0）
+#
+#       ⚠️ **契约在 task-17 之后翻转了**：旧版 E1/E1b 断言的是"未注入/空串 ⇒ 走到
+#       `InsecureAllowAny`（宽松）"—— 那是在**期待漏洞存在**，是最该被禁止的假绿方向。
+#       现在断言的是"未注入/空串 ⇒ 绝不宽松"。反向敏感性（把判据改回旧契约必须变红）：
+#         sed 's|^  NONLOOSE_OK_MARKS=.*|  NONLOOSE_OK_MARKS="$MARK_INSECURE_DEBUG"|' \
+#           scripts/verify-team-id-injection.sh > /tmp/old-contract.sh && bash /tmp/old-contract.sh --evidence
 #
 # # 三条策略的扩展点（**加第三态时只改这一处**）
 #
 # F1 的修复按可用凭据分三条形态；产物断言是**策略感知**的：
 #   · `team-id`    —— 注入真实 Apple Team ID（10 位 [A-Z0-9]）。已实现。
 #   · `refuse-all` —— 显式哨兵（当前无证书时的 fail-closed 形态）。已实现。
-#   · `cdhash`     —— **task-23（backend-2）计划中**：不依赖 Developer ID，把对端 cdhash 与
-#                     已安装 App 可执行文件的 cdhash 逐字节比对（ad-hoc 签名也有 cdhash）。
-#                     它的产物判据需要 backend-2 先定下"二进制里可断言的标识"，
-#                     所以这里先标 `PENDING`：**选中它会明确失败（退出 2），绝不静默通过**。
-# 落地时：在下面 `POLICY_STATUS` 把 `cdhash=pending` 改成 `done`，并在 `policy_assert()`
-# 的 `cdhash)` 分支填上判据（其余代码不用动）。
+#   · `cdhash`     —— 不依赖 Developer ID：比对"对端 cdhash == 已安装 App 可执行文件的 cdhash"
+#                     （ad-hoc 签名也有 cdhash）。task-17 已落地；产物判据 = 带
+#                     `XRAYTUN_HELPER_POLICY=cdhash-binding` + 绑定的 App 路径，且不含 debug 专用标识。
+# 落地时：`POLICY_STATUS` 改状态 + `policy_assert()` 对应分支填判据（其余代码不用动）。
 #
 # 退出码：0 = 通过；1 = 有判据不成立；2 = 用法错误 / 策略未实现；75 = 环境问题（缺工具，不是代码失败）。
 # ---------------------------------------------------------------------------
@@ -57,7 +63,18 @@ POLICY="auto"
 # `<策略>=<done|pending>`，空格分隔。`pending` 表示判据还没定下来（例如 cdhash 需要
 # backend-2 先给出"二进制里可断言的标识"）：选中它会**明确失败**，绝不静默通过。
 # `--static` 会检查这张表本身没写错，防止"加了策略但脚本忘了跟上"。
-POLICY_STATUS="team-id=done refuse-all=done cdhash=pending"
+POLICY_STATUS="team-id=done refuse-all=done cdhash=done"
+
+# 产物里的**策略标识**（由 `crates/xt-helper/src/peer.rs` 的 `PeerPolicy::describe()` 给出，
+# 并在 helper 启动日志里打出来）。用它们就能在**产物**与**运行期**两个层面断言"这一版走哪种策略"。
+# ⚠️ 其中 `insecure-allow-any-debug` 被 `#[cfg(debug_assertions)]` 门住：
+#    release 产物里出现它 = 那道编译期门失效了（这正是要抓的形态）。
+MARK_REQUIRE_SIGNATURE='XRAYTUN_HELPER_POLICY=require-signature'
+MARK_CDHASH='XRAYTUN_HELPER_POLICY=cdhash-binding'
+MARK_REFUSE='XRAYTUN_HELPER_POLICY=refuse-service'
+MARK_INSECURE_DEBUG='XRAYTUN_HELPER_POLICY=insecure-allow-any-debug'
+# helper 用来做 cdhash 绑定的那个路径（`peer.rs` 的 `INSTALLED_APP_BINARY`）。
+INSTALLED_APP_BINARY='/Applications/XrayTun.app/Contents/MacOS/xraytun-desktop'
 
 policy_status() { # <策略> → done | pending | unknown
   local p="$1" e
@@ -75,20 +92,59 @@ policy_of_value() { # 由注入值推导策略（保持与旧调用兼容）
   esac
 }
 
-# 产物断言：每种策略一行判据。**cdhash 落地时只改这里**。
+# 本机「未注入 Team ID 时应该落到哪种非宽松策略」：装了 App ⇒ cdhash 绑定；没装 ⇒ 拒绝服务。
+# 期望值**按环境算出来**，不是写死的 —— 否则在没有 App 的机器上会给出假红。
+expected_nonloose_policy() {
+  if [ -f "$INSTALLED_APP_BINARY" ]; then printf 'cdhash-binding\n'; else printf 'refuse-service\n'; fi
+}
+
+# 产物里是否有某个策略标识。直接对文件 grep（无管道）—— pipefail 下 `strings | grep -q`
+# 会把命中判成失败。
+artifact_has_mark() { # <文件> <标识>
+  LC_ALL=C grep -qF -- "$2" "$1" 2>/dev/null
+}
+
+# 跑一下 helper 读它**启动日志**里的策略标识（stderr，`XRAYTUN_LOG=info`）。
+# 为什么要真跑一次：产物里三个标识的**常量**都会在（`describe()` 的 match 分支都编进去），
+# 所以 `strings` 证明不了"这一版选了哪条"；只有启动日志能。
+# 安全性：`XRAYTUN_ALLOW_NONROOT=1` + 临时 socket 路径；`recover_from_crash()` 在本机是 no-op
+# （`/Library/Application Support/XrayTun/helper-session.json` 不存在，实测），
+# 且我们不发送任何请求 ⇒ 不会碰系统路由 / DNS。
+observe_policy() { # <helper 二进制> <env 赋值...> → stdout: 策略标识（可能为空）
+  local helper="$1"; shift
+  local log sock pid
+  log="$(mktemp "${TMPDIR:-/tmp}/xraytun-tid-policy.XXXXXX.log")"
+  sock="$(mktemp -u "${TMPDIR:-/tmp}/xraytun-tid-probe.XXXXXX.sock")"
+  env "$@" XRAYTUN_ALLOW_NONROOT=1 XRAYTUN_LOG=info \
+    "$helper" run --socket "$sock" >"$log" 2>&1 &
+  pid=$!
+  sleep 2
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$sock"
+  # grep -o 读全量、不提前退出（无 SIGPIPE 风险）
+  grep -o 'XRAYTUN_HELPER_POLICY=[a-z-]*' "$log" 2>/dev/null | head -1
+  rm -f "$log"
+}
+
+# 产物断言：每种策略一行判据。
 # 返回 0=通过 1=不通过 2=未实现/未知。
 policy_assert() { # <策略> <helper> <期望值>
   local policy="$1" helper="$2" expect="$3"
-  # ⚠️ 直接对文件 grep（不接管道）：本脚本 `set -o pipefail`，`strings … | grep -q`
-  #    在命中时会让上游收到 SIGPIPE(141)，把"命中"判成"失败"（详见 assert 模式注释）。
   case "$policy" in
     team-id | refuse-all)
+      # 注入值是编译期字面量 ⇒ 出现在二进制里 = `option_env!` 拿到的是 `Some(非空)`
+      # ⇒ 走 `RequireSignature`（不是宽松）。
       LC_ALL=C grep -qF -- "$expect" "$helper" 2>/dev/null
       ;;
     cdhash)
-      # PENDING（task-23）：ad-hoc 签名也有 cdhash，策略是"对端 cdhash == 已安装 App 的 cdhash"。
-      # 落地后在这里填判据，例如：断言二进制里带着绑定标识 / 绑定的可执行文件路径。
-      return 2
+      # cdhash 绑定（task-17）：不依赖证书，比对"对端 cdhash == 已安装 App 的 cdhash"。
+      # 产物判据 = 绑定的那个 App 可执行文件路径 + cdhash 策略标识都在二进制里，
+      # 且 **release 产物里不许出现 debug 专用标识**（后者是 cfg 门失效的形态）。
+      artifact_has_mark "$helper" "$MARK_CDHASH" || return 1
+      artifact_has_mark "$helper" "$INSTALLED_APP_BINARY" || return 1
+      if ! artifact_has_mark "$helper" "$MARK_INSECURE_DEBUG"; then :; else return 1; fi
+      return 0
       ;;
     *)
       return 2
@@ -333,104 +389,140 @@ if [ "$MODE" = "evidence" ]; then
   mkdir -p "$EVID_DIR"
   echo "[证据] CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
   echo "[证据] 判据来源 git rev: $(git -C "$ROOT" rev-parse --short HEAD)  哨兵=$XRAYTUN_TEAM_ID_SENTINEL"
-  HELPER_BIN="$CARGO_TARGET_DIR/debug/xraytun-helper"
-  TEST='build_env_policy_never_silently_trusts_everything'
-  # peer.rs 只在 InsecureAllowAny 分支打印这句（`crates/xt-helper/src/peer.rs:452`）。
-  MARK='当前构建未注入 XRAYTUN_TEAM_ID'
+  HELPER_RELEASE="$CARGO_TARGET_DIR/release/xraytun-helper"
+  HELPER_DEBUG="$CARGO_TARGET_DIR/debug/xraytun-helper"
+  FAKE_REAL='ABCDE12345'
 
-  run_policy_test() { # <显示名> <env 赋值...>
-    local label="$1"; shift
-    local out
-    out="$(cd "$ROOT" && env "$@" cargo test -q -p xt-helper "$TEST" -- --nocapture 2>&1)"
-    # 用 `case` 而不是 `printf … | grep -q`：后者在 pipefail 下会因 SIGPIPE 假红
-    # （这条判据要是假红，"未注入 ⇒ 开门"就会被误报成"门是好的"，最危险的方向）。
-    case "$out" in
-      *"$MARK"*) echo "CHOSE_INSECURE_ALLOW_ANY" ;;
-      *) echo "CHOSE_REQUIRE_SIGNATURE" ;;
-    esac
-  }
+  # ---------------------------------------------------------------------------
+  # E1/E1b 的**唯一判据**：未注入 / 空串时**允许**出现的策略标识。
+  #
+  # **契约在 task-17 后翻转了**（这里刻意只留一行常量，便于做反向敏感性突变）：
+  #   · 旧契约（P0-1 时代）：未注入/空串 ⇒ `InsecureAllowAny`（信任任何对端）—— 那是**漏洞本身**；
+  #     断言"宽松分支被走到"等于**期待漏洞存在**，是最该被禁止的假绿方向。
+  #   · 新契约（`crates/xt-helper/src/peer.rs` 的 `policy_for` + `#[cfg(debug_assertions)]` 门）：
+  #     未注入/空串 ⇒ 装了 App 走 `cdhash-binding`（对端 cdhash 必须等于已安装 App 的），
+  #     没装 App 走 `refuse-service`（拒绝一切非 root 特权操作）；`InsecureAllowAny` 只在 debug 存在。
+  # 所以断言的是"**绝不宽松**"，而不是"宽松会被走到"。
+  #
+  # 反向敏感性（可复算，我在提交说明里贴了红证）：
+  #   sed 's|^  NONLOOSE_OK_MARKS=.*|  NONLOOSE_OK_MARKS="$MARK_INSECURE_DEBUG"|' \
+  #     scripts/verify-team-id-injection.sh > /tmp/old-contract.sh && bash /tmp/old-contract.sh --evidence
+  #   ⇒ E1/E1b 必须变红（把判据改回旧契约 = 期待漏洞，必须失败）。
+  # ---------------------------------------------------------------------------
+  NONLOOSE_OK_MARKS="$MARK_CDHASH $MARK_REFUSE"
 
-  # 跑一次真正的 release-shaped 构建，**不吞退出码**。
+  # 跑一次真正的构建，**不吞退出码**。
   # 第一版把 `cargo build` 接进管道又只 `tail -3`，构建失败时断言只说"产物里找不到值"——
   # 把"没编出来"和"编出来但没注入"混成一句话。构建失败必须在这里就红，并带上日志尾巴。
-  build_helper() { # <显示名> <env 赋值...>
-    local label="$1"; shift
-    local log="$EVID_DIR/build-$label.log"
-    if ! (cd "$ROOT" && env "$@" cargo build -p xt-helper) >"$log" 2>&1; then
-      bad "构建失败（${label}）—— 见 $log"
+  build_helper() { # <显示名> <release|debug> <env 赋值...>
+    local label="$1" profile="$2"; shift 2
+    local log="$EVID_DIR/build-$label.log" relflag=""
+    [ "$profile" = "release" ] && relflag="--release"
+    # shellcheck disable=SC2086  # $relflag 是固定的字面量（"--release" 或空），不是路径
+    if ! (cd "$ROOT" && env "$@" cargo build $relflag -p xt-helper) >"$log" 2>&1; then
+      bad "构建失败（${label}/${profile}）—— 见 $log"
       tail -5 "$log" | sed 's/^/      /' >&2
       return 1
     fi
-    if [ ! -f "$HELPER_BIN" ]; then
-      bad "构建成功但没有 $HELPER_BIN —— 路径假设错了（先查 CARGO_TARGET_DIR）"
+    local bin="$CARGO_TARGET_DIR/$profile/xraytun-helper"
+    if [ ! -f "$bin" ]; then
+      bad "构建成功但没有 $bin —— 路径假设错了（先查 CARGO_TARGET_DIR / profile）"
       return 1
     fi
-    ok "构建成功（${label}）：$(basename "$HELPER_BIN") $(wc -c <"$HELPER_BIN" | tr -d ' ') 字节"
+    ok "构建成功（${label}/${profile}）：$(basename "$bin") $(wc -c <"$bin" | tr -d ' ') 字节"
     return 0
   }
 
+  # 断言"这个产物在未注入/空串下选的是非宽松策略"，并顺带钉住 release 里没有宽松标识。
+  check_nonloose() { # <显示名> <helper> <env 赋值...>
+    local label="$1" helper="$2"; shift 2
+    local want got
+    want="$(expected_nonloose_policy)"
+    got="$(observe_policy "$helper" "$@")"
+    case " $NONLOOSE_OK_MARKS " in
+      *" $got "*)
+        ok "${label}：策略 = ${got}（非宽松；本机装了 App 时期望 ${want}）" ;;
+      *)
+        bad "${label}：策略 = ${got:-（启动日志里没有策略标识）}，不在允许集 {${NONLOOSE_OK_MARKS# }} 里" \
+            "⇒ 未注入/空串**又**变成宽松（P0-1 回归）或契约未落地" ;;
+    esac
+    if artifact_has_mark "$helper" "$MARK_INSECURE_DEBUG"; then
+      bad "${label}：release 产物里出现了 ${MARK_INSECURE_DEBUG} ⇒ cfg 门失效（InsecureAllowAny 不该被编进 release）"
+    else
+      ok "${label}：release 产物里没有 ${MARK_INSECURE_DEBUG}（编译期就不存在这条策略）"
+    fi
+  }
+
   echo
-  echo "== E1 修前可复现：未注入 ⇒ InsecureAllowAny（信任任何对端）=="
-  got="$(run_policy_test '未注入' -u XRAYTUN_TEAM_ID)"
-  if [ "$got" = "CHOSE_INSECURE_ALLOW_ANY" ]; then
-    ok "未注入时走到宽松分支（这就是 F1；修前 release.yml 从不注入）"
+  echo "== E1 新契约：未注入 ⇒ **绝不宽松**（release）=="
+  build_helper 'release-未注入' release -u XRAYTUN_TEAM_ID && check_nonloose '未注入' "$HELPER_RELEASE" -u XRAYTUN_TEAM_ID
+
+  echo
+  echo "== E1b 空串不再开门：XRAYTUN_TEAM_ID= （CI 里 vars 未定义的形态）=="
+  build_helper 'release-空串' release XRAYTUN_TEAM_ID= && check_nonloose '空串' "$HELPER_RELEASE" XRAYTUN_TEAM_ID=
+
+  echo
+  echo "== E1c 反向敏感性：宽松标识**只在 debug 存在**（否则 E1 的"没有它"就是空话）=="
+  build_helper 'debug-未注入' debug -u XRAYTUN_TEAM_ID
+  if artifact_has_mark "$HELPER_DEBUG" "$MARK_INSECURE_DEBUG"; then
+    ok "debug 产物里有 ${MARK_INSECURE_DEBUG} ⇒ 标识机制是活的；release 里没有它**是 cfg 门做到的**，不是「这个标识从不出现」"
   else
-    bad "未注入时竟然没走宽松分支 ⇒ 复现前提变了，先查清楚"
+    bad "debug 产物里也没有 ${MARK_INSECURE_DEBUG} ⇒ E1 的「release 里没有它」可能是空话，先查 describe() 是否还被引用"
   fi
 
   echo
-  echo "== E1b 空串陷阱：XRAYTUN_TEAM_ID= （CI 里 vars 未定义的形态）=="
-  got="$(run_policy_test '空串' XRAYTUN_TEAM_ID=)"
-  if [ "$got" = "CHOSE_INSECURE_ALLOW_ANY" ]; then
-    ok "空串同样开门 ⇒ 所以判据把 empty 当**错误**，绝不猜默认值（这正是 CI 上最容易踩的形态）"
-  else
-    bad "空串没有开门？与 peer.rs 的判据（Some(team) && !team.is_empty()）不符，先查清楚"
-  fi
-
-  echo
-  echo "== E2 修后：注入哨兵 ⇒ RequireSignature（fail closed，拒绝一切非 root 特权操作）=="
+  echo "== E2 注入哨兵 ⇒ RequireSignature（fail closed，拒绝一切非 root 特权操作）=="
   if XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL" team_id_resolve --into /dev/null 2>/dev/null; then
     ok "判据接受显式哨兵（并把后果写在 stderr 上，不静默）"
   else
     bad "判据拒绝了哨兵 —— 那 fail-closed 形态就没有合法入口了"
   fi
-  got="$(run_policy_test '哨兵' XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL")"
-  if [ "$got" = "CHOSE_REQUIRE_SIGNATURE" ]; then
-    ok "注入哨兵后**不再**走宽松分支 ⇒ 策略是 RequireSignature{OU=哨兵}，匹配不上任何签名 ⇒ 一律拒绝"
+  build_helper 'release-哨兵' release XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL"
+  got="$(observe_policy "$HELPER_RELEASE" XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL")"
+  if [ "$got" = "$MARK_REQUIRE_SIGNATURE" ]; then
+    ok "启动日志：策略 = ${got}（植入哨兵 ⇒ 要求串匹配不上任何签名 ⇒ 一律拒绝）"
   else
-    bad "注入哨兵后仍然走了宽松分支 ⇒ 注入没生效（门还是空的）"
+    bad "注入哨兵后策略 = ${got:-（空）}，期望 ${MARK_REQUIRE_SIGNATURE}"
   fi
-  build_helper '哨兵' XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL"
-  if XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL" "$0" --assert-helper "$HELPER_BIN" --expect "$XRAYTUN_TEAM_ID_SENTINEL" >/dev/null; then
-    ok "产物断言：哨兵形态的 helper 里带着哨兵 ⇒ 编译期拿到了值"
+  if XRAYTUN_TEAM_ID="$XRAYTUN_TEAM_ID_SENTINEL" "$0" --assert-helper "$HELPER_RELEASE" --expect "$XRAYTUN_TEAM_ID_SENTINEL" >/dev/null; then
+    ok "产物断言：release helper 里带着哨兵字面量 ⇒ 编译期拿到了值"
   else
-    bad "产物断言失败：哨兵形态的 helper 里没有哨兵"
+    bad "产物断言失败：release helper 里没有哨兵"
   fi
 
   echo
-  echo "== E3 注入真实 Team ID ⇒ 产物带着它；签名门拒绝不受信任的对端 =="
-  FAKE_REAL='ABCDE12345'
-  got="$(run_policy_test '真值' XRAYTUN_TEAM_ID="$FAKE_REAL")"
-  if [ "$got" = "CHOSE_REQUIRE_SIGNATURE" ]; then
-    ok "注入 ${FAKE_REAL} 后走 RequireSignature（要求串 = anchor apple generic + com.xraytun.desktop + OU=${FAKE_REAL}）"
+  echo "== E3 注入真实 Team ID ⇒ 产物带着它；且 helper 全量测试全绿 =="
+  build_helper 'release-真值' release XRAYTUN_TEAM_ID="$FAKE_REAL"
+  got="$(observe_policy "$HELPER_RELEASE" XRAYTUN_TEAM_ID="$FAKE_REAL")"
+  if [ "$got" = "$MARK_REQUIRE_SIGNATURE" ]; then
+    ok "启动日志：策略 = ${got}（要求串 = anchor apple generic + com.xraytun.desktop + OU=${FAKE_REAL}）"
   else
-    bad "注入真值后仍走宽松分支"
+    bad "注入 ${FAKE_REAL} 后策略 = ${got:-（空）}，期望 ${MARK_REQUIRE_SIGNATURE}"
   fi
-  build_helper '真值' XRAYTUN_TEAM_ID="$FAKE_REAL"
-  if XRAYTUN_TEAM_ID="$FAKE_REAL" "$0" --assert-helper "$HELPER_BIN" --expect "$FAKE_REAL" >/dev/null; then
-    ok "产物断言：helper 里带着 $FAKE_REAL"
+  if XRAYTUN_TEAM_ID="$FAKE_REAL" "$0" --assert-helper "$HELPER_RELEASE" --expect "$FAKE_REAL" >/dev/null; then
+    ok "产物断言：helper 里带着 ${FAKE_REAL}"
   else
-    bad "产物断言失败：helper 里没有 $FAKE_REAL"
+    bad "产物断言失败：helper 里没有 ${FAKE_REAL}"
   fi
   # 用 cargo 自己的退出码（权威），不再 `… | tail | grep -q`（pipefail 下同样会假红）。
   if (cd "$ROOT" && XRAYTUN_TEAM_ID="$FAKE_REAL" cargo test -q -p xt-helper >"$EVID_DIR/tests-$FAKE_REAL.log" 2>&1); then
-    ok "xt-helper 全量测试在注入态下全绿（含 LOCAL_PEERTOKEN=0x006 门：拒绝不受信任的二进制与真 socket 对端）"
+    ok "xt-helper 全量测试全绿（含 LOCAL_PEERTOKEN=0x006 门、cdhash 绑定、空串当未配置、cfg 门）"
   else
-    bad "xt-helper 测试在注入态下没有全绿"
+    bad "xt-helper 测试没有全绿（见 $EVID_DIR/tests-$FAKE_REAL.log）"
   fi
 
   echo
-  echo "== E4 反向敏感性（判据/断言不许"照单全收"）=="
+  echo "== E4 cdhash 绑定（第三条策略）在产物上可断言 =="
+  # 未注入 + 本机装了 App ⇒ 期望 cdhash-binding（E1 已经断言过运行期标识）；这里断言产物层面。
+  if env -u XRAYTUN_TEAM_ID "$0" --assert-helper "$HELPER_RELEASE" \
+       --expect "$XRAYTUN_TEAM_ID_SENTINEL" --policy cdhash >/dev/null 2>&1; then
+    ok "产物断言 --policy cdhash 通过：release helper 里带着 cdhash 策略标识 + 绑定的 App 路径"
+  else
+    bad "--policy cdhash 断言失败（未注入的 release helper 应带 cdhash-binding 标识与 INSTALLED_APP_BINARY 路径）"
+  fi
+
+  echo
+  echo "== E5 判据/断言不许「照单全收」 =="
   if (XRAYTUN_TEAM_ID= team_id_resolve --into /dev/null) >/dev/null 2>&1; then
     bad "空串竟然被判据接受了 ⇒ 判据是空话"
   else
@@ -446,24 +538,12 @@ if [ "$MODE" = "evidence" ]; then
   else
     ok "形状不合法的值被拒绝（拒绝瞎填）"
   fi
-  build_helper '未注入' -u XRAYTUN_TEAM_ID
-  if env -u XRAYTUN_TEAM_ID "$0" --assert-helper "$HELPER_BIN" --expect "$FAKE_REAL" >/dev/null 2>&1; then
+  if env -u XRAYTUN_TEAM_ID "$0" --assert-helper "$HELPER_RELEASE" --expect "$FAKE_REAL" >/dev/null 2>&1; then
     bad "未注入的 helper 竟然通过了产物断言 ⇒ 断言是空话"
   else
-    ok "未注入的 helper **不通过**产物断言 ⇒ 这条断言真的能拦住 F1 形态"
+    ok "未注入的 helper **不通过**产物断言 ⇒ 这条断言真的能拦住「配置写了、产物是空的」"
   fi
-
-  echo
-  echo "== E5 扩展点自证：未实现的策略必须**明确失败**（task-23 cdhash 落地前的状态）=="
-  if (cd "$ROOT" && XRAYTUN_TEAM_ID="$FAKE_REAL" "$0" --assert-helper "$HELPER_BIN" \
-        --expect "$FAKE_REAL" --policy cdhash) >/dev/null 2>&1; then
-    bad "选 cdhash 策略竟然通过了 ⇒「未实现」被静默当成「通过」，扩展点是假的"
-  else
-    ok "cdhash 策略当前是 pending ⇒ 退出非 0（明确失败），不会被当成通过"
-    ok "落地方式：POLICY_STATUS 改 cdhash=done + policy_assert() 的 cdhash 分支填判据，其余不动"
-  fi
-  if (cd "$ROOT" && XRAYTUN_TEAM_ID="$FAKE_REAL" "$0" --assert-helper "$HELPER_BIN" \
-        --expect "$FAKE_REAL" --policy 不存在的策略) >/dev/null 2>&1; then
+  if "$0" --assert-helper "$HELPER_RELEASE" --expect "$FAKE_REAL" --policy 不存在的策略 >/dev/null 2>&1; then
     bad "未知策略竟然通过了 ⇒ 策略名写错会被静默吞掉"
   else
     ok "未知策略名也明确失败（拼错不会被静默吞掉）"
@@ -471,8 +551,10 @@ if [ "$MODE" = "evidence" ]; then
 
   echo
   echo "[证据] 通过 $pass 项，失败 $fail 项"
-  echo "[证据] **没验证**：真实 App 会被这个门接受这件事 —— 需要 Developer ID 证书"
-  echo "        （本机 security find-identity -v -p codesigning = 0 个身份；CI 只有 Cloudflare secrets），"
-  echo "        所以只验证了「未注入 ⇒ 拒绝」与「不受信任对端被拒」，没有验证「本 App 被接受」。"
+  echo "[证据] 未验证（写清楚，别当成漏做）："
+  echo "        1) 真实 App 被这个门**接受**—— 需要 Developer ID 证书（本机 0 个签名身份、CI 只有"
+  echo "           Cloudflare secrets），所以只验了负方向（拒绝）；"
+  echo "        2) cdhash 绑定的**正方向**（装了 App 时它真的被接受）—— 需要一次真实的 helper 会话，"
+  echo "           本脚本只断言到"策略选对了 + 绑定路径编进了产物"。"
   exit $((fail > 0 ? 1 : 0))
 fi
