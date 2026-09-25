@@ -49,6 +49,12 @@ const CORE_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// 也不能太短：跨国线路首次握手可能要 1 秒以上。
 const REGION_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
+/// 端到端门禁失败后、重试之前的停顿。
+///
+/// 与 `tcp_reachable_with_retry` 的 700ms 同一个量级，理由也同一条：
+/// 刚睡醒 / 刚换网 / 节点侧瞬时丢包时，一次单发探测的失败不等于"这条路走不通"。
+const GATE_RETRY_PAUSE: Duration = Duration::from_millis(500);
+
 /// 预览 TUN 启动将要做的网络改动（**只读，不改动任何东西**）。
 ///
 /// 与 `start()` 走的是同一套计算：探测物理出口 → 解析服务器地址 →
@@ -478,7 +484,48 @@ where
         }
     }
     if !failed.is_empty() {
-        return Err(GateFailure::Probe { failed });
+        // ---- 失败再试一次（**只重试失败的那些**）----
+        //
+        // 理由与 `tcp_reachable_with_retry` 完全一样：这是**单发**探测，而它的结果
+        // 决定"整次启动中止 + 回滚"。现场报错里就出现过"四个目标里只有一个域名目标
+        // 拿到 000"的中止 —— 那可能是节点侧真的解析不了，也可能只是一次抖动。
+        // 重试一次能把两者分开，而且只多花 500ms + 失败目标那一次探测。
+        //
+        // 语义**没有放松**：重试后仍要求每个目标都拿到真实响应才允许 commit。
+        tracing::info!(
+            failed = failed.len(),
+            "端到端门禁首次失败，重试失败的目标一次"
+        );
+        tokio::time::sleep(GATE_RETRY_PAUSE).await;
+        let retry_targets: Vec<String> = failed.iter().map(|f| f.target.clone()).collect();
+        let mut again: tokio::task::JoinSet<(String, String)> = tokio::task::JoinSet::new();
+        for target in retry_targets {
+            let probe_fut = probe(target.clone());
+            again.spawn(async move { (target, probe_fut.await) });
+        }
+        let mut second: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        while let Some(joined) = again.join_next().await {
+            if let Ok((target, http_code)) = joined {
+                second.insert(target, http_code);
+            }
+        }
+        // 按原顺序重建失败清单：第二次拿到响应的就不再算失败。
+        let mut still_failed = Vec::new();
+        for outcome in failed {
+            let code = second.get(&outcome.target).cloned().unwrap_or_default();
+            let retried = ProbeOutcome { target: outcome.target.clone(), http_code: code };
+            if !retried.responded() {
+                still_failed.push(retried);
+            }
+        }
+        if !still_failed.is_empty() {
+            tracing::warn!(
+                failed = still_failed.len(),
+                "端到端门禁重试后仍未通过，放弃接管默认路由"
+            );
+            return Err(GateFailure::Probe { failed: still_failed });
+        }
+        tracing::info!("端到端门禁：首次失败的目标在重试后通过（已继续）");
     }
     commit().await.map_err(|e| GateFailure::Commit(e.message))
 }
@@ -2057,7 +2104,9 @@ mod tests {
         }
         assert_eq!(
             log.seq(),
-            ["probe:overseas", "probe:domestic"],
+            // 末尾那一次是**失败重试**：只重试失败的那个目标（domestic），
+            // 通过的那个绝不重复探测。
+            ["probe:overseas", "probe:domestic", "probe:domestic"],
             "探测不过时 commit 一次都不能被调用（否则默认路由已被接管）"
         );
     }
@@ -2081,7 +2130,11 @@ mod tests {
         .await;
 
         assert!(matches!(res, Err(GateFailure::Probe { .. })), "实际 {res:?}");
-        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic"]);
+        // 末尾那一次是**失败重试**：这个用例里失败的是 overseas，所以重试的也只有它。
+        assert_eq!(
+            log.seq(),
+            ["probe:overseas", "probe:domestic", "probe:overseas"]
+        );
     }
 
     /// 超时（curl 拿不到码 → 空串）也必须算**不通**，且不得接管。
@@ -2109,7 +2162,7 @@ mod tests {
             }
             other => panic!("超时必须 Probe 失败，实际 {other:?}"),
         }
-        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic"]);
+        assert_eq!(log.seq(), ["probe:overseas", "probe:domestic", "probe:domestic"]);
     }
 
     /// 一个目标的响应码不是 204 也算通（403/301 都证明路径真的通）。
@@ -2388,6 +2441,68 @@ mod tests {
             msg.contains("分不开") || msg.contains("边界"),
             "只有一个域名目标 ⇒ 要写出诊断能力的边界，别把猜测说成结论：{msg}"
         );
+    }
+
+    /// **门禁的失败重试**：首次全失败、重试后拿到响应 ⇒ 继续（并只 commit 一次）。
+    ///
+    /// 这条与 `a_single_transient_probe_failure_is_retried_and_does_not_abort`
+    /// 是同一个理由在另一道门禁上的落地：单发探测的一次抖动不该把整次启动打掉。
+    #[tokio::test]
+    async fn the_gate_retries_failed_targets_once_and_continues() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let calls = Arc::new(AtomicU64::new(0));
+        let commits = Arc::new(AtomicU64::new(0));
+        let (c1, c2) = (calls.clone(), commits.clone());
+        let res = verify_paths_then_commit(
+            &["http://a.test/", "http://b.test/"],
+            move |_t: String| {
+                let n = c1.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    // 每个目标：第一次空（没响应），第二次给真实状态码。
+                    if n < 2 {
+                        String::new()
+                    } else {
+                        "204".to_string()
+                    }
+                }
+            },
+            move || {
+                c2.fetch_add(1, Ordering::Relaxed);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(res.is_ok(), "重试后拿到响应就该继续，实际：{res:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 4, "两个目标各探测两次");
+        assert_eq!(commits.load(Ordering::Relaxed), 1, "commit 只能调一次");
+    }
+
+    /// **负对照**：重试后还是拿不到 ⇒ 仍然中止，而且**不许** commit。
+    ///
+    /// 没有这一条，"加了重试"就可能变成"把门禁放宽成不检查"。
+    #[tokio::test]
+    async fn the_gate_still_aborts_when_the_retry_also_fails() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        let calls = Arc::new(AtomicU64::new(0));
+        let commits = Arc::new(AtomicU64::new(0));
+        let (c1, c2) = (calls.clone(), commits.clone());
+        let res = verify_paths_then_commit(
+            &["http://a.test/"],
+            move |_t: String| {
+                c1.fetch_add(1, Ordering::Relaxed);
+                async { String::new() }
+            },
+            move || {
+                c2.fetch_add(1, Ordering::Relaxed);
+                async { Ok(()) }
+            },
+        )
+        .await;
+        assert!(matches!(res, Err(GateFailure::Probe { .. })), "实际：{res:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "只重试一次（不是无限重试）");
+        assert_eq!(commits.load(Ordering::Relaxed), 0, "没通过就绝不许 commit");
     }
 
     /// **反例**：IP 字面量目标也失败了 ⇒ **不许**说「传输通/只有解析坏」。
