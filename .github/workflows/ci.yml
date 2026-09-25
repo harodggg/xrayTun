@@ -25,7 +25,13 @@ jobs:
     name: 构建 / lint / 测试
     runs-on: macos-14
     steps:
+      # `fetch-depth: 0` 是**必需的**，不是优化：`scripts/check.sh` 现在会跑
+      # `scripts/bump-release.py self-test`，而后者的夹具是**真实历史树**
+      # （`git archive <commit>`）。默认的 `--depth 1` 浅克隆取不到那个提交，
+      # 自测会以退出码 75（环境问题）明确失败。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 安装 Rust
         run: |

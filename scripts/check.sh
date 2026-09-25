@@ -265,6 +265,26 @@ step "站点 JSON-LD 产物一致性（gen-site-jsonld.py check）"
 python3 scripts/gen-site-jsonld.py check
 
 
+# ---------------------------------------------------------------- 发版工具自测
+
+# 为什么把 `bump-release.py self-test` 放进**门禁**（而不是只写在文档里）：
+#
+# 发版机械动作（phase1/phase2）在真实发版里连续卡死过两次，两次都是同一类根因
+# 「校验只报第一条 / 判据分不清真版本字段与注释里的历史版本字面」：
+#   · `Cargo.lock` 漏了新 workspace 成员（P4 的 xt-intent/xt-mitm）⇒ 报错不说是哪个 crate；
+#   · `scripts/gen-site-geo.py` 注释里的 `v0.8.38` 让「不许残留旧版本号」**永远失败**。
+#
+# 本脚本顶部已经记过一次「检查存在、但本地没有任何一条命令会踩到它」的亏（`tsc --noEmit` 那件事）。
+# 所以自测**必须和别的门禁跑在同一条命令里**：夹具是真实历史树（`git archive`），
+# 跑 phase1/phase2/notes 的绿/红/零落盘，约 12 秒，**只读、不写仓库**。
+#
+# ⚠️ 它需要**完整的 git 历史**才能取夹具提交。CI 与发版流水线的 `actions/checkout`
+#    都设了 `fetch-depth: 0`（见 ci.yml / release.yml）。浅克隆里跑会得到退出码 **75**
+#    （本项目约定：75 = 环境问题，不是代码失败）并在 stderr 说清怎么处理。
+step "发版工具自测（bump-release.py self-test）"
+python3 scripts/bump-release.py self-test
+
+
 # ---------------------------------------------------------------- Rust
 
 step "clippy（warning 视为错误）"

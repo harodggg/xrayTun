@@ -39,7 +39,13 @@ jobs:
     # 都行，选 arm64 只是因为它更快。
     runs-on: macos-14
     steps:
+      # `fetch-depth: 0` 是**必需的**，不是优化：下面的 `scripts/check.sh` 会跑
+      # `scripts/bump-release.py self-test`，夹具是**真实历史树**（`git archive <commit>`）。
+      # 默认 `--depth 1` 取不到那个提交 ⇒ 自测以退出码 75（环境问题）失败，发版会被拦下。
+      # 打 tag 发布时 checkout 的是 tag 的树，历史里**包含**夹具提交（它是本 tag 的祖先）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 安装 Rust 与两个 target
         run: |

@@ -886,6 +886,18 @@ def _mutate(src: Path, dest: Path, pairs) -> None:
 
 def cmd_self_test(a) -> int:
     ref = a.fixture_ref
+    # 夹具要从 **git 历史**里取一棵真实的"已发布态"树 ⇒ 浅克隆（`git clone --depth 1`）下取不到。
+    # 这与 `scripts/check.sh` 里「退出 75 = 环境问题，不是代码失败」的约定一致：
+    # 明确说清楚并给 75，而不是让 `git archive` 报一句难懂的错。
+    # （ci.yml / release.yml 的 actions/checkout 已设 fetch-depth: 0，正常不会走到这里。）
+    chk = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{ref}^{{commit}}"],
+                         capture_output=True, text=True)
+    if chk.returncode != 0:
+        print(f"✗ 环境问题（退出码 75）：本仓库里没有夹具提交 `{ref}`（浅克隆？）\n"
+              f"  self-test 需要**完整的 git 历史**：`git fetch --unshallow` 后重跑，\n"
+              f"  或显式指定一个本地已有的已发布态提交：`--fixture-ref <commit>`。",
+              file=sys.stderr)
+        return 75
     tmp = Path(tempfile.mkdtemp(prefix="bump-release-selftest-"))
     fails = []
     try:
