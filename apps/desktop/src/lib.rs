@@ -25,6 +25,8 @@ pub mod intent;
 pub mod helper_install;
 pub mod login_item;
 pub mod mitm;
+/// 节点不可达时的可避免伤害：失败三分类 + 自动回落排序 + 全挂时的节点清单。
+pub mod node_health;
 pub mod state;
 pub mod supervisor;
 pub mod traffic;

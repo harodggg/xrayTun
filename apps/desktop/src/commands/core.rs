@@ -127,7 +127,6 @@ pub(crate) async fn start_core(
     // 一起失效，所以要留着基线做比对，见 `spawn_network_watch`。
     let egress_before = Egress::now();
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<xray::CoreEvent>();
     let resource_dir = app.path().resource_dir().ok();
 
     let mut supervisor = state.supervisor.lock().await;
@@ -193,38 +192,210 @@ pub(crate) async fn start_core(
         .unwrap_or(false);
     let effective_settings = crate::mitm::core_settings(&settings, mitm_trusted);
 
-    let result = supervisor
-        .start(
-            &state.store,
-            &effective_settings,
-            &nodes,
-            &mut helper,
-            Some(tx),
-            crate::supervisor::CoreSearchPaths {
-                managed_core_dir: Some(xt_core::update::managed_core_dir(state.store.root())),
-                app_resource_dir: resource_dir,
-                dev_binaries_dir: crate::dev_binaries_dir(),
-            },
-        )
-        .await;
+    // ---- 自动回落：先试用户选中的节点，再按真实可用性试其它节点 ----
+    //
+    // # 诚实边界（写在实现里，也写进失败文案）
+    //
+    // App **不能**让一个不可达的节点变得可达（节点宕机、地址写错、出网链路被挡
+    // 都在我们之外）。这里能永久避免的是**伤害**：
+    //   · 不让整机断网 —— 每次尝试都在「接管默认路由之前」中止并回滚；
+    //   · 不让你猜 —— 每个节点一条结果，失败分三类，各自给下一步；
+    //   · 不只试一个节点就放弃 —— 候选列表**包含全部节点**，全试完才报错。
+    //
+    // # 不许静默改用户选中的节点
+    //
+    // 回落只改**这一次**用的节点（`attempt_settings`），**不写回**
+    // `settings.selected_node`；成功时把「用了哪个、为什么换」写进日志与提示条。
+    // 取舍：界面上「当前节点」仍显示用户选中的那个，靠提示条说明实际用的是哪个 ——
+    // 要把它做成界面字段需要前端配合（`CoreRuntime` 是类型契约，不能偷偷加字段）。
+    let search_paths = crate::supervisor::CoreSearchPaths {
+        managed_core_dir: Some(xt_core::update::managed_core_dir(state.store.root())),
+        app_resource_dir: resource_dir,
+        dev_binaries_dir: crate::dev_binaries_dir(),
+    };
+    let selected_id = settings.selected_node.clone();
+    // **一个节点都没选** ≠ 「选中的节点不可达」：前者要用户先选（原有行为），
+    // 后者才轮到自动回落。不加这一条，回落会把「没选」悄悄变成「替你挑一个」。
+    if settings.mode != ProxyMode::Direct && selected_id.is_none() {
+        return Err("请先选择一个节点".into());
+    }
+    let (latencies, last_good) = state
+        .with(|i| (i.latencies.clone(), i.runtime.last_good_node.clone()))
+        .ok_or_else(|| "应用状态不可用".to_string())?;
+    // 端口预检：本地端口被占用时，换多少节点都白搭（分类会据此判 LocalPort）。
+    let port_free = crate::node_health::local_port_free(effective_settings.socks_port);
+    let candidates = crate::node_health::rank_candidates(
+        selected_id.as_deref(),
+        &nodes,
+        &latencies,
+        last_good.as_deref(),
+    );
+    let mut report = crate::node_health::TrialReport::new();
+    let mut success: Option<(
+        CoreRuntime,
+        tokio::sync::mpsc::UnboundedReceiver<xray::CoreEvent>,
+        String,
+    )> = None;
+
+    for (idx, candidate_id) in candidates.iter().enumerate() {
+        let Some(node) = nodes.iter().find(|n| &n.id == candidate_id).cloned() else {
+            continue;
+        };
+        // 每个尝试一个**独立**事件通道：失败尝试的日志不该混进成功那次。
+        let (tx, attempt_rx) = tokio::sync::mpsc::unbounded_channel::<xray::CoreEvent>();
+        let mut attempt_settings = effective_settings.clone();
+        attempt_settings.selected_node = Some(candidate_id.clone());
+        let started = std::time::Instant::now();
+        match supervisor
+            .start(
+                &state.store,
+                &attempt_settings,
+                &nodes,
+                &mut helper,
+                Some(tx),
+                search_paths.clone(),
+            )
+            .await
+        {
+            Ok(rt) => {
+                report.record(crate::node_health::NodeAttempt::ok(
+                    &node,
+                    started.elapsed(),
+                ));
+                success = Some((rt, attempt_rx, candidate_id.clone()));
+                break;
+            }
+            Err(e) => {
+                let class = crate::node_health::classify(&crate::node_health::FailureFacts {
+                    message: &e,
+                    node_tcp_ok: None,
+                    local_port_free: Some(port_free),
+                });
+                report.record(crate::node_health::NodeAttempt::failed(
+                    &node,
+                    class,
+                    started.elapsed(),
+                    e.clone(),
+                ));
+                let streak = state
+                    .with(|i| {
+                        let n = i.node_fail_streak.entry(node.id.clone()).or_insert(0);
+                        *n += 1;
+                        *n
+                    })
+                    .unwrap_or(1);
+                state.log(
+                    "app",
+                    "warn",
+                    format!(
+                        "节点「{}」尝试失败（{}，第 {} 次连续失败，{:.1}s）：{}",
+                        node.name,
+                        class.slug(),
+                        streak,
+                        started.elapsed().as_secs_f32(),
+                        e
+                    ),
+                );
+                // 订阅节点连续失败 ⇒ 提示重拉订阅（**不自动改用户选中的节点**）。
+                if let xt_core::model::NodeSource::Subscription { id: sub_id } = &node.source {
+                    let sub_name = state
+                        .with(|i| {
+                            i.subscriptions
+                                .iter()
+                                .find(|s| &s.id == sub_id)
+                                .map(|s| s.name.clone())
+                        })
+                        .unwrap_or(None);
+                    if let Some(sub_name) = sub_name {
+                        if let Some(hint) = crate::node_health::subscription_refresh_hint(
+                            &node.name,
+                            &sub_name,
+                            streak,
+                        ) {
+                            state.with(|i| i.last_notice = Some(hint.clone()));
+                            state.log("app", "warn", hint);
+                        }
+                    }
+                }
+                // 本地端口问题：换节点没用，立刻停（别让用户白等一轮）。
+                if !class.is_node_level() {
+                    break;
+                }
+                if idx + 1 < candidates.len() {
+                    state.log(
+                        "app",
+                        "info",
+                        format!(
+                            "继续尝试下一个节点（候选 {}/{}）",
+                            idx + 2,
+                            candidates.len()
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     // task-176：**先取走路由审计再 drop**（审计要落盘，不能随 supervisor 一起丢）。
-    // 放在 `match result` 之前 ⇒ **成功与失败两条路径都会记**。
+    // 放在 `success` 判定之前 ⇒ **成功与失败两条路径都会记**。
     let route_audits = supervisor.take_route_audits();
     drop(helper);
     drop(supervisor);
     log_route_audits(state, &route_audits);
 
-    let runtime = match result {
-        Ok(rt) => rt,
-        Err(e) => {
-            state.with(|i| {
-                i.runtime = CoreRuntime { running: false, last_error: Some(e.clone()), ..Default::default() };
-                i.push_log("app", "error", format!("启动失败：{e}"));
-            });
-            events::runtime_changed(app, state);
-            return Err(e);
-        }
+    // 节点尝试账：一行一个节点（id:名称:类别:耗时:原文），成功与失败都记。
+    // 这是「为什么这次用了/没用某个节点」的唯一结构化留痕。
+    if !report.attempts().is_empty() {
+        state.log(
+            "app",
+            "info",
+            format!("节点尝试账：{}", report.summary_for_log()),
+        );
+    }
+
+    let Some((runtime, mut rx, used_node_id)) = success else {
+        // 全试完才报错：给一份**节点级失败清单**（类别 + 用时 + 各自的下一步）。
+        let msg = report.all_failed_message();
+        state.with(|i| {
+            i.runtime = CoreRuntime {
+                running: false,
+                last_error: Some(msg.clone()),
+                ..Default::default()
+            };
+            i.active_node = None;
+            i.push_log("app", "error", format!("启动失败：{msg}"));
+            i.last_notice = Some(msg.clone());
+        });
+        events::runtime_changed(app, state);
+        return Err(msg);
     };
+
+    // 成功：记下**实际**用的节点（不写回 `settings.selected_node`），并清零失败计数。
+    state.with(|i| {
+        i.active_node = Some(used_node_id.clone());
+        i.node_fail_streak.remove(&used_node_id);
+    });
+    if used_node_id != selected_id.clone().unwrap_or_default() {
+        let name_of = |id: &Option<String>| -> String {
+            id.as_deref()
+                .and_then(|id| nodes.iter().find(|n| n.id == id))
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| "（未选择）".into())
+        };
+        let selected_name = name_of(&selected_id);
+        let used_name = name_of(&Some(used_node_id.clone()));
+        let notice = format!(
+            "原选中节点「{selected_name}」不可达（本次共试了 {} 个节点），已自动改用「{used_name}」连接。\
+             你的选择没有被改动 —— 设置里仍然是「{selected_name}」；\
+             要固定用新节点，请在节点列表里手动选中它。",
+            report.attempts().len()
+        );
+        state.with(|i| {
+            i.push_log("app", "warn", notice.clone());
+            i.last_notice = Some(notice.clone());
+        });
+        tracing::warn!(from = %selected_name, to = %used_name, "选中节点不可达，已自动回落到其它节点");
+    }
 
     // 新核心起来了：启动它的监控（换网检测 / 连通性检查 / 看门狗）。
     // 与「已经在跑」那条路径共用同一个入口，避免两处各写一份。
@@ -1607,17 +1778,24 @@ pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard
             return;
         };
         // 只认自己那一次连接：用户可能已经重连或断开了。
+        // **认实际跑着的那个节点**（`active_node`），不是用户选中的那个。
+        // 自动回落之后两者可能不同；拿选中的去核对，会把「这个节点验证通过」
+        // 记到错的节点头上，下一次切换的自动回退就退错地方。
+        // `active_node` 为空时（老状态/未回落）才退回 `selected_node`。
         let (still_mine, node_name, node_id) = state
             .with(|i| {
-                let selected = i.settings.selected_node.clone();
+                let active = i
+                    .active_node
+                    .clone()
+                    .or_else(|| i.settings.selected_node.clone());
                 (
                     i.runtime.running && i.runtime.pid == pid,
                     i.nodes
                         .iter()
-                        .find(|n| Some(&n.id) == selected.as_ref())
+                        .find(|n| Some(&n.id) == active.as_ref())
                         .map(|n| n.name.clone())
                         .unwrap_or_default(),
-                    selected.unwrap_or_default(),
+                    active.unwrap_or_default(),
                 )
             })
             .unwrap_or((false, String::new(), String::new()));

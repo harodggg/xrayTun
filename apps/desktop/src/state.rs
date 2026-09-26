@@ -227,6 +227,25 @@ pub struct Inner {
     ///
     /// **只活在内存里**，不落盘：CA 是每次启动新生成的（见 `crate::mitm` 的文档）。
     pub mitm: crate::mitm::MitmRuntime,
+    /// **本次连接实际使用的节点 id**（自动回落之后可能与
+    /// `settings.selected_node` 不同）。
+    ///
+    /// # 为什么单独存，而不是改 `settings.selected_node`
+    ///
+    /// 回落是「这一会话先用别人顶上」，**不是**替用户改选择：悄悄改掉
+    /// `selected_node` 会让用户下次点连接时不知道自己在用哪个节点。
+    /// 但「现在跑的到底是哪个」必须如实可查 —— 否则连通性检查会拿着
+    /// 用户选中的（而不是实际跑着的）节点去核对，把验证结果记到错的节点头上。
+    ///
+    /// 不放进 `CoreRuntime`：那边是**序列化给前端**的契约，
+    /// 加字段会破坏 `tests/type_contract.rs`（Rust 不许提供前端未声明的字段）。
+    pub active_node: Option<String>,
+    /// 每个节点**连续失败**的次数（成功即清零）。
+    ///
+    /// 用途：同一节点连续失败达到
+    /// [`crate::node_health::CONSECUTIVE_FAILURES_BEFORE_SUB_REFRESH`] 且它来自订阅时，
+    /// 提示「重拉订阅」（见 `node_health::subscription_refresh_hint`）。
+    pub node_fail_streak: HashMap<String, u32>,
 }
 
 /// DNS 探测状态。
@@ -392,6 +411,8 @@ impl Inner {
             connections: xt_core::xray::access_log::ConnectionLog::new(),
             intent: crate::intent::IntentRuntime::new(store.root().to_path_buf()),
             mitm: crate::mitm::MitmRuntime::default(),
+            active_node: None,
+            node_fail_streak: HashMap::new(),
         }
     }
 
