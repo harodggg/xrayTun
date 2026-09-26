@@ -91,15 +91,52 @@ function Shell({ initialView }: { initialView?: View }) {
   // 要跳到的设置分节。只有「从别处带着目标进设置」时才非空（深链、或状态卡片
   // 上的按钮）；用户自己点侧栏进设置时是 null，设置页就按记忆/默认分类走。
   const [settingsTarget, setSettingsTarget] = useState<string | null>(() => initialSectionFromHash());
-  const { snapshot, error, errorSteps, clearError, recoveredAttempt, dismissRecovered } = useStore();
+  /**
+   * 一次「有未保存改动时想离开」的待确认导航（task-23 F1）。
+   *
+   * 规则页的草稿是组件内 state：切页即卸载 ⇒ 改动**静默丢光**（本项目里唯一会
+   * 直接丢掉用户工作的问题）。所以这里在切页前拦一次，问清楚再走。
+   */
+  const [pendingNav, setPendingNav] = useState<{ view: View; target: string | null } | null>(null);
+  const {
+    snapshot,
+    error,
+    errorSteps,
+    clearError,
+    recoveredAttempt,
+    dismissRecovered,
+    hasUnsavedEdits,
+    setHasUnsavedEdits,
+  } = useStore();
+
+  /**
+   * 切页的唯一入口（侧栏与状态卡片的「去处理」都走它）。
+   *
+   * `hasUnsavedEdits` 为真时**不立刻切**，而是记下目标并让用户选。
+   */
+  const requestView = useCallback(
+    (next: View, target: string | null = null) => {
+      if (next === view) {
+        setSettingsTarget(target);
+        return;
+      }
+      if (hasUnsavedEdits) {
+        setPendingNav({ view: next, target });
+        return;
+      }
+      setView(next);
+      setSettingsTarget(target);
+    },
+    [view, hasUnsavedEdits],
+  );
 
   // 入参用 string 而不是 View：Dashboard 的 onNavigate 契约就是 `(view: string)`，
   // 这里收窄一次即可；等它加上可选的 target 参数（状态卡片直接指到某个设置分节）
   // 也不用再改这里。
-  const onNavigate = useCallback((next: string, target?: string) => {
-    setView(next as View);
-    setSettingsTarget(target ?? null);
-  }, []);
+  const onNavigate = useCallback(
+    (next: string, target?: string) => requestView(next as View, target ?? null),
+    [requestView],
+  );
 
   // 离开设置页就把目标丢掉：否则下次进来会莫名其妙跳到上一回那个分节。
   useEffect(() => {
@@ -149,7 +186,7 @@ function Shell({ initialView }: { initialView?: View }) {
             <button
               key={item.id}
               className={`nav-item${view === item.id ? " is-active" : ""}`}
-              onClick={() => setView(item.id)}
+              onClick={() => requestView(item.id)}
             >
               <span>{item.label}</span>
               {badgeFor(item.id) && <span className="nav-item__badge">{badgeFor(item.id)}</span>}
@@ -185,8 +222,37 @@ function Shell({ initialView }: { initialView?: View }) {
       <main className="main">
         <TopBar view={view} />
         <div className="content">
+          {/*
+           * task-23 F1：有未保存的规则草稿时，切页前先问一次。
+           * 「留在本页」是默认安全项（用户如果不小心按了导航，工作不会丢）。
+           */}
+          {pendingNav && (
+            <div className="banner banner--warn" role="alert">
+              <span>⚠︎</span>
+              <div style={{ flex: 1 }}>
+                有<strong>未保存的规则改动</strong>，离开「规则」页会丢失这些改动。
+              </div>
+              <button className="btn" onClick={() => setPendingNav(null)}>
+                留在本页
+              </button>
+              <button
+                className="btn btn--primary"
+                onClick={() => {
+                  // 先清标记再切页：否则路由页卸载前的清理与这次切换会互相打架。
+                  setHasUnsavedEdits(false);
+                  setView(pendingNav.view);
+                  setSettingsTarget(pendingNav.target);
+                  setPendingNav(null);
+                }}
+              >
+                放弃改动并离开
+              </button>
+            </div>
+          )}
           {error && (
-            <div className="banner banner--error">
+            // task-23 D2：失败横幅必须是 live region —— 否则读屏用户点「连接」失败后
+            // **什么都听不到**，而同仓的日志页/规则页早就播报了（两套标准）。
+            <div className="banner banner--error" role="alert">
               <span>⚠︎</span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 {/*
@@ -231,7 +297,8 @@ function Shell({ initialView }: { initialView?: View }) {
               给一次明确的完成提示，8 秒后自己消失（也可手动关掉）。
               只在**恢复真的发生过**时出现（后端 `last_outcome === "recovered"`）。 */}
           {recoveredAttempt !== null && (
-            <div className="banner banner--info">
+            // task-23 D2：完成提示是信息类 ⇒ `role="status"`（不打断，但会被播报）。
+            <div className="banner banner--info" role="status">
               <span>✓</span>
               <div style={{ flex: 1 }}>
                 已自动恢复连接（第 {recoveredAttempt} 次自动重建成功）—— 隧道已重建，无需手动操作。
@@ -257,7 +324,7 @@ function Shell({ initialView }: { initialView?: View }) {
 }
 
 export function TopBar({ view }: { view: View }) {
-  const { snapshot, busy, run, recovery } = useStore();
+  const { snapshot, busy, busyLabel, run, recovery } = useStore();
   const [pending, setPending] = useState<ProxyMode | null>(null);
 
   const title = NAV.find((n) => n.id === view)?.label ?? "";
@@ -320,6 +387,18 @@ export function TopBar({ view }: { view: View }) {
 
   const modeBusy = busy === "mode" || pending !== null;
   const runBusy = busy === "start" || busy === "stop";
+  /**
+   * task-23 C1：**任何**操作在进行时，连接与模式按钮一律禁用。
+   *
+   * 原来判据只看「同操作忙碌」：正在「测试延迟 / 保存设置」时这两组按钮**都可点**，
+   * 点下去 `store.run()` 在 `busyRef.current` 检查处直接 `return false` ——
+   * 界面既不报错也不变化，用户得到的是「这个按钮坏了」。
+   * 另一个方向上，`store` 的 `busy` 竞态**不会**调用后端（见 `store.tsx` 的注释），
+   * 所以「点了没反应」是纯前端问题，必须在前端给反馈。
+   */
+  const anyBusy = busy !== null;
+  /** 顶部那颗常驻的「正在忙什么」徽章（连接/模式自己有 spin，不重复）。 */
+  const showBusyBadge = anyBusy && !modeBusy && !runBusy;
 
   return (
     /*
@@ -360,20 +439,23 @@ export function TopBar({ view }: { view: View }) {
           <button
             key={m}
             className={mode === m ? "is-active" : ""}
-            disabled={modeBusy}
+            // C1：任何操作在进行中都禁用（见 `anyBusy` 的注释）。
+            disabled={anyBusy}
             onClick={() => void switchMode(m)}
             title={
-              m === "tun"
-                ? "通过 utun 虚拟网卡接管全部流量（需要已安装 helper）"
-                : m === "system_proxy"
-                  ? // task-120：**这句原来是「只设置系统 HTTP/SOCKS 代理」，而实现从来
-                    // 没有设置过系统代理**（全仓 `setwebproxy`/`scutil`/`SCDynamicStore`
-                    // 0 命中，只在 `model.rs:451` 的注释里写着这个意图）。
-                    // 同一屏的状态区说的却是「系统代理未被本应用修改：需要手动指向…」——
-                    // 两句话互相矛盾，而这条 tooltip 是在**承诺产品做不到的事**。
-                    // 现在只说**已经成立**的那半：本应用只开本地入口、不改系统设置。
-                    "只开本地 SOCKS/HTTP 入口（127.0.0.1）；本应用不修改系统代理设置，需要你手动把浏览器或系统代理指向它"
-                  : "不接管任何流量"
+              anyBusy
+                ? `有操作正在进行（${busyLabel ?? "请稍候"}），完成后再切换模式`
+                : m === "tun"
+                  ? "通过 utun 虚拟网卡接管全部流量（需要已安装 helper）"
+                  : m === "system_proxy"
+                    ? // task-120：**这句原来是「只设置系统 HTTP/SOCKS 代理」，而实现从来
+                      // 没有设置过系统代理**（全仓 `setwebproxy`/`scutil`/`SCDynamicStore`
+                      // 0 命中，只在 `model.rs:451` 的注释里写着这个意图）。
+                      // 同一屏的状态区说的却是「系统代理未被本应用修改：需要手动指向…」——
+                      // 两句话互相矛盾，而这条 tooltip 是在**承诺产品做不到的事**。
+                      // 现在只说**已经成立**的那半：本应用只开本地入口、不改系统设置。
+                      "只开本地 SOCKS/HTTP 入口（127.0.0.1）；本应用不修改系统代理设置，需要你手动把浏览器或系统代理指向它"
+                    : "不接管任何流量"
             }
           >
             {MODE_LABEL[m]}
@@ -390,6 +472,18 @@ export function TopBar({ view }: { view: View }) {
           title="切换模式需要重启核心：先停掉再按新模式起，请等它完成"
         >
           {running ? "正在切换模式（重启核心，可能十几秒）…" : "正在切换模式…"}
+        </span>
+      )}
+
+      {/* task-23 C1：其它长操作（测延迟 / 保存设置 / 更新订阅…）也要**可见**。
+          没有它，那几秒到几十秒里顶栏只有「按钮突然点不动」，用户会以为界面坏了。 */}
+      {showBusyBadge && (
+        <span
+          className="badge badge--unknown"
+          role="status"
+          title="有操作正在进行：期间连接与模式按钮不可点，完成后再试"
+        >
+          {busyLabel ?? "有操作正在进行…"}
         </span>
       )}
 
@@ -444,16 +538,20 @@ export function TopBar({ view }: { view: View }) {
       <span className={`dot ${DOT_TONE_CLASS[status.tone]}`} />
       <button
         className={`btn ${rv.button === "connect" ? "btn--primary" : ""}`}
-        disabled={runButtonDisabled(rv, { runBusy, mode })}
+        // C1：任何操作在进行中都禁用 —— 否则点击会被 `store.run()` 静默吞掉。
+        disabled={runButtonDisabled(rv, { runBusy: anyBusy, mode })}
         onClick={() => void toggleRun()}
         title={
-          mode === "direct"
-            ? "直连模式下无需启动核心"
-            : rv.button === "recovering"
-              ? "正在自动恢复 —— 现在点「连接」会打断看门狗的重建，所以先禁用；恢复会自动完成"
-              : rv.phase === "failed"
-                ? "自动恢复失败，已退回直连；点这里可手动重连"
-                : ""
+          // 别的操作在跑时，优先说清「为什么现在点不动」（否则空 title 让用户猜）。
+          anyBusy && busy !== "start" && busy !== "stop"
+            ? `有操作正在进行（${busyLabel ?? "请稍候"}），完成后再试`
+            : mode === "direct"
+              ? "直连模式下无需启动核心"
+              : rv.button === "recovering"
+                ? "正在自动恢复 —— 现在点「连接」会打断看门狗的重建，所以先禁用；恢复会自动完成"
+                : rv.phase === "failed"
+                  ? "自动恢复失败，已退回直连；点这里可手动重连"
+                  : ""
         }
       >
         {runBusy ? <span className="spin" /> : null}

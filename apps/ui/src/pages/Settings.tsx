@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { api } from "../ipc";
 import { CopyButton } from "../IncidentReport";
 import { InlineConfirm } from "../InlineConfirm";
+import SnapshotFallback from "../SnapshotState";
 import { useStore } from "../store";
 import {
   DNS_MODE_LABEL,
@@ -292,7 +293,9 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
     return () => window.removeEventListener("hashchange", onHash);
   }, [selectCategory]);
 
-  if (!snapshot) return <div className="empty">正在加载…</div>;
+  // task-23 A1：读不到快照时不再写「正在加载…」（永远不停的等待），
+  // 而是分「正在读取」与「读失败 + 重试」两态。
+  if (!snapshot) return <SnapshotFallback />;
 
   const active = SETTINGS_CATEGORIES.find((c) => c.id === cat) ?? SETTINGS_CATEGORIES[0];
   const activeIds = new Set<string>(active.sections.map((s) => s.id));

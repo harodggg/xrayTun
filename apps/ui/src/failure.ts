@@ -290,6 +290,24 @@ export function plainOneLine(text: string): string {
 }
 
 /**
+ * 两段失败文案是不是**同一件事**（task-23 D1）。
+ *
+ * 用途：命令失败的 `error` 与 `runtime.last_error` 讲同一句话时，界面只该说一遍。
+ * 只按 `stripMarkup` 归一（**不**压换行）：两端可能一个保留了 `\n`、一个没有，
+ * 各自 trim 一次即可；任一端不是字符串 / 空 ⇒ `false`
+ * （「不知道是不是同一句」时**不合并** —— 宁可多显示，也不许悄悄吞掉一条失败）。
+ */
+export function sameFailureText(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const na = stripMarkup(a).trim();
+  const nb = stripMarkup(b).trim();
+  return na.length > 0 && na === nb;
+}
+
+/**
  * 「门禁未过」这一刻，后端文案可能叫用户「点『断开』」，而按钮写的是「连接」。
  *
  * 后端文案归 `supervisor.rs`，前端**不改它**（改了就是两处真源）；但同一屏里

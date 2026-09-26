@@ -38,6 +38,42 @@ import type {
   MitmStatus,
 } from "../types";
 
+/**
+ * 「现在会真的拦吗」这一行的**唯一判据**（task-23 D3）。
+ *
+ * # 它防的错误信念
+ *
+ * 旧写法只看 `block_rules > 0` 就答「会：当前有 N 条拦截规则」。而
+ * `summary.block_rules` 是 `intent.rs::rules()` 的**当前应该生效的集合**
+ * （重启 App 后从缓存里加载也会 > 0），与「核心有没有按它跑」无关：
+ * 判决变了但还没点「应用（会重连一次）」时，`rules_pending_apply === true`，
+ * 同屏另外两处正写着「尚未下发到核心」—— 用户会相信广告已经被拦了。
+ *
+ * 所以「有规则但没下发」必须是**独立一态**，且**不许**答「会」。
+ *
+ * 抽成导出纯函数：它是这一页最容易再犯的错，值得单测直接钉（见
+ * `intentHonesty.test.tsx`）。
+ */
+export function intentVerdictLine(
+  intent: Pick<AppSettings["intent"], "enabled" | "drill">,
+  summary: IntentSummary | null,
+  summaryUnknown: string,
+): string {
+  if (!intent.enabled) return "不会：功能开关没开";
+  if (intent.drill) return "不会：演练模式只记录本来该拦谁，不下发任何拦截规则";
+  if (summary === null) return `读不到：${summaryUnknown}`;
+  if (summary.block_rules <= 0) {
+    return "暂时不会：当前 0 条拦截规则（规则要核心重连后才生效）";
+  }
+  if (summary.rules_pending_apply) {
+    return (
+      `还不会：${summary.block_rules} 条拦截规则已就绪，但还没下发到核心` +
+      " —— 点下面的「应用（会重连一次）」才生效"
+    );
+  }
+  return `会：核心已加载 ${summary.block_rules} 条拦截规则`;
+}
+
 const PRESET_LABEL: Record<IntentPreset, string> = {
   typesafe: "TypeSafe 官方（需密钥）",
   zen: "OpenCode Zen（免密钥）",
@@ -384,7 +420,8 @@ export default function Intent() {
       </p>
 
       {err && (
-        <div className="banner banner--error">
+        // task-23 D2：页面级失败也必须是 live region（读屏用户才会被告知）。
+        <div className="banner banner--error" role="alert">
           <div>
             {err}
             {errSteps.length > 0 && (
@@ -415,17 +452,7 @@ export default function Intent() {
         {/* 这一个行回答用户唯一真正关心的问题：「现在到底拦不拦？」 */}
         <div className="kv">
           <span>现在会真的拦吗</span>
-          <strong>
-            {!s.enabled
-              ? "不会：功能开关没开"
-              : s.drill
-                ? "不会：演练模式只记录本来该拦谁，不下发任何拦截规则"
-                : summary === null
-                  ? `读不到：${summaryUnknown}`
-                  : summary.block_rules > 0
-                    ? `会：当前有 ${summary.block_rules} 条拦截规则`
-                    : "暂时不会：当前 0 条拦截规则（规则要核心重连后才生效）"}
-          </strong>
+          <strong>{intentVerdictLine(s, summary, summaryUnknown)}</strong>
         </div>
         <div className="kv">
           <span>引擎</span>
@@ -701,7 +728,7 @@ export default function Intent() {
          * 确定事实。这里把原因和下一步都摆出来。
          */}
         {mitmErr && (
-          <div className="banner banner--error">
+          <div className="banner banner--error" role="alert">
             <div>
               读不到 MITM 状态（下面的「代理 / 根证书 / 生效」现在都显示「读不到」）：
               {mitmErr}

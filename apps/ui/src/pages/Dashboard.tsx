@@ -23,7 +23,8 @@
 import { useState } from "react";
 
 import { api, recoveryView } from "../ipc";
-import { buttonNameNote, failureActions, nextSteps, stripMarkup } from "../failure";
+import { buttonNameNote, failureActions, nextSteps, stripMarkup, sameFailureText } from "../failure";
+import SnapshotFallback from "../SnapshotState";
 import { InlineConfirm } from "../InlineConfirm";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
 import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
@@ -184,9 +185,10 @@ export default function Dashboard({
   /** `target` 是目标分节（如 `set-helper`）：设置页是两级结构，带目标才会落到正确的分类。 */
   onNavigate: (view: string, target?: string) => void;
 }) {
-  const { snapshot, busy, run, probing, recovery } = useStore();
+  const { snapshot, busy, run, probing, recovery, error: storeError, errorSource } = useStore();
   const [showAllNotices, setShowAllNotices] = useState(false);
-  if (!snapshot) return <div className="empty">正在加载…</div>;
+  // task-23 A1：读不到快照时**不再**说「正在加载…」（那会永远停在那里）。
+  if (!snapshot) return <SnapshotFallback />;
 
   const { runtime, helper, core, nodes, settings, traffic, latency } = snapshot;
   const selected = nodes.find((n) => n.id === settings.selected_node) ?? null;
@@ -227,7 +229,16 @@ export default function Dashboard({
     dotClass: DOT_TONE_CLASS[status.tone],
   };
 
-  const notices = collectNotices(snapshot, run, onNavigate);
+  /**
+   * task-23 D1：命令刚失败、而它的话就是 `runtime.last_error` 时，
+   * **不要再在仪表盘里复述一遍** —— 上面那条全局横幅已经完整地说过
+   * （原因 + 下一步 + 3 个动作 + 可关闭），而同屏第二条红字只有 1 个动作、
+   * 还关不掉，用户会以为发生了两次故障。
+   */
+  const notices = collectNotices(snapshot, run, onNavigate, {
+    suppressLastError:
+      errorSource === "command" && sameFailureText(storeError, snapshot.runtime.last_error),
+  });
   const [primary, ...rest] = notices;
   const visible = showAllNotices ? notices : primary ? [primary] : [];
 
@@ -390,7 +401,12 @@ export default function Dashboard({
 
       {/* ---------------------------------------------------------- 提示 */}
       {visible.map((n) => (
-        <div key={n.key} className={`banner banner--${n.tone} dash__banner`}>
+        <div
+          key={n.key}
+          className={`banner banner--${n.tone} dash__banner`}
+          // task-23 D2：失败 → alert（读屏立刻播报）；警告/信息 → status（不打断）。
+          role={n.tone === "error" ? "alert" : "status"}
+        >
           <span>{n.icon}</span>
           <div style={{ flex: 1 }}>{n.text}</div>
           {n.action && <NoticeAction action={n.action} />}
@@ -494,12 +510,19 @@ export function collectNotices(
   snapshot: AppSnapshot,
   run: ReturnType<typeof useStore>["run"],
   onNavigate: (view: string, target?: string) => void,
+  /**
+   * 额外输入（可选，老调用方不受影响）。
+   *
+   * `suppressLastError`：全局横幅正在原样陈述同一条 `runtime.last_error` 时置 true，
+   * 让仪表盘**不再复述**（task-23 D1）。
+   */
+  opts: { suppressLastError?: boolean } = {},
 ): Notice[] {
   const { core, helper, notice, runtime } = snapshot;
   const out: Notice[] = [];
 
   // rank 越小越急：先「现在就是坏的」，再「需要修」，最后「仅供参考」。
-  if (runtime.last_error) {
+  if (runtime.last_error && !opts.suppressLastError) {
     // U3：连接失败最忌讳的是一句错误码就完事。这里做三件事，全部与全局横幅同源
     // （`failure.ts`）——
     // ① 原文里成对的 `**` 记号去掉（用户不该看到工程记号）；

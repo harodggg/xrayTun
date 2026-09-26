@@ -35,6 +35,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
+import SnapshotFallback from "../SnapshotState";
 import {
   PRESET_LABEL,
   ruleActionLabel,
@@ -166,7 +167,7 @@ export function actionText(action: RuleAction, nodes: Node[]): string {
 }
 
 export default function Routing() {
-  const { snapshot, busy, run } = useStore();
+  const { snapshot, busy, run, setHasUnsavedEdits } = useStore();
 
   /**
    * 「保存了但还没生效」的那次改动（task-70）。
@@ -214,12 +215,21 @@ export default function Routing() {
     if (pendingSave && startedAt !== null && startedAt >= pendingSave.savedAt) setPendingSave(null);
   }, [startedAt, pendingSave]);
 
-  if (!snapshot) return <div className="empty">正在加载…</div>;
+  // task-23 F1：草稿是**组件内 state**，切页即卸载 ⇒ 静默丢光。
+  // 把「有没有未保存改动」同步给 store，App 在切页前拦一次（见 `App.tsx`）。
+  // 依赖数组里带上 `dirty`：改草稿 / 保存成功都会同步；卸载时清掉，
+  // 免得守卫在别的页面上误拦。
+  const dirty = draft !== null;
+  useEffect(() => {
+    setHasUnsavedEdits(dirty);
+    return () => setHasUnsavedEdits(false);
+  }, [dirty, setHasUnsavedEdits]);
+
+  if (!snapshot) return <SnapshotFallback />;
 
   const { settings, nodes, latency } = snapshot;
   const running = snapshot.runtime.running;
   const rules = draft ?? settings.custom_rules;
-  const dirty = draft !== null;
 
   const validTags = new Set(nodes.map((n) => outboundTagOf(n.id)));
 

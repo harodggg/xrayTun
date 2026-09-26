@@ -16,6 +16,7 @@
 import { useState } from "react";
 import { api } from "../ipc";
 import { InlineConfirm } from "../InlineConfirm";
+import SnapshotFallback from "../SnapshotState";
 import { useStore } from "../store";
 import { formatBytes, formatTimestamp, type Subscription } from "../types";
 
@@ -35,6 +36,10 @@ export default function Subscriptions() {
       setUrl("");
     }
   };
+
+  // task-23 A1：`snapshot?.subscriptions ?? []` 会把「没读到」渲染成
+  // 「还没有订阅，添加后会自动拉取…」—— 给错原因。读不到就必须说读不到。
+  if (!snapshot) return <SnapshotFallback />;
 
   return (
     <div className="page">

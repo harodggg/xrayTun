@@ -17,9 +17,11 @@
  *    但把装饰性重量降下来）。
  */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import { api, errorText } from "../ipc";
+import { CopyButton } from "../IncidentReport";
 import { InlineConfirm } from "../InlineConfirm";
+import SnapshotFallback from "../SnapshotState";
 import { useStore } from "../store";
 import {
   formatTimestamp,
@@ -50,6 +52,46 @@ export default function Nodes() {
       [n.name, n.address, n.protocol.kind].some((v) => v.toLowerCase().includes(q)),
     );
   }, [nodes, query]);
+
+  /**
+   * task-23 A1：读不到快照时**不能**继续往下渲染「还没有任何节点」——
+   * 那是把「没读到」说成「没有」，属于给错原因（详见 `SnapshotState.tsx`）。
+   * 放在 `useMemo` **之后**：hook 的调用顺序必须与其它 render 一致。
+   */
+  if (!snapshot) return <SnapshotFallback />;
+
+  /**
+   * task-23 B1：行内 roving tabindex 的落点。
+   *
+   * 选中项优先；**一个都没选中时第一条**也要能 Tab 进来 —— 否则键盘用户
+   * 永远进不了这个列表（`tabIndex={selected ? 0 : -1}` 在 selected 为 null
+   * 时会让所有行都不可聚焦）。
+   */
+  const rovingId = selectedId ?? filtered[0]?.id ?? null;
+
+  /**
+   * 行的键盘操作（task-23 B1）。原来是 `<div onClick>`：键盘用户 Tab 只能落到
+   * 行内的「二维码 / 删除」，**没办法切换节点**，读屏也读不出这一组是单选、选没选中。
+   *
+   * 方向键按**视觉顺序**在组内移动并同时选中（与 macOS 单选列表一致）；
+   * Enter/Space 只选当前行。
+   */
+  const onRowKeyDown = (e: KeyboardEvent<HTMLDivElement>, node: Node, index: number) => {
+    if (busy !== null) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      void run("select", () => api.selectNode(node.id));
+      return;
+    }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const nextIndex = e.key === "ArrowDown" ? index + 1 : index - 1;
+    const next = filtered[nextIndex];
+    if (!next) return;
+    const rows = e.currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="radio"]');
+    rows?.[nextIndex]?.focus();
+    void run("select", () => api.selectNode(next.id));
+  };
 
   const openExport = async (nodeId: string) => {
     setExportError(null);
@@ -88,6 +130,7 @@ export default function Nodes() {
         <input
           type="text"
           placeholder="搜索名称、地址或协议"
+          aria-label="搜索节点"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -130,7 +173,7 @@ export default function Nodes() {
             </div>
           </div>
           {addError && (
-            <div className="banner banner--error">
+            <div className="banner banner--error" role="alert">
               <span>✕</span>
               <div>{addError}</div>
             </div>
@@ -156,14 +199,18 @@ export default function Nodes() {
           )}
         </div>
       ) : (
-        <div className="list">
-          {filtered.map((node) => (
+        // task-23 B1：整组是**单选**（选中哪一个节点），所以用 radiogroup/radio，
+        // 而不是给行加 role="button"（那会和行内两个真按钮形成「按钮套按钮」）。
+        <div className="list" role="radiogroup" aria-label="节点">
+          {filtered.map((node, index) => (
             <NodeRow
               key={node.id}
               node={node}
               selected={node.id === selectedId}
               probe={latency[node.id]}
               busy={busy !== null}
+              tabIndex={busy !== null || node.id !== rovingId ? -1 : 0}
+              onKeyDown={(e) => onRowKeyDown(e, node, index)}
               onSelect={() => void run("select", () => api.selectNode(node.id))}
               onDelete={() => void run("delete", () => api.deleteNode(node.id))}
               onExport={() => void openExport(node.id)}
@@ -186,7 +233,7 @@ export default function Nodes() {
             </div>
 
             {exportError && (
-              <div className="banner banner--error">
+              <div className="banner banner--error" role="alert">
                 <span>⚠︎</span>
                 <div>{exportError}</div>
               </div>
@@ -220,12 +267,11 @@ export default function Nodes() {
                 <textarea className="input mono" readOnly rows={4} value={exported.uri} />
 
                 <div className="row" style={{ marginTop: 10, gap: 8 }}>
-                  <button
-                    className="btn btn--primary"
-                    onClick={() => void navigator.clipboard.writeText(exported.uri)}
-                  >
-                    复制链接
-                  </button>
+                  {/* task-23 B3：原来是**裸** `navigator.clipboard.writeText`（连 catch
+                      都没有）—— 剪贴板被拒时用户以为复制成功、贴出去却是空的。
+                      改用与日志页/「报告问题」同一个 `CopyButton`：失败给
+                      `role="alert"` + 可手动选中的 textarea。 */}
+                  <CopyButton label="复制链接" text={exported.uri} className="btn btn--primary" />
                   <button className="btn" onClick={() => setExported(null)}>
                     关闭
                   </button>
@@ -244,6 +290,8 @@ function NodeRow({
   selected,
   probe,
   busy,
+  tabIndex,
+  onKeyDown,
   onSelect,
   onDelete,
   onExport,
@@ -254,6 +302,9 @@ function NodeRow({
   /** 这个节点的最近一次探测结果（`snapshot.latency[node.id]`）；`undefined` = 没测过。 */
   probe: ProbeResult | undefined;
   busy: boolean;
+  /** roving tabindex：只有一条行是 `0`，其余 `-1`（task-23 B1）。 */
+  tabIndex: number;
+  onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => void;
   onSelect: () => void;
   onDelete: () => void;
   onExport: () => void;
@@ -283,7 +334,14 @@ function NodeRow({
   return (
     <div
       className={`list__row node-row${selected ? " is-selected" : ""}`}
+      // task-23 B1：整行是一个**单选**项。键盘：Enter/Space 选中、方向键组内移动；
+      // 读屏：能听到「单选、已选中/未选中」。
+      role="radio"
+      aria-checked={selected}
+      aria-disabled={busy || undefined}
+      tabIndex={tabIndex}
       onClick={busy ? undefined : onSelect}
+      onKeyDown={onKeyDown}
       // task-120：这里原来是「**正在使用**这个节点」/「当前」。判据是
       // `settings.selected_node`，那是**选中的意图**，不是数据面正在用的出口：
       // 断开后（`runtime.running=false`）它不变；`mode=direct` 时核心不接管流量；

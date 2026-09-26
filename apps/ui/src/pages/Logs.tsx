@@ -112,17 +112,23 @@ export default function Logs() {
   // `enabled` 只在跟随关闭时成立 —— 跟随开着时我们本来就要贴底。
   usePreserveReadingPosition(boxRef, !follow, logs[0]?.seq ?? null);
 
-  const exportLogs = async () => {
-    const text = filtered
-      .map((l) => `[${new Date(l.ts_unix * 1000).toISOString()}] ${l.source}/${l.level} ${l.message}`)
-      .join("\n");
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // 剪贴板可能被拒绝；退化成在控制台输出，至少不会静默失败。
-      console.log(text);
-    }
-  };
+  /**
+   * task-23 B3：要复制的文本（与筛选结果同源）。
+   *
+   * 以前是 `exportLogs()` 里裸调 `navigator.clipboard.writeText`，失败只
+   * `console.log(text)` —— WKWebView 里用户看不到控制台，于是「点了没反应」，
+   * 以为复制成功、贴出去是空的。现在文本在这里算好，交给既有的 `CopyButton`：
+   * 成功给 `role="status"`、失败给 `role="alert"` + 可手动选中的 textarea。
+   */
+  const copyText = useMemo(
+    () =>
+      filtered
+        .map(
+          (l) => `[${new Date(l.ts_unix * 1000).toISOString()}] ${l.source}/${l.level} ${l.message}`,
+        )
+        .join("\n"),
+    [filtered],
+  );
 
   return (
     <div className="logs-page">
@@ -153,6 +159,7 @@ export default function Logs() {
           type="text"
           className="logs-bar__search"
           placeholder="过滤关键字"
+          aria-label="过滤日志关键字"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -163,9 +170,7 @@ export default function Logs() {
           <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
           跟随
         </label>
-        <button className="btn btn--ghost" onClick={() => void exportLogs()}>
-          复制
-        </button>
+        <CopyButton label="复制" text={copyText} className="btn btn--ghost" />
         <button
           className="btn btn--ghost"
           onClick={() => void runVoid("diag", async () => setDiagnostics(await api.diagnostics()))}

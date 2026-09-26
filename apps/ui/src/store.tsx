@@ -58,13 +58,71 @@ export interface LogsLoad {
   error: string | null;
 }
 
+/** 快照读取状态。与 `logsLoad` 同一口径：「没读到」与「读到了、但是空的」是两件事。 */
+export type SnapshotPhase = "loading" | "loaded" | "failed";
+
+/** 失败来自哪条路。用于「同一句话不要在两处重复说」（task-23 D1）。 */
+export type ErrorSource = "command" | "snapshot" | "logs";
+
+/**
+ * 操作名 → 人话（task-23 C1）。
+ *
+ * 为什么需要：`busy` 是个内部英文键，而界面要告诉用户「正在忙什么」。
+ * 没映射到的操作**不编**具体业务名，只说「有操作正在进行」——
+ * 猜错名字比不说更糟。
+ */
+const BUSY_LABEL: Record<string, string> = {
+  probe: "正在测试延迟…",
+  select: "正在切换节点…",
+  delete: "正在删除节点…",
+  "add-node": "正在添加节点…",
+  "add-sub": "正在添加订阅…",
+  "remove-sub": "正在删除订阅…",
+  "refresh-all": "正在更新全部订阅…",
+  "refresh-one": "正在更新订阅…",
+  "save-rules": "正在保存规则…",
+  preset: "正在切换分流预设…",
+  reconnect: "正在重连核心…",
+  "check-updates": "正在检查更新…",
+  "install-core-update": "正在更新核心…",
+  "install-geo-update": "正在更新 geo 数据…",
+  "check-app-update": "正在检查客户端更新…",
+  "install-app-update": "正在安装客户端更新…",
+  "revert-managed-update": "正在回退更新…",
+  "install-helper": "正在安装特权助手…",
+  "restart-helper": "正在重启特权助手…",
+  "uninstall-helper": "正在卸载特权助手…",
+  restore: "正在回滚网络配置…",
+  diag: "正在生成诊断报告…",
+  "open-data-dir": "正在打开数据目录…",
+  mode: "正在切换模式…",
+  start: "正在连接…",
+  stop: "正在断开…",
+};
+
+/** `busy` → 给用户看的一句话；`null` = 没有操作在进行。 */
+export function busyLabelOf(busy: string | null): string | null {
+  if (busy === null) return null;
+  return BUSY_LABEL[busy] ?? "有操作正在进行…";
+}
+
 interface StoreValue {
   snapshot: AppSnapshot | null;
   logs: UiLogEntry[];
   /** 日志读取本身的状态 —— 「没读到」与「读到但是空的」是两件事。 */
   logsLoad: LogsLoad;
+  /**
+   * 快照读取状态（task-23 A1）。
+   *
+   * 以前界面只有 `snapshot === null` 一个信息，于是把「还没读回来」和
+   * 「读失败了」都渲染成「正在加载…」（永远不停），节点/订阅页更糟 ——
+   * 把「没读到」说成「你还没有任何节点/订阅」（**给错原因**）。
+   */
+  snapshotPhase: SnapshotPhase;
   /** 正在执行的操作名，用于按钮转圈与防重复点击。 */
   busy: string | null;
+  /** `busy` 的人话版本（顶部 status 徽章用）；`null` = 没有操作在进行。 */
+  busyLabel: string | null;
   error: string | null;
   /**
    * 失败时的**下一步动作**（`failure.ts::nextSteps`）。与 `error` 同时写入、
@@ -72,6 +130,13 @@ interface StoreValue {
    * 只报错误码等于把用户留在原地。
    */
   errorSteps: string[];
+  /**
+   * 这条 `error` 来自哪条路（task-23 D1）。
+   *
+   * `command` 的命令错误与 `runtime.last_error` 是同一句话时，仪表盘不该再显示
+   * 一遍（否则同屏两条红字、动作数还不一样）。
+   */
+  errorSource: ErrorSource | null;
   /** 延迟测量是否正在进行。 */
   probing: boolean;
   probeProgress: { done: number; total: number } | null;
@@ -107,6 +172,14 @@ interface StoreValue {
   clearLogs: () => Promise<void>;
   /** 重新拉一次日志（失败态里的「重试」）。 */
   reloadLogs: () => Promise<void>;
+  /**
+   * 有没有**未保存的编辑**（目前只有规则页的草稿，task-23 F1）。
+   *
+   * 它是「离开会不会丢工作」的唯一判据：`Routing` 的 `draft` 是组件内 state，
+   * 切页即卸载 ⇒ 静默丢光。规则页把 dirty 同步到这里，App 在切页前拦一次。
+   */
+  hasUnsavedEdits: boolean;
+  setHasUnsavedEdits: (v: boolean) => void;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -138,9 +211,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const nextLogSeq = useCallback(() => (logSeqRef.current += 1), []);
   /** 日志读取状态：最初是「正在读」，成败由 IPC 的真实结果决定。 */
   const [logsLoad, setLogsLoad] = useState<LogsLoad>({ phase: "loading", error: null });
+  const [snapshotPhase, setSnapshotPhase] = useState<SnapshotPhase>("loading");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [errorSteps, setErrorSteps] = useState<string[]>([]);
+  const [errorSource, setErrorSource] = useState<ErrorSource | null>(null);
+  const [hasUnsavedEdits, setHasUnsavedEdits] = useState(false);
   const [probing, setProbing] = useState(false);
   const [probeProgress, setProbeProgress] = useState<{ done: number; total: number } | null>(null);
 
@@ -207,7 +283,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
    * 节点页的 `submitManual()`）不该当成成功继续往下走 —— 宁可让它报失败，
    * 因为横幅里已经写清了**真实**原因。（代价见卡片的诚实清单。）
    */
-  const acceptSnapshot = useCallback((v: unknown, source: string): boolean => {
+  const acceptSnapshot = useCallback((v: unknown, source: ErrorSource): boolean => {
     if (isObject(v) && isObject(v.settings) && isObject(v.runtime)) {
       shapeBadRef.current = false;
       setSnapshot(v as unknown as AppSnapshot);
@@ -224,6 +300,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // 形状异常不是「后端给了一条命令错误」，它自带说明与出路（见常量文案），
       // 所以这里**不**再叠一层通用建议 —— 清空即可，免得留下上一次的步骤。
       setErrorSteps([]);
+      setErrorSource(source);
     }
     return false;
   }, []);
@@ -234,24 +311,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
    * 分开写的好处是「清错误」和「报错误」永远同步；以前只清 `error`、
    * 不管别的状态时漏过一次（task-146 就踩过这种「同一件事两处维护」的坑）。
    */
-  const fail = useCallback((e: unknown) => {
+  const fail = useCallback((e: unknown, source: ErrorSource) => {
     const text = errorText(e);
+    // 快照读失败是**页面级**故障：它同时决定「空态还是错误态」，
+    // 所以 `snapshotPhase` 与错误横幅必须一起更新（task-23 A1）。
+    if (source === "snapshot") setSnapshotPhase("failed");
     setError(text);
     // 线索来自后端自己的文案；线索不足时只给「看日志」——不编具体归因。
     setErrorSteps(nextSteps(text));
+    setErrorSource(source);
   }, []);
 
   const succeed = useCallback(() => {
     setError(null);
     setErrorSteps([]);
+    setErrorSource(null);
   }, []);
 
   const refresh = useCallback(async () => {
     try {
       const next = await api.snapshot();
-      if (acceptSnapshot(next, "snapshot")) succeed();
+      if (acceptSnapshot(next, "snapshot")) {
+        setSnapshotPhase("loaded");
+        succeed();
+      } else {
+        // 形状异常：没有可用数据 ⇒ 仍是失败态（界面保留上一份，横幅已说明）。
+        setSnapshotPhase("failed");
+      }
     } catch (e) {
-      fail(e);
+      fail(e, "snapshot");
     }
   }, [acceptSnapshot, fail, succeed]);
 
@@ -264,7 +352,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const next = await action();
         return acceptSnapshot(next, "command");
       } catch (e) {
-        fail(e);
+        fail(e, "command");
         return false;
       } finally {
         setBusy(null);
@@ -282,7 +370,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         await action();
         return true;
       } catch (e) {
-        fail(e);
+        fail(e, "command");
         return false;
       } finally {
         setBusy(null);
@@ -464,6 +552,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const text = `清空日志失败：${errorText(e)}`;
       setError(text);
       setErrorSteps(nextSteps(text));
+      setErrorSource("logs");
     }
   }, []);
 
@@ -475,9 +564,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       snapshot,
       logs,
       logsLoad,
+      snapshotPhase,
       busy,
+      busyLabel: busyLabelOf(busy),
       error,
       errorSteps,
+      errorSource,
       probing,
       probeProgress,
       recovery,
@@ -489,17 +581,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       clearError: () => {
         setError(null);
         setErrorSteps([]);
+        setErrorSource(null);
       },
       clearLogs,
       reloadLogs: loadLogs,
+      hasUnsavedEdits,
+      setHasUnsavedEdits,
     }),
     [
       snapshot,
       logs,
       logsLoad,
+      snapshotPhase,
       busy,
       error,
       errorSteps,
+      errorSource,
       probing,
       probeProgress,
       recovery,
@@ -510,6 +607,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       runVoid,
       clearLogs,
       loadLogs,
+      hasUnsavedEdits,
     ],
   );
 
