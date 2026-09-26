@@ -39,6 +39,13 @@ set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${SELF}/.." && pwd)"
+
+# **内联 python 的 import 路径**：脚本里多处用 `python3 - <<'PY'` 内联执行，
+# 而内联脚本的 `sys.path[0]` 是**当前工作目录**（不是脚本所在目录）。
+# 于是从别的 cwd 调用时 `from helper_tristate import …` 会
+# `ModuleNotFoundError`（现场包因此直接失败、exit 1 —— 用户实测）。
+# 内联脚本已支持 `XRAYTUN_SCRIPTS_DIR`，这里统一兜住：**调用方不必知道这件事**。
+export XRAYTUN_SCRIPTS_DIR="${XRAYTUN_SCRIPTS_DIR:-$SELF}"
 DATA_DIR_DEFAULT="${HOME}/Library/Application Support/com.xraytun.desktop"
 APP_DEFAULT="/Applications/XrayTun.app"
 HELPER_INSTALLED_DEFAULT="/Library/PrivilegedHelperTools/com.xraytun.helper"
