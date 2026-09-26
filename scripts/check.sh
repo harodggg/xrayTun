@@ -188,6 +188,41 @@ python3 scripts/triage-incident.py --self-test
 step "worktree 位置守卫自测（wt.sh：默认不在 ${TMPDIR} 下）"
 bash docs/verification/verify-wt-dir-root.sh
 
+# ---------------------------------------------------------------- 脚本可执行位
+#
+# 为什么要有这一步（2026-09-26，v0.8.42 的真实事故）：
+# 工作区里有工具重写过脚本，把 git 里的可执行位从 100755 掉成 100644
+# （`scripts/package-macos.sh`、`scripts/gen-site-geo.py`、`scripts/gen-site-jsonld.py`），
+# 而**测试步骤全绿** —— 一直到 release.yml 的打包步骤才
+# `./scripts/package-macos.sh: Permission denied`，把发版卡在「正在发布」的中间态。
+# 与「`config.rs` 里重复的 `#[test]` 属性」同一天发生，是同一类漏洞：
+# 门禁覆盖了「测试过不过」，没覆盖「**它到底能不能跑起来**」。
+#
+# 判据**不写死清单**：从 CI 里**实际出现的 `./scripts/…` 调用点**推导
+# （`.github/workflows/**` + 本脚本，去掉纯注释行），这些文件在 git index 里必须是 100755。
+# 差分证明：`v0.8.41` 上该判据为真（6/6 = 755）；修复前的 HEAD 上为假（`package-macos.sh` = 100644）。
+# 只查**直接执行**点：`python3 scripts/x.py` 这种由解释器读取的文件**不需要** x 位，
+# 历史上也不是 755（v0.8.41 上 `gen-site-images.py` 等 4 个就是 644），所以不能一刀切。
+step "脚本可执行位（被 ./scripts/… 直接调用的必须 100755）"
+_perm_bad=0
+while IFS= read -r _p; do
+  [ -n "$_p" ] || continue
+  [ -f "$_p" ] || continue
+  _mode="$(git ls-files -s -- "$_p" | awk 'NR==1 {print $1}')"
+  if [ "$_mode" = "100755" ]; then
+    printf '  ✓ %-40s 100755\n' "$_p"
+  else
+    printf '  ✗ %-40s 实际 %s / 期望 100755（发版会在打包步骤 Permission denied）\n' \
+      "$_p" "${_mode:-未跟踪}" >&2
+    _perm_bad=1
+  fi
+done < <({ grep -rhE '\./scripts/[A-Za-z0-9._/-]+' .github/workflows scripts/check.sh || true; } \
+         | grep -v '^[[:space:]]*#' | grep -oE '\./scripts/[A-Za-z0-9._/-]+' | sort -u)
+if [ "$_perm_bad" -ne 0 ]; then
+  echo "  ⇒ 修法：chmod +x <文件> && git update-index --chmod=+x <文件>（再提交）" >&2
+  exit 1
+fi
+
 step "前端构建"
 # 注意这条是对的：`npm run` 会把 cwd 切到包目录，脚本里的 `tsc --noEmit`
 # 因此能找到 tsconfig.json。上一行那个 `npm exec` 不会。
