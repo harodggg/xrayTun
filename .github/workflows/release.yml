@@ -83,7 +83,7 @@ jobs:
             *) echo "✗ 未知策略：$POLICY —— 形状非法本应在 team_id_resolve 被拦下" >&2; exit 1 ;;
           esac
           printf 'XRAYTUN_TEAM_ID_POLICY=%s\n' "$POLICY" >>"$GITHUB_ENV"
-          echo "已归一化注入策略：$POLICY（值本身不打印）"
+          echo "已归一化注入策略：${POLICY}（值本身不打印）"
           case "$POLICY" in
             cdhash)
               echo "  · cdhash 绑定要求 App 装在 /Applications/XrayTun.app（发行包就是这样装的）" ;;
@@ -171,7 +171,7 @@ jobs:
             archs="$(lipo -archs "$APP/$f")"
             case "$archs" in
               *x86_64*arm64*|*arm64*x86_64*) ;;
-              *) echo "$f 不是 universal（$archs）" >&2; exit 1 ;;
+              *) echo "$f 不是 universal（${archs}）" >&2; exit 1 ;;
             esac
           done
 
