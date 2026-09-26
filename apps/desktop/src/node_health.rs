@@ -339,6 +339,20 @@ pub(crate) fn local_port_free(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
+/// 按 id 取节点的**显示名**；找不到（或 `id` 为 `None`）时返回 `fallback`。
+///
+/// # 为什么集中这一处（简化，不是取巧）
+///
+/// 「id → 名字」在本 crate 里手写了 6 处以上，写法都是
+/// `nodes.iter().find(|n| n.id == id).map(|n| n.name.clone()).unwrap_or_else(...)`，
+/// 而**兜底文案各不相同**（有的是 `""`、有的是 `"（未选择）"`）。集中成一个函数后：
+/// 只有一处需要知道「怎么按 id 找节点」，调用点只保留自己的兜底文案 ⇒ **行为逐字不变**。
+pub(crate) fn node_name_or(nodes: &[Node], id: Option<&str>, fallback: &str) -> String {
+    id.and_then(|id| nodes.iter().find(|n| n.id == id))
+        .map(|n| n.name.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +681,19 @@ mod tests {
         assert!(!local_port_free(port), "正在被占用的端口必须判成不空闲");
         drop(listener);
         assert!(local_port_free(port), "放开之后必须判成空闲");
+    }
+
+    /// `node_name_or` 必须**逐字保留调用点各自的兜底文案**（集中化的等价性论据）。
+    #[test]
+    fn node_name_or_keeps_each_callsite_fallback_text() {
+        let nodes = vec![node("n-a", "香港 A", "1.1.1.1")];
+        assert_eq!(node_name_or(&nodes, Some("n-a"), "（未选择）"), "香港 A");
+        assert_eq!(
+            node_name_or(&nodes, Some("不存在"), "（未选择）"),
+            "（未选择）",
+            "找不到时用调用点的兜底文案"
+        );
+        assert_eq!(node_name_or(&nodes, None, ""), "", "连通性检查用的兜底是空串");
+        assert_eq!(node_name_or(&[], Some("n-a"), "?"), "?");
     }
 }

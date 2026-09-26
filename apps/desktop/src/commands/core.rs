@@ -97,6 +97,63 @@ pub async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
     snapshot::build_snapshot(&app, &state).await
 }
 
+/// 记一次**节点尝试失败**：连续失败计数 + 一条 warn 日志 + 订阅重拉提示。
+///
+/// # 为什么抽出来（简化，且行为不变）
+///
+/// 这段原来是 `start_core` 回落循环里的内联代码，只做**记账**、不参与控制流
+/// （循环的走/停由 `class.is_node_level()` 决定）。抽出来之后：
+///   · `start_core` 的循环只剩「决策 + 调用」，长度可读；
+///   · 「连续 N 次 + 来自订阅 ⇒ 提示」这条从「只能整条启动路径间接验」
+///     变成可单测（见 `note_node_failure_counts_streaks_and_only_hints_for_subscriptions`）。
+/// 三件事的顺序与内容与内联版逐条相同：**计数 → 日志 → 提示**。
+fn note_node_failure(
+    state: &AppState,
+    node: &Node,
+    class: crate::node_health::NodeFailureClass,
+    elapsed: Duration,
+    message: &str,
+) {
+    let streak = state
+        .with(|i| {
+            let n = i.node_fail_streak.entry(node.id.clone()).or_insert(0);
+            *n += 1;
+            *n
+        })
+        .unwrap_or(1);
+    state.log(
+        "app",
+        "warn",
+        format!(
+            "节点「{}」尝试失败（{}，第 {} 次连续失败，{:.1}s）：{}",
+            node.name,
+            class.slug(),
+            streak,
+            elapsed.as_secs_f32(),
+            message
+        ),
+    );
+    // 订阅节点连续失败 ⇒ 提示重拉订阅（**不自动改用户选中的节点**）。
+    if let xt_core::model::NodeSource::Subscription { id: sub_id } = &node.source {
+        let sub_name = state
+            .with(|i| {
+                i.subscriptions
+                    .iter()
+                    .find(|s| &s.id == sub_id)
+                    .map(|s| s.name.clone())
+            })
+            .unwrap_or(None);
+        if let Some(sub_name) = sub_name {
+            if let Some(hint) =
+                crate::node_health::subscription_refresh_hint(&node.name, &sub_name, streak)
+            {
+                state.with(|i| i.last_notice = Some(hint.clone()));
+                state.log("app", "warn", hint);
+            }
+        }
+    }
+}
+
 pub(crate) async fn start_core(
     app: &AppHandle,
     state: &AppState,
@@ -277,46 +334,7 @@ pub(crate) async fn start_core(
                     started.elapsed(),
                     e.clone(),
                 ));
-                let streak = state
-                    .with(|i| {
-                        let n = i.node_fail_streak.entry(node.id.clone()).or_insert(0);
-                        *n += 1;
-                        *n
-                    })
-                    .unwrap_or(1);
-                state.log(
-                    "app",
-                    "warn",
-                    format!(
-                        "节点「{}」尝试失败（{}，第 {} 次连续失败，{:.1}s）：{}",
-                        node.name,
-                        class.slug(),
-                        streak,
-                        started.elapsed().as_secs_f32(),
-                        e
-                    ),
-                );
-                // 订阅节点连续失败 ⇒ 提示重拉订阅（**不自动改用户选中的节点**）。
-                if let xt_core::model::NodeSource::Subscription { id: sub_id } = &node.source {
-                    let sub_name = state
-                        .with(|i| {
-                            i.subscriptions
-                                .iter()
-                                .find(|s| &s.id == sub_id)
-                                .map(|s| s.name.clone())
-                        })
-                        .unwrap_or(None);
-                    if let Some(sub_name) = sub_name {
-                        if let Some(hint) = crate::node_health::subscription_refresh_hint(
-                            &node.name,
-                            &sub_name,
-                            streak,
-                        ) {
-                            state.with(|i| i.last_notice = Some(hint.clone()));
-                            state.log("app", "warn", hint);
-                        }
-                    }
-                }
+                note_node_failure(state, &node, class, started.elapsed(), &e);
                 // 本地端口问题：换节点没用，立刻停（别让用户白等一轮）。
                 if !class.is_node_level() {
                     break;
@@ -376,14 +394,10 @@ pub(crate) async fn start_core(
         i.node_fail_streak.remove(&used_node_id);
     });
     if used_node_id != selected_id.clone().unwrap_or_default() {
-        let name_of = |id: &Option<String>| -> String {
-            id.as_deref()
-                .and_then(|id| nodes.iter().find(|n| n.id == id))
-                .map(|n| n.name.clone())
-                .unwrap_or_else(|| "（未选择）".into())
-        };
-        let selected_name = name_of(&selected_id);
-        let used_name = name_of(&Some(used_node_id.clone()));
+        let selected_name =
+            crate::node_health::node_name_or(&nodes, selected_id.as_deref(), "（未选择）");
+        let used_name =
+            crate::node_health::node_name_or(&nodes, Some(used_node_id.as_str()), "（未选择）");
         let notice = format!(
             "原选中节点「{selected_name}」不可达（本次共试了 {} 个节点），已自动改用「{used_name}」连接。\
              你的选择没有被改动 —— 设置里仍然是「{selected_name}」；\
@@ -1790,11 +1804,7 @@ pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard
                     .or_else(|| i.settings.selected_node.clone());
                 (
                     i.runtime.running && i.runtime.pid == pid,
-                    i.nodes
-                        .iter()
-                        .find(|n| Some(&n.id) == active.as_ref())
-                        .map(|n| n.name.clone())
-                        .unwrap_or_default(),
+                    crate::node_health::node_name_or(&i.nodes, active.as_deref(), ""),
                     active.unwrap_or_default(),
                 )
             })
@@ -3776,6 +3786,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::new(dir);
         (AppState::new(store.clone()), store)
+    }
+
+    /// **行为级**：节点失败记账（原来埋在 `start_core` 的回落循环里）。
+    ///
+    /// 等价性论据：`note_node_failure` 与内联版做同样三件事（计数 → 日志 → 提示），
+    /// 所以把「连续失败递增」与「手工节点不提示订阅」这两条钉出来即可。
+    /// 判别性：把计数那一段删掉 ⇒ 第一条断言红；把 `Manual` 也当成订阅 ⇒ 第二条红。
+    #[test]
+    fn note_node_failure_counts_streaks_and_only_hints_for_subscriptions() {
+        let (state, store) = route_audit_state("node-fail-streak");
+        let node = Node {
+            id: "n-manual".into(),
+            name: "手工节点".into(),
+            address: "203.0.113.9".into(),
+            port: 443,
+            protocol: xt_core::model::Protocol::Vless {
+                uuid: "00000000-0000-0000-0000-000000000000".into(),
+                flow: String::new(),
+                encryption: "none".into(),
+            },
+            transport: Default::default(),
+            tls: Default::default(),
+            mux: None,
+            source: xt_core::model::NodeSource::Manual,
+            tags: Vec::new(),
+            raw_uri: None,
+        };
+        for round in 1..=3u32 {
+            note_node_failure(
+                &state,
+                &node,
+                crate::node_health::NodeFailureClass::TcpUnreachable,
+                Duration::from_secs(8),
+                "接管默认路由之前就联系不上代理服务器 203.0.113.9:443",
+            );
+            let seen = state
+                .with(|i| i.node_fail_streak.get("n-manual").copied())
+                .unwrap();
+            assert_eq!(seen, Some(round), "第 {round} 次失败后计数应当递增");
+        }
+        let notice = state.with(|i| i.last_notice.clone()).unwrap_or(None);
+        assert!(
+            notice.is_none(),
+            "手工节点没有订阅可重拉 ⇒ 不许出现订阅提示：{notice:?}"
+        );
+        let _ = std::fs::remove_dir_all(store.root());
     }
 
     /// **L1 行为级**：接管后缺「作用域默认路由」⇒ App 落盘日志里出现**可直接判读**的
