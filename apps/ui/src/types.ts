@@ -356,24 +356,31 @@ export type IntentVerdict =
   | { verdict: "deferred"; reason: "not_candidate"; why: string }
   | { verdict: "deferred"; reason: "disabled" };
 
-/** 一条意图判定的审计记录（`intent_audit`）。 */
+/**
+ * 一条意图判定的审计记录（`intent_audit`）。
+ *
+ * ⚠️ 所有可选字段都是 `?`：审计是磁盘上的 JSONL，**缺 key 时 `JSON.parse` 得到的是
+ * `undefined`，不是 `null`**。只判 `=== null` 的代码会在「某条记录恰好缺这个字段」
+ * 时抛异常（真实事故：`row.ads_intent.toFixed(2)` ⇒ 界面黑屏）。
+ * 新版本后端已改成发显式 `null`，但老版本写下的历史行不会变。
+ */
 export interface IntentAuditRecord {
   ts_unix: number;
   host: string;
   outcome: "block" | "allow" | "deferred";
-  reason: string | null;
-  category: string | null;
-  ads_intent: number | null;
-  risk_of_breakage: number | null;
-  choice_confidence: number | null;
-  effective_min: number | null;
+  reason?: string | null;
+  category?: string | null;
+  ads_intent?: number | null;
+  risk_of_breakage?: number | null;
+  choice_confidence?: number | null;
+  effective_min?: number | null;
   /** 这条判决是否真的变成了配置里的规则。 */
   applied: boolean;
   cache_hit: boolean;
-  model: string | null;
-  usage: { input_tokens: number; output_tokens: number } | null;
-  /** 只在用户显式开启"记录外发内容"时才非空。 */
-  context_sent: string | null;
+  model?: string | null;
+  usage?: { input_tokens: number; output_tokens: number } | null;
+  /** 只在用户显式开启"记录外发内容"时才非空（默认连 key 都不出现）。 */
+  context_sent?: string | null;
 }
 
 /**

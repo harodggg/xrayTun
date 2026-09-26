@@ -253,6 +253,26 @@ describe("意图过滤页", () => {
     expect(mocks.intentExplain).toHaveBeenCalledWith("ads.example");
   });
 
+  it("审计行**缺少** ads_intent（后端省略 key ⇒ undefined）不许把整页打崩", async () => {
+    mocks.intentStatus.mockResolvedValue(summary({ cache_len: 1 }));
+    // 真实事故形态：serde 的 `skip_serializing_if` 让 `None` 字段**整个消失**，
+    // 前端拿到 `undefined`（不是 `null`）⇒ `.toFixed()` 抛
+    // `undefined is not an object` ⇒ React 卸载整棵树 ⇒ 界面黑屏。
+    const missing = auditRow() as unknown as Record<string, unknown>;
+    delete missing.ads_intent;
+    mocks.intentAudit.mockResolvedValue([missing as unknown as IntentAuditRecord]);
+    mocks.snapshot.mockResolvedValue(snapshotWithIntent({ enabled: true }));
+    render(
+      <StoreProvider>
+        <Intent />
+      </StoreProvider>,
+    );
+
+    const tr = (await screen.findByText("ads.example")).closest("tr")!;
+    expect(within(tr).getAllByText("—").length).toBeGreaterThan(0);
+    expect(within(tr).queryByText("0.97")).toBeNull();
+  });
+
   it("放行按钮把动作显式传下去（我们绝不替用户选直连还是走代理）", async () => {
     mocks.intentStatus.mockResolvedValue(summary({ cache_len: 1 }));
     mocks.intentAudit.mockResolvedValue([auditRow({ outcome: "block" })]);

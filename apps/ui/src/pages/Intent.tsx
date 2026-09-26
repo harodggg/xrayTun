@@ -215,6 +215,19 @@ export function mitmGateSummary(gates: MitmGate[], status: MitmStatus | null): s
   return "三道闸门全过 —— 但核心这次启动没带引导规则（证书或名单是在它启动之后才满足的，重连一次即可）。";
 }
 
+/**
+ * 概率显示：拿不到值一律显示「—」。
+ *
+ * ⚠️ 判据必须是 `typeof === "number" && Number.isFinite`，**不能**只判 `=== null`：
+ * 后端 `Option` 字段一旦省略 key（历史审计文件、旧版本写下的行），JS 拿到的是
+ * `undefined`，`.toFixed()` 会抛 `undefined is not an object` ⇒ React 卸载整棵树
+ * ⇒ **界面黑屏**。后端已改成始终发显式 `null`（`xt-intent/src/audit.rs`），
+ * 但磁盘上的老行永远是缺 key 的，所以这里必须有。
+ */
+function fmtProb(v: number | null | undefined): string {
+  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "—";
+}
+
 export default function Intent() {
   const { snapshot, runVoid } = useStore();
   const settings = snapshot?.settings ?? null;
@@ -964,7 +977,7 @@ export default function Intent() {
                   </td>
                   <td>{row.reason ?? "—"}</td>
                   <td className="mono">
-                    {row.ads_intent === null ? "—" : row.ads_intent.toFixed(2)}
+                    {fmtProb(row.ads_intent)}
                   </td>
                   {/* 「没有构成规则」有两种完全不同的原因，不许混成一句。 */}
                   <td>
@@ -1019,8 +1032,8 @@ export default function Intent() {
                 <div className="kv">
                   <span>广告概率 / 误杀风险</span>
                   <strong>
-                    {explain.verdict.ads_intent.toFixed(2)} /{" "}
-                    {explain.verdict.risk_of_breakage.toFixed(2)}
+                    {fmtProb(explain.verdict.ads_intent)} /{" "}
+                    {fmtProb(explain.verdict.risk_of_breakage)}
                   </strong>
                 </div>
                 <div className="kv">

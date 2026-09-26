@@ -28,6 +28,19 @@ pub struct Usage {
 }
 
 /// 审计记录。字段只增不改名 —— 历史文件要能一直读。
+///
+/// # ⚠️ 可选字段**不省略 key**（唯一的例外是 `context_sent`）
+///
+/// 除 `context_sent` 外，`None` 一律写成**显式 `null`**。省略 key 会让前端拿到
+/// `undefined`，而 TS 侧声明的是 `number | null` —— 类型与线上实际不符，且只在
+/// **某条记录恰好缺这个字段**时暴露。
+///
+/// 真实事故：`Intent.tsx` 里 `row.ads_intent.toFixed(2)` 抛
+/// `undefined is not an object` ⇒ React 卸载整棵树 ⇒ **界面黑屏**。
+/// 前端也加了容错（`fmtProb`），但契约必须由后端保证。
+///
+/// `context_sent` 故意保持省略：默认配置下审计文件里**连 key 都不该出现**
+/// （见测试 `the_context_is_absent_by_default`），与 UI 展示无关。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub ts_unix: u64,
@@ -36,24 +49,24 @@ pub struct AuditRecord {
     /// `block` / `allow` / `deferred`。
     pub outcome: String,
     /// 细化原因（`allow` / `deferred` 才有）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub category: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ads_intent: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub risk_of_breakage: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub choice_confidence: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub effective_min: Option<f32>,
     /// 这条判决是否真的变成了配置里的规则（演练模式恒为 `false`）。
     pub applied: bool,
     pub cache_hit: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub usage: Option<Usage>,
     /// 只在用户显式开启"记录外发内容"时才写（默认 `None`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +186,42 @@ mod tests {
             usage: Some(Usage { input_tokens: 90, output_tokens: 12 }),
             context_sent: None,
         }
+    }
+
+    /// 除 `context_sent` 外的可选字段必须**存在且为 null**，不能省略 key。
+    ///
+    /// 这是前端 `fmtProb` 之外的第二道保险：省略 key 的历史形态曾把整页打崩。
+    #[test]
+    fn optional_fields_serialize_as_explicit_null_never_omitted() {
+        let rec = AuditRecord {
+            ts_unix: 1,
+            host: "a.example".into(),
+            outcome: "allow".into(),
+            reason: None,
+            category: None,
+            ads_intent: None,
+            risk_of_breakage: None,
+            choice_confidence: None,
+            effective_min: None,
+            applied: false,
+            cache_hit: false,
+            model: None,
+            usage: None,
+            context_sent: None,
+        };
+        let line = serde_json::to_string(&rec).unwrap();
+        for key in ["reason", "category", "ads_intent", "risk_of_breakage",
+                    "choice_confidence", "effective_min", "model", "usage"] {
+            assert!(
+                line.contains(&format!("\"{key}\":null")),
+                "缺少显式 null 的 key {key}：{line}"
+            );
+        }
+        // 例外：默认不外发内容时，key 连出现都不该出现。
+        assert!(!line.contains("context_sent"), "默认审计不许出现 context_sent：{line}");
+        // 回读不受影响（老文件缺 key 也能读）。
+        let back: AuditRecord = serde_json::from_str(&line).unwrap();
+        assert_eq!(back, rec);
     }
 
     #[test]
