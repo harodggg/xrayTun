@@ -527,6 +527,89 @@ mod tests {
         assert!(st.ca_fingerprint.is_none());
     }
 
+    /// **task-24 第 1 项（三闸门组合判据）**：闸门①（名单非空）与②（CA 信任）都过之后，
+    /// 「核心那边到底生没生效」只剩 `core_steering` 这一个判据 —— 三种取值都必须钉住：
+    ///
+    /// * `Some(true)`  + 全绿 ⇒ 不需要重连、没有 note；
+    /// * `Some(false)` + CA 已信任 ⇒ **需要重连**（证书刚装上，核心还是旧配置），note 要明说；
+    /// * `None`（没记录过）⇒ **不许声称需要重连**，而且 `core_steering` 必须原样保留为 `None`
+    ///   —— null 是独立一态（"没记录过"），不许被"简化"成 bool。
+    ///
+    /// 判别性：把 `core_restart_required` 写死 `false` ⇒ 中间的断言红；
+    /// 把 `None` 压成 `Some(false)` 或 `false` ⇒ 最后两条红。
+    #[test]
+    fn three_gates_matrix_pins_core_restart_and_the_null_tristate() {
+        let mut s = settings_with_mitm(&["ads.example"]);
+        // 两个端口必须不同（自环配置会被 `proxy_config` 拒绝）；随机端口偶尔会撞。
+        let listen = free_port();
+        let mut upstream = free_port();
+        while upstream == listen {
+            upstream = free_port();
+        }
+        s.mitm.listen_port = listen;
+        s.mitm.upstream_port = upstream;
+
+        // (c) 闸门①②都过，但核心上次启动时**没带**引导规则 ⇒ 要重连一次。
+        let mut rt = MitmRuntime::default();
+        rt.mark_core_steering(false);
+        let st = rt.status(&s.mitm, true);
+        assert!(st.active, "名单非空 + 开着 ⇒ 闸门①过");
+        assert_eq!(st.core_steering, Some(false), "记录必须如实保留");
+        assert!(st.core_restart_required, "(c) 核心那次没带引导规则 ⇒ 必须说要重连");
+        assert!(
+            st.note.as_deref().unwrap_or_default().contains("重连"),
+            "(c) 必须用一句人话说明要重连：{:?}",
+            st.note
+        );
+
+        // (d) 全绿：代理真的在跑 + 核心那次**带了**引导规则。
+        let mut rt = MitmRuntime::default();
+        rt.start(&s.mitm, vec!["ads.example".into()], None)
+            .expect("起代理");
+        rt.mark_core_steering(true);
+        let st = rt.status(&s.mitm, true);
+        assert!(st.active && st.running, "(d) 全绿：active 且 running");
+        assert_eq!(st.core_steering, Some(true));
+        assert!(!st.core_restart_required, "(d) 核心已按它跑 ⇒ 不需要重连");
+        assert!(st.note.is_none(), "(d) 全绿不该有 note：{:?}", st.note);
+        rt.stop();
+
+        // (e) 没记录过：不声称，且 null 不许被压成 bool。
+        let rt = MitmRuntime::default();
+        let st = rt.status(&s.mitm, true);
+        assert_eq!(st.core_steering, None, "null 是独立一态：'没记录过'");
+        assert!(
+            !st.core_restart_required,
+            "'没记录过'不许被当成'需要重连'（那是在编）"
+        );
+    }
+
+    /// **闸门②在两层必须是同一判据**：状态层（`active && ca_trusted`）与
+    /// 配置层（`core_settings(...).mitm.is_active()`）不许漂移。
+    ///
+    /// 判别性：任何只改一层的"收敛"都会让这条红 —— 它钉的是两处推导的一致性，
+    /// 而不是某一个具体取值。
+    #[test]
+    fn ca_gate_agrees_between_status_and_core_settings() {
+        for (enabled, domains, trusted) in [
+            (true, vec![], true),
+            (true, vec!["ads.example"], false),
+            (true, vec!["ads.example"], true),
+            (false, vec!["ads.example"], true),
+        ] {
+            let mut s = settings_with_mitm(&domains);
+            s.mitm.enabled = enabled;
+            let rt = MitmRuntime::default();
+            let st = rt.status(&s.mitm, trusted);
+            let status_layer = st.active && trusted;
+            let config_layer = core_settings(&s, trusted).mitm.is_active();
+            assert_eq!(
+                status_layer, config_layer,
+                "闸门②两层漂移：enabled={enabled} domains={domains:?} trusted={trusted}"
+            );
+        }
+    }
+
     fn free_port() -> u16 {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("拿空闲端口");
         l.local_addr().unwrap().port()
