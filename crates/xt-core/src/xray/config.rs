@@ -1698,7 +1698,6 @@ mod tests {
         assert_eq!(base, with_empty, "没有意图规则时不许改变任何一条既有规则");
     }
 
-    #[test]
     /// **P1 判据（这条就是被修的那个用户可见 bug）**：
     /// 一条 `block` 的自定义规则，对**命中 `geosite:CN` 的域名**必须排在
     /// `preset-cn-domain` **之前** —— 否则 CN 的 `direct` 先命中，用户显式写的拦
