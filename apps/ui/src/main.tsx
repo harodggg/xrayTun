@@ -1,6 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { installFatalHandlers, showFatal } from "./fatalError";
 import "./styles.css";
 
 /**
@@ -14,6 +16,10 @@ import "./styles.css";
  * 这段分支连同 preview.ts 一起被摇掉。
  */
 async function bootstrap() {
+  // **第一件事**：装上全局兜底。晚一步就可能错过启动阶段的异常，
+  // 而那种情况在 WebView 里表现为一片黑、没有任何可诊断信息。
+  installFatalHandlers();
+
   const wantPreview =
     import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
   if (wantPreview) {
@@ -28,9 +34,13 @@ async function bootstrap() {
 
   ReactDOM.createRoot(root).render(
     <React.StrictMode>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </React.StrictMode>,
   );
 }
 
-void bootstrap();
+// ⚠️ 不能只写 `void bootstrap()`：那样任何异常都变成未处理的 Promise 拒绝，
+// 界面静默空白（真实事故）。这里显式兜住并显示出来。
+bootstrap().catch((e: unknown) => showFatal(e));
