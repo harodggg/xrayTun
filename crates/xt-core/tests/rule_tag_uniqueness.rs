@@ -129,9 +129,33 @@ fn rule_tags(cfg: &str) -> Vec<String> {
 /// 期望顺序：`internal-dns-hijack`、`internal-api`、预设…、自定义…、`internal-fallback`。
 fn expected_sequence(preset: RoutingPreset, custom_ids: &[String]) -> Vec<String> {
     let mut out = vec![INTERNAL_TAGS[0].to_string(), INTERNAL_TAGS[1].to_string()];
-    out.extend(routing::preset_rules(preset).iter().map(|r| r.id.clone()));
+    // **顺序必须与 `merge_rules_with_intent` 一致**（P1 修复后）：
+    //   `preset-private`（不可覆盖的头）→ **用户自定义规则** → 其余预设 → 兜底。
+    //
+    // 旧实现把 `custom` 排在预设**之后**，于是用户显式 `block` 在命中 `geosite:CN`
+    // 的域名上永远不会生效（预设 direct 先命中）—— 所以这里断言的顺序也随契约更新。
+    // 本函数**不复制实现**：它按"preset-private 切一刀"的同一口径重建期望，
+    // 并且下面额外钉住「`preset-private` 之后紧接用户规则」这条不变量，
+    // 避免"实现和期望一起漂"。
+    let presets = routing::preset_rules(preset);
+    let split = presets
+        .iter()
+        .position(|r| r.id == "preset-private")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    out.extend(presets[..split].iter().map(|r| r.id.clone()));
+    let custom_start = out.len();
     out.extend(custom_ids.iter().cloned());
+    out.extend(presets[split..].iter().map(|r| r.id.clone()));
     out.push(INTERNAL_TAGS[2].to_string());
+    // 不变量：用户规则必须**紧跟**在 preset-private 头之后（放错位置 ⇒ 这里就红）。
+    if let Some(first_custom) = custom_ids.first() {
+        assert_eq!(
+            out.get(custom_start).map(String::as_str),
+            Some(first_custom.as_str()),
+            "用户自定义规则必须紧跟在 `preset-private` 之后（不能被预设 direct 抢在前面）"
+        );
+    }
     out
 }
 

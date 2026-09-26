@@ -771,7 +771,13 @@ fn build_policy() -> Value {
 }
 
 /// 把预设与自定义规则合并成最终顺序：
-/// 预设在前（它们包含“私有地址直连”这类必须优先的规则），自定义在后。
+/// **`preset-private` 最前，用户自定义规则紧跟其后、早于任何预设 direct/block**。
+///
+/// 旧实现把自定义规则接在预设表**末尾** ⇒ 一条显式 `block` 只要命中任何预设
+/// direct（`preset-ads` / `preset-cn-domain` / …）就永远不会生效。用户现场就是
+/// 这个形态：界面里加了 `block` 规则，日志里该域名却命中 `[preset-cn-domain] → direct`，
+/// 一次都没拦到 —— **界面允许创建一条注定无效的规则且不提示**。详见
+/// [`merge_rules_with_intent`] 的顺序表。
 ///
 /// **并保证 `RoutingRule::id` 唯一**（`id` 会原样写进配置的 `ruleTag`）——
 /// 重复的 `ruleTag` 会让 Xray 在 `app/router` 阶段拒绝启动：用户报的原文就是
@@ -788,27 +794,36 @@ pub fn merge_rules(s: &AppSettings) -> Vec<RoutingRule> {
 
 /// 预设 + **意图规则** + 自定义，按优先级拼成一份规则表。
 ///
-/// # 意图规则插在哪，以及为什么
+/// # 顺序表（每条都对应一个失败模式）
 ///
 /// ```text
-/// [preset-private]      ← 永远最先（否则路由器/NAS 不可达）
-/// [intent-allow-*]      ← 用户纠正（必须先于 block，才能纠正误杀）
-/// [intent-block-*]      ← Jev 判定的投放/追踪端点
+/// [preset-private]      ← 永远最先（否则路由器/NAS 不可达）；不变量，不可覆盖
+/// [intent-allow-*]      ← 用户点「拦错了」的纠正：必须先于一切 block 类规则
+/// [自定义规则]          ← **用户显式写的**：早于所有预设 direct/block
+/// [intent-block-*]      ← Jev 判定的投放/追踪端点（推断出来的）
+/// [mitm-steer]          ← 内容级判定（已被拦掉的域名没必要再拆 TLS）
 /// [preset-ads]          ← geosite:category-ads-all（L0 静态名单）
 /// [preset-cn-domain] …
-/// [自定义规则]
+/// [preset-cn-ip] …
+/// [兜底]
 /// ```
 ///
-/// 三条顺序理由（每条都对应一个失败模式）：
+/// 四条理由：
 ///
-/// * **`allow` 必须早于 `block`** —— 反过来的话，用户点"这个拦错了"之后什么都不会发生；
-/// * **意图规则必须早于 `preset-cn-domain` / `preset-ads`** —— 否则被 `direct` 规则先命中，
-///   意图判定花了钱却永远不生效（与 `preset-ads` 必须早于 `preset-cn-domain` 同一条理由）；
-/// * **插在 `preset-private` 之后** —— 私有地址直连是唯一一条不允许被覆盖的规则。
+/// * **`preset-private` 最先** —— 私有地址直连是唯一一条不允许被覆盖的规则；
+/// * **用户自定义规则必须早于预设 direct** —— 旧实现把它排在末尾，于是显式 `block`
+///   在命中 `geosite:CN`（或 `category-ads-all`）的域名上永远不会生效：预设的
+///   `direct` 先命中，规则表后面的 block 连看都看不到。用户以为拦了，实际一次没拦
+///   （P1，实测现场）。
+/// * **`intent-allow` 早于自定义 `block`，自定义规则早于 `intent-block`** —— 两类冲突
+///   分别取"更不会静默"的一侧：放行纠正被遮住的话，用户点「拦错了」什么都不会发生
+///   （这是界面动作，必须可靠）；而"用户手写的 block 被推断的 intent-block 抢先"
+///   同样是显式失效，所以用户规则排在 `intent-block` 之前。**用户显式 > 推断**。
+/// * **意图/自定义/steer 都早于 `preset-ads` / `preset-cn-domain`** —— 否则被
+///   `direct` 或静态名单先命中（与 `preset-ads` 必须早于 `preset-cn-domain` 同一条理由）。
 ///
-/// `Custom` 预设下没有任何预设规则，于是意图两带落在**自定义规则之前**：
-/// 意图过滤属于"预设"这一层，用户要纠正就用放行纠正（`allow_overrides`），
-/// 而不是期望自定义规则能压过它。
+/// `Custom` 预设下没有预设规则，顺序是 `intent-allow → 自定义 → intent-block → steer`：
+/// 与上面同一条规则，只是省掉了预设那两段。
 ///
 /// `intent_allow` / `intent_block` 由 `xt-intent` 的 `materialize()` 产出；
 /// 本函数**不依赖那个 crate**（会成环），只把 `RoutingRule` 当数据。
@@ -817,71 +832,37 @@ pub fn merge_rules_with_intent(
     intent_allow: &[RoutingRule],
     intent_block: &[RoutingRule],
 ) -> Vec<RoutingRule> {
-    let mut rules = if s.routing_preset == RoutingPreset::Custom {
-        s.custom_rules.clone()
+    // 非 Custom 预设：只把「`preset-private` 及其之前」当作不可覆盖的头，
+    // 其余预设（`preset-ads` / `preset-cn-domain` / …）留到最后一段。
+    // Custom 预设：没有预设规则，头与尾都是空的。
+    let presets = if s.routing_preset == RoutingPreset::Custom {
+        Vec::new()
     } else {
-        let mut rules = routing::preset_rules(s.routing_preset);
-        rules.extend(s.custom_rules.iter().cloned());
-        rules
+        routing::preset_rules(s.routing_preset)
     };
+    let split = presets
+        .iter()
+        .position(|r| r.id == "preset-private")
+        .map(|i| i + 1)
+        .unwrap_or(0);
 
-    if !intent_allow.is_empty() || !intent_block.is_empty() {
-        let at = rules
-            .iter()
-            .position(|r| r.id == "preset-private")
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let mut band: Vec<RoutingRule> = Vec::with_capacity(intent_allow.len() + intent_block.len());
-        band.extend(intent_allow.iter().cloned());
-        band.extend(intent_block.iter().cloned());
-        rules.splice(at..at, band);
-    }
-
-    // ---- MITM 的 steer 带（内容级判定） ----
-    //
-    // 位置：**紧跟在意图带之后**。理由与 intent 带相同（必须早于 preset-ads / cn，
-    // 否则被 direct 先命中），而放在意图带之后是因为：**已经被判为广告、直接拦掉的域名
-    // 没必要再拆一次 TLS**。
+    let mut rules: Vec<RoutingRule> = Vec::with_capacity(
+        presets.len() + s.custom_rules.len() + intent_allow.len() + intent_block.len() + 2,
+    );
+    // 1) 不可覆盖的头（`preset-private`）。
+    rules.extend(presets[..split].iter().cloned());
+    // 2) 用户放行纠正 —— 必须先于一切 block 类规则。
+    rules.extend(intent_allow.iter().cloned());
+    // 3) **用户显式规则** —— 早于任何预设 direct/block（P1 修复点）。
+    rules.extend(s.custom_rules.iter().cloned());
+    // 4) 推断出来的意图拦截 —— 用户显式规则之后。
+    rules.extend(intent_block.iter().cloned());
+    // 5) MITM steer（内容级判定）：紧跟意图带。
     if s.mitm.is_active() {
-        let domains = mitm_domains(s);
-        let mut at = rules
-            .iter()
-            .position(|r| r.id == "preset-private")
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        while at < rules.len() && rules[at].id.starts_with("intent-") {
-            at += 1;
-        }
-        let mut band = vec![RoutingRule::new(
-            "mitm-steer",
-            "MITM 拆包（仅 opt-in 域名）",
-            MatchCondition {
-                domains: domains.clone(),
-                // **只列本地入口**：回连走的是 `mitm-upstream`，不在这个列表里 ⇒
-                // 从构造上不可能自环（也就不需要一条容易被改坏的"旁路规则"）。
-                inbound_tags: vec!["tun".into(), "socks".into(), "http".into()],
-                ..Default::default()
-            },
-            RuleAction::Proxy { outbound: Some("mitm-out".into()) },
-        )];
-        if s.mitm.block_quic {
-            // QUIC 拆不了：只对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP。
-            // **不做全局**（那会打断所有 HTTP/3 站点），代价是首次回退要等一次超时。
-            band.push(RoutingRule::new(
-                "mitm-quic-fallback",
-                "MITM：opt-in 域名禁 QUIC（逼回 TCP）",
-                MatchCondition {
-                    domains,
-                    inbound_tags: vec!["tun".into()],
-                    ports: vec![PortMatcher::Single(443)],
-                    network: Network::Udp,
-                    ..Default::default()
-                },
-                RuleAction::Block,
-            ));
-        }
-        rules.splice(at..at, band);
+        rules.extend(mitm_steer_band(s));
     }
+    // 6) 其余预设 + 兜底。
+    rules.extend(presets[split..].iter().cloned());
 
     let mut ids: Vec<String> = rules.iter().map(|r| r.id.clone()).collect();
     if uniquify_tags(&mut ids) > 0 {
@@ -890,6 +871,45 @@ pub fn merge_rules_with_intent(
         }
     }
     rules
+}
+
+/// MITM 的 steer 带（内容级判定）。
+///
+/// 位置由 [`merge_rules_with_intent`] 决定：**紧跟在意图带之后**、`preset-ads` 之前。
+/// 理由有两层：必须早于 `preset-ads` / `preset-cn-domain`（否则被 `direct` 先命中，
+/// 拆包永远不会发生），而放在意图带之后是因为**已经被判为广告、直接拦掉的域名
+/// 没必要再拆一次 TLS**。
+fn mitm_steer_band(s: &AppSettings) -> Vec<RoutingRule> {
+    let domains = mitm_domains(s);
+    let mut band = vec![RoutingRule::new(
+        "mitm-steer",
+        "MITM 拆包（仅 opt-in 域名）",
+        MatchCondition {
+            domains: domains.clone(),
+            // **只列本地入口**：回连走的是 `mitm-upstream`，不在这个列表里 ⇒
+            // 从构造上不可能自环（也就不需要一条容易被改坏的"旁路规则"）。
+            inbound_tags: vec!["tun".into(), "socks".into(), "http".into()],
+            ..Default::default()
+        },
+        RuleAction::Proxy { outbound: Some("mitm-out".into()) },
+    )];
+    if s.mitm.block_quic {
+        // QUIC 拆不了：只对 opt-in 域名拦掉 UDP/443，逼浏览器回退 TCP。
+        // **不做全局**（那会打断所有 HTTP/3 站点），代价是首次回退要等一次超时。
+        band.push(RoutingRule::new(
+            "mitm-quic-fallback",
+            "MITM：opt-in 域名禁 QUIC（逼回 TCP）",
+            MatchCondition {
+                domains,
+                inbound_tags: vec!["tun".into()],
+                ports: vec![PortMatcher::Single(443)],
+                network: Network::Udp,
+                ..Default::default()
+            },
+            RuleAction::Block,
+        ));
+    }
+    band
 }
 
 /// 就地把重复的 tag 改成确定性的唯一形式：**首次出现保持原样**，之后依次加 `#2`、`#3`…
@@ -1679,15 +1699,107 @@ mod tests {
     }
 
     #[test]
-    fn custom_preset_puts_intent_rules_before_user_rules() {
+    /// **P1 判据（这条就是被修的那个用户可见 bug）**：
+    /// 一条 `block` 的自定义规则，对**命中 `geosite:CN` 的域名**必须排在
+    /// `preset-cn-domain` **之前** —— 否则 CN 的 `direct` 先命中，用户显式写的拦
+    /// 截一次都不会生效（现场：界面加了规则、日志里却仍是 `[preset-cn-domain] → direct`）。
+    ///
+    /// 反证：把顺序改回"自定义接在预设末尾" ⇒ 本测试红。
+    #[test]
+    fn a_user_block_rule_precedes_the_preset_cn_direct_rules() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        // 用户现场形态：域名命中 geosite:CN，所以会被 preset-cn-domain 判 direct。
+        s.custom_rules = vec![intent_rule(
+            "user-block-ad-bridge",
+            "badjs.example.com",
+            RuleAction::Block,
+        )];
+
+        let rules = merge_rules_with_intent(&s, &[], &[]);
+
+        let user = order_of(&rules, "user-block-ad-bridge");
+        let private = order_of(&rules, "preset-private");
+        let ads = order_of(&rules, "preset-ads");
+        let cn = order_of(&rules, "preset-cn-domain");
+        let cn_ip = order_of(&rules, "preset-cn-ip");
+
+        assert_eq!(rules[0].id, "preset-private", "私有直连永远是第一条（不可覆盖）");
+        assert!(private < user, "自定义规则必须排在 preset-private 之后");
+        assert!(user < ads, "用户显式规则必须早于静态广告名单（否则被它先命中）");
+        assert!(user < cn, "用户显式规则必须早于大陆直连 —— 否则这条 block 永不生效（P1）");
+        assert!(user < cn_ip, "同上，IP 段规则也一样");
+        // 规则条件没有被改动（只是挪位置）。
+        let mine = &rules[user];
+        assert_eq!(mine.when.domains, vec!["full:badjs.example.com".to_string()]);
+        assert_eq!(mine.then, RuleAction::Block);
+    }
+
+    /// 用户显式规则早于**推断**出来的意图拦截，但**晚于**用户的放行纠正
+    /// （「拦错了」必须永远生效，不能被任何 block 类规则遮住）。
+    #[test]
+    fn user_rules_sit_between_intent_allow_and_intent_block() {
+        let mut s = settings();
+        s.routing_preset = RoutingPreset::BypassMainland;
+        s.custom_rules = vec![intent_rule("mine", "mine.example", RuleAction::Block)];
+        let allow = vec![intent_rule("intent-allow-ok.example", "ok.example", RuleAction::Direct)];
+        let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+
+        let rules = merge_rules_with_intent(&s, &allow, &block);
+        let private = order_of(&rules, "preset-private");
+        let allow_at = order_of(&rules, "intent-allow-ok.example");
+        let mine = order_of(&rules, "mine");
+        let block_at = order_of(&rules, "intent-block-ads.example");
+        let ads = order_of(&rules, "preset-ads");
+
+        assert!(private < allow_at, "私有直连最先");
+        assert!(allow_at < mine, "放行纠正必须早于用户 block（否则「拦错了」点不动）");
+        assert!(mine < block_at, "用户显式规则早于推断的意图拦截");
+        assert!(block_at < ads, "意图拦截仍早于静态广告名单");
+    }
+
+    #[test]
+    fn custom_preset_keeps_user_rules_between_the_intent_bands() {
         let mut s = settings();
         s.routing_preset = RoutingPreset::Custom;
         s.custom_rules = vec![intent_rule("mine", "mine.example", RuleAction::Proxy { outbound: None })];
+        let allow = vec![intent_rule("intent-allow-ok.example", "ok.example", RuleAction::Direct)];
         let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
 
-        let rules = merge_rules_with_intent(&s, &[], &block);
-        assert_eq!(rules[0].id, "intent-block-ads.example", "Custom 预设下意图规则也属于「预设」那一层");
+        let rules = merge_rules_with_intent(&s, &allow, &block);
+        // Custom 预设下没有预设规则：顺序 = allow → 自定义 → block。
+        assert_eq!(rules[0].id, "intent-allow-ok.example");
         assert_eq!(rules[1].id, "mine");
+        assert_eq!(rules[2].id, "intent-block-ads.example");
+        // 用户的规则一条都不许被丢掉。
+        assert!(rules.iter().any(|r| r.id == "mine"));
+    }
+
+    /// 守卫：无论怎么调顺序，`preset-private` 都不许被挪走（本机/NAS 可达性的唯一保障）。
+    #[test]
+    fn preset_private_stays_first_in_every_preset() {
+        for preset in [
+            RoutingPreset::BypassMainland,
+            RoutingPreset::DirectAll,
+            RoutingPreset::GlobalProxy,
+        ] {
+            let mut s = settings();
+            s.routing_preset = preset;
+            s.custom_rules = vec![intent_rule("mine", "mine.example", RuleAction::Block)];
+            let allow = vec![intent_rule("intent-allow-ok.example", "ok.example", RuleAction::Direct)];
+            let block = vec![intent_rule("intent-block-ads.example", "ads.example", RuleAction::Block)];
+
+            let rules = merge_rules_with_intent(&s, &allow, &block);
+            if preset == RoutingPreset::BypassMainland {
+                assert_eq!(rules[0].id, "preset-private", "preset-private 必须永远第一");
+            } else {
+                // 这两个预设没有 `preset-private`：那就没有别的规则可以排在它前面。
+                assert!(
+                    !rules.iter().any(|r| r.id.starts_with("preset-private")),
+                    "没有预设规则时不许凭空造 preset-private"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2366,38 +2478,41 @@ mod tests {
 
     /// **P0 复现形态**：用户那份 `custom_rules` + `bypass_mainland`。
     ///
-    /// 先用**修前的合并写法**证明用例忠实复现现场（4 个 id 各 ×2），再断言修后：
-    /// 条数不减、顺序不变、id 全唯一。
+    /// 先用**旧写法**（预设 extend 自定义）证明用例忠实复现现场（4 个 id 各 ×2），
+    /// 再断言修后：条数不减、**自定义规则早于预设**、id 全唯一。
     #[test]
     fn user_rule_shape_with_bypass_mainland_is_uniquified_without_losing_rules() {
         let s = user_shape(RoutingPreset::BypassMainland);
 
-        // 修前的合并写法（预设 extend 自定义）—— 复现用户现场，证明本用例不是空壳。
+        // 旧写法（预设 extend 自定义）—— 复现用户现场，证明本用例不是空壳。
         let mut before = routing::preset_rules(RoutingPreset::BypassMainland);
         before.extend(s.custom_rules.iter().cloned());
         let before_ids: Vec<String> = before.iter().map(|r| r.id.clone()).collect();
         assert_eq!(
             duplicated_tags(&before_ids),
             vec!["preset-ads", "preset-cn-domain", "preset-cn-ip", "preset-private"],
-            "修前必须复现 4 个重复 id（与用户日志 `duplicate ruleTag preset-private` 同形）"
+            "旧写法必须复现 4 个重复 id（与用户日志 `duplicate ruleTag preset-private` 同形）"
         );
 
         let merged = merge_rules(&s);
         assert_eq!(
             merged.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
             vec![
+                // `preset-private` 永远第一（不可覆盖）
                 "preset-private",
+                // 用户自定义这次排在预设之前（P1 修复点）：先到者保留原名
+                "preset-private#2",
                 "preset-ads",
-                "preset-proxy-google",
+                "google-to-us",
                 "preset-cn-domain",
                 "preset-cn-ip",
-                "preset-private#2",
+                // 其余预设留在后面；与自定义撞名的**预设**那条加后缀
                 "preset-ads#2",
-                "google-to-us",
+                "preset-proxy-google",
                 "preset-cn-domain#2",
                 "preset-cn-ip#2",
             ],
-            "顺序必须是「预设在前、自定义在后」，冲突的**自定义**那条加后缀"
+            "顺序必须是「preset-private → 自定义 → 其余预设」，冲突的后到者加后缀"
         );
         assert_eq!(merged.len(), 10, "一条都不能少（预设 5 + 自定义 5）");
     }
