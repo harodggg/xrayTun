@@ -54,26 +54,42 @@ jobs:
       # ---------------------------------------------------------------- Team ID 预检
       #
       # 为什么排在最前面（早于任何编译）：缺注入的构建**必须走不到出包**。
-      # 判据在 `scripts/team-id.sh`（单一来源）：真实 Team ID / 显式哨兵（fail closed）
-      # 二选一；未设或空串一律失败。归一化后的值写进 `$GITHUB_ENV`，后续所有步骤
-      # （check.sh、package-macos.sh、产物断言）拿到的都是**非空**值 —— 这一步也顺手堵住
-      # 了"`${{ vars.X }}` 未定义 ⇒ 空串 ⇒ peer.rs 反而开门"这个最阴的形态。
+      # 判据在 `scripts/team-id.sh`（单一来源），**三条路**：
+      #   · `team-id`   —— 注入真实 Apple Team ID（10 位 [A-Z0-9]）；
+      #   · `refuse-all`—— 显式哨兵（fail closed：helper 拒绝一切非 root 特权操作）；
+      #   · `cdhash`    —— **未注入/空串**：helper 改成"对端 cdhash == 已安装 App 的 cdhash"
+      #                    （不需要 Developer ID 证书），找不到已安装 App 时全拒。
+      # 三条都**不是**"信任任何对端"（task-17 起 `None` 与 `Some("")` 一律视为未配置），
+      # 所以这一步不再要求"归一化后的值必须非空"——cdhash 形态的意义正是不注入。
+      # 策略写进 `$GITHUB_ENV`，供产物断言选判据。
       #
       # 输入用**另一个变量名**（`..._INPUT`）传进来：`$GITHUB_ENV` 与 workflow env 同名时
       # 谁优先是个容易记错的细节，这里不让它成为判据的一部分。
-      - name: 预检 XRAYTUN_TEAM_ID 注入（发行版 helper 的第二道门）
+      - name: 预检 XRAYTUN_TEAM_ID 注入（发行版 helper 的第二道门：三条策略）
         env:
           XRAYTUN_TEAM_ID_INPUT: ${{ vars.XRAYTUN_TEAM_ID }}
         run: |
           set -eu
           # shellcheck source=./scripts/team-id.sh
           source scripts/team-id.sh
+          # 形状非法（例如小写、长度不对）在这里就返回 1 —— 那是最容易踩的拼写形态。
           XRAYTUN_TEAM_ID="${XRAYTUN_TEAM_ID_INPUT-}" team_id_resolve --into "$GITHUB_ENV"
-          # 自证：写进 GITHUB_ENV 的值必须非空（空串会让 helper 退化成 InsecureAllowAny）
-          grep -q '^XRAYTUN_TEAM_ID=.' "$GITHUB_ENV" || {
-            echo "✗ 归一化后的 XRAYTUN_TEAM_ID 为空 —— 拒绝继续" >&2; exit 1; }
-          grep -q '^XRAYTUN_TEAM_ID=.' "$GITHUB_ENV" &&
-            echo "已注入 XRAYTUN_TEAM_ID（非空；值本身不打印）"
+          # 策略由注入值推导：真 Team ID ⇒ team-id · 哨兵 ⇒ refuse-all · 未注入/空串 ⇒ cdhash。
+          # ⚠️ 这里**不能**再要求 `$GITHUB_ENV` 里有非空 `XRAYTUN_TEAM_ID=`：cdhash 形态
+          #    就是"不注入"，其产物判据是策略标识 + 绑定的 App 路径（verify-…-injection.sh）。
+          POLICY="$(XRAYTUN_TEAM_ID="${XRAYTUN_TEAM_ID_INPUT-}" team_id_policy_for_env)"
+          case "$POLICY" in
+            team-id | refuse-all | cdhash) ;;
+            *) echo "✗ 未知策略：$POLICY —— 形状非法本应在 team_id_resolve 被拦下" >&2; exit 1 ;;
+          esac
+          printf 'XRAYTUN_TEAM_ID_POLICY=%s\n' "$POLICY" >>"$GITHUB_ENV"
+          echo "已归一化注入策略：$POLICY（值本身不打印）"
+          case "$POLICY" in
+            cdhash)
+              echo "  · cdhash 绑定要求 App 装在 /Applications/XrayTun.app（发行包就是这样装的）" ;;
+            refuse-all)
+              echo "  ⚠️ 哨兵形态：这个包里的 helper 拒绝一切非 root 特权操作（TUN/helper/MITM 全不可用）" ;;
+          esac
 
       - name: 安装 Rust 与两个 target
         run: |
@@ -190,7 +206,8 @@ jobs:
           . scripts/team-id.sh
           ./scripts/verify-team-id-injection.sh \
             --assert-helper "$APP/Contents/MacOS/xraytun-helper" \
-            --policy "$(team_id_policy_for_env)" --expect "${XRAYTUN_TEAM_ID:-}"
+            --policy "${XRAYTUN_TEAM_ID_POLICY:-$(team_id_policy_for_env)}" \
+            --expect "${XRAYTUN_TEAM_ID:-}"
 
       - name: 收集产物
         id: collect
