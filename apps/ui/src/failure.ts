@@ -118,7 +118,9 @@ export function humanError(e: unknown): string {
  */
 type StepKey =
   | "reinstall-helper"
+  | "change-network"
   | "change-node"
+  | "check-node-address"
   | "install-ca"
   | "fix-port"
   | "check-core"
@@ -128,53 +130,98 @@ type StepKey =
 const STEP_TEXT: Record<StepKey, string> = {
   "reinstall-helper":
     "重装助手：「设置 → 系统与助手」里点「重新安装助手」（会重新申请一次系统授权）",
+  // task-18：连不上服务器时，**本机网络/出口**是第一件要排除的事，
+  // 而「换本地端口」在那条路上是反向的（本地端口没坏）。
+  "change-network": "先换一个网络再试（例如切到手机热点 / 换一个 Wi-Fi）：连不上服务器时先排除本机网络与出口",
   "change-node": "换一个节点再试：「节点」页可以先测延迟再选",
+  "check-node-address":
+    "核对节点地址与端口有没有写错（「节点」页能看到地址；订阅节点可以重新拉一次订阅）",
   "install-ca": "按顺序做：装入根证书 → 应用（起/停代理）→ 重连核心（都在「意图过滤 → MITM」）",
   "fix-port": "换一个本地端口（「设置 → 端口」），或先关掉占用该端口的程序",
   "check-core": "确认核心路径：「设置 → 核心与数据更新」",
   "open-logs": "看日志：「日志」页有核心输出的最后几行",
 };
 
-/**
- * 线索 → 动作。**线索来自后端自己写的文案**（命令返回的 Err(String) 就是给人看的
- * 中文），命中即给对应动作；命中不了就只剩 `open-logs`。
- *
- * 顺序 = 优先级：更具体的失败排前面（端口占用比「连接失败」更具体）。
- */
-const STEP_RULES: ReadonlyArray<{ readonly match: RegExp; readonly steps: readonly StepKey[] }> = [
-  { match: /helper|助手/i, steps: ["reinstall-helper"] },
-  { match: /证书|钥匙串|keychain|信任锚|根证书|mitm/i, steps: ["install-ca"] },
-  { match: /端口|占用|address already in use|eaddrinuse/i, steps: ["fix-port"] },
-  { match: /权限|特权|授权|permission|not permitted|denied/i, steps: ["reinstall-helper"] },
-  { match: /核心|core|xray|可执行文件/i, steps: ["check-core"] },
-  { match: /节点|node|订阅|机场|超时|timeout|无响应/i, steps: ["change-node"] },
-  { match: /连接|connect|握手|handshake|tls|econn|refused|reset|网络|network|dns|代理/i, steps: ["change-node"] },
-];
+/** 助手（特权）自己的问题。 */
+const HELPER_RE = /helper|助手/i;
+/** MITM 的**本地根证书**问题。刻意**不**匹配裸「证书」——
+ *  远端 TLS 证书过期是服务器的证书，不是我们要装进钥匙串的那一张。 */
+const MITM_CA_RE = /钥匙串|keychain|信任锚|根证书|mitm/i;
+/** 本地端口**被占用 / 绑定失败**。必须同时是「占用」语义；
+ *  只出现「端口」二字不算 —— 连不上的原文里常带 `IP:端口`。 */
+const LOCAL_PORT_RE =
+  /占用|已被占用|被占用|address already in use|eaddrinuse|address in use|绑定失败|bind.*fail/i;
+/** 需要特权授权的动作（助手装/卸载）。刻意**不**匹配裸 `permission denied`：
+ *  网络沙箱 / 防火墙拒绝同样会写它，那不是助手的问题。 */
+const PRIVILEGE_RE = /特权|管理员授权|install_helper|helper 安装|无法安装助手|助手安装/i;
+/** 核心可执行文件本身的问题。 */
+const CORE_RE = /核心|core|xray|可执行文件/i;
+/** 连不上服务器 / 本机到服务器的直连不通（通道层）。 */
+const UNREACHABLE_RE =
+  /联系不上|连不上|无法连接|不可达|unreachable|拒绝|refused|econn|enetunreach|ehostunreach|oserror|超时|timeout|握手|handshake|tls|reset|dns|网络|network|代理/i;
+/** 节点/订阅侧的问题。 */
+const NODE_RE = /节点|node|订阅|机场|无响应/i;
 
 /** 每个失败里**总是**成立的那一条：日志一直在，读它不需要任何前提。 */
 const ALWAYS: readonly StepKey[] = ["open-logs"];
 
-/** 按线索算出动作键（顺序 = 优先级，`open-logs` 永远兜底）。 */
+/** 最多几条建议。连不上服务器那条路本身就有 4 步（换网络→换节点→查地址→看日志）。 */
+const MAX_STEPS = 4;
+
+/**
+ * 按线索算出动作键（顺序 = 优先级，`open-logs` 永远兜底）。
+ *
+ * # 两条「独立且精确」的失败要点名（task-18）
+ *
+ * * **本地端口被占用 / 绑定失败**：只给 `fix-port`（+看日志），
+ *   **不掺**换网络/换节点 —— 本地端口坏了跟服务器没关系；
+ * * **连不上服务器**：`change-network → change-node → check-node-address`，
+ *   **绝不给** `fix-port` —— 现场就是这条把人引向改本地端口。
+ *
+ * 旧实现按 `/端口/` 判「端口占用」，而连不上的原文里必然出现 `IP:端口`
+ * （`supervisor.rs:901-906`），于是第一条建议总是「换一个本地端口」，方向完全错。
+ */
 function stepKeys(text: string): StepKey[] {
   const keys: StepKey[] = [];
-  for (const rule of STEP_RULES) {
-    if (!rule.match.test(text)) continue;
-    for (const k of rule.steps) if (!keys.includes(k)) keys.push(k);
+  const push = (k: StepKey) => {
+    if (!keys.includes(k)) keys.push(k);
+  };
+
+  if (HELPER_RE.test(text)) push("reinstall-helper");
+  if (MITM_CA_RE.test(text)) push("install-ca");
+  if (PRIVILEGE_RE.test(text)) push("reinstall-helper");
+
+  if (LOCAL_PORT_RE.test(text)) {
+    push("fix-port");
+    for (const k of ALWAYS) push(k);
+    return keys;
   }
-  for (const k of ALWAYS) if (!keys.includes(k)) keys.push(k);
+
+  if (CORE_RE.test(text)) push("check-core");
+  if (UNREACHABLE_RE.test(text)) {
+    push("change-network");
+    push("change-node");
+    push("check-node-address");
+  }
+  if (NODE_RE.test(text)) push("change-node");
+
+  for (const k of ALWAYS) push(k);
   return keys;
 }
 
 /**
- * 从失败文案推出「下一步可以做什么」。**最多 3 条**，去重、按优先级。
+ * 从失败文案推出「下一步可以做什么」。最多 `MAX_STEPS`（4）条，去重、按优先级。
  *
  * 不变量（测试锁着）：
  * 1. 结果**非空**：任何失败至少给「看日志」；
- * 2. 线索命中时给**该线索的动作**（助手 ⇒ 重装助手；节点/连接 ⇒ 换节点）；
- * 3. 线索命中不了时**不编**具体归因 —— 只给「看日志」。
+ * 2. 线索命中时给**该线索的动作**（助手 ⇒ 重装助手；连不上 ⇒ 换网络/换节点/查地址；
+ *    本地端口占用 ⇒ 换端口）；
+ * 3. **不许错配**：连不上服务器不给「换本地端口」；本地端口占用不给「换网络/换节点」；
+ *    网络错误不给「重装助手」；远端证书问题不给「装入根证书」；
+ * 4. 线索命中不了时**不编**具体归因 —— 只给「看日志」。
  */
 export function nextSteps(text: string): string[] {
-  return stepKeys(text).slice(0, 3).map((k) => STEP_TEXT[k]);
+  return stepKeys(text).slice(0, MAX_STEPS).map((k) => STEP_TEXT[k]);
 }
 
 /** 界面上真的可以点的动作。`open-logs` 永远在最后（它没有任何前提）。 */

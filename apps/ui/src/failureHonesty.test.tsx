@@ -280,6 +280,93 @@ describe("下一步动作：不是只给错误码（原来连接失败横幅一�
 });
 
 // ---------------------------------------------------------------------------
+// 2b. task-18：步骤错配 —— 「连不上服务器」不许建议「换本地端口」
+// ---------------------------------------------------------------------------
+
+describe("task-18：连不上节点 vs 本地端口占用 —— 两套建议不许混（原来会把人引向改本地端口）", () => {
+  /**
+   * 后端 `supervisor.rs:901-906` 的**真实原文**（TCP 层不可达，现场就是这条）。
+   * 它里面出现「端口」二字（因为探测目标是 `IP:端口`）—— 旧规则用 `/端口/` 判
+   * 「本地端口被占用」，于是第一条建议变成「换一个本地端口」：
+   * 用户真实的处境是两个节点都连不上，方向完全错。
+   */
+  const TCP_UNREACHABLE =
+    "接管默认路由之前就联系不上代理服务器 198.51.100.7:443（第1次失败、第2次失败，每次 4 秒）。\n" +
+    "请检查节点地址 / 端口，以及本机到该服务器的直连是否正常。\n" +
+    "本次启动已中止并回滚，**默认路由没有被接管**。";
+
+  /** 本地绑定失败的真实形态（EADDRINUSE / OS error 48）。 */
+  const LOCAL_PORT_BUSY =
+    "本地代理入口绑定失败：127.0.0.1:10808 已被占用（address already in use, os error 48）。";
+
+  it("前置：这两段原文里的「端口」分别指代理服务器端口与本地端口（否则测不出错配）", () => {
+    expect(TCP_UNREACHABLE, "原文必须含「端口」，否则这条测试是空转").toContain("端口");
+    expect(LOCAL_PORT_BUSY).toContain("占用");
+  });
+
+  it("连不上服务器 ⇒ **不含**「本地端口」，且按「换网络 → 换节点 → 查地址 → 看日志」给建议", () => {
+    const steps = nextSteps(TCP_UNREACHABLE);
+    const joined = steps.join("；");
+    expect(joined, "把「连不上服务器」误判成「本地端口被占用」").not.toContain("本地端口");
+    expect(joined).toContain("换一个网络");
+    expect(joined).toContain("换一个节点");
+    expect(joined).toContain("地址与端口");
+    expect(joined).toContain("日志");
+    // 顺序也是建议的一部分：先排除本机网络，再怀疑节点，最后才是看日志。
+    expect(steps).toEqual([
+      expect.stringContaining("换一个网络"),
+      expect.stringContaining("换一个节点"),
+      expect.stringContaining("地址与端口"),
+      expect.stringContaining("日志"),
+    ]);
+    // 可点动作里同样不许出现端口相关的那条。
+    const labels = failureActions(TCP_UNREACHABLE).map((a) => a.label);
+    expect(labels.join("；")).not.toContain("端口");
+    expect(labels[0]).toBe("去换一个节点");
+  });
+
+  it("本地端口被占用 ⇒ 才给「换一个本地端口」，且不掺网络/节点建议", () => {
+    const joined = nextSteps(LOCAL_PORT_BUSY).join("；");
+    expect(joined, "端口占用这条必须保留 fix-port").toContain("换一个本地端口");
+    expect(joined, "端口占用不该建议换网络").not.toContain("换一个网络");
+    expect(joined, "端口占用不该建议换节点").not.toContain("换一个节点");
+  });
+
+  it("同类错配扫描：网络错误不许建议「重装助手」（那是特权助手自己的问题）", () => {
+    const network = "连接节点 198.51.100.7:443 失败：OSError: [Errno 61] Connection refused";
+    const joined = nextSteps(network).join("；");
+    expect(joined, "网络错误被误判成助手问题").not.toContain("重装助手");
+    expect(joined).not.toContain("本地端口");
+    expect(joined).toContain("换一个节点");
+  });
+
+  it("同类错配扫描：远端 TLS 证书问题不许建议「装入根证书」（那是 MITM 自己的证书）", () => {
+    const joined = nextSteps("TLS 握手失败：远端证书已过期（x509: certificate has expired）").join("；");
+    expect(joined, "把远端证书问题误判成 MITM 自己的根证书").not.toContain("装入根证书");
+    expect(joined).toContain("换一个节点");
+  });
+
+  it("同类错配扫描：远端 permission denied 不许建议「重装助手」（沙箱/防火墙也会这么写）", () => {
+    const joined = nextSteps(
+      "连接 198.51.100.7:443 失败：OSError: [Errno 13] Permission denied",
+    ).join("；");
+    expect(joined, "把网络层拒绝误判成特权助手问题").not.toContain("重装助手");
+    expect(joined).toContain("换一个节点");
+  });
+
+  it("反例：MITM 自己的根证书没装时，仍然要给「装入根证书」", () => {
+    const joined = nextSteps("根证书还没装进系统钥匙串：引导规则不会下发给核心").join("；");
+    expect(joined).toContain("装入根证书");
+  });
+
+  it("反例：助手类错误仍然给「重装助手」", () => {
+    expect(nextSteps("helper 建立 TUN 失败：协议版本不匹配（旧助手）").join("；")).toContain(
+      "重装助手",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. 工程记号与按钮名
 // ---------------------------------------------------------------------------
 
