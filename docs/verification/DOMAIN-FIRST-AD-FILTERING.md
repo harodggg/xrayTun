@@ -58,8 +58,21 @@ accepted 连接行 82,969）→ **观测域名 447 个 → 候选 11 条（2.5%�
 家族的投放基础设施（`googleadservices`、`doubleclick` 的若干子域、
 `analytics.google.com` 等）—— 本工具的词典更宽。**计数不可直接比**：Lead 报的
 每域名次数（几百量级）与本工具三种口径都对不上，说明那份用的是另一种归属算法
-（很可能把"最近一条 sniffed 之后的连接"都算给该域名、且不消费）。工具把三种口径
+（"最近一条 sniffed 之后的连接都算给它、且不消费"）。工具把三种口径
 都打出来，就是为了避免"数字对不上却看不出是口径问题"。
+
+**本机聚合观测到的 4 条高置信投放端候选**（Lead 口径；只列域名本身，
+不含任何完整 URL、时间戳、逐条请求记录 —— 这些是投放/分析基础设施域名）：
+
+| 域名 | 为什么是高置信 |
+|---|---|
+| `badjs.weixinbridge.com` | 标签 `badjs`（坏脚本/广告桥） |
+| `ogads-pa.clients6.google.com` | 段 `ogads`（Google 投放端点） |
+| `www.google-analytics.com` | 段 `analytics`（Google Analytics） |
+| `analytics.immersivetranslate.com` | 段 `analytics`（沉浸式翻译的分析端点） |
+
+这 4 条是 `scripts/ad-candidates.py` 那 11 条候选里的高置信子集；其余 7 条是同家族
+的投放基础设施。**"候选"不等于"已确认要拦"** —— 仍要用户逐条勾选（见 §1.3）。
 
 ### 1.3 纪律：**不自动下发**
 
