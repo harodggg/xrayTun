@@ -525,7 +525,7 @@ cat <<EOF
   * macOS 15+：右键「打开」已被 Apple 移除，去「系统设置 → 隐私与安全性」
     对被拦的 App 点「仍要打开」；
   * macOS 14-：右键（或 Control-点击）→「打开」；
-  * 终端（都适用）：逐文件清 quarantine（`xattr` 有两个实现，`-r` 支持随实现/版本而异）：
+  * 终端（都适用）：逐文件清 quarantine（\`xattr\` 有两个实现，\`-r\` 支持随实现/版本而异）：
       find /Applications/XrayTun.app -exec xattr -d com.apple.quarantine {} + 2>/dev/null
 
 架构：App 是 ${APP_ARCH}，核心是 ${CORE_ARCH:-未知}。
