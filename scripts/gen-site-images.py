@@ -46,7 +46,7 @@ ASSETS = SITE / "assets"
 # 卡片的**文件名里带版本号**，原因是一次实测事故：og 卡片内容每个版本都会变，而 `_headers`
 # 给了长缓存；文件名不变时，改版后 CDN 继续发旧卡片（实测 `cf-cache-status: HIT`、`age: 1674`、
 # 旧字节数，图上还印着旧版本号）。用带版本的文件名 = 每次发版换 URL，缓存可以放心长。
-SITE_VERSION = "0.8.41"
+SITE_VERSION = "0.8.42"
 WASM_VERSION = "0.7.0"
 
 # 配色**逐字取自 site/assets/site.css 的 :root**（改这里等于改官网，不要另起一套）
@@ -162,7 +162,7 @@ CARDS = [
         "brand": "XrayTun",
         "title": "macOS 上的 Xray 图形客户端",
         "subtitle": "原生 TUN 模式接管系统流量",
-        "chips": ["macOS 13.0+", "通用包 arm64 + x86_64", "包内自带 Xray 核心", "v0.8.41"],
+        "chips": ["macOS 13.0+", "通用包 arm64 + x86_64", "包内自带 Xray 核心", "v0.8.42"],
         "note": None,
     },
     {
@@ -171,7 +171,7 @@ CARDS = [
         "brand": "XrayTun",
         "title": "An Xray GUI client for macOS",
         "subtitle": "Native TUN mode takes over system traffic",
-        "chips": ["macOS 13.0+", "Universal arm64 + x86_64", "Xray core included", "v0.8.41"],
+        "chips": ["macOS 13.0+", "Universal arm64 + x86_64", "Xray core included", "v0.8.42"],
         "note": None,
     },
     {
