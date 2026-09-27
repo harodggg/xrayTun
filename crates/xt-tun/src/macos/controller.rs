@@ -301,24 +301,44 @@ fn resolve_via(via: &RouteVia, ifname: &str) -> RouteVia {
     }
 }
 
+/// 逐项执行回滚动作，**尽力而为**：单项失败只记一条文案，不中断其余项。
+///
+/// 这个 helper 刻意**只做三件事**，其余全留给调用方，以保证抽出它不改变行为：
+///
+/// * **迭代顺序 = `items` 的顺序，绝不重排。** 所以收的是 `Iterator` 而不是
+///   `DoubleEndedIterator` —— 后者会暗示本函数自己会反向遍历，而它不会；
+///   方向（信任锚/DNS 的 `.rev()`、路由用 `rollback_plan` 算好的顺序）由三处调用点
+///   各自决定，抽函数前后逐字不变。
+/// * **失败文案由 `f` 逐字给出**，helper 只负责收集：等价于原来的
+///   `if let Err(e) { failures.push(format!(...)) }`。
+/// * **返回值空 ⇔ 每一项都成功** —— `rollback` 的 `SessionSnapshot::clear()`
+///   正是挂在这个条件上（有失败就必须留着快照让下次启动重试）。
+fn try_each<T>(
+    items: impl IntoIterator<Item = T>,
+    mut f: impl FnMut(T) -> Result<(), String>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for item in items {
+        if let Err(msg) = f(item) {
+            failures.push(msg);
+        }
+    }
+    failures
+}
+
 /// 按快照回滚。**尽力而为**：单项失败不影响其余项。
 pub fn rollback(snap: &SessionSnapshot) -> Result<()> {
-    let mut failures: Vec<String> = Vec::new();
-
     // 0) **信任锚最先撤**：它是"我们额外加进系统钥匙串的信任"，越早收回越安全。
     //    并且**按备份记录**撤 —— 安装前就存在的证书不许删（那是用户自己的）。
-    for backup in snap.trust_anchors.iter().rev() {
-        if let Err(e) = crate::macos::trust::rollback(backup) {
-            failures.push(format!("移除信任锚 {} 失败: {e}", backup.fingerprint));
-        }
-    }
+    let mut failures = try_each(snap.trust_anchors.iter().rev(), |backup| {
+        crate::macos::trust::rollback(backup)
+            .map_err(|e| format!("移除信任锚 {} 失败: {e}", backup.fingerprint))
+    });
 
     // 1) DNS 先还原（见模块文档里的顺序说明）
-    for backup in snap.dns_backups.iter().rev() {
-        if let Err(e) = dns::restore(backup) {
-            failures.push(format!("还原 {} 的 DNS 失败: {e}", backup.service));
-        }
-    }
+    failures.extend(try_each(snap.dns_backups.iter().rev(), |backup| {
+        dns::restore(backup).map_err(|e| format!("还原 {} 的 DNS 失败: {e}", backup.service))
+    }));
 
     // 2) 再倒序处理路由：**先删自己那条，再恢复被顶掉的那条**（task-85）。
     //
@@ -336,22 +356,12 @@ pub fn rollback(snap: &SessionSnapshot) -> Result<()> {
         .chain(snap.pending_routes.iter())
         .cloned()
         .collect();
-    for action in rollback_plan(&all_routes) {
-        match action {
-            RollbackAction::Delete { destination, via } => {
-                if let Err(e) = route::delete(&destination, &via) {
-                    failures.push(format!("删除路由 {destination} 失败: {e}"));
-                }
-            }
-            RollbackAction::Restore { destination, via } => {
-                if let Err(e) = route::add(&destination, &via) {
-                    failures.push(format!(
-                        "恢复路由 {destination}（原本经由 {via:?}）失败: {e}"
-                    ));
-                }
-            }
-        }
-    }
+    failures.extend(try_each(rollback_plan(&all_routes), |action| match action {
+        RollbackAction::Delete { destination, via } => route::delete(&destination, &via)
+            .map_err(|e| format!("删除路由 {destination} 失败: {e}")),
+        RollbackAction::Restore { destination, via } => route::add(&destination, &via)
+            .map_err(|e| format!("恢复路由 {destination}（原本经由 {via:?}）失败: {e}")),
+    }));
 
     // 3) 数据面进程由调用方（helper）负责杀掉，这里只报告 pid
     if let Some(pid) = snap.datapath_pid {
@@ -1009,5 +1019,36 @@ mod tests {
             "路由目的地必须出现在失败文案里：{err_msg}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `try_each` 自身的契约：按序逐项调用、收集**全部**失败文案、全成功返回空。
+    ///
+    /// 这三条正是从三处循环里搬走的语义 —— 尤其是「空 ⇔ 全成功」，
+    /// `rollback` 的 `SessionSnapshot::clear()` 条件就挂在它上面。
+    #[test]
+    fn try_each_preserves_order_and_collects_every_failure() {
+        let mut calls = Vec::new();
+        let failures = try_each(1..=3, |n| {
+            calls.push(n);
+            Err(format!("第 {n} 项失败"))
+        });
+        assert_eq!(calls, vec![1, 2, 3], "必须按迭代顺序逐项调用，且不因失败中断");
+        assert_eq!(
+            failures,
+            vec!["第 1 项失败", "第 2 项失败", "第 3 项失败"],
+            "失败文案按调用顺序原样收集"
+        );
+
+        let mut reversed = Vec::new();
+        let none = try_each((1..=3).rev(), |n| {
+            reversed.push(n);
+            Ok(())
+        });
+        assert!(none.is_empty(), "全部成功 ⇒ 返回空（rollback 才允许 clear 快照）");
+        assert_eq!(
+            reversed,
+            vec![3, 2, 1],
+            "`.rev()` 的方向由调用方决定，helper 不重排"
+        );
     }
 }
