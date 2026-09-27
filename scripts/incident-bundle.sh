@@ -33,19 +33,62 @@
 #   ./scripts/incident-bundle.sh --out /tmp/x.zip       # 指定输出
 #   ./scripts/incident-bundle.sh --since 17:12:00       # 指定窗口起点（默认 = 本次 App 启动）
 #   ./scripts/incident-bundle.sh --max-bytes 5242880    # 总大小上限（默认 10 MiB）
-#   ./scripts/incident-bundle.sh --self-test            # 脱敏 fixture 的双向断言（不采集、不写仓库）
+#   ./scripts/incident-bundle.sh --self-test            # 脱敏 + 随包布局的双向断言（采集只写 $TMPDIR、不写仓库）
 #
 set -euo pipefail
 
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "${SELF}/.." && pwd)"
+# SELF = **脚本真实所在目录**（解析入口文件与路径上的符号链接）。它是运行期「脚本目录」的唯一来源。
+# 为什么要解析链接：入口可能是符号链接（App 与工具链常见），不解析时 dirname 给出的是链接所在目录，
+# 而 helper_tristate.py / fixtures/ 在**真实**目录里 ⇒ 从链接调用时 import 必失败。
+# 注意 `cd -P` 只解析**目录路径**上的链接，不解析「脚本文件本身是链接」这一种 —— 所以要下面这个循环。
+_self_src="${BASH_SOURCE[0]}"
+while [ -L "$_self_src" ]; do
+  _self_dir="$(cd -P "$(dirname "$_self_src")" && pwd -P)"
+  _self_src="$(readlink "$_self_src")"
+  case "$_self_src" in
+    /*) ;;
+    *) _self_src="${_self_dir}/${_self_src}" ;;
+  esac
+done
+SELF="$(cd -P "$(dirname "$_self_src")" && pwd -P)"
+REPO="$(cd -P "${SELF}/.." && pwd -P)"
 
-# **内联 python 的 import 路径**：脚本里多处用 `python3 - <<'PY'` 内联执行，
-# 而内联脚本的 `sys.path[0]` 是**当前工作目录**（不是脚本所在目录）。
-# 于是从别的 cwd 调用时 `from helper_tristate import …` 会
-# `ModuleNotFoundError`（现场包因此直接失败、exit 1 —— 用户实测）。
-# 内联脚本已支持 `XRAYTUN_SCRIPTS_DIR`，这里统一兜住：**调用方不必知道这件事**。
-export XRAYTUN_SCRIPTS_DIR="${XRAYTUN_SCRIPTS_DIR:-$SELF}"
+# **内联 python 的 import 路径（单一来源）**：脚本里多处用 `python3 - <<'PY'` 内联执行，
+# 而内联脚本的 `sys.path[0]` 是**当前工作目录**（不是脚本所在目录）。以前的修法只 export
+# 了变量、且信任外部传入值，于是「从别的 cwd 调用」时 `from helper_tristate import …`
+# 仍会 `ModuleNotFoundError`（现场包直接失败、exit 1 —— 用户实测）。现在：
+#   1. `XRAYTUN_SCRIPTS_DIR`：给内联脚本里的 `sys.path.insert(...)` 用；
+#   2. `PYTHONPATH`：**所有**子 python（内联 heredoc、net-metrics.py、triage-incident.py）
+#      都继承 —— 「一处设定、处处成立」的那一处；
+#   3. **无条件覆盖**（不再 `${VAR:-$SELF}`）：外部旧值往往是空的或指向别处，
+#      那正是现场失败的形态；调用方不必、也不许自己算这个路径。
+export XRAYTUN_SCRIPTS_DIR="$SELF"
+export PYTHONPATH="$SELF${PYTHONPATH:+:$PYTHONPATH}"
+
+# **fail closed 前置闸**：运行期依赖必须与脚本同级。App 资源目录过去漏拷
+# helper_tristate.py（以及 fixtures/），内联 python 才在 <stdin> 里爆 traceback。
+# 这里提前把「缺什么、谁负责补」说清楚 —— 缺件不许降级、不许等到内联 python 里才炸。
+RUNTIME_FILES_LIST="${SELF}/incident-runtime-files.txt"
+if [ ! -f "$RUNTIME_FILES_LIST" ]; then
+  echo "✗ 缺运行期脚本清单：${RUNTIME_FILES_LIST}" >&2
+  echo "  它是运行期依赖的单一来源（打包 scripts/package-macos.sh 与 --self-test 都读它）。" >&2
+  echo "  开发机上请确认在仓库检出里运行：./scripts/incident-bundle.sh" >&2
+  exit 3
+fi
+missing_runtime=0
+while IFS= read -r _rel || [ -n "$_rel" ]; do
+  case "$_rel" in '' | '#'*) continue ;; esac
+  if [ ! -f "${SELF}/${_rel}" ]; then
+    echo "✗ 运行期依赖缺失：${SELF}/${_rel}" >&2
+    missing_runtime=1
+  fi
+done <"$RUNTIME_FILES_LIST"
+if [ "$missing_runtime" -ne 0 ]; then
+  echo "  这些文件必须与 $(basename "$0") 同级部署（App 包内是 Contents/Resources/scripts/）。" >&2
+  echo "  清单：${RUNTIME_FILES_LIST}；打包由 scripts/package-macos.sh 按清单补齐。" >&2
+  echo "  缺 helper_tristate.py 的后果就是现场的 ModuleNotFoundError + exit 1 —— 这里提前挡。" >&2
+  exit 3
+fi
 DATA_DIR_DEFAULT="${HOME}/Library/Application Support/com.xraytun.desktop"
 APP_DEFAULT="/Applications/XrayTun.app"
 HELPER_INSTALLED_DEFAULT="/Library/PrivilegedHelperTools/com.xraytun.helper"
@@ -140,6 +183,130 @@ sha256_of() { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'; }
 
 # ---------------------------------------------------------------- --self-test（脱敏的双向断言）
 
+# 判据①②：**按「运行期脚本清单」模拟 App 资源目录**，从陌生 cwd 出包。
+# 为什么必须在自测里做（真实事故）：App 的「出包」走 `Contents/Resources/scripts/incident-bundle.sh`，
+# 而历史上只拷了三个文件、漏了 helper_tristate.py 与 fixtures/ ⇒ 现场 exit 1 + `ModuleNotFoundError`，
+# 仓库里却全绿。这个自测把「打包产物里的那套文件」原样铺一份，从**非仓库**的 cwd 跑完整出包，
+# 因此「清单漏项 / 依赖 cwd / 依赖仓库」三种情形都会当场红。
+shipped_layout_self_test() {
+  local fail=0
+  local list="${SELF}/incident-runtime-files.txt"
+  local tmp alien data out log rc rel mj
+  echo "=== 判据①：按随包清单模拟 App 资源目录，从陌生 cwd 出包（App 走的就是这条）==="
+  if [ ! -f "$list" ]; then
+    echo "  ✗ 缺运行期脚本清单：${list}（打包与自测都应以它为准）"
+    return 1
+  fi
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/xraytun-shipped.XXXXXX")" || { echo "  ✗ mktemp 失败"; return 1; }
+  alien="${tmp}/alien-cwd"
+  mkdir -p "$alien" "${tmp}/scripts"
+
+  # 1) 按清单铺出「App 资源目录」（只铺清单里声明的文件 —— 这正是打包会拷的东西）
+  while IFS= read -r rel || [ -n "$rel" ]; do
+    case "$rel" in '' | '#'*) continue ;; esac
+    if [ ! -f "${SELF}/${rel}" ]; then
+      echo "  ✗ 清单里的文件在仓库里不存在：${rel}"; fail=$((fail + 1)); continue
+    fi
+    mkdir -p "$(dirname "${tmp}/scripts/${rel}")"
+    cp "${SELF}/${rel}" "${tmp}/scripts/${rel}"
+  done <"$list"
+  chmod +x "${tmp}/scripts/incident-bundle.sh"
+
+  # 2) 造最小日志目录（人造值，不碰用户数据）
+  data="${tmp}/data"
+  mkdir -p "${data}/logs"
+  python3 - "${data}/logs/app.1.jsonl" <<'PY'
+import json, sys, time
+now = int(time.time())
+rows = [
+    {"ts_unix": now - 60, "source": "core", "level": "info", "message": "core: Xray 26.9.9 started"},
+    {"ts_unix": now - 30, "source": "app", "level": "info", "message": "self-test boot"},
+    {"ts_unix": now - 10, "source": "app", "level": "error", "message": "self-test error row"},
+]
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    for r in rows:
+        f.write(json.dumps(r) + "\n")
+PY
+  printf '%s\n' '{"mode":"rule","log_level":"info"}' >"${data}/settings.json"
+
+  # 3) 从**陌生 cwd**（不是仓库、也不是脚本目录）跑完整出包。
+  #    ⚠️ 必须清掉继承来的 PYTHONPATH / XRAYTUN_SCRIPTS_DIR：否则父进程（本自测）导出的
+  #    `repo/scripts` 会泄漏进子进程，把「随包目录里缺 helper_tristate.py」这种行为**掩盖掉**
+  #    —— 那就变成一个恒真的假断言。App 调脚本时这两个变量本来就不存在。
+  out="${tmp}/shipped.zip"; log="${tmp}/shipped.log"; rc=0
+  ( cd "$alien" && env -u PYTHONPATH -u XRAYTUN_SCRIPTS_DIR \
+      bash "${tmp}/scripts/incident-bundle.sh" --data-dir "$data" --out "$out" ) \
+    >"$log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "  ✗ 随包布局 + 陌生 cwd 出包失败（exit ${rc}）："
+    tail -20 "$log" | sed 's/^/      /'
+    fail=$((fail + 1))
+  else
+    echo "  ✓ 随包布局 + 陌生 cwd（${alien}）出包成功（exit 0）"
+  fi
+
+  # 4) 判据②：zip 内 metrics.json 必须存在、非空、且是**真指标**（不是 unavailable 占位）
+  if [ "$rc" -eq 0 ]; then
+    mj="${tmp}/metrics-out.json"
+    if unzip -p "$out" metrics.json >"$mj" 2>"${tmp}/unzip.err"; then
+      if [ -s "$mj" ]; then
+        if python3 - "$mj" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+if doc.get("error") == "metrics_unavailable":
+    raise SystemExit("metrics.json 是「不可用」占位，不是真指标")
+if "caliber" not in doc:
+    raise SystemExit("metrics.json 缺口径头 caliber")
+print("      metrics.json：真指标（含 caliber），%d 顶层键" % len(doc))
+PY
+        then
+          echo "  ✓ 判据②：zip 内 metrics.json 存在、非空、含口径头（真指标）"
+        else
+          echo "  ✗ 判据②：zip 内 metrics.json 不是真指标"; fail=$((fail + 1))
+        fi
+      else
+        echo "  ✗ 判据②：zip 内 metrics.json 为空"; fail=$((fail + 1))
+      fi
+    else
+      echo "  ✗ 判据②：zip 内没有 metrics.json（unzip：$(head -1 "${tmp}/unzip.err")）"
+      fail=$((fail + 1))
+    fi
+  fi
+
+  # 5) **双向敏感性**：清单漏掉 helper_tristate.py（= 改动前 tauri resources 的口径）⇒ 必须失败。
+  #    没有这条，判据①可能是个恒真的断言。
+  echo "  --- 敏感性：随包清单漏掉 helper_tristate.py ⇒ 出包必须失败并点名它 ---"
+  local tmp2="${tmp}/incomplete"
+  mkdir -p "${tmp2}/scripts"
+  while IFS= read -r rel || [ -n "$rel" ]; do
+    case "$rel" in '' | '#'*) continue ;; esac
+    [ "$rel" = "helper_tristate.py" ] && continue
+    if [ -f "${SELF}/${rel}" ]; then
+      mkdir -p "$(dirname "${tmp2}/scripts/${rel}")"
+      cp "${SELF}/${rel}" "${tmp2}/scripts/${rel}"
+    fi
+  done <"$list"
+  chmod +x "${tmp2}/scripts/incident-bundle.sh"
+  local rc2=0 log2="${tmp}/incomplete.log"
+  ( cd "$alien" && env -u PYTHONPATH -u XRAYTUN_SCRIPTS_DIR \
+      bash "${tmp2}/scripts/incident-bundle.sh" --data-dir "$data" --out "${tmp}/bad.zip" ) \
+    >"$log2" 2>&1 || rc2=$?
+  if [ "$rc2" -eq 0 ]; then
+    echo "  ✗ 漏掉 helper_tristate.py 竟然还成功 —— 判据①没有力度"; fail=$((fail + 1))
+  elif grep -q "helper_tristate" "$log2"; then
+    echo "  ✓ 漏掉 helper_tristate.py ⇒ 失败（exit ${rc2}）且报错点名它（判据①有力度）"
+    grep -m1 "helper_tristate" "$log2" | sed 's/^/      /'
+  else
+    echo "  ✗ 漏掉 helper_tristate.py 失败了，但报错没点名它："
+    head -5 "$log2" | sed 's/^/      /'
+    fail=$((fail + 1))
+  fi
+
+  rm -rf "$tmp"
+  # 清理产物（--out 都写在 tmp 里，上面已随 tmp 删掉；这里只防漏）
+  return "$fail"
+}
+
 self_test() {
   local fail=0
   local raw ok_bad ok_good
@@ -196,9 +363,11 @@ self_test() {
   echo "=== helper 三态（与产品同构：协议号优先 + 退化路径）==="
   python3 "${SELF}/helper_tristate.py" --self-test || fail=$((fail + 1))
 
+  shipped_layout_self_test || fail=$((fail + 1))
+
   echo
   if [ "$fail" -eq 0 ]; then
-    echo "self-test：**全部通过**（脱敏真值不出现 / host 与节点 IP 保留 / 双向敏感性有力度）"
+    echo "self-test：**全部通过**（脱敏真值不出现 / host 与节点 IP 保留 / 双向敏感性有力度 / 随包布局从陌生 cwd 出包成功且 metrics.json 为真指标）"
     return 0
   fi
   echo "self-test：**失败 ${fail} 项**" >&2
@@ -452,28 +621,49 @@ PY
 
 # --- metrics.json：net-metrics.py 的原始 JSON（自带口径头）
 METRICS_NOTE=""
+METRICS_DETAIL=""
 if [ -f "${REPO}/scripts/net-metrics.py" ]; then
   if python3 "${REPO}/scripts/net-metrics.py" --json \
       --since "$SINCE_LOCAL" --until "$NOW_LOCAL" >"${BUNDLE_DIR}/metrics.json" 2>"${BUNDLE_DIR}/metrics.err"; then
     echo "  metrics.json：已生成（口径头与选择内容指纹在文件内）"
   else
-    METRICS_NOTE="net-metrics.py 运行失败（见 metrics.err）"
+    _metrics_rc=$?
+    METRICS_NOTE="net-metrics.py 运行失败（退出码 ${_metrics_rc}）"
+    # ⚠️ metrics.err 随后会被删（见下面为什么）。所以**先**把真实原因摘出来，
+    #    否则包里只剩一句「见 metrics.err」，而那个文件根本不在 —— 那正是
+    #    「说了不可用、却没说清楚为什么」的形态（用户现场就是这么收到的）。
+    if [ -f "${BUNDLE_DIR}/metrics.err" ]; then
+      METRICS_DETAIL="$(sed -n '1,20p' "${BUNDLE_DIR}/metrics.err")"
+    fi
   fi
 else
   METRICS_NOTE="仓库里没有 scripts/net-metrics.py（本脚本通常在仓库检出内运行）"
+  METRICS_DETAIL="找不到 ${REPO}/scripts/net-metrics.py；它由 scripts/incident-runtime-files.txt 声明、scripts/package-macos.sh 补进 App 资源目录。"
 fi
 if [ -n "$METRICS_NOTE" ]; then
-  # **不许静默缺件**：失败也要留一个**说清原因**的文件
-  python3 - "$METRICS_NOTE" >"${BUNDLE_DIR}/metrics.json" <<'PY'
+  # **不许静默缺件**：失败也要留一个**说清原因**的文件，且原因要**自包含**
+  # （metrics.err 会被删，所以把 stderr 摘要嵌进 metrics.json 的 stderr_excerpt）。
+  python3 - "$METRICS_NOTE" "$METRICS_DETAIL" >"${BUNDLE_DIR}/metrics.json" <<'PY'
 import json, sys
-print(json.dumps({"error": "metrics_unavailable", "note": sys.argv[1],
-                  "窗口": "见 manifest.json 的 window"},
-                 ensure_ascii=False, indent=2))
+note, detail = sys.argv[1], sys.argv[2]
+doc = {
+    "error": "metrics_unavailable",
+    "note": note,
+    "窗口": "见 manifest.json 的 window",
+    "why_this_matters": "metrics 缺失时，依赖它的 signature 只能记为 unavailable，不能记成「没有命中」",
+}
+if detail.strip():
+    doc["stderr_excerpt"] = detail.strip().splitlines()
+print(json.dumps(doc, ensure_ascii=False, indent=2))
 PY
-  echo "  ⚠️ metrics.json 不可用：${METRICS_NOTE}"
+  echo "  ⚠️ metrics.json 不可用：${METRICS_NOTE}（原因原文已写进包内 metrics.json 的 stderr_excerpt）"
+  if [ -n "$METRICS_DETAIL" ]; then
+    printf '%s\n' "$METRICS_DETAIL" | sed -n '1,5p' | sed 's/^/      /' >&2
+  fi
 fi
 # ⚠️ 必须在 manifest **之前**删掉：否则 manifest 会把 metrics.err 列进去，
 #    而它随后被删除 ⇒ 收到包的人按 manifest 逐文件校验 sha256 时会失败（这一条是实测抓到的）。
+#    真实原因不丢：上面已把它摘进 metrics.json 的 stderr_excerpt。
 rm -f "${BUNDLE_DIR}/metrics.err"
 
 # --- README.txt（脱敏 + 说明；用户上传前先看这个）
@@ -485,7 +675,11 @@ rm -f "${BUNDLE_DIR}/metrics.err"
   echo
   echo "包里有什么："
   echo "  manifest.json  —— 自锚定：App/核心/helper 版本 + 三态 + 采集时刻 + 每个文件的 sha256"
-  echo "  metrics.json   —— net-metrics.py 的原始 JSON（含口径头：切/解/匹配/单位 + 选择内容指纹）"
+  if [ -n "$METRICS_NOTE" ]; then
+    echo "  metrics.json   —— ⚠️ **不可用**（${METRICS_NOTE}）；真实原因见本文件 stderr_excerpt 字段"
+  else
+    echo "  metrics.json   —— net-metrics.py 的原始 JSON（含口径头：切/解/匹配/单位 + 选择内容指纹）"
+  fi
   echo "  events.jsonl   —— 只看事件：source=app 的行 + level∈{error,warn} 的行（去重、按时间排序、有上限）"
   echo "  core-tail.txt  —— 核心日志尾部（字节上限；若截断，文件第一行会写清截了多少）"
   echo "  network.txt    —— 只读网络快照（默认路由 / 128·0/1 捕获路由 / 127 / utun / DNS 解析器）"
@@ -571,11 +765,12 @@ XRAYTUN_SCRIPTS_DIR="${SELF}" python3 - "${BUNDLE_DIR}" "${APP_PATH}" "${HELPER_
   "${SINCE_EPOCH}" "${NOW_EPOCH}" "${SINCE_SOURCE}" "${SINCE_DEGRADED}" \
   "${COLLECT_START_UTC}" "${SINCE_LOCAL}" "${NOW_LOCAL}" \
   "${CORE_TAIL_BYTES}" "${MAX_BYTES}" "${TOTAL_LINES}" "${TOTAL_BYTES}" "${KEPT_LINES}" \
-  "${METRICS_NOTE}" <<'PY'
+  "${METRICS_NOTE}" "${METRICS_DETAIL}" <<'PY'
 import hashlib, json, os, subprocess, sys
 (bundle, app_path, helper_installed, data_dir,
  since_epoch, now_epoch, since_source, degraded, collect_utc, since_local, now_local,
- core_tail_cap, total_cap, total_lines, total_bytes, kept_lines, metrics_note) = sys.argv[1:18]
+ core_tail_cap, total_cap, total_lines, total_bytes, kept_lines, metrics_note,
+ metrics_detail) = sys.argv[1:19]
 
 def out(cmd):
     try:
@@ -624,11 +819,17 @@ core_version = core_version_from_logs()
 #   * 协议号任一边读不到 ⇒ 退回「包版本相等」；
 #   * 任一边 `version` 输出读不到 ⇒ Unreadable（不许猜成不一致）。
 # 判据本体放在共享模块 scripts/helper_tristate.py ⇒ 现场包与分诊不可能再各写一份。
+# ⚠️ 这里的 `sys.path` 不能靠 `sys.path[0]`（内联脚本里它是 cwd，不是脚本目录）：
+#    入口已 export XRAYTUN_SCRIPTS_DIR（本调用点还额外前缀赋值一次，双保险）。
 import os as _os
 import sys as _sys
 
-if _os.environ.get("XRAYTUN_SCRIPTS_DIR"):
-    _sys.path.insert(0, _os.environ["XRAYTUN_SCRIPTS_DIR"])
+_scripts_dir = _os.environ.get("XRAYTUN_SCRIPTS_DIR")
+if not _scripts_dir:
+    raise SystemExit(
+        "✗ XRAYTUN_SCRIPTS_DIR 未设置 ⇒ 无法 import helper_tristate。"
+        "应由 incident-bundle.sh 入口导出；请从脚本所在目录重跑。")
+_sys.path.insert(0, _scripts_dir)
 from helper_tristate import classify_from_outputs   # noqa: E402
 
 installed_txt = out([helper_installed, "version"])
@@ -707,6 +908,8 @@ manifest = {
         "events": events_truncation,
         "metrics_available": not bool(metrics_note),
         "metrics_note": metrics_note or None,
+        # 真实原因（metrics.err 摘要）—— 缺件时「不可用」必须带得上为什么，见 metrics.json
+        "metrics_error_excerpt": metrics_detail.splitlines() if metrics_detail else [],
         "note": "任何截断都在 README.txt、core-tail.txt 首行与采集时的 stdout 各说一次（不许静默）",
     },
 }

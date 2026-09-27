@@ -121,6 +121,9 @@ def load_probe_targets(path=None):
         raise SystemExit(
             f"✗ 探针目标夹具不存在：{p}\n"
             f"  夹具由 task-106 维护（Rust 的 REQUIRED_PROBE_TARGETS 是权威，二者同源）。\n"
+            f"  它必须**随 App 一起发布**：scripts/incident-runtime-files.txt 声明、\n"
+            f"  scripts/package-macos.sh 在 tauri build 之后把清单里的文件补进\n"
+            f"  Contents/Resources/scripts/。App 里出现本错误 = 打包漏拷贝（不是日志问题）。\n"
             f"  本工具**不回退**到旧的内联目标表 —— 那会让「境内探针量不到」重新变成静默缺陷。\n"
             f"  可用 {PROBE_TARGETS_FIXTURE_ENV}=<path> 指定别处（自测/敏感性用）。")
     raw = open(p, encoding="utf-8").read()

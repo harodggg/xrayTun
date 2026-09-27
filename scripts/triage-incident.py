@@ -148,9 +148,22 @@ def load_bundle(path):
     mj = rd("metrics.json")
     if mj:
         try:
-            out["metrics"] = json.loads(mj)
+            parsed = json.loads(mj)
         except Exception as e:  # noqa: BLE001
             out["metrics_error"] = f"metrics.json 解析失败：{e}"
+        else:
+            if isinstance(parsed, dict) and parsed.get("error") == "metrics_unavailable":
+                # incident-bundle.sh 在 net-metrics.py 失败时写的**占位符**：文件在、但不是指标。
+                # 「没数据」必须与「数据说没有」分开（本文件 docstring 第 2 条红线）⇒ 当成不可用，
+                # 并把占位符里的真实原因带出来（note + stderr_excerpt），不许静默按「未命中」算。
+                why = parsed.get("note") or "原因见包内 metrics.json"
+                exc = parsed.get("stderr_excerpt") or []
+                out["metrics_error"] = "metrics.json 是占位符（net-metrics 未产出指标）：" + why
+                if exc:
+                    out["metrics_error"] += "｜" + str(exc[0])
+                out["notes"].append(out["metrics_error"])
+            else:
+                out["metrics"] = parsed
 
     ev = rd("events.jsonl")
     if ev:
@@ -195,10 +208,15 @@ def load_bundle(path):
 #   samples  : 原始行（截断到 3 条）—— 给「不许编造、要能自己看」用的
 
 
+def metrics_unavailable_reason(b):
+    """metrics 不可用时的原因：区分「文件缺失/解析失败」与「文件在但是占位符」。"""
+    return b.get("metrics_error") or "缺 metrics.json"
+
+
 def sig_v6_rewrite(b):
     m = b["metrics"]
     if not m:
-        return {"hit": False, "unavailable": "缺 metrics.json", "near_miss": 0.0, "samples": []}
+        return {"hit": False, "unavailable": metrics_unavailable_reason(b), "near_miss": 0.0, "samples": []}
     t = m.get("task97") or {}
     lines = t.get("v6_rewrite_lines", 0)
     cls = t.get("classes") or {}
@@ -245,7 +263,7 @@ def sig_watchdog_false_positive(b):
 def sig_probe_false_negative(b):
     m = b["metrics"]
     if not m:
-        return {"hit": False, "unavailable": "缺 metrics.json", "near_miss": 0.0, "samples": []}
+        return {"hit": False, "unavailable": metrics_unavailable_reason(b), "near_miss": 0.0, "samples": []}
     p = m.get("probes") or {}
     fl, nol = p.get("failed_line", 0), p.get("no_outcome_line", 0)
     hit = (fl + nol) > 0
@@ -262,7 +280,7 @@ def sig_probe_false_negative(b):
 def sig_log_read_loss(b):
     m = b["metrics"]
     if not m:
-        return {"hit": False, "unavailable": "缺 metrics.json", "near_miss": 0.0, "samples": []}
+        return {"hit": False, "unavailable": metrics_unavailable_reason(b), "near_miss": 0.0, "samples": []}
     s = m.get("stats") or {}
     trunc = s.get("truncated_lines", 0)
     nonjson = s.get("non_json_lines", 0)
@@ -988,6 +1006,30 @@ def self_test():
         pos_ev = PREDICATES[name](load_bundle(fixtures[name]))["evidence"]
         check(f"改坏 `{name}` 后边界 fixture 会被误判命中（⇒ 原断言红）", bool(mutants[name](edge_ev)), True)
         check(f"（对照）同一改坏版在正 fixture 上也为真：`{name}`", bool(mutants[name](pos_ev)), True)
+
+    # --- metrics **占位符**（net-metrics 失败时 incident-bundle.sh 写的那种）：
+    #     文件在、内容不是指标。必须记「不可用」，不许按「未命中」算 —— 本文件 docstring 第 2 条红线，
+    #     用户现场收到的正是这个形状。判据本体在 load_bundle 里（不是把结果写死）。
+    print("\n=== metrics 占位符 ⇒ 依赖它的 signature 必须记 `unavailable`（不是「未命中」）===")
+    ph_root = _write_fixture(
+        os.path.join(tmp, "metrics-placeholder"), _base_manifest(),
+        metrics={"error": "metrics_unavailable",
+                 "note": "net-metrics.py 运行失败（退出码 1）",
+                 "stderr_excerpt": ["✗ 探针目标夹具不存在：/nonexistent/probe-targets.json"]},
+        events=[], core=[], network="# net\n")
+    ph_b = load_bundle(ph_root)
+    check("占位符 ⇒ metrics 读数必须为空（= 不可用，不是空指标）", ph_b["metrics"], None)
+    check("占位符 ⇒ 原因要带出 note", "运行失败" in (ph_b["metrics_error"] or ""), True)
+    check("占位符 ⇒ 原因要带出 stderr 首行", "探针目标夹具不存在" in (ph_b["metrics_error"] or ""), True)
+    check("占位符 ⇒ 必须进 notes（不许静默）", any("占位符" in n for n in ph_b["notes"]), True)
+    tri_ph = triage(ph_b)
+    ph_metrics_sigs = ("v6-rewrite", "probe-false-negative", "log-read-loss")
+    for name in ph_metrics_sigs:
+        r = PREDICATES[name](ph_b)
+        check(f"占位符 ⇒ `{name}` 记 unavailable", bool(r.get("unavailable")), True)
+        check(f"占位符 ⇒ `{name}` 不许判成命中", r.get("hit"), False)
+    check("占位符 ⇒ 这些 signature 不许进 hits",
+          [h for h in tri_ph["hits"] if h in ph_metrics_sigs], [])
 
 
     # --- helper 三态（task-171）：协议号口径的额外断言 + 老格式的如实说明

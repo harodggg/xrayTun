@@ -219,6 +219,41 @@ if [ ! -f "$HELPER_SRC" ]; then
 fi
 install -m 0755 "$HELPER_SRC" "$APP/Contents/MacOS/xraytun-helper"
 
+# --- 运行期脚本集：**必须与 incident-bundle.sh 同级**（现场事故的根因就在这里）------------
+# tauri.conf.json 的 `bundle.resources` 只列了 incident-bundle.sh / triage-incident.py /
+# net-metrics.py 三个文件，而：
+#   * incident-bundle.sh 的内联 python 要 `from helper_tristate import …`；
+#   * net-metrics.py 要读 `fixtures/probe-targets.json`；
+#   * helper_tristate.py 的自测要读 `fixtures/helper-version-cases.json`。
+# 漏拷的表现（用户实测 2026-09-27）：App 里点「出包」→
+#   `ModuleNotFoundError: No module named 'helper_tristate'`（`<stdin>` line 58）+ exit 1；
+# 而仓库里跑同一脚本一切正常 ⇒ 这是**只在打包产物里坏**的故障，门禁看不见。
+# 清单是**单一来源**：scripts/incident-runtime-files.txt（incident-bundle.sh --self-test
+# 也读它来模拟 App 资源目录；清单漏项 ⇒ 自测当场红）。Tauri 的 resources 由 apps/ 下的
+# 配置决定，本脚本在 `tauri build` 之后补齐，属于既有「helper 由本脚本补进 Contents/MacOS/」的同一手法。
+RUNTIME_LIST="$ROOT/scripts/incident-runtime-files.txt"
+if [ ! -f "$RUNTIME_LIST" ]; then
+  echo "✗ 缺运行期脚本清单：$RUNTIME_LIST ⇒ 拒绝出货（否则会打出缺 helper_tristate.py 的 App）" >&2
+  exit 1
+fi
+APP_SCRIPTS="$APP/Contents/Resources/scripts"
+mkdir -p "$APP_SCRIPTS"
+RUNTIME_COUNT=0
+while IFS= read -r rel || [ -n "$rel" ]; do
+  case "$rel" in '' | '#'*) continue ;; esac
+  src="$ROOT/scripts/$rel"
+  if [ ! -f "$src" ]; then
+    echo "✗ 运行期脚本清单里的文件不存在：$src ⇒ 拒绝出货" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$APP_SCRIPTS/$rel")"
+  install -m 0644 "$src" "$APP_SCRIPTS/$rel"
+  RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+done <"$RUNTIME_LIST"
+# 入口脚本保留可执行位（它是被 `/bin/bash <path>` 调的，位不是必须，但与仓库一致以免惊吓）。
+chmod 0755 "$APP_SCRIPTS/incident-bundle.sh"
+echo "  · 运行期脚本集已补齐：${RUNTIME_COUNT} 个文件（含 helper_tristate.py 与 fixtures/）"
+
 # **产物断言**（不是"配置写了就行"）：证明这一版 helper 编进去的是**预期的策略**。
 #   · team-id / refuse-all：注入值是编译期字面量，一定在二进制里 ⇒ 找到它 = 走 RequireSignature；
 #   · cdhash：这一路**本来就不注入**（`$XRAYTUN_TEAM_ID` 为空）⇒ 判据是产物里有
@@ -247,6 +282,11 @@ check "geosite.dat" "$APP/Contents/Resources/geosite.dat"
 check "helper"      "$APP/Contents/MacOS/xraytun-helper"
 check "Info.plist"  "$APP/Contents/Info.plist"
 check "主程序"      "$APP/Contents/MacOS/xraytun-desktop"
+# 运行期脚本集：清单里每一条都必须在产物里 —— 漏一条就是「App 里点出包直接失败」。
+while IFS= read -r rel || [ -n "$rel" ]; do
+  case "$rel" in '' | '#'*) continue ;; esac
+  check "运行期脚本 $rel" "$APP/Contents/Resources/scripts/$rel"
+done <"$RUNTIME_LIST"
 
 # 前端**不在** Resources 里：Tauri 会把 dist 压缩后嵌进可执行文件，
 # 所以这里查不到 dist 目录是正常的（早先这里写了一条错误检查，

@@ -1,0 +1,25 @@
+# 现场包「运行期脚本集」—— **必须与 incident-bundle.sh 同级部署**（单一来源）。
+#
+# 为什么要有这个文件（真实事故，2026-09-27）：
+#   App 里的「出包」按钮走的是 `Contents/Resources/scripts/incident-bundle.sh`，
+#   而 tauri.conf.json 的 `bundle.resources` 只列了 incident-bundle.sh / triage-incident.py /
+#   net-metrics.py 三个文件。于是：
+#     * incident-bundle.sh 的内联 python `from helper_tristate import …`
+#       → `ModuleNotFoundError: No module named 'helper_tristate'`（`<stdin>` line 58）+ exit 1；
+#     * net-metrics.py 读 `fixtures/probe-targets.json`
+#       → `✗ 探针目标夹具不存在：…/Resources/scripts/fixtures/probe-targets.json`。
+#   仓库里跑同一脚本一切正常（文件都在）—— 这是个**只在打包产物里坏**的故障。
+#
+# 谁读它：
+#   * `scripts/package-macos.sh`：按清单把文件补进 `$APP/Contents/Resources/scripts/`；
+#   * `scripts/incident-bundle.sh --self-test`：按清单**模拟 App 资源目录**，
+#     从陌生 cwd 跑一次出包并断言成功（判据①）—— 清单漏项 ⇒ 自测立刻红。
+#
+# 格式：一行一个路径，相对 scripts/；`#` 开头与空行忽略。路径含子目录（fixtures/）也可以。
+incident-runtime-files.txt
+incident-bundle.sh
+helper_tristate.py
+net-metrics.py
+triage-incident.py
+fixtures/helper-version-cases.json
+fixtures/probe-targets.json
