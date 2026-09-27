@@ -99,6 +99,12 @@ pub fn tcp_reachable(addr: SocketAddr, timeout: Duration) -> bool {
 ///
 /// 非 inet 的 socket 仍落到 v4 选项上，行为与修前一致（`EOPNOTSUPP`），
 /// 因为这里唯一的语义是「绑到某张网卡」，对 AF_UNIX 本来就无意义。
+///
+/// **Darwin/BSD 专有**：`IP_BOUND_IF` / `IPV6_BOUND_IF` 是 BSD 系的 socket 选项，
+/// Linux 的 libc 里不存在（Linux 侧的对应物是 `SO_BINDTODEVICE`，需要
+/// root / `CAP_NET_RAW`，实参与语义都不同），所以这里按 `target_os` 门控：
+/// macOS 上是下面的真实实现，非 macOS 是紧随其后的**显式降级**（返回错误）。
+#[cfg(target_os = "macos")]
 pub fn bind_to_interface_fd(fd: std::os::unix::io::RawFd, interface: &str) -> std::io::Result<()> {
     let cname = std::ffi::CString::new(interface)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "网卡名含 NUL"))?;
@@ -132,10 +138,33 @@ pub fn bind_to_interface_fd(fd: std::os::unix::io::RawFd, interface: &str) -> st
     Ok(())
 }
 
+/// 非 macOS 平台上的 [`bind_to_interface_fd`]。
+///
+/// **故意返回错误**，绝不静默 `Ok(())`：调用方据「绑定成功」才会相信这次测到的
+/// 延迟是绕开隧道的真实值（见上面那段文档）。假装绑定成功 = 让调用方拿到
+/// 假的 0ms，正是这个函数存在的理由要防的事。
+#[cfg(not(target_os = "macos"))]
+pub fn bind_to_interface_fd(
+    _fd: std::os::unix::io::RawFd,
+    interface: &str,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "把 socket 绑到网卡 {interface}（IP_BOUND_IF / IPV6_BOUND_IF）仅在 macOS 可用；\
+             本平台没有等价实现，拒绝假装绑定成功"
+        ),
+    ))
+}
+
 /// `fd` 的地址族（`AF_INET` / `AF_INET6` / …）。
 ///
 /// 未 bind 的 socket 也会返回它被创建时的族，所以可以在 `bind`/`connect`
 /// 之前调用 —— 这正是 [`bind_to_interface_fd`] 需要的时机。
+///
+/// 只有 macOS 那份 [`bind_to_interface_fd`] 会调用它，所以在其它平台一并门控，
+/// 免得成为 dead_code。
+#[cfg(target_os = "macos")]
 fn socket_family(fd: std::os::unix::io::RawFd) -> std::io::Result<libc::c_int> {
     // SAFETY: `sockaddr_storage` 是内核写 sockaddr 的通用容器，长度如实传进去；
     // `getsockname` 只会写我们自己栈上的这块 buffer。
@@ -150,6 +179,10 @@ fn socket_family(fd: std::os::unix::io::RawFd) -> std::io::Result<libc::c_int> {
 }
 
 #[cfg(test)]
+// 这里的每个测试都依赖 Darwin 专有的东西：`lo0` 这个网卡名、`IP_BOUND_IF` /
+// `IPV6_BOUND_IF` 这两个选项，以及它们被实测出来的内核行为。放到 Linux 上必然
+// 假红（`lo0` 不存在、选项常量也不存在），所以整块按 `target_os` 门控。
+#[cfg(target_os = "macos")]
 mod tests {
     use super::*;
     use std::os::unix::io::{AsRawFd, RawFd};

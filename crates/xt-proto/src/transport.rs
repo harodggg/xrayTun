@@ -235,6 +235,12 @@ pub fn set_cloexec(fd: RawFd) {
 /// `getpeereid`：拿到连接对端的 uid/gid。
 ///
 /// 访问控制的第一层（第二层是代码签名校验）。注意它**不返回 pid**。
+///
+/// **Darwin/BSD 专有**：`getpeereid(3)` 在 Linux 的 libc 里不存在
+/// （Linux 的等价物是 `SO_PEERCRED`，语义与返回类型都不同）。所以这里按
+/// `target_os` 门控：macOS 上是下面的真实实现，非 macOS 是紧随其后的
+/// **显式降级**（返回错误，绝不返回假凭据）。
+#[cfg(target_os = "macos")]
 pub fn peer_credentials(socket: RawFd) -> std::io::Result<(libc::uid_t, libc::gid_t)> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
@@ -246,7 +252,21 @@ pub fn peer_credentials(socket: RawFd) -> std::io::Result<(libc::uid_t, libc::gi
     Ok((uid, gid))
 }
 
+/// 非 macOS 平台上的 [`peer_credentials`]。
+///
+/// **故意返回错误，而不是任何「默认凭据」**：调用方拿不到对端 uid/gid 时必须
+/// 走向拒绝分支。返回 `Ok((0, 0))` 这类假凭据会让授权层以为对端是 root ——
+/// 那是比「编不过」严重得多的安全问题。
+#[cfg(not(target_os = "macos"))]
+pub fn peer_credentials(_socket: RawFd) -> std::io::Result<(libc::uid_t, libc::gid_t)> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "peer_credentials（getpeereid）仅在 macOS 可用；本平台没有等价实现，拒绝返回任何凭据",
+    ))
+}
+
 /// 取对端 pid。**仅用于日志**，不要拿它做授权判断（存在 pid 复用导致的 TOCTOU）。
+#[cfg(target_os = "macos")]
 pub fn peer_pid(socket: RawFd) -> Option<libc::pid_t> {
     let mut pid: libc::pid_t = -1;
     let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
@@ -267,10 +287,23 @@ pub fn peer_pid(socket: RawFd) -> Option<libc::pid_t> {
     }
 }
 
+/// 非 macOS 平台上的 [`peer_pid`]。
+///
+/// 返回 `None`：这正是本函数既有的「取不到」语义，调用方本来就只把它用于
+/// 日志、拿到 `None` 也照常工作。它不参与授权判断，所以 `None` 不构成降级风险。
+#[cfg(not(target_os = "macos"))]
+pub fn peer_pid(_socket: RawFd) -> Option<libc::pid_t> {
+    None
+}
+
 /// 取对端的 `audit_token_t`（8 个 u32，共 32 字节）。
 ///
 /// **这是做授权该用的东西**：内核给连接打上的不可伪造标识，没有 pid 那样的复用问题。
 /// 交给 `SecCodeCopyGuestWithAttributes(kSecGuestAttributeAudit)` 使用。
+///
+/// **Darwin 专有**：`LOCAL_PEERTOKEN` 是 macOS 的 `SOL_LOCAL`（`0`）级 socket
+/// 选项，Linux 上不存在，所以这里按 `target_os` 门控。
+#[cfg(target_os = "macos")]
 pub fn peer_audit_token(socket: RawFd) -> std::io::Result<[u32; 8]> {
     let mut token = [0u32; 8];
     let mut len = std::mem::size_of::<[u32; 8]>() as libc::socklen_t;
@@ -288,6 +321,21 @@ pub fn peer_audit_token(socket: RawFd) -> std::io::Result<[u32; 8]> {
         return Err(std::io::Error::last_os_error());
     }
     Ok(token)
+}
+
+/// 非 macOS 平台上的 [`peer_audit_token`]。
+///
+/// **一律返回错误，绝不返回任何 token**：本平台没有 `LOCAL_PEERTOKEN`，也就没有
+/// 内核签发的、不可伪造的对端凭据。伪造一个全零/常量 token 会让
+/// `SecCodeCopyGuestWithAttributes` 的调用方以为「拿到了凭据」而继续往下走，
+/// 从而彻底绕开 helper 的对端校验 —— 这是本条降级唯一不能做的事。
+#[cfg(not(target_os = "macos"))]
+pub fn peer_audit_token(_socket: RawFd) -> std::io::Result<[u32; 8]> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "peer_audit_token（getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)）仅在 macOS 可用；\
+         本平台没有等价的内核凭据，拒绝返回任何 token",
+    ))
 }
 
 /// 以标准 `SOCK_STREAM` 连接到 helper。
@@ -316,6 +364,10 @@ mod tests {
     /// 曾经的设计用了 `SOCK_SEQPACKET`（报文边界 + fd 一定同帧到达，非常诱人），
     /// 但在 macOS 上直接 `EPROTONOSUPPORT`。谁要是又想改回去，
     /// 这个测试会立刻拦住他。
+    ///
+    /// 门控在 macOS：这条断言说的是 **Darwin 的事实**（Linux 的 `AF_UNIX`
+    /// 恰恰支持 `SOCK_SEQPACKET`），放到 Linux 上跑必然是假红。
+    #[cfg(target_os = "macos")]
     #[test]
     fn seqpacket_is_not_supported_on_macos() {
         const SOCK_SEQPACKET: libc::c_int = 5;
@@ -444,6 +496,9 @@ mod tests {
         assert!(err.to_string().contains("过大"), "{err}");
     }
 
+    /// 门控在 macOS：非 macOS 上 [`peer_credentials`] 是显式降级实现
+    /// （返回 `Unsupported`），这里 `unwrap()` 必然 panic，属于平台差异而非缺陷。
+    #[cfg(target_os = "macos")]
     #[test]
     fn peer_credentials_match_our_own() {
         let (a, _b) = pair();
