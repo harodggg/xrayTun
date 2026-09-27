@@ -82,9 +82,44 @@ pub async fn start_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<A
     snapshot::build_snapshot(&app, &state).await
 }
 
+/// 用户点「断开」但回滚失败时，写进提示条的那条**持久**陈述。
+///
+/// # 为什么必须有它（与看门狗 / 换网两条路径对齐）
+///
+/// 回滚失败时 `stop_core` 只把自己的日志写进环形缓冲，并以 `Err` 返回；而
+/// `stop_proxy` 原先直接 `?` 出去 —— 用户那一刻只看到一次**瞬时**的命令报错，
+/// 状态里没留下任何「未能确认网络已恢复」。同一种失败，看门狗回退与换网重建失败
+/// 都会写 [`FallbackOutcome::messages`] 的诚实 notice，只有这条路径没说 ⇒ 不一致
+/// 本身就是缺陷。
+///
+/// 成功时返回 `None`：回滚成功没有坏消息可讲，**不新增任何断言**
+/// （成功路径的运行态与文案保持改前逐字节一致）。
+///
+/// 关键：`reason` 是 helper / supervisor 的**原始错误文本**，必须原样带进提示条 ——
+/// 只写一句笼统的「失败」等于把真实原因丢掉。
+pub(crate) fn stop_proxy_failure_notice(result: &Result<(), String>) -> Option<String> {
+    match result {
+        Ok(()) => None,
+        Err(reason) => Some(format!(
+            "点「断开」时未能完成网络回滚：{reason}；**未能确认网络已恢复**\
+             （helper 上的会话可能仍在，路由/DNS 可能没还原，已保留会话 id）。\
+             可到「设置 → 修复网络（回滚遗留配置）」重试回滚。"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<AppSnapshot, String> {
-    stop_core(&app, &state).await?;
+    let result = stop_core(&app, &state).await;
+    if let Some(notice) = stop_proxy_failure_notice(&result) {
+        // **回滚失败不撒谎，也不静默。** `stop_core` 已经保留了 `tun_session`
+        // （那是「helper 上这条会话可能还活着」的唯一线索）并把原因写进
+        // `last_error`；这里再补一条**持久**的提示条，否则用户离开那条瞬时错误后，
+        // 界面上再也没有任何「网络可能还没恢复」的陈述。
+        state.with(|i| i.last_notice = Some(notice));
+        // **Err 契约不变**：仍然返回 Err，载荷仍是原始错误文本。
+        return Err(result.err().unwrap_or_default());
+    }
     // **用户主动停止** —— 意图作废，而且**必须落盘**：重启后读到的就是 false，
     // 所以「断开」是**跨进程有效**的逃生路（task-64 (c) 钉的就是这条）。
     //
@@ -3367,6 +3402,45 @@ mod tests {
         assert_eq!(level, "info");
         assert!(message.contains("网络配置已回滚"), "实际：{message}");
         assert!(!message.contains("网络可用"), "实际：{message}");
+    }
+
+    /// **用户点「断开」回滚失败**：必须留下一条**持久**的诚实陈述。
+    ///
+    /// 看门狗回退与换网重建失败都会写 `FallbackOutcome::messages` 的 notice，
+    /// 只有 `stop_proxy` 原先直接把 `Err` `?` 出去 —— 状态里什么都没留下。
+    /// 这条测试钉住三件事：提示条存在、带上**真实原因**、且**不含**「网络可用」。
+    #[test]
+    fn stop_proxy_failure_leaves_a_truthful_persistent_notice() {
+        let reason = "helper 回滚 TUN 失败：连接被拒绝";
+        let notice = stop_proxy_failure_notice(&Err(reason.to_string()))
+            .expect("回滚失败必须留下提示条（否则用户离开瞬时错误后就无从得知）");
+
+        assert!(
+            notice.contains("未能确认网络已恢复"),
+            "拿不到证据就要如实说不知道，实际：{notice}"
+        );
+        assert!(
+            notice.contains(reason),
+            "**原始 helper 原因必须原样带进提示条**，不许只写一句笼统的「失败」：{notice}"
+        );
+        assert!(
+            !notice.contains("网络可用"),
+            "**不许**断言没验证过的事，实际：{notice}"
+        );
+        assert!(
+            notice.contains("修复网络"),
+            "要给出下一步能做什么：{notice}"
+        );
+    }
+
+    /// **成功路径不受影响**：回滚成功没有坏消息可讲 ⇒ 不写提示条
+    /// （成功路径的运行态与文案保持改前逐字节一致，见上面两条测试）。
+    #[test]
+    fn stop_proxy_success_writes_no_failure_notice() {
+        assert!(
+            stop_proxy_failure_notice(&Ok(())).is_none(),
+            "成功时不得凭空造一条失败陈述"
+        );
     }
 
     /// 回退直连：helper 回滚失败 → `DirectUnverified`，日志与 notice 都必须

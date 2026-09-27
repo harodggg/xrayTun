@@ -1315,7 +1315,18 @@ pub struct AppSettings {
     pub auto_reconnect: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    /// 是否在切换模式时自动清理系统代理设置。
+    /// 是否在退出时还原系统代理设置。
+    ///
+    /// ⚠️ **本字段尚未实现：全仓没有任何逻辑读它。**
+    ///
+    /// 0.9.0 §2 裁决 1：界面上那个开关**已移除**（原文见
+    /// `apps/ui/src/pages/Settings.tsx` 里「退出时还原系统代理设置」那段说明）——
+    /// 「勾了什么都不变」等于界面在陈述不实事实，比少一个功能严重。
+    ///
+    /// 字段与 `serde` 默认值**刻意保留**：删掉会破坏已持久化的 `settings.json`
+    /// 兼容性。**不要**顺手实现它 —— 「写系统代理设置 + 崩溃安全还原」是独立的
+    /// 路线图功能项（`ProxyMode::SystemProxy` 目前不改 macOS 的系统代理设置，
+    /// 所以「退出时还原」此刻没有被还原的对象）。
     #[serde(default = "yes")]
     pub restore_system_proxy_on_exit: bool,
     /// 是否把实时网速显示在窗口标题栏与菜单栏。
