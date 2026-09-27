@@ -669,7 +669,10 @@ pub enum HelperVersionCheck {
     /// 两边都读到了，且**协议号相等** → **界面不该提示**。
     ///
     /// 判据是**协议号**（`commands/helper.rs::helper_versions_are_compatible`），
-    /// **包版本不同不算不一致**：App 0.8.34 + 已装 helper 0.8.33、协议同为 1 ⇒ 就是这里。
+    /// **包版本不同不算不一致**：例如 App 更新到新包、已装 helper 还是上一版，只要协议号相同就是这里。
+    /// （协议号的语义是 **App↔helper 的「行为契约」版本** —— helper 侧行为一变就必须升，
+    /// 见 `crates/xt-proto/src/lib.rs` 的 `PROTOCOL_VERSION`；**注释里不写死具体数字**，
+    /// 免得它像 `1`/`2` 那样过期。历史：`1` → `2`（信任锚请求）、`2` → `3`（回滚复检 + 启动对账）。）
     /// `version` 报的是**已安装**（实际在跑）那份的**包版本**。
     Match { version: String },
     /// 兼容性判据不满足 → 提示 + 「重新安装助手」入口。
