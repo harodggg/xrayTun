@@ -231,6 +231,70 @@ export interface MitmSettings {
    * 本版只支持一种窄口径动作（删掉某个布尔字段为 true 的数组元素）。
    */
   body_strip: MitmBodyStrip | null;
+  /**
+   * 「只观察、不改写」的配置（`model.rs::ObserveSettings`）。默认全关。
+   *
+   * 空名单 = **一条摘要都不写**（我们绝不自动填入用户没点名的域名）。
+   */
+  observe: ObserveSettings;
+}
+
+/**
+ * MITM 观察设置（`model.rs::ObserveSettings`）。
+ *
+ * 它只是"采证据"，与上面的 `body_strip`（**改写**响应体）是两件事：
+ * 观察模式下响应体**逐字节原样透传**，观察在裁剪之前汇总，互不污染。
+ */
+export interface ObserveSettings {
+  /** 总开关。默认 false。 */
+  enabled: boolean;
+  /** 只观察这些域名（子域命中）；**空 = 一条摘要都不写**。 */
+  hosts: string[];
+  /**
+   * 显式把完整响应体落盘到这个目录。默认 `null` = 不落盘。
+   *
+   * 只接受**绝对路径**：相对路径会被后端拒绝并降级为不落盘（界面会显示原因），
+   * 而且这个目录必须在仓库之外 —— 完整 body 可能含隐私内容。
+   */
+  capture_body_dir: string | null;
+}
+
+/** 单个域名的观察汇总（`observe.rs::HostObservation`）。 */
+export interface HostObservation {
+  host: string;
+  /** 这个域名上写过摘要的交换条数。 */
+  exchanges: number;
+  /** 所有标记词在这个域名上的命中总数。 */
+  marker_total: number;
+  /**
+   * **只列命中的词**（`promoted × 3` 这种）；一个都没命中就是空数组。
+   * 命中计数是**出现次数**，不是"命中就 1"。
+   */
+  markers: Array<{ marker: string; count: number }>;
+  /** 最近一次观察到这个域名的时间（Unix 秒；0 = 还没采到）。 */
+  last_seen_unix: number;
+}
+
+/**
+ * 观察结论（`observe.rs::ObserveReport`，挂在 `MitmStatus.observe` 上）。
+ *
+ * 它同时是**配置事实**（`enabled` / `configured_hosts`）与**数据事实**
+ * （`exchanges` / `hosts`）。两者必须分开显示："开着但还没采到" ≠ "采到且干净"，
+ * 更不等于"没有广告"。
+ */
+export interface ObserveReport {
+  enabled: boolean;
+  /** 配置里的名单原样回传。空 = 一条摘要都不会写。 */
+  configured_hosts: string[];
+  /** 实际用于计数的词表。 */
+  markers: string[];
+  exchanges: number;
+  marker_total: number;
+  /** 每个域名一条，命中多的在前。空 = **没有采到证据**（不是"干净"）。 */
+  hosts: HostObservation[];
+  capture_body_dir: string | null;
+  /** 配置里的问题（例如落盘目录是相对路径 ⇒ 已降级为不落盘）。 */
+  note: string | null;
 }
 
 /** 响应体裁剪的唯一口径（`model.rs::MitmBodyStrip`）。 */
@@ -280,6 +344,13 @@ export interface MitmStatus {
   applied: string | null;
   core_steering: boolean | null;
   core_restart_required: boolean;
+  /**
+   * 「只观察、不改写」的结论（按域名的标记词命中汇总；默认关）。
+   *
+   * 阅读顺序很重要：先看 `enabled` / `configured_hosts`（配置事实），
+   * 再看 `hosts` / `exchanges`（数据事实）。**没有摘要 ≠ 没有广告。**
+   */
+  observe: ObserveReport;
 }
 
 /**

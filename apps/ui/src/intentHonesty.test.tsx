@@ -103,6 +103,16 @@ function mitmStatus(over: Partial<MitmStatus> = {}): MitmStatus {
     applied: null,
     core_steering: null,
     core_restart_required: false,
+    observe: {
+      enabled: false,
+      configured_hosts: [],
+      markers: [],
+      exchanges: 0,
+      marker_total: 0,
+      hosts: [],
+      capture_body_dir: null,
+      note: null,
+    },
     ...over,
   };
 }

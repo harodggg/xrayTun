@@ -36,6 +36,7 @@ import type {
   IntentSummary,
   MitmSettings,
   MitmStatus,
+  ObserveReport,
 } from "../types";
 
 /**
@@ -251,6 +252,50 @@ export function mitmGateSummary(gates: MitmGate[], status: MitmStatus | null): s
   return "三道闸门全过 —— 但核心这次启动没带引导规则（证书或名单是在它启动之后才满足的，重连一次即可）。";
 }
 
+// ---------------------------------------------------------------------------
+// MITM 观察（只观察、不改写）
+// ---------------------------------------------------------------------------
+
+/**
+ * 「观察到底看到了什么」这一行的**唯一判据**。
+ *
+ * 它刻意把**配置事实**与**数据事实**分开，并且**绝不允许**把"没有摘要"说成
+ * "没有广告"：那是把"没有证据"讲成"干净"。四种状态各自一句话：
+ *
+ * * 读不到 —— 后端状态读取失败，什么都不能断言；
+ * * 未开启 —— 空态，明说"没有证据 ≠ 干净"；
+ * * 开着但名单空 —— 结构性的一条都采不到；
+ * * 名单非空但零摘要 —— 可能的原因很多（代理没跑 / 域名不在拆包名单 / 落在盲点里），
+ *   仍然是"没有证据"。
+ *
+ * 抽成导出纯函数：这是这一页最容易再犯的错，值得单测直接钉。
+ */
+export function observeStatusLine(report: ObserveReport | null, unknown: string): string {
+  if (report === null) {
+    return `读不到观察结论（${unknown}）—— 空不等于干净`;
+  }
+  if (!report.enabled) {
+    return "观察没开启：这里空着不代表没有广告 —— 我们一条证据都没采（没有证据 ≠ 干净）";
+  }
+  if (report.configured_hosts.length === 0) {
+    return "观察开着，但名单是空的 —— 一条摘要都不会写（我们不会自动替你观察任何域名）";
+  }
+  if (report.exchanges === 0) {
+    return (
+      `名单里有 ${report.configured_hosts.length} 个域名，但还没有采到任何摘要` +
+      " —— 空不等于干净（可能：代理没在跑、域名不在拆包名单、或落在下面「看不到什么」里）"
+    );
+  }
+  return `按域名采到 ${report.exchanges} 条摘要 · 标记词命中 ${report.marker_total} 次`;
+}
+
+/** 一个域名的命中汇总：`promoted × 3 · is_ad × 1`；一个都没命中就是「无命中」。 */
+export function formatMarkerHits(markers: Array<{ marker: string; count: number }>): string {
+  const hit = markers.filter((m) => m.count > 0);
+  if (hit.length === 0) return "无命中";
+  return hit.map((m) => `${m.marker} × ${m.count}`).join(" · ");
+}
+
 /**
  * 概率显示：拿不到值一律显示「—」。
  *
@@ -290,6 +335,10 @@ export default function Intent() {
   const [mitmErr, setMitmErr] = useState<string | null>(null);
   /** 编辑中的名单文本。`null` = 没在编辑（显示设置里的值）。 */
   const [domainsText, setDomainsText] = useState<string | null>(null);
+  /** 编辑中的**观察**名单文本（与拆包名单分开：两份名单是两件事）。 */
+  const [observeHostsText, setObserveHostsText] = useState<string | null>(null);
+  /** 编辑中的观察落盘目录（绝对路径）。 */
+  const [observeDirText, setObserveDirText] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -365,6 +414,29 @@ export default function Intent() {
       .map((t) => t.trim())
       .filter(Boolean);
 
+  /**
+   * 写设置（合并式：只改 `mitm.observe` 子树）。
+   *
+   * 观察与拆包名单是**两份独立名单**：分开写才不会因为改一个开关顺手动到另一个。
+   */
+  const patchObserve = useCallback(
+    (patch: Partial<AppSettings["mitm"]["observe"]>, name: string) => {
+      if (!settings) return;
+      const next: AppSettings = {
+        ...settings,
+        mitm: {
+          ...settings.mitm,
+          observe: { ...settings.mitm.observe, ...patch },
+        },
+      };
+      return runVoid(name, async () => {
+        await api.saveSettings(next);
+        await refresh();
+      });
+    },
+    [settings, runVoid, refresh],
+  );
+
   const allow = useCallback(
     (host: string, action: IntentAllowAction) => {
       return runVoid(`放行 ${host}`, async () => {
@@ -403,6 +475,7 @@ export default function Intent() {
   const m = settings.mitm;
   const gates = mitmGates(m, mitm);
   const gateLine = mitmGateSummary(gates, mitm);
+  const observeLine = observeStatusLine(mitm?.observe ?? null, mitmErr ?? "还没读回来");
   const errSteps = err ? nextSteps(err) : [];
   /**
    * `summary` 缺席时的说法。**必须区分两种缺席**：读失败（不知道）与还没读回来。
@@ -893,6 +966,151 @@ export default function Intent() {
             </p>
           </>
         )}
+
+        {/*
+         * ---- 观察（只观察、不改写）----
+         *
+         * 它不是"过滤广告"：只把真实响应体拿回来看一眼、写一条摘要，然后逐字节原样转发。
+         * 所以这一段先把"摘要里没有什么"与"看不到什么"说清，再给结论 ——
+         * 否则一张空的表很容易被读成"没有广告"（没有证据 ≠ 干净）。
+         */}
+        <h3>观察（只观察、不改写）</h3>
+        <p className="note">
+          这一块只<strong>采证据</strong>：把名单内域名的真实响应体在本机读出来，数一数里面出现了
+          哪些标记词，然后<strong>逐字节原样转发</strong> —— 不改一个字节。它是"先看清楚
+          这是不是广告"，不是"过滤广告"。摘要里只有：域名、方法、
+          <strong>去掉 query 的路径</strong>（截断 128 字符）、状态码、content-type、体字节数、
+          16 位短哈希、标记词计数；<strong>没有完整 URL、没有 query、没有正文</strong>。
+        </p>
+
+        <div className="field">
+          <label htmlFor="mitm-observe-enabled">启用观察（只写摘要，不改写任何内容）</label>
+          <input
+            id="mitm-observe-enabled"
+            type="checkbox"
+            checked={m.observe.enabled}
+            onChange={(e) => void patchObserve({ enabled: e.target.checked }, "改观察开关")}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="mitm-observe-hosts">
+            只观察这些域名（每行一个；空 = 一条摘要都不写，我们不会自动替你填）
+          </label>
+          <textarea
+            id="mitm-observe-hosts"
+            rows={4}
+            value={observeHostsText ?? m.observe.hosts.join("\n")}
+            onChange={(e) => setObserveHostsText(e.target.value)}
+            onBlur={() => {
+              if (observeHostsText !== null) {
+                void patchObserve({ hosts: parseDomains(observeHostsText) }, "改观察域名名单");
+                setObserveHostsText(null);
+              }
+            }}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="mitm-observe-dir">
+            把完整响应体落盘到这个目录（可选，必须是绝对路径；留空 = 不落盘）
+          </label>
+          <input
+            id="mitm-observe-dir"
+            value={observeDirText ?? m.observe.capture_body_dir ?? ""}
+            onChange={(e) => setObserveDirText(e.target.value)}
+            onBlur={() => {
+              if (observeDirText !== null) {
+                const t = observeDirText.trim();
+                void patchObserve(
+                  { capture_body_dir: t === "" ? null : t },
+                  "改观察落盘目录",
+                );
+                setObserveDirText(null);
+              }
+            }}
+          />
+          <div className="note">
+            只有你真的写了<strong>绝对路径</strong>才会落盘（默认绝不落盘）。相对路径会被后端拒绝并
+            降级为不落盘 —— 它可能把含隐私的响应体写进当前工作目录（比如仓库）。这个目录也必须
+            在仓库之外。
+          </div>
+        </div>
+
+        {/*
+         * 关于观察配置本身的问题（例如落盘目录被拒）。它必须显式出现：
+         * 否则用户会以为自己真的在留 body，实际一条都没落。
+         */}
+        {mitm?.observe?.note && (
+          <div className="banner banner--warn" role="alert">
+            {mitm.observe.note}
+          </div>
+        )}
+
+        {/*
+         * 结论区：`observeLine` 已经把"未开启 / 名单空 / 零摘要"三种空态分开说了，
+         * 并且明说"没有证据 ≠ 干净"。有数据时才画表。
+         */}
+        <p className="note note--warn">{observeLine}</p>
+        {mitm?.observe && mitm.observe.hosts.length > 0 && (
+          <table className="list">
+            <thead>
+              <tr>
+                <th>域名</th>
+                <th>摘要条数</th>
+                <th>标记词命中汇总</th>
+                <th>命中总数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mitm.observe.hosts.map((h) => (
+                <tr key={h.host}>
+                  <td className="mono">{h.host}</td>
+                  <td className="mono">{h.exchanges}</td>
+                  <td>{formatMarkerHits(h.markers)}</td>
+                  <td className="mono">{h.marker_total}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <p className="note">
+          词表（本版固定）：{mitm?.observe?.markers?.join("、") ?? "is_ad、ad_type、promoted、sponsored、adsbygoogle、广告"}
+          。命中计数是<strong>出现次数</strong>，不是"命中就 1"；命中是强证据，
+          但<strong>不命中什么也证明不了</strong>。
+        </p>
+
+        <div className="note">
+          <strong>观察看不到什么（如实列出）：</strong>
+        </div>
+        <ul className="list">
+          <li>
+            <strong>HTTP/2、HTTP/3（QUIC）</strong>：代理只广告 http/1.1 —— 只跑 h2 的客户端要么
+            退化成 h1，要么握手失败；QUIC 根本不经过这里。
+          </li>
+          <li>
+            <strong>WebSocket</strong>：一律回 501（只计数、不拆），所以看不到里面的消息。
+          </li>
+          <li>
+            <strong>证书固定 / 不信任本地 CA 的站点</strong>：TLS 握手直接失败，连请求都读不到。
+          </li>
+          <li>
+            <strong>上游无视我们、仍回压缩体的响应</strong>：我们拿到的是 gzip 字节，标记词搜不到。
+          </li>
+          <li>
+            <strong>Expect: 100-continue 的上传</strong>：本版不代传 100，客户端可能等不到而超时。
+          </li>
+          <li>
+            <strong>超过 12 MiB 的请求体/响应体</strong>：明确关闭连接（宁可断开，也不发半截）。
+          </li>
+          <li>
+            <strong>加密/混淆载荷、二进制协议里的广告标记</strong>：本来就搜不到。
+          </li>
+        </ul>
+        <p className="note note--warn">
+          所以这里<strong>没有任何摘要，不等于没有广告</strong>：它只说明我们没采到证据。
+          没有证据不是干净。
+        </p>
 
         <div className="row">
           <button

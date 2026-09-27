@@ -27,6 +27,8 @@ pub mod login_item;
 pub mod mitm;
 /// 节点不可达时的可避免伤害：失败三分类 + 自动回落排序 + 全挂时的节点清单。
 pub mod node_health;
+/// MITM「只观察、不改写」的 App 侧汇总（按域名的标记词命中结论）。
+pub mod observe;
 pub mod state;
 pub mod supervisor;
 pub mod traffic;

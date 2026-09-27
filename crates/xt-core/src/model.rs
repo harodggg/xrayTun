@@ -1052,6 +1052,13 @@ impl IntentSettings {
 /// 这是整个功能里唯一会改系统状态的部分（要往系统钥匙串装一个本地根证书、
 /// 还要拆 TLS），所以默认关闭；而且即使打开了，**名单为空时也不生成任何 steer 规则** ——
 /// 「打开了但什么都没配」在行为上应当等于没开。
+///
+/// # 两块可选能力各自独立
+///
+/// * [`Self::body_strip`]：**改写**响应体（语义改动，唯一支持的窄口径动作）；
+/// * [`Self::observe`]：**只观察、不改写**（按域名 opt-in，默认连摘要都不写）。
+///
+/// 两者可以同时开：观察看到的是**上游原样**的内容（在裁剪之前汇总），互不污染。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MitmSettings {
     #[serde(default)]
@@ -1079,6 +1086,68 @@ pub struct MitmSettings {
     /// 一种窄口径动作（见 [`MitmBodyStrip`]）。
     #[serde(default)]
     pub body_strip: Option<MitmBodyStrip>,
+    /// **只观察、不改写**（默认全关；空名单 = 一条摘要都不写）。见 [`ObserveSettings`]。
+    ///
+    /// `#[serde(default)]` 让没有这一块的老 `settings.json` 直接可用 —— 缺省等于
+    /// "用户从没开过观察"，与迁移语义一致，所以**不需要迁移**。
+    #[serde(default)]
+    pub observe: ObserveSettings,
+}
+
+/// MITM 的「**只观察、不改写**」设置（对应 `xt_mitm::ObserveConfig`）。
+///
+/// # 为什么默认全关、而且空名单等于没开
+///
+/// 观察会把响应体在本机读出来做标记词计数 —— 这比"只拆 TLS 不看内容"更进一步，
+/// 所以它必须是用户逐域点名的动作：`enabled` 默认 `false`，`hosts` 默认空，
+/// 而**空名单时一条摘要都不会写**（`xt_mitm::DomainObserver::observes` 恒假）。
+/// 我们**绝不**自动把用户没点名的域名填进来。
+///
+/// # 隐私取舍
+///
+/// * 摘要里**没有**完整 URL / query / 正文；`path` 进摘要前已去 query 并截断到
+///   `xt_mitm::MAX_PATH_CHARS` 字符；
+/// * 完整响应体默认**绝不落盘**；要落盘必须是用户显式给的 [`Self::capture_body_dir`]，
+///   而且只接受**绝对路径**（相对路径由 [`Self::validate`] 与 `xt_mitm` 双重拒绝）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ObserveSettings {
+    /// 总开关。默认 `false`。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 只观察**这些域名**（子域命中，按标签边界）。空 = 一条摘要都不写。
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// **显式**留完整 body 的目录。默认 `None` = 不落盘；只接受绝对路径。
+    #[serde(default)]
+    pub capture_body_dir: Option<PathBuf>,
+}
+
+impl ObserveSettings {
+    /// 配置上"会观察"（≠ 真的采到过东西）：开着**且**名单非空。
+    ///
+    /// 与 [`MitmSettings::is_active`] 同一条口径：打开了但什么都没配 = 没开。
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.hosts.is_empty()
+    }
+
+    /// 配置级校验：只报**能一眼说清原因**的问题（目前只有相对落盘目录这一条）。
+    ///
+    /// 相对路径不是"随便一个坏值"：它会相对**当前工作目录**解析，而桌面进程的
+    /// 工作目录可能是仓库根 —— 手滑一次就把别人的完整响应体写进源码树。所以宁可
+    /// 明确拒绝并降级为不落盘（`xt_mitm` 那边也这么干，这里是让用户看得见原因）。
+    pub fn validate(&self) -> Vec<String> {
+        let mut errs = Vec::new();
+        if let Some(dir) = &self.capture_body_dir {
+            if !dir.is_absolute() {
+                errs.push(format!(
+                    "观察的落盘目录必须是绝对路径，{} 会被拒绝（已降级为不落盘）—— \
+                     相对路径有把隐私 body 写进当前工作目录（可能是仓库）的风险",
+                    dir.display()
+                ));
+            }
+        }
+        errs
+    }
 }
 
 /// 响应体裁剪的**唯一**支持口径：删掉 JSON 里某个数组内、某个布尔字段为 `true` 的元素。
@@ -1125,6 +1194,7 @@ impl Default for MitmSettings {
             domains: Vec::new(),
             block_quic: false,
             body_strip: None,
+            observe: ObserveSettings::default(),
         }
     }
 }
@@ -1172,6 +1242,10 @@ impl MitmSettings {
                     strip.pointer
                 ));
             }
+        }
+        // 观察配置单独校验：它管的是"采证据"，与裁剪是两件事。
+        if self.observe.enabled {
+            errs.extend(self.observe.validate());
         }
         errs
     }
@@ -1516,6 +1590,87 @@ mod tests {
         assert!(!s.intent.enabled, "缺省即关闭");
         assert!(s.intent.drill);
         assert_eq!(s.intent.per_day, 200);
+    }
+
+    /// **判据④**：老 `settings.json`（`mitm` 里**没有** `observe` 字段，甚至整个
+    /// `mitm` 都没有）必须能读，而且观察**默认关**、名单为空、不落盘。
+    ///
+    /// 判别性：把 `observe` 上的 `#[serde(default)]` 删掉 ⇒ 第一条 `from_str` 直接
+    /// `Err(missing field 'observe')` ⇒ 红；把 `ObserveSettings::default()` 的
+    /// `enabled` 写成 `true` ⇒ 断言红。
+    #[test]
+    fn settings_without_the_observe_block_load_as_observation_off() {
+        // (a) 有 mitm、但没有 observe（0.8.4x 用户升级上来的典型形态）
+        let with_mitm = r#"{
+            "settings_version": 1,
+            "mitm": {
+                "enabled": true,
+                "listen_port": 10810,
+                "upstream_port": 10811,
+                "domains": ["news.example"],
+                "block_quic": false,
+                "body_strip": null
+            }
+        }"#;
+        let s: AppSettings = serde_json::from_str(with_mitm).expect("老 mitm 设置必须能读");
+        assert_eq!(s.mitm.domains, vec!["news.example".to_string()]);
+        assert!(!s.mitm.observe.enabled, "缺 observe ⇒ 观察必须是关的");
+        assert!(s.mitm.observe.hosts.is_empty(), "缺 observe ⇒ 名单为空（不观察任何域名）");
+        assert!(
+            s.mitm.observe.capture_body_dir.is_none(),
+            "缺 observe ⇒ 绝不落盘"
+        );
+        assert!(!s.mitm.observe.is_active(), "关着 + 空名单 = 没开");
+
+        // (b) 整个 mitm 块都没有
+        let no_mitm = r#"{ "settings_version": 1, "socks_port": 10808, "http_port": 10809 }"#;
+        let s: AppSettings = serde_json::from_str(no_mitm).expect("更老的设置也必须能读");
+        assert_eq!(s.mitm, MitmSettings::default());
+        assert!(!s.mitm.observe.enabled);
+    }
+
+    /// 配置级校验：相对落盘目录被拒且原因是**人话**；绝对路径不报。
+    #[test]
+    fn a_relative_capture_dir_is_refused_with_a_readable_reason() {
+        let mut o = ObserveSettings {
+            enabled: true,
+            hosts: vec!["news.example".into()],
+            capture_body_dir: Some(PathBuf::from("crates/xt-core/leak")),
+        };
+        let errs = o.validate();
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("绝对路径"), "{errs:?}");
+        assert!(errs[0].contains("降级为不落盘"), "{errs:?}");
+        assert!(o.is_active(), "落盘目录不合法不影响「按名单观察」这一件事");
+
+        o.capture_body_dir = Some(PathBuf::from("/tmp/xraytun-observe"));
+        assert!(o.validate().is_empty(), "绝对路径不该报毛病");
+
+        // 观察没开时，`MitmSettings::validate` 不该为落盘目录吵闹。
+        let mut m = MitmSettings { enabled: true, domains: vec!["a.example".into()], ..Default::default() };
+        m.observe.capture_body_dir = Some(PathBuf::from("relative"));
+        assert!(m.validate().is_empty(), "观察没开时不该报它：{:?}", m.validate());
+        m.observe.enabled = true;
+        assert!(
+            m.validate().iter().any(|e| e.contains("绝对路径")),
+            "观察开了就必须报：{:?}",
+            m.validate()
+        );
+    }
+
+    /// 观察配置必须能过 JSON 往返（它要落盘、要被 `saveSettings` 写回）。
+    #[test]
+    fn observe_settings_round_trip_through_json() {
+        let mut s = AppSettings::default();
+        s.mitm.observe = ObserveSettings {
+            enabled: true,
+            hosts: vec!["news.example".into(), "cdn.news.example".into()],
+            capture_body_dir: Some(PathBuf::from("/tmp/xraytun-observe")),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+        assert_eq!(back.mitm.observe.hosts.len(), 2);
     }
 
     #[test]

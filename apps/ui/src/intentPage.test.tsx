@@ -84,6 +84,22 @@ function mitmStatus(over: Partial<MitmStatus> = {}): MitmStatus {
     applied: null,
     core_steering: true,
     core_restart_required: false,
+    observe: observeReport(),
+    ...over,
+  };
+}
+
+/** 观察报告夹具：默认**关 + 零摘要**（"空 ≠ 干净"的默认形态）。 */
+function observeReport(over: Partial<MitmStatus["observe"]> = {}): MitmStatus["observe"] {
+  return {
+    enabled: false,
+    configured_hosts: [],
+    markers: ["is_ad", "ad_type", "promoted", "sponsored", "adsbygoogle", "广告"],
+    exchanges: 0,
+    marker_total: 0,
+    hosts: [],
+    capture_body_dir: null,
+    note: null,
     ...over,
   };
 }

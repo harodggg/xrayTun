@@ -31,8 +31,12 @@ use std::sync::Arc;
 
 use xt_core::model::{AppSettings, MitmSettings};
 use xt_mitm::{
-    serve_with, BlocklistDecider, BodyRewriter, JsonStripRewriter, LocalCa, ProxyConfig,
+    serve_with_observer, BlocklistDecider, BodyRewriter, JsonStripRewriter, LocalCa, ProxyConfig,
     ProxyHandle, ProxyStatsSnapshot, TlsError,
+};
+
+use crate::observe::{
+    observe_config_for, ObserveLedger, ObserveReport, RecordingObserver,
 };
 
 /// 下发给核心的**有效设置**：根证书没被信任时，把 MITM 摘掉。
@@ -99,6 +103,13 @@ pub struct MitmRuntime {
     /// 之间隔着一次重连。这个字段就是那个差值的唯一判据，跟 `intent.mark_applied`
     /// 同一个套路：**没记录过就不许说"已生效"**。
     core_steering: Option<bool>,
+    /// 本会话的观察汇总（按域名的标记词命中结论）。
+    ///
+    /// **不清空**：代理停了之后"刚才到底看到了什么"仍然是已发生的事实，
+    /// 用户点「应用（起/停代理）」停下后应当还能看见结论；下次启动会换一份新的。
+    observe: Arc<ObserveLedger>,
+    /// 当前代理实际用的观察者（诊断/测试用）。`stop` 之后为 `None`。
+    observer: Option<Arc<RecordingObserver>>,
 }
 
 /// 给界面看的状态。字段名就是 TS 那边的字段名（契约测试盯着）。
@@ -134,6 +145,11 @@ pub struct MitmStatus {
     pub core_steering: Option<bool>,
     /// 引导规则要重连核心才生效（证书刚装/刚卸、或名单刚改）。
     pub core_restart_required: bool,
+    /// **只观察、不改写**的结论（按域名的标记词命中汇总；默认关）。
+    ///
+    /// 它是观察配置与已采数据的合并视图；字段含义与隐私口径见
+    /// [`crate::observe::ObserveReport`]。
+    pub observe: ObserveReport,
 }
 
 impl MitmRuntime {
@@ -143,13 +159,23 @@ impl MitmRuntime {
     /// 重启会打断所有连接，和核心规则一样必须由用户显式触发（`mitm_apply`）。
     fn digest(settings: &MitmSettings, block_hosts: &[String], rewriter: bool) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
             settings.listen_port,
             settings.upstream_port,
             settings.domains.join(","),
             settings.block_quic,
             block_hosts.join(","),
-            rewriter
+            rewriter,
+            // 观察配置也要进摘要：改了"看哪些域名/落不落盘"之后，
+            // 用户点「应用」必须真的换掉代理里的观察者（否则界面显示的和跑的不是一回事）。
+            settings.observe.enabled,
+            settings.observe.hosts.join(","),
+            settings
+                .observe
+                .capture_body_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
         )
     }
 
@@ -221,24 +247,36 @@ impl MitmRuntime {
         self.stop();
         let ca = self.ca()?;
         let decider = Arc::new(BlocklistDecider::new(block_hosts));
-        let handle = serve_with(cfg, ca, decider, rewriter)
+        // 每次启动换一份新的观察汇总与观察者：旧数据属于上一份配置，混在一起
+        // 会让"这个域名到底采到没有"说不清。
+        let ledger = Arc::new(ObserveLedger::default());
+        let observer: Arc<RecordingObserver> =
+            Arc::new(RecordingObserver::new(&observe_config_for(settings), ledger.clone()));
+        let handle = serve_with_observer(cfg, ca, decider, rewriter, observer.clone())
             .map_err(|e| format!("启动 MITM 代理失败：{e}"))?;
         tracing::info!(
             listen = %handle.listen,
             domains = settings.domains.len(),
+            observe_enabled = settings.observe.enabled,
+            observe_hosts = settings.observe.hosts.len(),
             "MITM 代理已启动"
         );
         self.handle = Some(handle);
         self.applied = Some(key);
+        self.observe = ledger;
+        self.observer = Some(observer);
         Ok(())
     }
 
     /// 停代理。幂等；**留下的 CA 不动**（卸信任锚是单独的、需要 helper 的动作）。
+    ///
+    /// 观察汇总**不清空**（见字段注释）；只把"当前代理用的观察者"摘掉。
     pub fn stop(&mut self) {
         if self.handle.take().is_some() {
             tracing::info!("MITM 代理已停止");
         }
         self.applied = None;
+        self.observer = None;
     }
 
     /// 按当前设置求出状态。取 `ca_trusted` 由调用方给（它要跑 `security(1)` 查询，
@@ -291,6 +329,9 @@ impl MitmRuntime {
             applied: self.applied.clone(),
             core_steering: self.core_steering,
             core_restart_required,
+            // 观察报告是"配置 + 已采数据"的合并视图：即使代理没在跑，
+            // 也要能回答"观察开没开、名单是什么、有没有采到过"。
+            observe: self.observe.report(settings),
         }
     }
 }
@@ -336,6 +377,7 @@ fn proxy_config(settings: &MitmSettings) -> Result<ProxyConfig, TlsError> {
 mod tests {
     use super::*;
     use xt_core::model::RoutingPreset;
+    use xt_mitm::Observer;
 
     fn settings_with_mitm(domains: &[&str]) -> AppSettings {
         let mut s = AppSettings {
@@ -458,6 +500,7 @@ mod tests {
             upstream_port: upstream,
             block_quic: false,
             body_strip: None,
+            observe: Default::default(),
         };
         rt.start(&s, vec!["ads.example".into()], None)
             .expect("起代理");
@@ -667,6 +710,17 @@ mod tests {
                 "applied": null,
                 "core_steering": steering,
                 "core_restart_required": restart,
+                // 观察报告字段名也是给界面的契约：这里逐字段钉住（默认关 ⇒ 零摘要）。
+                "observe": {
+                    "enabled": false,
+                    "configured_hosts": [],
+                    "markers": xt_mitm::default_markers(),
+                    "exchanges": 0,
+                    "marker_total": 0,
+                    "hosts": [],
+                    "capture_body_dir": null,
+                    "note": null,
+                },
             })
         };
 
@@ -729,5 +783,130 @@ mod tests {
     fn free_port() -> u16 {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("拿空闲端口");
         l.local_addr().unwrap().port()
+    }
+
+    // -----------------------------------------------------------------------
+    // task-「观察接进 App」：把 ObserveConfig / Observer 真的交给代理
+    // -----------------------------------------------------------------------
+
+    /// 起代理用的两个**互不相同**的空闲端口（同端口会被 `proxy_config` 判自环）。
+    ///
+    /// 观察配置**保持默认（关）**：要不要观察由每条测试自己显式说，
+    /// 默认值本身就是判据①要钉的东西。
+    fn mitm_settings_with_ports() -> MitmSettings {
+        let listen = free_port();
+        let mut upstream = free_port();
+        while upstream == listen {
+            upstream = free_port();
+        }
+        MitmSettings {
+            enabled: true,
+            domains: vec!["news.example".into()],
+            listen_port: listen,
+            upstream_port: upstream,
+            ..Default::default()
+        }
+    }
+
+    fn observed_record(host: &str, body: &[u8]) -> xt_mitm::ExchangeRecord {
+        let meta = xt_mitm::ExchangeMeta {
+            host: host.into(),
+            method: "GET".into(),
+            path: "/api/timeline".into(),
+            status: 200,
+            status_line: "HTTP/1.1 200 OK".into(),
+            content_type: Some("application/json".into()),
+            body_bytes: body.len(),
+            request_body_bytes: 0,
+        };
+        xt_mitm::summarize(&meta, body, &xt_mitm::default_markers())
+    }
+
+    /// **接线判据**：`start` 之后，观察者必须真的被装进运行态，而且它采到的摘要
+    /// 必须出现在 `status().observe` 里（否则界面看到的永远是空的）。
+    ///
+    /// 判别性：把 `start` 里的 `serve_with_observer(...)` 换回 `serve_with(...)`，
+    /// 或者忘了 `self.observer = Some(...)` / `self.observe = ledger` ⇒ 这条红。
+    #[test]
+    fn start_wires_the_observer_and_its_summaries_reach_the_status() {
+        let mut s = mitm_settings_with_ports();
+        s.observe.enabled = true;
+        s.observe.hosts = vec!["news.example".into()];
+        let mut rt = MitmRuntime::default();
+        rt.start(&s, vec![], None).expect("起代理");
+
+        let ob = rt.observer.clone().expect("起代理必须装上观察者");
+        assert!(ob.observes("news.example"), "名单里的域名必须被观察");
+        assert!(ob.observes("cdn.news.example"), "子域命中（与库层同一套规则）");
+        assert!(!ob.observes("tracker.example"), "名单外不看");
+
+        let body = br#"{"a":{"promoted":true},"b":{"promoted":false}}"#;
+        let rec = observed_record("news.example", body);
+        assert_eq!(rec.marker_total, 2, "promoted 出现两次");
+        ob.observe(&rec, body);
+
+        let st = rt.status(&s, true);
+        assert!(st.observe.enabled);
+        assert_eq!(st.observe.exchanges, 1, "摘要必须真的进了报告");
+        assert_eq!(st.observe.hosts.len(), 1);
+        assert_eq!(st.observe.hosts[0].host, "news.example");
+        assert_eq!(st.observe.hosts[0].marker_total, 2);
+        assert_eq!(
+            st.observe.hosts[0]
+                .markers
+                .iter()
+                .find(|m| m.marker == "promoted")
+                .map(|m| m.count),
+            Some(2),
+            "promoted × 2"
+        );
+        rt.stop();
+    }
+
+    /// **判据（负例）**：默认设置（观察关）起代理 ⇒ 一条摘要都不写。
+    ///
+    /// 判别性：把 `ObserveSettings::default()` 的 `enabled` 改成 `true` ⇒ 红。
+    #[test]
+    fn a_default_start_observes_nothing() {
+        let mut s = mitm_settings_with_ports();
+        s.observe = xt_core::model::ObserveSettings::default();
+        let mut rt = MitmRuntime::default();
+        rt.start(&s, vec![], None).expect("起代理");
+
+        let ob = rt.observer.clone().expect("观察者仍在（只是它说「不看」）");
+        assert!(!ob.observes("news.example"), "默认关：一个域名都不看");
+        let body = br#"{"promoted":true}"#;
+        ob.observe(&observed_record("news.example", body), body);
+
+        let st = rt.status(&s, true);
+        assert!(!st.observe.enabled);
+        assert_eq!(st.observe.exchanges, 0, "默认关必须是零摘要");
+        assert!(st.observe.hosts.is_empty());
+        assert_eq!(st.observe.marker_total, 0);
+        rt.stop();
+    }
+
+    /// 观察配置变了，`digest` 必须跟着变 —— 否则点「应用」是空操作，
+    /// 界面显示的新名单和代理里真正跑的不是一回事。
+    #[test]
+    fn changing_the_observe_config_changes_the_applied_digest() {
+        let s = mitm_settings_with_ports();
+        let a = MitmRuntime::digest(&s, &[], false);
+
+        let mut on = s.clone();
+        on.observe.enabled = true;
+        let b = MitmRuntime::digest(&on, &[], false);
+        assert_ne!(a, b, "开关进摘要");
+
+        let mut hosts = s.clone();
+        hosts.observe.hosts = vec!["news.example".into()];
+        let c = MitmRuntime::digest(&hosts, &[], false);
+        assert_ne!(a, c, "名单进摘要");
+        assert_ne!(b, c);
+
+        let mut dir = s.clone();
+        dir.observe.capture_body_dir = Some(std::path::PathBuf::from("/tmp/xraytun-observe"));
+        let d = MitmRuntime::digest(&dir, &[], false);
+        assert_ne!(a, d, "落盘目录进摘要");
     }
 }

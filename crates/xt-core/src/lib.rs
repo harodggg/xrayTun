@@ -28,7 +28,8 @@ pub use error::{Error, Result};
 pub use model::{
     AppSettings, DatapathMode, DnsHandling, DnsSettings, FakeDnsSettings, FdOwnership,
     IntentAllowAction, IntentAllowOverride, IntentCategory, IntentPreset, IntentSettings,
-    IntentThresholds, MitmSettings, MuxSettings, Node, NodeId, NodeSource, Protocol, ProxyMode,
+    IntentThresholds, MitmSettings, MuxSettings, Node, NodeId, NodeSource, ObserveSettings,
+    Protocol, ProxyMode,
     RealitySettings,
     RoutingPreset, Subscription, TlsSettings, Transport, TunSettings, VmessSecurity,
 };
