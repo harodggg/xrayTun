@@ -894,7 +894,12 @@ mod tests {
             "外层 markers() 必须是空：proxy.rs 用它算命中，空表就真的一词不数"
         );
 
-        let body = br#"{"promoted":true,"is_ad":true,"广告":true}"#;
+        // 词表里有非 ASCII 的默认词（`广告`），夹具必须原样带上它，才能证明
+        // "空词表 ⇒ 连默认词也不数"。**不能**用 `b`/`br` 前缀的字节串字面量：
+        // 字节串只允许 ASCII，含中文会直接
+        // `error: non-ASCII character in raw byte string literal`
+        // （那正是这条 CI 红的原因）。用 `&str` 字面量取 `.as_bytes()`，字节不变。
+        let body = r#"{"promoted":true,"is_ad":true,"广告":true}"#.as_bytes();
         let rec = record_with("news.example", body, ob.markers());
         assert_eq!(rec.marker_total, 0, "空词表 ⇒ 一个词都不数");
         ob.observe(&rec, body);
@@ -1074,7 +1079,8 @@ mod tests {
     /// 换一个实例会让清空看起来生效、旧账还在被继续写。
     #[test]
     fn clear_drops_the_ledger_in_place_so_a_running_observer_sees_it() {
-        let s = settings(true, &["news.example"]);
+        // 这条测试只碰累加器本身，不需要 `settings`（留一个未用的 `s` 会在
+        // `clippy --all-targets -- -D warnings` 下变成 `unused_variables` 错误）。
         let ledger = Arc::new(ObserveLedger::default());
         let body = br#"{"promoted":true}"#;
         ledger.record(&record("news.example", body));

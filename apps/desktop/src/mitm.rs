@@ -1084,13 +1084,13 @@ mod tests {
 
         // 还没启动过 / 还没采到：给可读原因，不是静默失败。
         let err = rt.export_observe("/tmp/xraytun-never.json").unwrap_err();
-        assert!(err.contains("没有摘要"), "{err}");
+        assert!(err.contains("还没有采到任何摘要"), "{err}");
 
         rt.start(&s, vec![], None).expect("起代理");
         let err = rt.export_observe("relative/leak.json").unwrap_err();
         assert!(err.contains("绝对路径"), "相对路径必须被拒：{err}");
         let err = rt.export_observe("/tmp/xraytun-never.json").unwrap_err();
-        assert!(err.contains("没有摘要"), "{err}");
+        assert!(err.contains("还没有采到任何摘要"), "{err}");
 
         let ob = rt.observer.clone().expect("观察者");
         let body = br#"{"promoted":true}"#;
