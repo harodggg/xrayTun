@@ -12,10 +12,15 @@
 //!    （回滚路径上「尽力而为」比「严格失败」更重要）。
 //! 3. **DNS 先于路由还原**。反过来的话，会有一段「流量已出隧道、但 DNS
 //!    还指向隧道内哨兵地址」的窗口，用户会看到几秒钟的全网解析失败。
+//! 4. **回滚之后要复检**（不是「恢复命令发出去了」就算完）：默认路由必须仍可用、
+//!    本会话的捕获路由必须已从 utun 上删掉、DNS 必须**逐值**回到备份
+//!    （含「原本没有设置任何 DNS 服务器」这一态）。任何一条不满足都如实上报
+//!    并保留快照 —— **绝不假装成功**（见 `rollback`）。
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::RawFd;
 
-use xt_proto::{DatapathPlan, DnsMode, InstalledRoute, RouteVia, TunUpRequest};
+use xt_proto::{Cidr, DatapathPlan, DnsMode, InstalledRoute, RouteVia, TunUpRequest};
 
 use crate::error::{Error, Result};
 use crate::macos::dns;
@@ -368,13 +373,204 @@ pub fn rollback(snap: &SessionSnapshot) -> Result<()> {
         tracing::info!(pid, "回滚：请调用方终止数据面进程");
     }
 
-    // 4) 全部成功才删快照；有失败就留着让下次启动重试。
+    // 4) **复检**：发出恢复命令 ≠ 系统已回到用户原本的样子。
+    //
+    //    只在前面的动作**全部报成功**时才复检 —— 复检的唯一目的就是堵住
+    //    **假成功**（命令都退出 0、快照被删掉，而系统其实没回去）。已经失败时
+    //    照旧上报失败、保留快照，不必再往系统上多打几条只读命令。
+    if failures.is_empty() {
+        failures.extend(verify_rollback_took_effect(snap, !all_routes.is_empty()));
+    }
+
+    // 5) 全部成功才删快照；有失败就留着让下次启动重试。
     if failures.is_empty() {
         SessionSnapshot::clear()?;
         Ok(())
     } else {
         Err(Error::Invalid(failures.join("; ")))
     }
+}
+
+/// 回滚之后的**复检 + 一次重试**。
+///
+/// # 为什么不能只看命令退出码
+///
+/// `networksetup -setdnsservers` / `route delete` 返回 0 **不等于**配置真的变了：
+/// 别的 VPN 工具可能同时写同一张表、命令可能在半路被杀、`route` 的 `-ifscope`
+/// 语义也可能与预期不同。旧实现只要没报错就 `SessionSnapshot::clear()`，于是出现
+/// 「用户没网、日志却说已回滚」——与 task-122 A-1 同一类**假结论**。
+///
+/// 这里只钉三条**用户可感知**的不变量（本卡的 P0 判据），任一条不满足 ⇒ 返回可读
+/// 失败文案（由调用方汇总进 `Err`：快照保留、错误上传，**绝不假装成功**）：
+///
+/// 1. 见 [`verify_default_route_is_back`]：机器仍有**不在隧道上、带网关**的默认路由；
+/// 2. 见 [`verify_capture_routes_are_gone`]：**本次会话的**捕获路由不许还挂在
+///    `snap.interface` 那个 utun 上（否则全机流量会进一条即将被关掉的黑洞隧道）；
+/// 3. 见 [`verify_dns_is_back`]：每个改过的服务，其 DNS **逐值等于**备份。
+///
+/// * `touched_routes`：本次回滚是否动过路由。没动过就不该拿路由表去判人家的死活
+///   （否则会把「用户本来就没有默认路由」误算成我们的回滚失败）。
+fn verify_rollback_took_effect(snap: &SessionSnapshot, touched_routes: bool) -> Vec<String> {
+    let mut failures = Vec::new();
+    if touched_routes {
+        failures.extend(verify_default_route_is_back(snap));
+        failures.extend(verify_capture_routes_are_gone(snap));
+    }
+    failures.extend(verify_dns_is_back(snap));
+    failures
+}
+
+/// 判据 ①：回滚之后机器必须仍有一条**能用的**默认路由。
+///
+/// 「能用」= `route -n get default` 拿得到、**带网关**、且**不在 `utun` 上**。
+/// 最后一条是「App 不在之后流量不该还挂在隧道里」的直接表达；前两条来自
+/// `route.rs` 的实测（无网关的默认路由会退化成「目标在本地链路」的纯接口路由，
+/// 包根本发不出去 —— 比没有更糟）。
+///
+/// 缺了就**按快照记下的物理网关重装一次**（重试一次）。只在「真的没有默认路由」
+/// 时才补：那已经等于没网了，补一条只可能变好；而「查得到但不可用」（在隧道上 /
+/// 没网关 / 读失败）**不猜**，只如实上报。
+fn verify_default_route_is_back(snap: &SessionSnapshot) -> Vec<String> {
+    if default_route_problem().is_none() {
+        return Vec::new();
+    }
+    // 重试一次：只对「`route -n get default` 查不到」这一态做修复，且必须有 IPv4 网关。
+    let missing = matches!(route::default_route(), Err(Error::NoDefaultRoute));
+    if missing {
+        if let Some(gw) = snap.physical.gateway.filter(|g| g.is_ipv4()) {
+            let dest = Cidr {
+                addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                prefix: 0,
+            };
+            match route::add(&dest, &RouteVia::Gateway { addr: gw }) {
+                Ok(()) => tracing::warn!(
+                    gateway = %gw,
+                    "回滚复检：默认路由缺失，已按快照网关重装一次"
+                ),
+                Err(e) => tracing::error!(
+                    gateway = %gw,
+                    error = %e,
+                    "回滚复检：默认路由缺失，重装失败"
+                ),
+            }
+        } else {
+            tracing::error!(
+                interface = %snap.physical.interface,
+                "回滚复检：默认路由缺失，但快照里没有可用的 IPv4 网关，不敢凭空造一条"
+            );
+        }
+    }
+    match default_route_problem() {
+        None => Vec::new(),
+        Some(problem) => vec![format!("回滚后默认路由未恢复: {problem}")],
+    }
+}
+
+/// 读一次默认路由；`None` = 可用，`Some(人话)` = 出了什么问题。
+fn default_route_problem() -> Option<String> {
+    match route::default_route() {
+        Ok(dr) if dr.interface.starts_with("utun") => {
+            Some(format!("默认路由仍指向隧道接口 {}", dr.interface))
+        }
+        Ok(dr) if dr.gateway.is_none() => Some(format!(
+            "默认路由在 {} 上但没有网关（目标在本地链路的纯接口路由，包发不出去）",
+            dr.interface
+        )),
+        Ok(_) => None,
+        Err(e) => Some(format!("{e}")),
+    }
+}
+
+/// 判据 ①b：**本次会话自己的**捕获路由（`0/1` / `128/1`）不许还挂在
+/// `snap.interface` 那个 utun 上。
+///
+/// 这是「整机没网」的真正入口：删漏一条 `0/1 → utunN`，调用方随后关掉那个 fd，
+/// 全机的默认流量就进了一条**已死的隧道**（黑洞），而 `route -n get default`
+/// 仍然答得出系统默认路由 —— 只看默认路由**发现不了**这一条。
+///
+/// 只认**快照里那个 utun 名**：用户机器上还跑着 Karing / Tailscale，别人家的
+/// `0/1 → utunX` 不是我们的账，不能算成回滚失败（那正是「同一件事两个口径」）。
+///
+/// 读不到路由表（`netstat` 失败）时**不断言** —— 不把「读失败」当成「没删掉」。
+fn verify_capture_routes_are_gone(snap: &SessionSnapshot) -> Vec<String> {
+    // 快照里根本没记过「挂在本会话 utun 上的 /1 捕获路由」⇒ 不必去读表，
+    // 也就不会对别的会话/别的工具误报。
+    let had_our_capture = snap
+        .installed_routes
+        .iter()
+        .chain(snap.pending_routes.iter())
+        .any(|r| {
+            r.destination.prefix == 1
+                && matches!(&r.via, RouteVia::Interface { name } if name == &snap.interface)
+        });
+    if !had_our_capture {
+        return Vec::new();
+    }
+    let Ok(audit) = route::current_route_audit(&snap.physical.interface) else {
+        tracing::warn!(
+            interface = %snap.physical.interface,
+            "回滚复检：读不到路由表，无法确认本次会话的捕获路由是否已删（如实记录，不当作失败）"
+        );
+        return Vec::new();
+    };
+    let mut failures = Vec::new();
+    for (label, seen) in [
+        ("0/1", audit.capture_0_1),
+        ("128/1", audit.capture_128_1),
+    ] {
+        if seen.as_deref() == Some(snap.interface.as_str()) {
+            failures.push(format!(
+                "回滚后捕获路由 {label} 仍指向本次会话的隧道 {}（全机流量会进已死的隧道）",
+                snap.interface
+            ));
+        }
+    }
+    failures
+}
+
+/// 判据 ②：每个被我们改过 DNS 的服务，当前值必须**逐值（含顺序）等于**备份。
+///
+/// 为什么是逐值相等而不是「包含」：多一个隧道哨兵（`198.18.0.2`）就是整机解析不了
+/// 域名；少一个用户自己设的服务器同样是坏的。**备份为空 = 原本走 DHCP ⇒ 现在也
+/// 必须是空**（`networksetup` 的 `Empty` 语义）—— 这是最容易被漏掉、也最容易
+/// 让用户「终端没网」的一态。
+///
+/// 第一次不符就**立刻重试一次** `dns::restore`（把缺失窗口缩到最小），仍不符才上报。
+fn verify_dns_is_back(snap: &SessionSnapshot) -> Vec<String> {
+    let mut failures = Vec::new();
+    for backup in &snap.dns_backups {
+        if matches!(dns::get_dns(&backup.service), Ok(now) if servers_equal(&now, &backup.servers)) {
+            continue;
+        }
+        // 重试一次。
+        if let Err(e) = dns::restore(backup) {
+            failures.push(format!("回滚后重试还原 {} 的 DNS 失败: {e}", backup.service));
+            continue;
+        }
+        match dns::get_dns(&backup.service) {
+            Ok(now) if servers_equal(&now, &backup.servers) => {
+                tracing::warn!(
+                    service = %backup.service,
+                    "回滚复检：DNS 第一次不符，重试后已还原"
+                );
+            }
+            Ok(now) => failures.push(format!(
+                "回滚后 {} 的 DNS 未还原: 期望 {:?}, 实际 {now:?}",
+                backup.service, backup.servers
+            )),
+            Err(e) => failures.push(format!(
+                "回滚后无法复检 {} 的 DNS（读当前值失败）: {e}",
+                backup.service
+            )),
+        }
+    }
+    failures
+}
+
+/// DNS 服务器列表的比较：逐值（含顺序）相等。两边都以 `IpAddr` 文本存，非法项丢弃。
+fn servers_equal(now: &[String], want: &[String]) -> bool {
+    let parse = |v: &[String]| -> Vec<IpAddr> { v.iter().filter_map(|s| s.parse().ok()).collect() };
+    parse(now) == parse(want)
 }
 
 /// 拆除会话。`session_id` 不匹配时拒绝执行 —— 防止 GUI 的陈旧请求
@@ -718,8 +914,13 @@ mod tests {
         );
         assert_eq!(calls.get(), 2, "只该跑到失败的那一步为止");
 
-        // 「失败可重试」也要行为级成立：换全成功的执行器再跑一次 ⇒ Ok，且这时才删快照。
-        let ok: crate::macos::TestExecutor = Rc::new(|_, _| Ok(String::new()));
+        // 「失败可重试」也要行为级成立：换一个**系统已还原**的执行器再跑一次 ⇒ Ok，
+        // 且这时才删快照。
+        //
+        // ⚠️ 它必须也回答回滚后的复检探针（`route -n get default` 要返回一条真实
+        // 形态的默认路由）——「所有命令都返回空串」现在会被复检**正确地**判成
+        // 「没有默认路由」。这正是本卡新增的那条不变量在起作用。
+        let ok: crate::macos::TestExecutor = dispatch(HEALTHY_DEFAULT_ROUTE, "");
         let (retry, gone) = with_test_root(&root, || {
             let r = with_executor(ok, force_cleanup);
             (
@@ -1050,5 +1251,242 @@ mod tests {
             vec![3, 2, 1],
             "`.rev()` 的方向由调用方决定，helper 不重排"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0（本次卡）：**回滚之后的复检** —— 「发出恢复命令」≠「系统已回到原样」
+    //
+    // 现场（用户机器 `app.jsonl`，09-27 10:49:24，两次失败尝试都是这两行）：
+    //   路由审计[TunUp 之后（接管前）]：en0 的作用域默认路由**在**；default 行 2 条
+    //   路由审计[回滚之后]：en0 的作用域默认路由**缺失**；default 行 1 条
+    //
+    // 判据钉的是**用户可感知**的两条不变量（不是「我们发过命令」）：
+    //   ① 回滚之后 `route::default_route()` 必须仍能拿到一条**不在隧道上、带网关**
+    //      的默认路由（机器有出口）；
+    //   ② 每个改过 DNS 的服务，其当前值必须**逐值等于**备份 —— 含「原本没有设置
+    //      任何 DNS 服务器」（备份为空 = 交还 DHCP）这一态。
+    //
+    // ⚠️ 这两条在**改前**是红的：旧 `rollback` 只要命令不报错就 `clear()` 快照，
+    // 从不回头读一眼系统 —— 于是「用户没网」而日志说「已回滚」（task-122 A-1 家族）。
+    // -----------------------------------------------------------------------
+
+    /// 一条**可用**默认路由的 `route -n get default` 真实形态（en0 + 网关）。
+    const HEALTHY_DEFAULT_ROUTE: &str = "\
+   route to: default
+destination: default
+       mask: default
+    gateway: 192.168.0.1
+  interface: en0
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING>\n";
+
+    fn argv_is(args: &[String], want: &[&str]) -> bool {
+        args.len() == want.len() && args.iter().zip(want).all(|(a, b)| a == b)
+    }
+
+    /// 按 argv 分派的替身执行器：只对两个**复检读**给固定回答，其余命令一律「成功」。
+    ///
+    /// 这样测试能精确表达「命令都成功了，但系统其实没回到原样」这一形状 ——
+    /// 而这正是旧实现会误报成功的地方。
+    fn dispatch(route_get_default: &'static str, get_dns: &'static str) -> crate::macos::TestExecutor {
+        std::rc::Rc::new(move |program: &str, args: &[String]| {
+            if program == crate::tools::ROUTE && argv_is(args, &["-n", "get", "default"]) {
+                return Ok(route_get_default.to_string());
+            }
+            if program == crate::tools::NETWORKSETUP
+                && args.first().map(String::as_str) == Some("-getdnsservers")
+            {
+                return Ok(get_dns.to_string());
+            }
+            Ok(String::new())
+        })
+    }
+
+    /// **判据 ①（改前红）**：复检发现「回滚后没有可用默认路由」⇒ 必须 `Err` 且保留快照。
+    ///
+    /// 旧实现根本不看默认路由 ⇒ 这里会拿到 `Ok`（快照被删），断言当场红。
+    #[test]
+    fn rollback_refuses_to_claim_success_when_the_default_route_is_gone() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::with_executor;
+
+        let root = tmp_snapshot_root("p0-default-route");
+        let mut snap = SessionSnapshot::new("s-route".into(), "utun9".into(), fixture_uplink());
+        snap.installed_routes = vec![fixture_route("203.0.113.0/24")];
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        // 空输出 ⇒ `parse_route_get` 拿不到 interface ⇒ `NoDefaultRoute`。
+        let exec = dispatch("", "");
+        let (result, kept) = with_test_root(&root, || {
+            let r = with_executor(exec, || rollback(&snap));
+            (r.map(|_| ()), SessionSnapshot::snapshot_path().exists())
+        });
+
+        let err = result.expect_err(
+            "默认路由没回来 ⇒ rollback 必须返回 Err（不许「命令发出去了」就算成功）",
+        );
+        assert!(
+            err.to_string().contains("默认路由"),
+            "失败文案要点明是「默认路由」这一项：{err}"
+        );
+        assert!(kept, "复检失败时快照必须留着（失败可重试语义）");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **判据 ②（改前红）**：复检发现「回滚后 DNS 仍是哨兵」⇒ 必须 `Err`、点名服务与实际值。
+    ///
+    /// **含「原本没有设置任何 DNS 服务器」这一态**（备份为空 = 交还 DHCP）——
+    /// 这正是用户机器上 `Wi-Fi` 的原值形态。
+    #[test]
+    fn rollback_refuses_to_claim_success_when_dns_is_still_the_sentinel() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::with_executor;
+
+        let root = tmp_snapshot_root("p0-dns-leftover");
+        let mut snap = SessionSnapshot::new("s-dns".into(), "utun9".into(), fixture_uplink());
+        snap.dns_backups.push(crate::macos::dns::DnsBackup {
+            service: "Wi-Fi".into(),
+            servers: vec![],
+            search_domains: vec![],
+        });
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        // 还原命令一律「成功」，但系统上仍然是隧道内的哨兵地址。
+        let exec = dispatch(HEALTHY_DEFAULT_ROUTE, "198.18.0.2\n");
+        let (result, kept) = with_test_root(&root, || {
+            let r = with_executor(exec, || rollback(&snap));
+            (r.map(|_| ()), SessionSnapshot::snapshot_path().exists())
+        });
+
+        let msg = result
+            .expect_err("DNS 还指着 198.18.0.2 ⇒ 不许报成功")
+            .to_string();
+        assert!(
+            msg.contains("Wi-Fi") && msg.contains("DNS"),
+            "要点名服务名与 DNS：{msg}"
+        );
+        assert!(msg.contains("198.18.0.2"), "要点出实际值（现场证据）：{msg}");
+        assert!(kept, "复检失败时快照必须留着（失败可重试语义）");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **判据 ①b（改前红）**：`0/1` 仍指向**本次会话的** utun ⇒ 必须 `Err`。
+    ///
+    /// 这是「整机没网」的真实入口：调用方随后会关掉 utun 的 fd，全机默认流量
+    /// 就进了一条已死的隧道。而 `route -n get default` 仍答得出**系统的**默认路由
+    /// ⇒ 只查默认路由**抓不到**这一条。
+    #[test]
+    fn rollback_refuses_to_claim_success_when_our_capture_route_is_still_on_the_tunnel() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::with_executor;
+
+        let root = tmp_snapshot_root("p0-capture-left");
+        let mut snap = SessionSnapshot::new("s-cap".into(), "utun9".into(), fixture_uplink());
+        // 延迟模式：捕获路由记在 pending 里（本次确实装过/尝试装过）。
+        snap.pending_routes.push(InstalledRoute {
+            destination: "0.0.0.0/1".parse().unwrap(),
+            via: RouteVia::Interface {
+                name: "utun9".into(),
+            },
+            replaced: None,
+        });
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        // 替身刻意让**默认路由是好的**（排除它干扰），只在 netstat 里保留一条
+        // `0/1 → utun9` —— 也就是「删漏了自己的捕获路由」这一态。
+        let exec: crate::macos::TestExecutor = std::rc::Rc::new(
+            |program: &str, args: &[String]| {
+                if program == crate::tools::ROUTE && argv_is(args, &["-n", "get", "default"]) {
+                    return Ok(HEALTHY_DEFAULT_ROUTE.to_string());
+                }
+                if program == crate::tools::NETSTAT {
+                    return Ok("0/1                utun9              UScg                utun9\n".to_string());
+                }
+                Ok(String::new())
+            },
+        );
+        let (result, kept) = with_test_root(&root, || {
+            let r = with_executor(exec, || rollback(&snap));
+            (r.map(|_| ()), SessionSnapshot::snapshot_path().exists())
+        });
+
+        let msg = result
+            .expect_err("捕获路由还在我们自己的 utun 上 ⇒ 不许报成功")
+            .to_string();
+        assert!(
+            msg.contains("0/1") && msg.contains("utun9"),
+            "要点名是哪条捕获路由、挂在哪个 utun 上：{msg}"
+        );
+        assert!(kept, "复检失败时快照必须留着");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **正向对照（改前改后都绿）**：系统确实回到原样时，回滚必须成功并删快照。
+    ///
+    /// 同时把判据 ① 的**字面形式**钉住：回滚之后 `route::default_route()`
+    /// 仍能拿到 en0 那条（gateway 存在）。
+    #[test]
+    fn rollback_succeeds_when_the_route_and_dns_are_really_restored() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::with_executor;
+
+        let root = tmp_snapshot_root("p0-positive");
+        let mut snap = SessionSnapshot::new("s-ok".into(), "utun9".into(), fixture_uplink());
+        snap.installed_routes = vec![fixture_route("203.0.113.0/24")];
+        // 原值 = 「没有设置任何 DNS 服务器」（DHCP）。`networksetup` 的原话就在这里。
+        snap.dns_backups.push(crate::macos::dns::DnsBackup {
+            service: "Wi-Fi".into(),
+            servers: vec![],
+            search_domains: vec![],
+        });
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        let (result, gone) = with_test_root(&root, || {
+            let r = with_executor(
+                dispatch(
+                    HEALTHY_DEFAULT_ROUTE,
+                    "There aren't any DNS Servers set on Wi-Fi.\n",
+                ),
+                || rollback(&snap),
+            );
+            (r.map(|_| ()), !SessionSnapshot::snapshot_path().exists())
+        });
+        assert!(result.is_ok(), "系统已还原 ⇒ 回滚必须成功：{result:?}");
+        assert!(gone, "全部复检通过才允许删快照");
+
+        // 判据 ① 的字面形式。
+        let dr = with_test_root(&root, || {
+            with_executor(dispatch(HEALTHY_DEFAULT_ROUTE, ""), route::default_route)
+        })
+        .expect("回滚之后必须仍有一条可用的默认路由");
+        assert_eq!(dr.interface, "en0");
+        assert_eq!(dr.gateway, Some("192.168.0.1".parse().unwrap()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 正向对照：备份里**有** DNS 时，「当前值 == 备份值」也算还原成功。
+    #[test]
+    fn rollback_accepts_a_restored_non_empty_dns_backup() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::with_executor;
+
+        let root = tmp_snapshot_root("p0-dns-nonempty");
+        let mut snap = SessionSnapshot::new("s-dns2".into(), "utun9".into(), fixture_uplink());
+        snap.dns_backups.push(crate::macos::dns::DnsBackup {
+            service: "Wi-Fi".into(),
+            servers: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+            search_domains: vec![],
+        });
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        let (result, gone) = with_test_root(&root, || {
+            let r = with_executor(
+                dispatch(HEALTHY_DEFAULT_ROUTE, "1.1.1.1\n8.8.8.8\n"),
+                || rollback(&snap),
+            );
+            (r.map(|_| ()), !SessionSnapshot::snapshot_path().exists())
+        });
+        assert!(result.is_ok(), "DNS 已写回原值 ⇒ 必须成功：{result:?}");
+        assert!(gone);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
