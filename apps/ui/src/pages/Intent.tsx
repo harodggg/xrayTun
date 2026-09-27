@@ -278,12 +278,15 @@ export function observeStatusLine(report: ObserveReport | null, unknown: string)
     return "观察没开启：这里空着不代表没有广告 —— 我们一条证据都没采（没有证据 ≠ 干净）";
   }
   if (report.configured_hosts.length === 0) {
-    return "观察开着，但名单是空的 —— 一条摘要都不会写（我们不会自动替你观察任何域名）";
+    return (
+      "观察开着，但名单是空的 —— 一条摘要都不会写（我们不会自动替你观察任何域名）" +
+      "（没有证据 ≠ 干净）"
+    );
   }
   if (report.exchanges === 0) {
     return (
       `名单里有 ${report.configured_hosts.length} 个域名，但还没有采到任何摘要` +
-      " —— 空不等于干净（可能：代理没在跑、域名不在拆包名单、或落在下面「看不到什么」里）"
+      " —— 没有证据 ≠ 干净（可能：代理没在跑、域名不在拆包名单、或落在下面「看不到什么」里）"
     );
   }
   return `按域名采到 ${report.exchanges} 条摘要 · 标记词命中 ${report.marker_total} 次`;

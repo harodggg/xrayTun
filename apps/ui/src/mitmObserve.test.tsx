@@ -184,7 +184,7 @@ describe("MITM 观察：没有证据 ≠ 干净", () => {
     expect(text).toContain("一条摘要都不会写");
   });
 
-  it("名单非空却零摘要：说「还没采到」并强调空不等于干净", async () => {
+  it("名单非空却零摘要：说「还没采到」并强调没有证据 ≠ 干净", async () => {
     const snap = snapWithObserve({ enabled: true, hosts: ["news.example"] });
     const text = await mount(
       snap,
@@ -192,7 +192,7 @@ describe("MITM 观察：没有证据 ≠ 干净", () => {
       () => (document.body.textContent ?? "").includes("还没有采到任何摘要"),
     );
     expect(text).toContain("还没有采到任何摘要");
-    expect(text).toContain("空不等于干净");
+    expect(text).toContain("没有证据 ≠ 干净");
   });
 
   it("读不到 MITM 状态：不许把「不知道」渲染成三项确定事实", async () => {
