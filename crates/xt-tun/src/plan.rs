@@ -727,6 +727,37 @@ mod tests {
         );
     }
 
+    /// **P1 脏状态的不变量**：`Restore` 的目标永远是**我们自己的** `destination`。
+    ///
+    /// 所以只要 `replaced` 记错了（例如把 `/0` 默认路由记成 `0.0.0.0/1` 的
+    /// 「被顶掉的那条」），回滚就会在 **`0.0.0.0/1` 自己**上装出一条物理网卡路由
+    /// —— 现场就是 `0/1 → en0` 残留（app.jsonl ts 1790476849/1790476863），
+    /// 半个 IPv4 空间绕过隧道 = 流量泄漏。
+    ///
+    /// 这条测试把「回滚动作的形状」钉死，真正的防线在
+    /// `macos::route::existing_route`（判据回归见其 tests）。
+    #[test]
+    fn a_mis_recorded_replaced_restores_a_half_on_the_replaced_prefix_itself() {
+        let utun = RouteVia::Interface { name: "utun6".into() };
+        let actions =
+            rollback_plan(&[installed_route("0.0.0.0/1", utun.clone(), Some(gw_via()))]);
+        assert_eq!(
+            actions,
+            vec![
+                RollbackAction::Delete {
+                    destination: "0.0.0.0/1".parse().unwrap(),
+                    via: utun,
+                },
+                // `replaced` 是物理网关那条 ⇒ 恢复动作落在 `0.0.0.0/1` 上：
+                // 这不是「恢复默认路由」，而是造出 `0/1 → 物理网卡`。
+                RollbackAction::Restore {
+                    destination: "0.0.0.0/1".parse().unwrap(),
+                    via: gw_via(),
+                },
+            ],
+        );
+    }
+
     /// 顺序：**安装顺序反序**，且每条自己的 Delete 在它的 Restore 之前。
     #[test]
     fn rollback_actions_are_reverse_install_order_with_restore_after_delete() {
