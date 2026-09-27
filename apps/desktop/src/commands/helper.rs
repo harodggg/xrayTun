@@ -77,7 +77,7 @@ use crate::state::HelperVersionCheck;
 
 /// 从 `<binary> version` 的输出里取版本号。
 ///
-/// 期望形如 `xraytun-helper 0.8.31 (protocol 1)`（`xt-helper/src/main.rs` 的
+/// 期望形如 `xraytun-helper 0.8.43 (protocol 3)`（`xt-helper/src/main.rs` 的
 /// `Version` 子命令）。**认不出来就返回 `None`** —— 调用方据此如实说「读不到」，
 /// 而不是猜一个版本出来。
 /// 一个 helper 二进制**自报**的两件事：包版本 + 协议号。
@@ -91,9 +91,9 @@ use crate::state::HelperVersionCheck;
 /// 真正决定双方能不能对话的是**协议号**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HelperProbe {
-    /// `xraytun-helper 0.8.33 (protocol 1)` 里的 `0.8.33`。
+    /// `xraytun-helper 0.8.43 (protocol 3)` 里的 `0.8.43`。
     pub version: String,
-    /// 同一行里的 `protocol 1`；老/异种二进制可能没有 ⇒ `None`（按**不可比**处理）。
+    /// 同一行里的 `protocol 3`；老/异种二进制可能没有 ⇒ `None`（按**不可比**处理）。
     pub protocol: Option<u32>,
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn parse_helper_protocol(line: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// 解析 `version` 子命令的输出：`xraytun-helper 0.8.33 (protocol 1)`。
+/// 解析 `version` 子命令的输出：`xraytun-helper 0.8.43 (protocol 3)`。
 pub(crate) fn parse_helper_probe(output: &str) -> Option<HelperProbe> {
     let line = output.lines().next()?.trim();
     let mut parts = line.split_whitespace();
@@ -122,6 +122,12 @@ pub(crate) fn parse_helper_probe(output: &str) -> Option<HelperProbe> {
 
 
 /// **兼容性判据：协议号相等。**
+///
+/// 这里比的不是「包版本」也不是「wire 结构」，而是 **App ↔ helper 的行为契约**
+/// （见 `crates/xt-proto` 的 `PROTOCOL_VERSION` 文档）：**只要 helper 侧行为变了、
+/// 而 App 依赖了这个变化，就必须升号**。因为 App 更新不会刷新特权 helper
+/// （`restart_helper` 只 kickstart 磁盘上那份），号不动 ⇒ 老 helper 被判 `Match`
+/// ⇒ helper 侧修复静默不生效。升号后这里判 `Mismatch`，界面才会提示重装。
 ///
 /// # 依据（都指到具体代码行）
 ///
@@ -387,14 +393,14 @@ mod tests {
 
     /// **task-111 主回归**：包版本不同但**协议相同** ⇒ **不许**报不一致。
     ///
-    /// 实测情形：v0.8.34 只改 App（helper 一行未改），包内 0.8.34 / 已装 0.8.33 ⇒
-    /// 旧判据（包版本相等）让设置页每次都喊「助手版本不匹配」——**误报**。
+    /// 形态：helper 行为未变的 App-only 更新（包内版本 +1），两边协议同为 2 ⇒
+    /// 旧判据（包版本相等）会让设置页每次都喊「助手版本不匹配」——**误报**。
     #[test]
     fn same_protocol_different_package_version_is_match() {
         assert_eq!(
-            classify_helper_versions(probe("0.8.33", Some(1)), probe("0.8.34", Some(1))),
+            classify_helper_versions(probe("0.8.42", Some(2)), probe("0.8.43", Some(2))),
             HelperVersionCheck::Match {
-                version: "0.8.33".into()
+                version: "0.8.42".into()
             },
             "协议相同 ⇒ 一致；报**已安装**那份的版本（那才是实际在跑的助手）",
         );
@@ -404,9 +410,9 @@ mod tests {
     #[test]
     fn same_version_is_match_not_mismatch() {
         assert_eq!(
-            classify_helper_versions(probe("0.8.31", Some(1)), probe("0.8.31", Some(1))),
+            classify_helper_versions(probe("0.8.43", Some(3)), probe("0.8.43", Some(3))),
             HelperVersionCheck::Match {
-                version: "0.8.31".into()
+                version: "0.8.43".into()
             },
             "版本相同必须判「一致」——否则就是狼来了",
         );
@@ -416,20 +422,87 @@ mod tests {
     #[test]
     fn different_protocol_is_still_mismatch() {
         assert_eq!(
-            classify_helper_versions(probe("0.8.33", Some(1)), probe("0.8.40", Some(2))),
+            classify_helper_versions(probe("0.8.42", Some(2)), probe("0.8.43", Some(3))),
             HelperVersionCheck::Mismatch {
-                installed: "0.8.33".into(),
-                bundled: "0.8.40".into()
+                installed: "0.8.42".into(),
+                bundled: "0.8.43".into()
             },
             "协议不同就是真不兼容 —— 这道检查的初衷（抓真旧助手）不许被削弱",
         );
         // 包版本**看起来一样**但协议不同，同样不兼容（不能因为版本串相同就放过）。
         assert!(
             matches!(
-                classify_helper_versions(probe("0.8.33", Some(1)), probe("0.8.33", Some(2))),
+                classify_helper_versions(probe("0.8.42", Some(2)), probe("0.8.42", Some(3))),
                 HelperVersionCheck::Mismatch { .. }
             ),
             "协议是兼容键，包版本相同也救不了协议不同",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 发布可达性：行为契约版本 2 → 3
+    //
+    // 背景（`state.rs::HelperVersionCheck` 文档原文）：App 更新**不会**刷新特权
+    // helper（`restart_helper` 只是 `kickstart` 磁盘上那份），只有 `install_helper`
+    // 才会把包内那份拷过去；而路由/DNS 的安装与回滚都在 helper 里 ⇒ 用户
+    // 「更新到最新版」之后，helper 侧修复**一点都没生效，而且完全无声**。
+    //
+    // 本版两个 **helper 侧** P0 修复：
+    //   * 13ed699 回滚复检（默认路由 / 捕获路由 / DNS 三态，不再假报「已回滚」）；
+    //   * 364c937 启动对账（会话死活看 utun 是否还在 + 哨兵 198.18.0.2 不再残留）。
+    //
+    // 让判据在 helper 行为变更时升号、进而判 `Mismatch`，是把修复送达已装用户的
+    // 唯一诚实机制：`Mismatch` 在界面上就是「重新安装助手」入口。
+    // -----------------------------------------------------------------------
+
+    /// **本次要害**：已装 0.8.42（协议 2）vs 包内 0.8.43（协议 3）⇒ `Mismatch`
+    /// ⇒ 界面出「助手版本不匹配 + 重新安装助手」⇒ 上面两个修复才可能被装上。
+    #[test]
+    fn stale_installed_helper_is_mismatch_after_the_behavior_contract_bump() {
+        assert_eq!(
+            classify_helper_versions(probe("0.8.42", Some(2)), probe("0.8.43", Some(3))),
+            HelperVersionCheck::Mismatch {
+                installed: "0.8.42".into(),
+                bundled: "0.8.43".into(),
+            },
+            "老 helper 协议 2 vs 新 helper 协议 3 ⇒ 必须要求重装（否则修复静默不生效）",
+        );
+    }
+
+    /// **判别性证明**：包内协议**不写死**，取当前 `xt_proto::PROTOCOL_VERSION`。
+    ///
+    /// * 升号（2 → 3）**之前**：`PROTOCOL_VERSION == 2` ⇒ `2 == 2` ⇒ `Match` ⇒
+    ///   本用例**红**（正是「用户更新到最新版、老 helper 却被判为匹配」的机器形态）；
+    /// * 升号**之后**：`== 3` ⇒ `2 != 3` ⇒ `Mismatch` ⇒ **绿**。
+    ///
+    /// 写死数字的用例证明不了「是升号让修复可达」，这一条才证明。
+    #[test]
+    fn the_protocol_bump_is_what_makes_the_stale_helper_detectable() {
+        assert_eq!(
+            classify_helper_versions(
+                probe("0.8.42", Some(2)),
+                probe("0.8.43", Some(xt_proto::PROTOCOL_VERSION)),
+            ),
+            HelperVersionCheck::Mismatch {
+                installed: "0.8.42".into(),
+                bundled: "0.8.43".into(),
+            },
+            "包内 helper 报当前 PROTOCOL_VERSION；它必须与老 helper 自报的 2 不等",
+        );
+        assert_eq!(xt_proto::PROTOCOL_VERSION, 3, "本版行为契约版本必须是 3");
+    }
+
+    /// **负向对照**：两边协议都是当前值（`Some(3)`）⇒ `Match`，不许「狼来了」。
+    ///
+    /// 包版本可以不同：helper 行为没变的 App-only 更新不该提示重装。
+    #[test]
+    fn same_current_protocol_on_both_sides_is_match() {
+        assert_eq!(
+            classify_helper_versions(probe("0.8.43", Some(3)), probe("0.8.44", Some(3))),
+            HelperVersionCheck::Match {
+                version: "0.8.43".into(),
+            },
+            "两边都是协议 3（包版本不同）⇒ Match —— 否则每次 App-only 更新都喊重装",
         );
     }
 
@@ -438,15 +511,15 @@ mod tests {
     fn missing_protocol_falls_back_to_conservative_version_compare() {
         assert!(
             matches!(
-                classify_helper_versions(probe("0.8.33", None), probe("0.8.34", None)),
+                classify_helper_versions(probe("0.8.42", None), probe("0.8.43", None)),
                 HelperVersionCheck::Mismatch { .. }
             ),
             "协议号读不到 + 包版本不同 ⇒ 保守按不兼容处理（对面不是我们认识的二进制）",
         );
         assert_eq!(
-            classify_helper_versions(probe("0.8.33", None), probe("0.8.33", None)),
+            classify_helper_versions(probe("0.8.42", None), probe("0.8.42", None)),
             HelperVersionCheck::Match {
-                version: "0.8.33".into()
+                version: "0.8.42".into()
             },
         );
     }
@@ -454,13 +527,13 @@ mod tests {
     /// 协议号从 helper **自己那行**里取；取不到就是 `None`（不猜）。
     #[test]
     fn protocol_is_parsed_from_the_helper_line() {
-        let p = parse_helper_probe("xraytun-helper 0.8.33 (protocol 1)\n").expect("应当能解析");
-        assert_eq!(p.version, "0.8.33");
-        assert_eq!(p.protocol, Some(1));
-        let legacy = parse_helper_probe("xraytun-helper 0.8.33\n").expect("老格式也要能读出版本");
+        let p = parse_helper_probe("xraytun-helper 0.8.43 (protocol 3)\n").expect("应当能解析");
+        assert_eq!(p.version, "0.8.43");
+        assert_eq!(p.protocol, Some(3));
+        let legacy = parse_helper_probe("xraytun-helper 0.8.43\n").expect("老格式也要能读出版本");
         assert_eq!(legacy.protocol, None, "没有协议号就是 None，不许猜成 1");
         assert_eq!(
-            parse_helper_protocol("xraytun-helper 0.8.33 (protocol abc)"),
+            parse_helper_protocol("xraytun-helper 0.8.43 (protocol abc)"),
             None
         );
     }
@@ -470,8 +543,8 @@ mod tests {
     fn unreadable_version_is_not_reported_as_mismatch() {
         for (installed, bundled) in [
             (None, None),
-            (None, probe("0.8.31", Some(1))),
-            (probe("0.8.11", Some(1)), None),
+            (None, probe("0.8.43", Some(3))),
+            (probe("0.8.42", Some(2)), None),
         ] {
             let got = classify_helper_versions(installed.clone(), bundled.clone());
             assert!(
@@ -493,8 +566,8 @@ mod tests {
     #[test]
     fn unreadable_reason_names_the_missing_side() {
         let both = classify_helper_versions(None, None);
-        let installed = classify_helper_versions(None, probe("0.8.31", Some(1)));
-        let bundled = classify_helper_versions(probe("0.8.31", Some(1)), None);
+        let installed = classify_helper_versions(None, probe("0.8.43", Some(3)));
+        let bundled = classify_helper_versions(probe("0.8.43", Some(3)), None);
         let text = |c: &HelperVersionCheck| match c {
             HelperVersionCheck::Unreadable { reason, .. } => reason.clone(),
             other => panic!("应当是 Unreadable：{other:?}"),
@@ -519,8 +592,8 @@ mod tests {
     /// `unreachable!()`，这条会 panic ⇒ 红。
     #[test]
     fn unreadable_reason_for_two_readable_probes_is_a_message_not_a_panic() {
-        let reason = unreadable_reason(&probe("0.8.39", Some(2)), &probe("0.9.0", Some(1)));
-        assert!(reason.contains("0.8.39"), "理由要带上已安装版本：{reason}");
+        let reason = unreadable_reason(&probe("0.8.42", Some(2)), &probe("0.9.0", Some(3)));
+        assert!(reason.contains("0.8.42"), "理由要带上已安装版本：{reason}");
         assert!(reason.contains("0.9.0"), "理由要带上包内版本：{reason}");
         assert!(
             reason.contains("重装") || reason.contains("重试"),
@@ -532,8 +605,8 @@ mod tests {
     #[test]
     fn version_line_parsing_is_strict() {
         assert_eq!(
-            version_of("xraytun-helper 0.8.31 (protocol 1)\n"),
-            Some("0.8.31".to_string()),
+            version_of("xraytun-helper 0.8.43 (protocol 3)\n"),
+            Some("0.8.43".to_string()),
         );
         assert_eq!(
             version_of("xraytun-helper 0.8.31"),
@@ -595,17 +668,17 @@ mod tests {
         let read = || {
             reads.set(reads.get() + 1);
             Some(HelperProbe {
-                version: "0.8.31".to_string(),
-                protocol: Some(1),
+                version: "0.8.43".to_string(),
+                protocol: Some(3),
             })
         };
         let before = BinaryFingerprint::Present {
             len: 4147568,
             mtime_secs: 1_700_000_000,
         };
-        assert_eq!(cache.get_or_read(before.clone(), read), probe("0.8.31", Some(1)));
-        assert_eq!(cache.get_or_read(before.clone(), read), probe("0.8.31", Some(1)));
-        assert_eq!(cache.get_or_read(before, read), probe("0.8.31", Some(1)));
+        assert_eq!(cache.get_or_read(before.clone(), read), probe("0.8.43", Some(3)));
+        assert_eq!(cache.get_or_read(before.clone(), read), probe("0.8.43", Some(3)));
+        assert_eq!(cache.get_or_read(before, read), probe("0.8.43", Some(3)));
         assert_eq!(
             reads.get(),
             1,
@@ -617,7 +690,7 @@ mod tests {
             len: 4149999,
             mtime_secs: 1_700_009_999,
         };
-        assert_eq!(cache.get_or_read(after, read), probe("0.8.31", Some(1)));
+        assert_eq!(cache.get_or_read(after, read), probe("0.8.43", Some(3)));
         assert_eq!(reads.get(), 2, "二进制变了⇒必须重读（重装后要能改口）");
     }
 
@@ -649,13 +722,13 @@ mod tests {
         let read_ok = || {
             reads.set(reads.get() + 1);
             Some(HelperProbe {
-                version: "0.8.32".to_string(),
-                protocol: Some(1),
+                version: "0.8.44".to_string(),
+                protocol: Some(3),
             })
         };
         assert_eq!(
             cache.get_or_read(installed, read_ok),
-            probe("0.8.32", Some(1)),
+            probe("0.8.44", Some(3)),
             "重装之后必须能读到新版本 —— 否则界面永远说「读不到」",
         );
         assert_eq!(reads.get(), 2);

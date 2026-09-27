@@ -28,8 +28,30 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-/// 线协议版本。任何破坏兼容性的改动都要 +1，helper 会拒绝不等版本。
-pub const PROTOCOL_VERSION: u32 = 2;
+/// **App ↔ helper 的「行为契约」版本**：两边必须同号才互认（helper 会拒绝不等版本）。
+///
+/// 它约束的**不只是线上 JSON 结构**，而是 **App 有权依赖的 helper 行为**。
+/// 只要 helper 侧可观察行为变了、而 App 依赖了这个变化 —— 请求语义、路由/DNS 的
+/// 安装与回滚口径、启动对账、错误三态…… —— 就**必须 +1**，哪怕 wire 结构一个字没改。
+///
+/// # 为什么「结构没变」也必须升
+///
+/// App 更新**不会**刷新磁盘上已安装的特权 helper：`restart_helper` 只是 `kickstart`
+/// 旧二进制，只有 `install_helper` 才会把包内那份拷过去（见 `apps/desktop/src/state.rs`
+/// 的 `HelperVersionCheck` 文档）。而路由/DNS 的安装与回滚**都发生在 helper 里**。
+/// 于是若 helper 行为变了却不升此号，`helper_versions_are_compatible`
+/// （`apps/desktop/src/commands/helper.rs`）会按「协议号相等」判成 `Match`，
+/// 用户「更新到最新版」之后 helper 侧修复**一点都没生效，而且完全无声**。
+/// 升号是让已装老 helper 被判 `Mismatch`、界面提示「重新安装助手」的**唯一诚实机制**
+/// —— App 侧无权重装特权二进制，只能如实说「要重装」。
+///
+/// # 本版 2 → 3：两个 **helper 侧** P0 修复
+///
+/// * `13ed699` 回滚复检：默认路由 / 捕获路由 / DNS 三态，不再假报「已回滚」；
+/// * `364c937` 启动对账：会话死活看 utun 是否还在 + 哨兵 `198.18.0.2` 不再残留。
+///
+/// 代价：所有已装老 helper 的用户会被提示重装一次（一次管理员授权）。
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// helper 监听的 Unix domain socket 路径。
 ///
@@ -681,11 +703,14 @@ mod tests {
         }
     }
 
-    /// 协议版本本轮 +1（新增信任锚请求）—— helper 会拒绝版本不等的客户端，
-    /// 这是防止"新 GUI 对着老 helper 发新请求"的唯一机制，所以版本号本身值得钉住。
+    /// 协议版本本轮 2 → 3：这是 **App ↔ helper 的行为契约**版本，本轮没有新增
+    /// 请求/字段，改的是 **helper 侧行为**（13ed699 回滚复检、364c937 启动对账）。
+    /// helper 会拒绝版本不等的客户端，而 App 又拿这个号当「已装 helper 是否还兼容」
+    /// 的判据（`helper_versions_are_compatible`）⇒ 号不动，老 helper 就会被判为
+    /// 匹配、helper 侧修复**静默不生效**。所以这个数字本身值得钉住。
     #[test]
-    fn the_protocol_version_was_bumped_for_the_trust_anchor_requests() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn the_protocol_version_was_bumped_for_the_helper_side_fixes() {
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     use super::*;
