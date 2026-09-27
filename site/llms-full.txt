@@ -618,7 +618,7 @@ docker run --rm -p 8443:8443 \
 
 # 双击打不开怎么办
 
-这一页给的是「App 根本起不来」时的步骤 —— 也就是界面帮不上忙的那种情况。 先按顺序做三件事：**确认它是不是崩溃** → **找到 panic.log** → **发给我们**。最后一条同样重要：**不要为了排障去改系统 DNS 或路由**。
+这一页给的是「App 根本起不来」时的步骤 —— 也就是界面帮不上忙的那种情况。 先按顺序做三件事：**确认它是不是崩溃** → **找到 panic.log** → **发给我们**。最后一条同样重要：**不要为了排障去改系统 DNS / 路由，或关掉代理**。
 
 如果你看到的是一句「Apple 无法检查它是否包含恶意软件」的弹窗，那不是崩溃，是 Gatekeeper 拦截 —— 放行方式在[首页的安装小节](../#install)（按 macOS 版本三选一）。
 
@@ -690,13 +690,34 @@ find ~ -name panic.log 2>/dev/null
 
 - 你是怎么启动的：双击 App、还是命令行；如果是命令行，把命令也贴上
 
+`panic.log` 与崩溃报告之外，仓库里已有的两份产物路径是：
+
+- **安装 / 更新日志**：`~/Library/Logs/XrayTun/app-update.log` —— App 内「设置」页写的也是这个路径；更新装不上时原因常在这里。
+
+- **「报告问题」现场包**：默认产出到 `~/Desktop/xraytun-incident-*.zip`。它的脚本随 App 一起装在包内， **不需要打开 App 界面**。
+
+App 打不开时，直接在「终端」里跑包内那份脚本即可（产物是一个 zip，拖进 issue 就能传）：
+
+```bash
+bash /Applications/XrayTun.app/Contents/Resources/scripts/incident-bundle.sh
+# 产物：~/Desktop/xraytun-incident-<UTC>.zip
+# 需要 python3（macOS 13 上一般随 Xcode 命令行工具提供）；缺失时脚本会明确报错
+```
+
+不想跑脚本，就用下面两条命令在访达里选中文件，直接拖进 issue 输入框 （文件不存在的那条会报错，跳过即可）：
+
+```bash
+open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log
+open -R ~/Library/Logs/XrayTun/app-update.log
+```
+
 **贴之前先扫一眼。**日志与崩溃报告里可能带有你的节点域名、订阅地址或配置片段 —— 不想公开的行删掉再贴，不影响定位问题。
 
-## 4. 不要为了排障去改系统 DNS / 路由
+## 4. 不要为了排障去改系统 DNS / 路由 / 关掉代理
 
-三条理由，都跟「别把现场弄乱」有关：
+这一条包括网上最常见的那句「先把系统代理关掉试试」—— **关掉它不会让 App 启动**，只会让别的程序一起断网。三条理由，都跟「别把现场弄乱」有关：
 
-- **起不来的那个进程什么网络都没改。**它连自己的启动都没走完， 所谓的「接管路由 / 改 DNS」只在 App 正常跑起来之后才发生。所以网络配置与这次崩溃 多半无关，改它不会让它能启动。
+- **起不来的那个进程什么网络都没改。**它连自己的启动都没走完， 所谓的「接管路由 / 改 DNS / 设系统代理」只在 App 正常跑起来之后才发生。所以网络配置与这次崩溃 多半无关：改它不会让它能启动，关掉系统代理或 App 的代理开关也不会。
 
 - **App 只回滚它自己做的改动。**它对网络的每一处改动都先落盘成快照、 退出或崩溃后按快照回滚；你手动敲的 `networksetup` / `route` 不在任何快照里，**不会被自动恢复**，可能让机器停在断网状态。
 
@@ -1155,7 +1176,7 @@ No, they solve different problems. XrayTun's TUN mode uses the official Xray-cor
 
 # It won't open — what to do
 
-This page is for the case where the app does not start at all — the one case where the app's own UI cannot help you. Do these three things in order: **confirm it crashed** → **find panic.log** → **send it to us**. And the last point matters just as much: **do not change your system DNS or routes to troubleshoot**.
+This page is for the case where the app does not start at all — the one case where the app's own UI cannot help you. Do these three things in order: **confirm it crashed** → **find panic.log** → **send it to us**. And the last point matters just as much: **do not change your system DNS / routes, or turn off the proxy, to troubleshoot**.
 
 If instead you see a dialog saying Apple cannot check the app for malicious software, that is not a crash — that is Gatekeeper. The ways to allow it are in the [install section of the home page](../#install) (pick one by macOS version).
 
@@ -1227,13 +1248,34 @@ These four things are enough to locate the vast majority of “won't start” ca
 
 - how you started it: double-click, or a command line — if a command line, paste the command
 
+Besides `panic.log` and the crash report, there are two product paths that already exist:
+
+- **Install / update log**: `~/Library/Logs/XrayTun/app-update.log` — the same path the app's own Settings page prints; update failures usually leave their reason here.
+
+- **“Report a problem” bundle**: by default written to `~/Desktop/xraytun-incident-*.zip`. Its script ships inside the app bundle, so **you do not need the app UI to open**.
+
+If the app won't open, run that bundled script from Terminal (the result is one zip you can drag into the issue):
+
+```bash
+bash /Applications/XrayTun.app/Contents/Resources/scripts/incident-bundle.sh
+# result: ~/Desktop/xraytun-incident-<UTC>.zip
+# needs python3 (usually provided with the Xcode command line tools on macOS 13); the script fails loudly if it is missing
+```
+
+If you would rather not run a script, these two commands select the files in Finder for you — drag them straight into the issue box (the command for a file you don't have will just error out; skip it):
+
+```bash
+open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log
+open -R ~/Library/Logs/XrayTun/app-update.log
+```
+
 **Have a look before you paste.** Logs and crash reports can contain your node hostnames, subscription URLs or configuration fragments — delete any line you would rather not publish; it does not hurt the diagnosis.
 
-## 4. Do not change your system DNS or routes to troubleshoot
+## 4. Do not change your system DNS, routes, or turn off the proxy to troubleshoot
 
-Three reasons, all about not disturbing the scene:
+This includes the most common online advice, “just turn the system proxy off and try again” — **that will not make the app start**, it will only take your other programs offline. Three reasons, all about not disturbing the scene:
 
-- **The process that failed to start changed nothing about your network.** It never finished starting; taking over routes / changing DNS only happens once the app is actually running. So your network configuration is almost certainly unrelated to this crash, and changing it will not make the app start.
+- **The process that failed to start changed nothing about your network.** It never finished starting; taking over routes / changing DNS / setting the system proxy only happens once the app is actually running. So your network configuration is almost certainly unrelated to this crash: changing it will not make the app start, and neither will turning off the system proxy or the app's proxy switch.
 
 - **The app only rolls back its own changes.** Every network change it makes is first written to a snapshot and rolled back on exit or crash. Your manual `networksetup` / `route` edits are in no snapshot, so they are **never restored automatically** — you can end up offline.
 

@@ -6,7 +6,7 @@
     <title>It won't open — troubleshooting — XrayTun</title>
     <meta
       name="description"
-      content="What to do when XrayTun won't open: how to confirm it crashed (the system crash report's abort() called / Abort trap: 6), where panic.log lives (by default ~/Library/Application Support/com.xraytun.desktop/logs/, and it may be overridden by XRAYTUN_DATA_DIR), how to send it to us, and why you should not change your system DNS or routes to troubleshoot."
+      content="What to do when XrayTun won't open: how to confirm it crashed (the system crash report's abort() called / Abort trap: 6), where panic.log lives (by default ~/Library/Application Support/com.xraytun.desktop/logs/, and it may be overridden by XRAYTUN_DATA_DIR), how to send logs to us (including the “report a problem” bundle and app-update.log), and why you should not change your system DNS / routes or turn off the proxy to troubleshoot."
     />
     <link rel="canonical" href="https://xraytun.top/en/troubleshoot/" />
     <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/troubleshoot/" />
@@ -18,7 +18,7 @@
     <meta property="og:title" content="It won't open — troubleshooting — XrayTun" />
     <meta
       property="og:description"
-      content="When double-clicking does nothing: confirm the crash, find panic.log, send it to us — and do not change your system DNS or routes to troubleshoot."
+      content="When double-clicking does nothing: confirm the crash, find panic.log, send it to us — and do not change your system DNS / routes or turn off the proxy to troubleshoot."
     />
     <meta property="og:url" content="https://xraytun.top/en/troubleshoot/" />
     <meta property="og:locale" content="en" />
@@ -26,7 +26,7 @@
     <meta name="twitter:title" content="It won't open — troubleshooting — XrayTun" />
     <meta
       name="twitter:description"
-      content="When double-clicking does nothing: find panic.log first, don't touch system DNS or routes."
+      content="When double-clicking does nothing: find panic.log first, don't touch system DNS / routes or turn off the proxy."
     />
     <!-- icons / manifest (relative paths) -->
     <link rel="icon" href="../../favicon.svg" type="image/svg+xml" />
@@ -64,7 +64,7 @@
           app's own UI cannot help you. Do these three things in order:
           <strong>confirm it crashed</strong> → <strong>find panic.log</strong> →
           <strong>send it to us</strong>. And the last point matters just as much:
-          <strong>do not change your system DNS or routes to troubleshoot</strong>.
+          <strong>do not change your system DNS / routes, or turn off the proxy, to troubleshoot</strong>.
         </p>
         <p>
           If instead you see a dialog saying Apple cannot check the app for malicious software,
@@ -155,6 +155,28 @@ find ~ -name panic.log 2&gt;/dev/null</code></pre>
           <li>your macOS version and your chip (Intel / Apple silicon)</li>
           <li>how you started it: double-click, or a command line — if a command line, paste the command</li>
         </ul>
+        <p>Besides <code>panic.log</code> and the crash report, there are two product paths that already exist:</p>
+        <ul>
+          <li>
+            <strong>Install / update log</strong>: <code>~/Library/Logs/XrayTun/app-update.log</code>
+            — the same path the app's own Settings page prints; update failures usually leave their reason here.
+          </li>
+          <li>
+            <strong>“Report a problem” bundle</strong>: by default written to
+            <code>~/Desktop/xraytun-incident-*.zip</code>. Its script ships inside the app
+            bundle, so <strong>you do not need the app UI to open</strong>.
+          </li>
+        </ul>
+        <p>If the app won't open, run that bundled script from Terminal (the result is one zip you can drag into the issue):</p>
+        <pre><code>bash /Applications/XrayTun.app/Contents/Resources/scripts/incident-bundle.sh
+# result: ~/Desktop/xraytun-incident-&lt;UTC&gt;.zip
+# needs python3 (usually provided with the Xcode command line tools on macOS 13); the script fails loudly if it is missing</code></pre>
+        <p>
+          If you would rather not run a script, these two commands select the files in Finder for you —
+          drag them straight into the issue box (the command for a file you don't have will just error out; skip it):
+        </p>
+        <pre><code>open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log
+open -R ~/Library/Logs/XrayTun/app-update.log</code></pre>
         <p>
           <strong>Have a look before you paste.</strong> Logs and crash reports can contain your node
           hostnames, subscription URLs or configuration fragments — delete any line you would rather
@@ -164,14 +186,19 @@ find ~ -name panic.log 2&gt;/dev/null</code></pre>
 
       <!-- ============================================================ #hands-off -->
       <section class="wrap prose" id="hands-off">
-        <h2>4. Do not change your system DNS or routes to troubleshoot</h2>
-        <p>Three reasons, all about not disturbing the scene:</p>
+        <h2>4. Do not change your system DNS, routes, or turn off the proxy to troubleshoot</h2>
+        <p>
+          This includes the most common online advice, “just turn the system proxy off and try again” —
+          <strong>that will not make the app start</strong>, it will only take your other programs offline.
+          Three reasons, all about not disturbing the scene:
+        </p>
         <ul>
           <li>
             <strong>The process that failed to start changed nothing about your network.</strong>
-            It never finished starting; taking over routes / changing DNS only happens once the app
-            is actually running. So your network configuration is almost certainly unrelated to this
-            crash, and changing it will not make the app start.
+            It never finished starting; taking over routes / changing DNS / setting the system proxy only
+            happens once the app is actually running. So your network configuration is almost certainly
+            unrelated to this crash: changing it will not make the app start, and neither will turning off
+            the system proxy or the app's proxy switch.
           </li>
           <li>
             <strong>The app only rolls back its own changes.</strong> Every network change it makes is

@@ -6,7 +6,7 @@
     <title>打不开怎么办（排障）— XrayTun</title>
     <meta
       name="description"
-      content="XrayTun 双击打不开时的排障步骤：怎么确认是崩溃（系统崩溃报告里的 abort() called / Abort trap: 6）、panic.log 在哪（默认在 ~/Library/Application Support/com.xraytun.desktop/logs/，可能被 XRAYTUN_DATA_DIR 覆盖）、怎么把日志发给我们，以及为什么不要为了排障去改系统 DNS / 路由。"
+      content="XrayTun 双击打不开时的排障步骤：怎么确认是崩溃（系统崩溃报告里的 abort() called / Abort trap: 6）、panic.log 在哪（默认在 ~/Library/Application Support/com.xraytun.desktop/logs/，可能被 XRAYTUN_DATA_DIR 覆盖）、怎么把日志（含「报告问题」现场包与 app-update.log）发给我们，以及为什么不要为了排障去改系统 DNS / 路由 / 关掉代理。"
     />
     <link rel="canonical" href="https://xraytun.top/troubleshoot/" />
     <link rel="alternate" hreflang="zh-Hans" href="https://xraytun.top/troubleshoot/" />
@@ -18,7 +18,7 @@
     <meta property="og:title" content="打不开怎么办（排障）— XrayTun" />
     <meta
       property="og:description"
-      content="双击没反应时：怎么确认是崩溃、panic.log 在哪里、怎么发给我们，以及为什么不要为了排障去改系统 DNS / 路由。"
+      content="双击没反应时：怎么确认是崩溃、panic.log 在哪里、怎么发给我们，以及为什么不要为了排障去改系统 DNS / 路由 / 关掉代理。"
     />
     <meta property="og:url" content="https://xraytun.top/troubleshoot/" />
     <meta property="og:locale" content="zh_Hans" />
@@ -26,7 +26,7 @@
     <meta name="twitter:title" content="打不开怎么办（排障）— XrayTun" />
     <meta
       name="twitter:description"
-      content="双击没反应时：先找 panic.log，不要先改系统 DNS / 路由。"
+      content="双击没反应时：先找 panic.log，不要先改系统 DNS / 路由或关掉代理。"
     />
     <!-- 图标 / manifest（相对路径） -->
     <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
@@ -62,7 +62,7 @@
         <p class="lead">
           这一页给的是「App 根本起不来」时的步骤 —— 也就是界面帮不上忙的那种情况。
           先按顺序做三件事：<strong>确认它是不是崩溃</strong> → <strong>找到 panic.log</strong> →
-          <strong>发给我们</strong>。最后一条同样重要：<strong>不要为了排障去改系统 DNS 或路由</strong>。
+          <strong>发给我们</strong>。最后一条同样重要：<strong>不要为了排障去改系统 DNS / 路由，或关掉代理</strong>。
         </p>
         <p>
           如果你看到的是一句「Apple 无法检查它是否包含恶意软件」的弹窗，那不是崩溃，是
@@ -145,6 +145,28 @@ find ~ -name panic.log 2&gt;/dev/null</code></pre>
           <li>你的 macOS 版本与芯片（Intel / Apple 芯片）</li>
           <li>你是怎么启动的：双击 App、还是命令行；如果是命令行，把命令也贴上</li>
         </ul>
+        <p><code>panic.log</code> 与崩溃报告之外，仓库里已有的两份产物路径是：</p>
+        <ul>
+          <li>
+            <strong>安装 / 更新日志</strong>：<code>~/Library/Logs/XrayTun/app-update.log</code>
+            —— App 内「设置」页写的也是这个路径；更新装不上时原因常在这里。
+          </li>
+          <li>
+            <strong>「报告问题」现场包</strong>：默认产出到
+            <code>~/Desktop/xraytun-incident-*.zip</code>。它的脚本随 App 一起装在包内，
+            <strong>不需要打开 App 界面</strong>。
+          </li>
+        </ul>
+        <p>App 打不开时，直接在「终端」里跑包内那份脚本即可（产物是一个 zip，拖进 issue 就能传）：</p>
+        <pre><code>bash /Applications/XrayTun.app/Contents/Resources/scripts/incident-bundle.sh
+# 产物：~/Desktop/xraytun-incident-&lt;UTC&gt;.zip
+# 需要 python3（macOS 13 上一般随 Xcode 命令行工具提供）；缺失时脚本会明确报错</code></pre>
+        <p>
+          不想跑脚本，就用下面两条命令在访达里选中文件，直接拖进 issue 输入框
+          （文件不存在的那条会报错，跳过即可）：
+        </p>
+        <pre><code>open -R ~/Library/Application\ Support/com.xraytun.desktop/logs/panic.log
+open -R ~/Library/Logs/XrayTun/app-update.log</code></pre>
         <p>
           <strong>贴之前先扫一眼。</strong>日志与崩溃报告里可能带有你的节点域名、订阅地址或配置片段 ——
           不想公开的行删掉再贴，不影响定位问题。
@@ -153,13 +175,16 @@ find ~ -name panic.log 2&gt;/dev/null</code></pre>
 
       <!-- ============================================================ #hands-off -->
       <section class="wrap prose" id="hands-off">
-        <h2>4. 不要为了排障去改系统 DNS / 路由</h2>
-        <p>三条理由，都跟「别把现场弄乱」有关：</p>
+        <h2>4. 不要为了排障去改系统 DNS / 路由 / 关掉代理</h2>
+        <p>
+          这一条包括网上最常见的那句「先把系统代理关掉试试」——
+          <strong>关掉它不会让 App 启动</strong>，只会让别的程序一起断网。三条理由，都跟「别把现场弄乱」有关：
+        </p>
         <ul>
           <li>
             <strong>起不来的那个进程什么网络都没改。</strong>它连自己的启动都没走完，
-            所谓的「接管路由 / 改 DNS」只在 App 正常跑起来之后才发生。所以网络配置与这次崩溃
-            多半无关，改它不会让它能启动。
+            所谓的「接管路由 / 改 DNS / 设系统代理」只在 App 正常跑起来之后才发生。所以网络配置与这次崩溃
+            多半无关：改它不会让它能启动，关掉系统代理或 App 的代理开关也不会。
           </li>
           <li>
             <strong>App 只回滚它自己做的改动。</strong>它对网络的每一处改动都先落盘成快照、

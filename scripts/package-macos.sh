@@ -395,7 +395,8 @@ ln -s /Applications "$STAGE/Applications"
 #
 # 内容与站点页 `https://xraytun.top/troubleshoot/`（中英）同源：确认是不是崩溃（系统崩溃报告里的
 # `abort() called` / `Abort trap: 6`）→ 去哪找 panic.log（默认路径 + `XRAYTUN_DATA_DIR` 可能覆盖）
-# → 怎么发给我们 → **不要**为排障去改系统 DNS/路由（App 只回滚它自己的快照，手动改动不会自动恢复）。
+# → 怎么发给我们（含「报告问题」现场包与 `app-update.log` 两条固定路径）
+# → **不要**为排障去改系统 DNS / 路由 / 关掉代理（App 只回滚它自己的快照，手动改动不会自动恢复）。
 #
 # ⚠️ 这份说明里**不写版本号、不写日期**：它不会随发版流程更新（bump-release.py 只管
 #    `site/index.html` 与 `site/en/index.html` 的页脚），写死的数字只会变成过期的事实。
@@ -426,9 +427,15 @@ cat > "$STAGE/打不开怎么办.txt" <<'TROUBLESHOOTING_TXT'
    贴：panic.log 开头几行（含 PANIC 文件:行号 与调用栈）+ 崩溃报告里 abort() called 那段
       + macOS 版本与芯片 + 你是怎么启动的。
    贴之前先扫一眼：日志里可能带你的节点域名或订阅地址，不想公开的行删掉再贴。
+   另外两份固定路径：
+     安装/更新日志：~/Library/Logs/XrayTun/app-update.log
+     现场包（App 打不开也能跑，产物在桌面）：
+       bash /Applications/XrayTun.app/Contents/Resources/scripts/incident-bundle.sh
+       （需要 python3；产物 ~/Desktop/xraytun-incident-<UTC>.zip）
 
-**不要为了排障去改系统 DNS / 路由。**
-   起不来的那个进程什么网络都没改（接管路由/改 DNS 只在 App 正常跑起来之后发生）；
+**不要为了排障去改系统 DNS / 路由 / 关掉代理。**
+   起不来的那个进程什么网络都没改（接管路由/改 DNS/设系统代理只在 App 正常跑起来之后发生）；
+   网上那句「先把系统代理关掉试试」不会让它启动，只会让别的程序一起断网。
    App 只回滚它**自己**做的改动（每一步都先落盘成快照），你手动敲的 networksetup / route
    不在任何快照里，**不会被自动恢复**，可能把机器留在断网状态，还会让诊断变难。
    正确顺序：什么都别改 → 把上面两份日志发给我们 → 需要时我们给**可回滚**的具体命令。
