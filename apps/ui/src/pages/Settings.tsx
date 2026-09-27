@@ -14,6 +14,7 @@ import {
   type DnsHandling,
   type HelperVersionCheck,
   type Ipv6Mode,
+  type UpdateStatus,
 } from "../types";
 
 /**
@@ -226,6 +227,39 @@ function Section({
   );
 }
 
+/** 三条更新通道。 */
+export type UpdateTarget = "app" | "core" | "geo";
+
+/**
+ * 「核心与数据更新」一屏里**唯一**该拿主按钮的那一条通道（评审剩项：一屏一主按钮）。
+ *
+ * 优先级 **客户端 > 核心 > geo**：
+ * * 客户端更新会把 App 退出、替换、重启 —— 用户下一步必然是它，最需要被一眼看到；
+ * * 核心次之（TUN 依赖它的版本），但换个二进制还得重连；
+ * * geo 只是数据文件，最不紧急。
+ *
+ * 返回 `null` = 三条都没有可装的版本 ⇒ 这一屏 **0 个主按钮**（允许）。
+ *
+ * 判据与各自的按钮**同源**（不另造一套）：
+ * * 客户端：`app_update_available && latest_app && !check_error_app`（task-44 / task-194）；
+ * * 核心：`latest_core && core_update_available !== false`（三态；`null` = 未知，保守保留）；
+ * * geo：只有 `latest_geo` 的**存在性**可用 —— 后端没有 geo 的三态字段，见诚实清单。
+ *
+ * 低优先级的通道**不会被删掉**，只是降级成次要按钮：把已知的升级入口藏起来，
+ * 比多一颗灰按钮严重得多。
+ */
+export function updateActionTarget(u: UpdateStatus): UpdateTarget | null {
+  if (u.app_update_available && u.latest_app && !u.check_error_app) return "app";
+  if (u.latest_core && u.core_update_available !== false) return "core";
+  if (u.latest_geo) return "geo";
+  return null;
+}
+
+/** 该通道按钮的类名：只有优先级最高的那条拿 `btn--primary`。 */
+export function updateActionClass(target: UpdateTarget | null, mine: UpdateTarget): string {
+  return target === mine ? "btn btn--primary" : "btn";
+}
+
 export default function Settings({ focusSection }: { focusSection?: string | null } = {}) {
   const { snapshot, busy, run, runVoid } = useStore();
   const [draft, setDraft] = useState<AppSettings | null>(null);
@@ -303,6 +337,14 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
 
   const settings = draft ?? snapshot.settings;
   const dirty = draft !== null;
+
+  // 这一屏唯一的主按钮归哪条更新通道（客户端 > 核心 > geo；null = 都没有新版）。
+  const updateTarget = updateActionTarget(snapshot.update);
+
+  // 数据目录（长路径，界面上要等宽 + 可复制）。`config_path` 指向 runtime 子目录。
+  const dataDir =
+    snapshot.runtime.config_path?.replace(/\/runtime\/.*$/, "") ??
+    "~/Library/Application Support/com.xraytun.desktop";
 
   const patch = (p: Partial<AppSettings>) => setDraft({ ...settings, ...p });
   const patchTun = (p: Partial<AppSettings["tun"]>) => patch({ tun: { ...settings.tun, ...p } });
@@ -890,12 +932,38 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             onChange={(e) => patch({ core_path: e.target.value.trim() || null })}
           />
           <div className="field__hint">
-            当前：{snapshot.core.path ?? snapshot.core.error ?? "未找到"}
-            {snapshot.core.version ? ` · ${snapshot.core.version}` : ""}
-            <br />
-            TUN 模式需要 <span className="mono">&gt;= {snapshot.core.min_native_tun_version}</span>
-            （该版本才补齐了 macOS 上的地址与路由编程）。建议使用最新的 26.9.x。
+            当前：
+            {snapshot.core.path
+              ? (snapshot.core.version ?? "核心在，但读不到版本")
+              : (snapshot.core.error ?? "未找到")}
           </div>
+          {/* 路径是长字符串：等宽（`.input.mono`）+ 一键复制。复制走共用的
+              `CopyButton` —— 剪贴板被拒时给 `role="alert"` 与一个可手动选中的文本框，
+              绝不静默（评审剩项 3 的「两处复制」之一）。 */}
+          {snapshot.core.path && (
+            <div className="row" style={{ marginTop: 6, gap: 8 }}>
+              <input
+                className="input mono"
+                type="text"
+                readOnly
+                value={snapshot.core.path}
+                aria-label="当前核心路径"
+                onFocus={(e) => e.currentTarget.select()}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <CopyButton label="复制路径" text={snapshot.core.path} className="btn btn--ghost" />
+            </div>
+          )}
+          {/* TUN 说明**条件化**（评审剩项 4）：只在核心确实**不支持**原生 TUN 时才提示，
+              门槛版本来自 `core.min_native_tun_version`（不写死某个小版本）。
+              支持时不再劝升级 —— 用户已经装着能工作的核心，那句话是纯噪音。 */}
+          {!snapshot.core.supports_native_tun && (
+            <div className="field__hint" data-testid="tun-support-hint" style={{ marginTop: 6 }}>
+              TUN 模式需要 <span className="mono">&gt;= {snapshot.core.min_native_tun_version}</span>
+              （该版本才补齐了 macOS 上的地址与路由编程）；当前核心不满足，
+              要用 TUN 模式请先更新核心 —— 见下面的「核心与数据更新」。
+            </div>
+          )}
         </div>
         <div className="row">
           <button className="btn" disabled={busy !== null} onClick={() => void restart()}>
@@ -1228,7 +1296,11 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
 
         {/* 两条通道分开：核心几个月一次，geo 数据上游每天更新。
             合成一个「检查更新」会让用户以为必须一起升级。 */}
-        <div className="row row--wrap" style={{ marginTop: 12 }}>
+        <div
+          className="row row--wrap"
+          style={{ marginTop: 12 }}
+          data-testid="update-core-block"
+        >
           <button className="btn" disabled={busy !== null}
                   onClick={() => void run("check-updates", () => api.checkUpdates())}>
             检查更新
@@ -1239,9 +1311,13 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               与下面客户端那颗按钮（`app_update_available`）**同一口径**。
 
               `!== false` 而不是 `=== true`：`null` 是**未知**（读不到已装版本），
-              未知 ≠ 已是最新 ⇒ 保守地保留按钮，绝不静默吞掉升级入口。 */}
+              未知 ≠ 已是最新 ⇒ 保守地保留按钮，绝不静默吞掉升级入口。
+
+              一屏一主按钮（评审剩项 1）：类名由 `updateActionClass` 按
+              **客户端 > 核心 > geo** 的优先级给 —— 只有最高优先级那条是
+              `btn--primary`，其余是次要按钮（**不删**，否则就是藏起升级入口）。 */}
           {snapshot.update.latest_core && snapshot.update.core_update_available !== false && (
-            <button className="btn btn--primary" disabled={busy !== null}
+            <button className={updateActionClass(updateTarget, "core")} disabled={busy !== null}
                     onClick={() => void run("install-core-update", () => api.installCoreUpdate())}>
               更新核心到 {snapshot.update.latest_core.version}
               {snapshot.update.latest_core.prerelease ? "（预发布）" : ""}
@@ -1255,8 +1331,12 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               核心已是最新（{snapshot.update.latest_core.version}）
             </span>
           )}
+          {/* ⚠️ geo **没有**三态字段（后端没有 `geo_update_available`）：这里只能按
+              「上次检查有没有拿到 geo 版本」判断 ⇒ 「查到了，但你装的就是它」这一格
+              在快照里表达不出来，按钮会白跑一趟。修它需要后端补三态字段（本卡不许改
+              `apps/desktop`，已记入报告的「没做/做不到」）。 */}
           {snapshot.update.latest_geo && (
-            <button className="btn btn--primary" disabled={busy !== null}
+            <button className={updateActionClass(updateTarget, "geo")} disabled={busy !== null}
                     onClick={() => void run("install-geo-update", () => api.installGeoUpdate())}>
               更新 geo 到 {snapshot.update.latest_geo.version}
             </button>
@@ -1270,7 +1350,8 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               只有**当前受管的那个**版本可读（`core_managed_version`），所以问句只报
               「将要删掉的那个版本」，目标版本如实写「包内自带的那一版」。
               「需要重新连接才生效」也是可确认的：核心二进制在**启动时**才解析
-              （`xray::resolve_core_binary(core_path, managed_core_dir, resource_dir, …)`）。 */}
+              （`xray::resolve_core_binary(core_path, managed_core_dir, resource_dir, …)`）。
+              评审剩项 1：回退是破坏性操作、且不是这一屏的主路径 ⇒ 保持 `ghost`。 */}
           {snapshot.update.core_managed && (
             <InlineConfirm
               label="回退到随包版本"
@@ -1286,6 +1367,24 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             />
           )}
         </div>
+
+        {/* 关键事实必须与上面的按钮**同屏**、且**未展开**就能看到（评审剩项 6）。
+            这四句话是用户在按「更新」「回退」之前真正需要知道的（会不会动 App 包、
+            要不要重连、回退删了什么）；开发者细节见下面的折叠层。 */}
+        <div className="field__hint" data-testid="update-core-facts" style={{ marginTop: 10 }}>
+          核心与 geo 的更新装在数据目录里，<strong>不会改动 App 包本身</strong>
+          （改包内文件会让签名失效）；所以「回退到随包版本」就是<strong>删掉那些文件</strong>，
+          永远可用。换掉核心之后<strong>需要重新连接核心才会生效</strong>。
+        </div>
+
+        {/* 开发者细节（预发布策略）：默认收起。 */}
+        <details className="dash__details" data-testid="update-core-details" style={{ marginTop: 8 }}>
+          <summary>开发者细节：为什么核心版本标「预发布」</summary>
+          <p>
+            核心的新版本在 GitHub 上全部标为「预发布」，所以这里如实标出 ——
+            按 GitHub 的 <span className="mono">latest</span> 判断会把你降到几个月前的旧版。
+          </p>
+        </details>
 
         {/* task-194 + task-195：这一节涵盖**核心/geo/客户端**三类，所以这里继续读
             **派生**的合并字段 `check_error`（一次失败必须说出来，这正是它该在的位置）。
@@ -1310,17 +1409,11 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
           </div>
         )}
 
-        <div className="field__hint" style={{ marginTop: 10 }}>
-          更新装在数据目录里，<strong>不会改动 App 包本身</strong>（改包内文件会让签名失效），
-          所以「回退到随包版本」就是删掉那些文件，永远可用。
-          装上后需要重新连接才会生效。
-          <br />
-          核心的新版本在 GitHub 上全部标为「预发布」，所以这里如实标出 ——
-          按 GitHub 的 <span className="mono">latest</span> 判断会把你降到几个月前的旧版。
-        </div>
-
         {/* ------------------------------------- 客户端自身更新 */}
-        <div style={{ marginTop: 22, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+        <div
+          data-testid="update-app-block"
+          style={{ marginTop: 22, paddingTop: 16, borderTop: "1px solid var(--border)" }}
+        >
           <div className="kv" style={{ marginBottom: 10 }}>
             <div>
               <div className="kv__k">客户端</div>
@@ -1370,7 +1463,8 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             {snapshot.update.app_update_available &&
               snapshot.update.latest_app &&
               !snapshot.update.check_error_app && (
-              <button className="btn btn--primary" disabled={busy !== null || downloading}
+              <button className={updateActionClass(updateTarget, "app")}
+                      disabled={busy !== null || downloading}
                       onClick={() => void run("install-app-update", () => api.installAppUpdate())}>
                 更新到 {snapshot.update.latest_app.version} 并重启
               </button>
@@ -1395,18 +1489,30 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
 
           {snapshot.update.progress && <UpdateBar p={snapshot.update.progress} />}
 
-          <div className="field__hint" style={{ marginTop: 8 }}>
-            仓库是<span className="mono">公开</span>的，匿名就能查更新，所以不需要任何凭据。
-            代价是匿名配额只有 <b>60 次/小时</b>且 GitHub <b>按 IP</b> 算 ——
-            我们的请求大多经节点出去，等于和整台节点的用户共用这个额度，
-            别人刷满时你这边会看到「限流」，过一会儿再试即可。
-            <br />
-            <b>安装会在替换 App 之后自动重启。</b>更新脚本先等你退出、再替换
-            <span className="mono"> /Applications/XrayTun.app</span>，所以安装前请先
-            断开隧道。校验用 release 里的 <span className="mono">SHA256SUMS.txt</span>
-            （能防下载损坏，<b>防不了上游被换掉</b> —— 那需要签名，而这个包是 ad-hoc 签名），
-            日志在 <span className="mono">~/Library/Logs/XrayTun/app-update.log</span>。
+          {/* 关键事实：与客户端按钮**同屏**、未展开可见（评审剩项 6）。
+              「会退出并重启 App」「先断开隧道」是用户在点「更新到 … 并重启」之前
+              必须知道的两件事。 */}
+          <div className="field__hint" data-testid="update-app-facts" style={{ marginTop: 8 }}>
+            客户端更新会<strong>退出并重启 App</strong>（安装脚本先等你退出、再替换
+            <span className="mono"> /Applications/XrayTun.app</span>），
+            所以安装前请<strong>先断开隧道</strong>。
           </div>
+
+          {/* 开发者细节（配额 / 校验 / 日志路径）：默认收起。 */}
+          <details className="dash__details" data-testid="update-app-details" style={{ marginTop: 8 }}>
+            <summary>开发者细节：匿名配额 / 校验方式 / 安装日志</summary>
+            <p>
+              仓库是<span className="mono">公开</span>的，匿名就能查更新，所以不需要任何凭据。
+              代价是匿名配额只有 <b>60 次/小时</b>且 GitHub <b>按 IP</b> 算 ——
+              我们的请求大多经节点出去，等于和整台节点的用户共用这个额度，
+              别人刷满时你这边会看到「限流」，过一会儿再试即可。
+            </p>
+            <p style={{ marginTop: 6 }}>
+              校验用 release 里的 <span className="mono">SHA256SUMS.txt</span>
+              （能防下载损坏，<b>防不了上游被换掉</b> —— 那需要签名，而这个包是 ad-hoc 签名）。
+              安装日志在 <span className="mono">~/Library/Logs/XrayTun/app-update.log</span>。
+            </p>
+          </details>
         </div>
       </Section>
 
@@ -1497,9 +1603,27 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             load={() => api.diagnostics()}
           />
         </div>
+        {/* 与内核路径同一口径：长路径等宽（`.input.mono`）+ 一键复制（共用
+            `CopyButton`，失败可见）—— 评审剩项 3 的「两处复制」之二。
+            `config_path` 是核心运行时的配置文件路径，它指向 runtime 子目录 ⇒
+            去掉 `/runtime/...` 才是用户要的数据目录。 */}
         <div className="field__hint" style={{ marginTop: 10 }}>
-          数据目录：<span className="mono">{snapshot.runtime.config_path?.replace(/\/runtime\/.*$/, "") ?? "~/Library/Application Support/com.xraytun.desktop"}</span>
+          数据目录：{snapshot.runtime.config_path ? "" : dataDir}
         </div>
+        {snapshot.runtime.config_path && (
+          <div className="row" style={{ marginTop: 6, gap: 8 }}>
+            <input
+              className="input mono"
+              type="text"
+              readOnly
+              value={dataDir}
+              aria-label="数据目录路径"
+              onFocus={(e) => e.currentTarget.select()}
+              style={{ flex: 1, minWidth: 0 }}
+            />
+            <CopyButton label="复制路径" text={dataDir} className="btn btn--ghost" />
+          </div>
+        )}
       </Section>
       </div>
     </div>
@@ -1510,23 +1634,34 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
  *
  *  `total_bytes` 为 null 时上游没报字节数 —— 这时**不画百分比**，只显示
  *  已下载多少。画一个假的百分比比不画更糟。
+ *
+ *  评审剩项 5：纯 `<div>` 画的进度条读屏完全读不到 ⇒ 补 `role="progressbar"`。
+ *  有总量时给 `aria-valuenow/min/max`；**总量未知时不给 `aria-valuenow`**
+ *  （那是不确定进度，编一个百分比与上面「不画假百分比」是同一口径）。
+ *  `aria-valuetext` 把「已下载 / 总量」的人话一并给读屏。
  */
 function UpdateBar({ p }: { p: UpdateProgress }) {
   const pct =
     p.total_bytes && p.total_bytes > 0
       ? Math.min(100, Math.round((p.done_bytes / p.total_bytes) * 100))
       : null;
+  const bytesText = `${fmtBytes(p.done_bytes)}${p.total_bytes ? ` / ${fmtBytes(p.total_bytes)}` : ""}`;
   return (
     <div style={{ marginTop: 10 }}>
       <div className="row" style={{ justifyContent: "space-between", fontSize: 11 }}>
         <span>正在下载 {p.label}</span>
         <span className="mono">
-          {fmtBytes(p.done_bytes)}
-          {p.total_bytes ? ` / ${fmtBytes(p.total_bytes)}` : ""}
+          {bytesText}
           {pct !== null ? ` · ${pct}%` : ""}
         </span>
       </div>
       <div
+        role="progressbar"
+        aria-label={`更新下载进度：${p.label}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        {...(pct !== null ? { "aria-valuenow": pct } : {})}
+        aria-valuetext={`${bytesText}${pct !== null ? ` · ${pct}%` : ""}`}
         style={{
           marginTop: 4,
           height: 6,

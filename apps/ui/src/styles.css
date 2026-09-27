@@ -369,6 +369,9 @@ textarea {
   font-size: 11px;
   color: var(--text-faint);
   line-height: 1.5;
+  /* 核心路径 / `SHA256SUMS.txt` / 日志路径这类长 token 没有空格可断，
+     默认会把卡片顶破（横向溢出）—— 强制在任意位置折行。 */
+  overflow-wrap: anywhere;
 }
 
 input[type="text"],
@@ -695,6 +698,20 @@ input[type="checkbox"] {
 
 /* ---------------------------------------------------------------- 其他 */
 
+/* 键值对展示（版本信息这类只读字段）。
+ *
+ * ⚠️ **只此一处定义**（守卫：`updateSourceGuard.test.ts` 要求行首 `.kv {` 恰好 1 次）。
+ * 以前这里有 dl 版、文件后面还有一份 div 版，后者把 `grid-template-columns` 覆盖成
+ * `repeat(auto-fit, minmax(140px, 1fr))` ⇒ `<dl>` 调用点（仪表盘「环境自检」/ 规则页
+ * 「配置落盘位置」/ 设置页「特权助手」）的 `dt,dd,dt,dd…` 被排成**同一行的多列**，
+ * 键和值交错（「Xray 核心」旁边坐着别人的值）。两列键值网格才是这两族调用点共同的形状。
+ *
+ * 调用点有两种写法，这一处要同时对两者成立：
+ * * `<dl class="kv"><dt>…</dt><dd>…</dd></dl>`
+ * * `<div class="kv"><div><div class="kv__k">…</div><div class="kv__v">…</div></div></div>`
+ *   —— 包裹 div 必须被下面的 `display: contents` 拆掉，否则它整体占一个格，
+ *   三组键值会被排成三列而不是三行。
+ */
 .kv {
   display: grid;
   grid-template-columns: 120px 1fr;
@@ -702,13 +719,31 @@ input[type="checkbox"] {
   font-size: 12px;
 }
 
-.kv dt {
+/* 无类名的包裹 div 不参与布局：它的 `kv__k` / `kv__v` 直接落进网格的两列。 */
+.kv > div:not([class]) {
+  display: contents;
+}
+
+.kv dt,
+.kv__k,
+.kv > span {
   color: var(--text-faint);
 }
 
-.kv dd {
+.kv__k {
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.kv dd,
+.kv__v {
   margin: 0;
+  color: var(--text);
   word-break: break-all;
+}
+
+.kv__v {
+  font-size: 12px;
 }
 
 .mono {
@@ -803,24 +838,6 @@ input[type="checkbox"] {
   color: var(--text-faint);
   font-size: 10px;
   margin-top: 2px;
-}
-
-/* 键值对展示（版本信息这类只读字段） */
-.kv {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
-}
-
-.kv__k {
-  font-size: 11px;
-  color: var(--text-faint);
-  margin-bottom: 2px;
-}
-
-.kv__v {
-  font-size: 12px;
-  color: var(--text);
 }
 
 /* 探测结果表 */
