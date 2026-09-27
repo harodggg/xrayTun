@@ -17,6 +17,7 @@
 //!    （含「原本没有设置任何 DNS 服务器」这一态）。任何一条不满足都如实上报
 //!    并保留快照 —— **绝不假装成功**（见 `rollback`）。
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::io::RawFd;
 
@@ -536,10 +537,14 @@ fn verify_capture_routes_are_gone(snap: &SessionSnapshot) -> Vec<String> {
 /// 让用户「终端没网」的一态。
 ///
 /// 第一次不符就**立刻重试一次** `dns::restore`（把缺失窗口缩到最小），仍不符才上报。
+///
+/// 期望值取 [`dns::DnsBackup::effective_servers`]（已剔哨兵）：磁盘上的历史快照可能
+/// 被旧版污染，若拿污染值当期望，会出现「系统已恢复成 DHCP、复检却仍判失败」的死循环。
 fn verify_dns_is_back(snap: &SessionSnapshot) -> Vec<String> {
     let mut failures = Vec::new();
     for backup in &snap.dns_backups {
-        if matches!(dns::get_dns(&backup.service), Ok(now) if servers_equal(&now, &backup.servers)) {
+        let want = backup.effective_servers();
+        if matches!(dns::get_dns(&backup.service), Ok(now) if servers_equal(&now, &want)) {
             continue;
         }
         // 重试一次。
@@ -548,15 +553,15 @@ fn verify_dns_is_back(snap: &SessionSnapshot) -> Vec<String> {
             continue;
         }
         match dns::get_dns(&backup.service) {
-            Ok(now) if servers_equal(&now, &backup.servers) => {
+            Ok(now) if servers_equal(&now, &want) => {
                 tracing::warn!(
                     service = %backup.service,
                     "回滚复检：DNS 第一次不符，重试后已还原"
                 );
             }
             Ok(now) => failures.push(format!(
-                "回滚后 {} 的 DNS 未还原: 期望 {:?}, 实际 {now:?}",
-                backup.service, backup.servers
+                "回滚后 {} 的 DNS 未还原: 期望 {want:?}, 实际 {now:?}",
+                backup.service
             )),
             Err(e) => failures.push(format!(
                 "回滚后无法复检 {} 的 DNS（读当前值失败）: {e}",
@@ -626,11 +631,229 @@ fn rollback_trust_anchors(snap: &mut SessionSnapshot) -> Result<()> {
     }
 }
 
-/// 回滚上次遗留的会话（GUI 崩溃 / helper 被杀之后调用）。
-pub fn restore_stale() -> Result<Option<SessionSnapshot>> {
-    let Some(mut snap) = SessionSnapshot::load()? else {
-        return Ok(None);
+/// 会话是否**真的还活着** —— 不是快照里那个 `state` 标志位，而是**此刻**的实况。
+///
+/// # 判据与理由
+///
+/// 判据：**快照里记的那个 utun 接口现在是否还存在**（`ifconfig -l` 解析，读不到时
+/// 退回内核 `if_nametoindex`，见 [`netif::interface_exists`]）。
+///
+/// 为什么是这个：
+///
+/// * 快照是**上一个进程**写的，`state == Up` 只说明"当时"建起来了。App 退出/崩溃
+///   后 utun 的 fd 关闭，内核随即删掉接口与挂在它上面的路由 —— 但磁盘上的快照
+///   仍写着 `Up`。只看标志位就会把"已经死了的会话"当成"活会话"而跳过清理，
+///   于是 DNS 停在我们自己的哨兵 `198.18.0.2` 上，用户终端整机解析不了域名。
+/// * 接口存在 ⇔ 会话的数据面资源还在：`HandoffFd` 模式下 fd 在 App 手里，
+///   App 在 ⇒ 接口在；`HelperSpawn` 模式下 fd 在 helper 手里，helper 重启 ⇒ 接口消失。
+///   两种模式下"接口是否存在"都精确对应"会话是否还占着系统资源"。
+/// * 它是**只读探测**：不断言、不改配置，失败也不会让情况变坏。
+///
+/// # 它挡不住什么（已知边界）
+///
+/// * **utun 名字复用**：若会话消失后又有别的进程建出同名的 `utunN`，会被误判成
+///   "活"。macOS 的 utun 号是内核按可用号递增分配的，同名复现需要恰好回收同一个号，
+///   概率低但非零 —— 所以这里只用于"决定要不要清 DNS"，误判的后果是**不动**
+///   （宁可漏清，也不误拆一条在用的隧道），不会写坏用户配置。
+/// * **helper 重启但 App 仍持有 fd**：接口仍在 ⇒ 判为活会话，启动时不拆。这正是
+///   期望行为（数据面还在跑），但此时 helper 内存里已经没有这条会话，最终还要靠
+///   App 自己退出时的 `force_cleanup` 或下一次启动对账。
+/// * 探测本身读不到（`ifconfig` 失败且内核也答不出）⇒ [`SessionLiveness::Unknown`]，
+///   调用方一律**不动**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionLiveness {
+    /// 接口还在 ⇒ 会话仍占着系统资源。
+    Alive,
+    /// 接口已不存在 ⇒ 会话已死，快照是残留。
+    Gone,
+    /// 探测失败，无法断言（fail-open：不误拆）。
+    Unknown(String),
+}
+
+/// 见 [`SessionLiveness`]。
+pub fn session_liveness(snap: &SessionSnapshot) -> SessionLiveness {
+    match netif::interface_exists(&snap.interface) {
+        Ok(true) => SessionLiveness::Alive,
+        Ok(false) => SessionLiveness::Gone,
+        Err(e) => SessionLiveness::Unknown(e.to_string()),
+    }
+}
+
+/// 启动对账的结果（供日志与测试观察）。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DnsReconcileReport {
+    /// 实际读过的服务名。
+    pub checked: Vec<String>,
+    /// 真的被恢复（哨兵已清除）的服务。
+    pub restored: Vec<String>,
+    /// 因仍有活会话而**刻意不动**的服务。
+    pub skipped_live: Vec<String>,
+    /// 探测/恢复失败与原因（绝不假装成功）。
+    pub failures: Vec<String>,
+}
+
+impl DnsReconcileReport {
+    /// 没有任何失败。
+    pub fn is_clean(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    /// 这次对账有没有真的动过系统 DNS。
+    pub fn changed_anything(&self) -> bool {
+        !self.restored.is_empty()
+    }
+}
+
+/// **启动即对账**：把「系统 DNS 停在我们自己的哨兵地址」这一残留清掉。
+///
+/// 规则（本卡 P0）：
+///
+/// * 观察到的会话**还活着** ⇒ **一律不动**（DNS 指向哨兵是这条活隧道的正常状态，
+///   不许误拆）；
+/// * 会话已死 / 没有快照 ⇒ 逐服务检查：当前值里含哨兵就恢复。恢复成什么？
+///   * 快照里记过这个服务 ⇒ 恢复成 [`dns::DnsBackup::effective_servers`]（已剔哨兵）；
+///   * 没记过（快照丢了/被重装删了）⇒ 备份按空处理 ⇒ **清成 DHCP**。
+///
+/// 只清**精确命中哨兵**的值：别的 DNS 配置一律不碰。每个服务恢复后立刻复检，
+/// 失败写进报告并打日志（点名服务、期望值、实际值）。
+///
+/// 快照损坏时也照常对账（那时没有"活会话"的证据，按残留处理）—— 宁可直连。
+pub fn reconcile_dns_residue() -> DnsReconcileReport {
+    let mut report = DnsReconcileReport::default();
+
+    let snap = match SessionSnapshot::load() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "启动对账：读取遗留会话快照失败，按「没有活会话」继续（只清哨兵）"
+            );
+            None
+        }
     };
+
+    // 有活会话 / 无法确认会话死活 ⇒ 都不动（fail-open：绝不误拆在用的隧道）。
+    if let Some(s) = &snap {
+        match session_liveness(s) {
+            SessionLiveness::Alive => {
+                report.skipped_live = s.dns_backups.iter().map(|b| b.service.clone()).collect();
+                tracing::info!(
+                    interface = %s.interface,
+                    services = ?report.skipped_live,
+                    "启动对账：会话仍在运行，DNS 一律不动（指向哨兵是正常状态）"
+                );
+                return report;
+            }
+            SessionLiveness::Unknown(why) => {
+                tracing::warn!(
+                    session = %s.session_id,
+                    interface = %s.interface,
+                    reason = %why,
+                    "启动对账：无法确认快照里的 utun 是否还在；按「不误拆」处理，DNS 一处不动"
+                );
+                return report;
+            }
+            SessionLiveness::Gone => {}
+        }
+    }
+
+    // 待查服务 = 快照里记过的（带原始值）∪ 所有启用的服务（快照丢了时的兜底）。
+    let mut originals: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if let Some(s) = &snap {
+        for b in &s.dns_backups {
+            originals.insert(b.service.clone(), b.effective_servers());
+        }
+    }
+    let mut services: Vec<String> = originals.keys().cloned().collect();
+    match dns::list_services() {
+        Ok(all) => {
+            for s in all {
+                if !services.contains(&s) {
+                    services.push(s);
+                }
+            }
+        }
+        Err(e) => report.failures.push(format!(
+            "列出网络服务失败，无法确认是否还有服务停在哨兵上: {e}"
+        )),
+    }
+
+    for service in services {
+        report.checked.push(service.clone());
+        let now = match dns::get_dns(&service) {
+            Ok(v) => v,
+            Err(e) => {
+                report.failures.push(format!(
+                    "读取「{service}」的 DNS 失败，无法判断是否残留哨兵: {e}"
+                ));
+                continue;
+            }
+        };
+        if !dns::has_sentinel(&now) {
+            continue;
+        }
+        let want = originals.get(&service).cloned().unwrap_or_default();
+        tracing::warn!(
+            service = %service,
+            expected = ?want,
+            actual = ?now,
+            "启动对账：系统 DNS 停在我们自己的哨兵地址且会话已不在，正在恢复"
+        );
+        match dns::restore_servers(&service, &want) {
+            // 命令成功 ≠ 真的写进去了：立刻复检一次。
+            Ok(()) => match dns::get_dns(&service) {
+                Ok(after) if !dns::has_sentinel(&after) => {
+                    report.restored.push(service.clone());
+                    tracing::warn!(service = %service, now = ?after, "启动对账：已恢复（哨兵已清除）");
+                }
+                Ok(after) => report.failures.push(format!(
+                    "启动对账后「{service}」的 DNS 仍是 {after:?}（期望 {want:?}，原值 {now:?}）"
+                )),
+                Err(e) => report.failures.push(format!(
+                    "启动对账后无法复检「{service}」的 DNS: {e}"
+                )),
+            },
+            Err(e) => report.failures.push(format!(
+                "启动对账恢复「{service}」的 DNS 失败（期望 {want:?}，实际 {now:?}）: {e}"
+            )),
+        }
+    }
+    report
+}
+
+/// **启动恢复入口**（helper 的 `recover_from_crash` 调用）。
+///
+/// 两件事，顺序固定：
+///
+/// 1. **回滚上次遗留的会话** —— 判据是「会话现在是否真的还在」（[`session_liveness`]），
+///    不是快照里的 `state`。接口已不存在 ⇒ 按残留回滚（DNS 先于路由还原）。
+/// 2. **DNS 哨兵对账** —— 覆盖"回滚没能碰到"的残留：没有快照、备份为空、
+///    或备份本身被哨兵污染（见 [`reconcile_dns_residue`]）。
+///
+/// 信任锚仍然与会话状态解耦、无条件撤销（P0-2）。有活会话时**只**撤信任锚，
+/// 路由/DNS 一律不动。
+pub fn restore_stale() -> Result<Option<SessionSnapshot>> {
+    let snap = match SessionSnapshot::load() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            // 没有快照也要对账：DNS 可能停在我们自己的哨兵上而快照已被删（重装/卸载残留）。
+            let report = reconcile_dns_residue();
+            return if report.is_clean() {
+                Ok(None)
+            } else {
+                Err(Error::Invalid(report.failures.join("; ")))
+            };
+        }
+        Err(e) => {
+            // 快照损坏：没有"活会话"的证据，按残留对账（宁可直连），并把读失败如实上报。
+            tracing::error!(error = %e, "读取遗留会话快照失败；跳过回滚，只对账 DNS 哨兵");
+            let report = reconcile_dns_residue();
+            let mut failures = vec![format!("读取遗留会话快照失败: {e}")];
+            failures.extend(report.failures);
+            return Err(Error::Invalid(failures.join("; ")));
+        }
+    };
+    let mut snap = snap;
 
     // ---- 信任锚：与会话状态**解耦**（P0-2）----
     //
@@ -653,25 +876,67 @@ pub fn restore_stale() -> Result<Option<SessionSnapshot>> {
         }
     }
 
-    if !snap.is_stale() {
-        // 会话本身没崩在半路 ⇒ 路由/DNS 可能仍在生效，交给 `force_cleanup`
-        // （GUI 的「修复网络」/「退出」）判断，不在启动时擅自拆一条活隧道。
-        //
-        // 但信任锚的失败必须让调用方看见：否则又是一次静默残留。
-        if let Some(e) = anchor_failure {
-            return Err(e);
+    // ---- 判据：会话现在是不是**真的还在**，而不是快照里那个 state 标志位 ----
+    // 只探一次：探测结果直接用在下判断与日志里（重复探测既浪费又可能自相矛盾）。
+    let liveness = session_liveness(&snap);
+    match &liveness {
+        SessionLiveness::Alive if !snap.is_stale() => {
+            // 接口还在、也没崩在半路 ⇒ 真有一条活隧道。启动时不拆它：
+            // 路由/DNS 交给它自己（或 GUI 的 force_cleanup）收尾。
+            tracing::info!(
+                session = %snap.session_id,
+                interface = %snap.interface,
+                "启动检查：快照里的会话仍在运行（接口存在），不拆；只撤信任锚"
+            );
+            return match anchor_failure {
+                Some(e) => Err(e),
+                None => Ok(None),
+            };
         }
-        return Ok(None);
+        SessionLiveness::Unknown(why) => {
+            tracing::warn!(
+                session = %snap.session_id,
+                interface = %snap.interface,
+                reason = %why,
+                "启动检查：无法确认快照里的 utun 是否还在；按「不误拆」处理，不动路由/DNS"
+            );
+            return match anchor_failure {
+                Some(e) => Err(e),
+                None => Ok(None),
+            };
+        }
+        // 接口已不存在（Gone）⇒ 残留；或崩在半路（is_stale）⇒ 必须回滚。
+        _ => {}
     }
 
+    let why = match &liveness {
+        SessionLiveness::Gone => format!("接口 {} 已不存在（会话已死）", snap.interface),
+        _ => "会话崩在半路".to_string(),
+    };
     tracing::warn!(
         session = %snap.session_id,
         interface = %snap.interface,
         routes = snap.installed_routes.len(),
-        "发现未清理的 TUN 会话，正在回滚"
+        reason = %why,
+        "发现未清理的 TUN 会话，正在回滚并做 DNS 对账"
     );
-    rollback(&snap)?;
-    Ok(Some(snap))
+
+    let rolled = rollback(&snap);
+    let report = reconcile_dns_residue();
+
+    let mut failures: Vec<String> = Vec::new();
+    if let Err(e) = rolled {
+        failures.push(format!("回滚遗留会话失败: {e}"));
+    }
+    failures.extend(report.failures.iter().cloned());
+    if let Some(e) = anchor_failure {
+        failures.push(format!("撤销信任锚失败: {e}"));
+    }
+    if failures.is_empty() {
+        Ok(Some(snap))
+    } else {
+        Err(Error::Invalid(failures.join("; ")))
+    }
 }
 
 /// 无论快照状态如何都强制清理（用于「一键修复网络」）。
@@ -967,6 +1232,19 @@ mod tests {
         with_test_root(root, || old.save()).expect("写旧快照");
     }
 
+    /// `ifconfig -l` 固定回答。
+    ///
+    /// `restore_stale()` 现在靠「接口是否还在」判活，测试必须把这一步确定化 ——
+    /// 否则结果会随真机上恰好有哪些 `utunN` 而变（现场这台机器有 utun0..utun6）。
+    fn ifconfig_listing(listing: &'static str) -> crate::macos::TestExecutor {
+        std::rc::Rc::new(move |program: &str, args: &[String]| {
+            if program == crate::tools::IFCONFIG && argv_is(args, &["-l"]) {
+                return Ok(listing.to_string());
+            }
+            Ok(String::new())
+        })
+    }
+
     /// 记录 `security(1)` 收到的每一条命令；不碰真钥匙串。
     fn recording_stub(
         ok: bool,
@@ -1009,7 +1287,10 @@ mod tests {
 
         let (stub, seen) = recording_stub(true, "");
         let (result, left, cmds) = with_test_root(&root, || {
-            let r = with_security_stub(stub, restore_stale);
+            // 明确声明 utun3 还在 ⇒ 这是「活会话」，启动时不拆（只撤锚）。
+            let r = crate::macos::with_executor(ifconfig_listing("lo0 en0 utun3"), || {
+                with_security_stub(stub, restore_stale)
+            });
             let left = SessionSnapshot::load().ok().flatten();
             (r.map(|o| o.is_some()), left, seen.borrow().clone())
         });
@@ -1104,7 +1385,10 @@ mod tests {
 
         let (stub, _seen) = recording_stub(false, "SecKeychain: permission denied");
         let (result, left) = with_test_root(&root, || {
-            let r = with_security_stub(stub, restore_stale);
+            // utun3 仍在 ⇒ 活会话：启动时不动路由/DNS，但锚的失败必须照旧上报。
+            let r = crate::macos::with_executor(ifconfig_listing("lo0 en0 utun3"), || {
+                with_security_stub(stub, restore_stale)
+            });
             (r, SessionSnapshot::load().ok().flatten())
         });
 
@@ -1487,6 +1771,171 @@ destination: default
         });
         assert!(result.is_ok(), "DNS 已写回原值 ⇒ 必须成功：{result:?}");
         assert!(gone);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------------
+    // P0（本卡）：**启动对账** —— 判据从「标志位」改成「会话是否真的还活着」
+    //
+    // 现场：helper 重启/被重装而 App 不在时，快照仍写着 `Up`，但那个 utun
+    // （fd 随 App 退出关闭）**已经不存在**；旧 `restore_stale()` 只看
+    // `is_stale()`（`Up` ⇒ false）就跳过路由/DNS 清理，把清理交给
+    // `force_cleanup` —— 而那一刻没人调它。于是系统 DNS 永久停在哨兵
+    // `198.18.0.2`，用户「终端不通，浏览器有时候通」。
+    //
+    // 三条判据：
+    //   ① 快照 `Up` + 接口不存在 ⇒ 启动路径必须恢复 DNS（改前红）；
+    //   ①b 没有快照也要对账（重装/卸载把快照删了）⇒ 必须恢复 DNS（改前红）；
+    //   ③ 正向对照：接口仍在（真有活会话）⇒ 一条 DNS 命令都不许发。
+    // -----------------------------------------------------------------------
+
+    /// 启动对账测试替身：`ifconfig -l` 由参数决定，记录所有 `-setdnsservers`。
+    struct ResidueStub {
+        exec: crate::macos::TestExecutor,
+        set_calls: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+        cleared: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl ResidueStub {
+        /// 在替身下跑 `f`（通常是 `restore_stale`），返回
+        /// `(结果, 是否已清成 DHCP, 所有 -setdnsservers 调用)`。
+        fn run<R>(self, f: impl FnOnce() -> R) -> (R, bool, Vec<Vec<String>>) {
+            let cleared = std::rc::Rc::clone(&self.cleared);
+            let calls = std::rc::Rc::clone(&self.set_calls);
+            let r = crate::macos::with_executor(self.exec, f);
+            let recorded = calls.borrow().clone();
+            (r, cleared.get(), recorded)
+        }
+    }
+
+    fn residue_stub(live_interfaces: &'static str) -> ResidueStub {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        let set_calls: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let cleared = Rc::new(Cell::new(false));
+        let sink = Rc::clone(&set_calls);
+        let flag = Rc::clone(&cleared);
+        let exec: crate::macos::TestExecutor = Rc::new(move |program: &str, args: &[String]| {
+            if program == crate::tools::IFCONFIG && argv_is(args, &["-l"]) {
+                return Ok(live_interfaces.to_string());
+            }
+            if program == crate::tools::NETWORKSETUP {
+                match args.first().map(String::as_str) {
+                    Some("-listallnetworkservices") => {
+                        return Ok(
+                            "An asterisk (*) denotes that a network service is disabled.\nWi-Fi\n"
+                                .to_string(),
+                        )
+                    }
+                    Some("-setdnsservers") => {
+                        sink.borrow_mut().push(args.to_vec());
+                        if args.get(2).map(String::as_str) == Some("Empty") {
+                            flag.set(true);
+                        }
+                        return Ok(String::new());
+                    }
+                    Some("-getdnsservers") => {
+                        // 现场：Wi-Fi 的 DNS 就是哨兵；被清成 Empty 之后改答 DHCP 原话。
+                        return Ok(if flag.get() {
+                            "There aren't any DNS Servers set on Wi-Fi.\n".to_string()
+                        } else {
+                            "198.18.0.2\n".to_string()
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(String::new())
+        });
+        ResidueStub { exec, set_calls, cleared }
+    }
+
+    /// **判据 ①（改前红）**：快照写着 `Up`、但它记的 utun 已不存在 ⇒ 必须恢复 DNS。
+    ///
+    /// 改前：`!is_stale()` ⇒ 直接 `Ok(None)`，一条 `networksetup` 都不发 ⇒ 红。
+    #[test]
+    fn startup_recovery_clears_sentinel_dns_when_the_recorded_utun_is_gone() {
+        use crate::macos::snapshot::with_test_root;
+
+        let root = tmp_snapshot_root("dns-residue-dead");
+        let mut snap = SessionSnapshot::new("s-residue".into(), "utun9".into(), fixture_uplink());
+        snap.state = SessionState::Up;
+        snap.dns_backups.push(crate::macos::dns::DnsBackup {
+            service: "Wi-Fi".into(),
+            servers: vec![], // 用户原值 = 未设置（DHCP）
+            search_domains: vec![],
+        });
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        // 现场：`ifconfig -l` 里没有 utun9（App 不在 ⇒ fd 关闭 ⇒ 接口消失）。
+        let stub = residue_stub("lo0 gif0 en0\n");
+        let (result, cleared_now, calls) =
+            with_test_root(&root, || stub.run(|| restore_stale().map(|o| o.is_some())));
+
+        assert!(
+            cleared_now,
+            "接口已不在 ⇒ 启动路径必须把哨兵 DNS 清回 DHCP: {calls:?}"
+        );
+        assert_eq!(result.as_ref().ok(), Some(&true), "死会话应当被回滚掉: {result:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **判据 ①b（改前红）**：快照被卸载/重装删掉，DNS 仍停在哨兵上 ⇒
+    /// 没有快照也要对账，否则用户永远修不回来。
+    #[test]
+    fn startup_recovery_clears_sentinel_dns_even_without_a_snapshot() {
+        use crate::macos::snapshot::with_test_root;
+
+        let root = tmp_snapshot_root("dns-residue-no-snap");
+        let stub = residue_stub("lo0 en0\n");
+        let (result, cleared_now, calls) =
+            with_test_root(&root, || stub.run(|| restore_stale().map(|o| o.is_some())));
+
+        assert!(
+            cleared_now,
+            "没有快照也要对账：哨兵 DNS 是整机解析失败的根因: {calls:?}"
+        );
+        assert_eq!(result.as_ref().ok(), Some(&false), "没有会话可回滚: {result:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **判据 ③ 正向对照（防过度清理）**：接口仍在 ⇒ 真有活会话 ⇒
+    /// 一条 `-setdnsservers` 都不许发。
+    ///
+    /// 改前改后都绿；但它钉住了「不许因为发现哨兵就无脑清 DNS」——
+    /// 一旦丢掉「会话是否活着」这一层判据，它立刻红。
+    #[test]
+    fn startup_recovery_leaves_a_live_sessions_sentinel_dns_alone() {
+        use crate::macos::snapshot::with_test_root;
+
+        let root = tmp_snapshot_root("dns-residue-live");
+        let mut snap = SessionSnapshot::new("s-live".into(), "utun9".into(), fixture_uplink());
+        snap.state = SessionState::Up;
+        snap.dns_backups.push(crate::macos::dns::DnsBackup {
+            service: "Wi-Fi".into(),
+            servers: vec![],
+            search_domains: vec![],
+        });
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        // utun9 出现在接口表里 ⇒ 会话还活着（App 正持有 fd）。
+        let stub = residue_stub("lo0 gif0 en0 utun9\n");
+        let (result, calls) = with_test_root(&root, || {
+            let (r, _cleared, calls) = stub.run(|| restore_stale().map(|o| o.is_some()));
+            (r, calls)
+        });
+
+        assert!(
+            calls.is_empty(),
+            "有活会话时 DNS 指向哨兵是正常状态，绝不许动它: {calls:?}"
+        );
+        assert_eq!(result.as_ref().ok(), Some(&false), "活会话不在启动时拆: {result:?}");
+        // 快照必须原样留着（下次启动/force_cleanup 还要用它）。
+        let kept = with_test_root(&root, SessionSnapshot::load)
+            .expect("读快照")
+            .expect("活会话的快照不许被删");
+        assert_eq!(kept.session_id, "s-live");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

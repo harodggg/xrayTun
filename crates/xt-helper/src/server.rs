@@ -92,15 +92,23 @@ impl Helper {
         }
     }
 
-    /// 启动前先回滚上次遗留的会话。
+    /// 启动前先回滚上次遗留的会话，并做一次 **DNS 哨兵对账**。
     ///
-    /// 这一步保证了「helper 被 kill -9 之后重启」不会让用户永久处于断网状态。
+    /// 这一步保证了「helper 被 kill -9 **或 App 已不在**」之后用户不会永久处于
+    /// 断网状态。关键在判据：回滚与否看的是**会话现在是否真的还在**
+    /// （快照里那个 utun 接口是否仍存在），而不是快照里的 `state` —— 旧实现只看
+    /// `state == Up` 就跳过清理，而 App 退出后 utun 已随 fd 关闭消失，于是系统 DNS
+    /// 永久停在哨兵 `198.18.0.2`，用户「终端不通，浏览器有时候通」。
+    ///
+    /// 对账细节见 `controller::restore_stale` / `controller::reconcile_dns_residue`：
+    /// 有活会话一律不动；会话已死或没有快照 ⇒ 把含哨兵的 DNS 恢复成原值
+    /// （无原值则清成 DHCP）。
     pub fn recover_from_crash(&self) {
         match controller::restore_stale() {
             Ok(Some(snap)) => tracing::warn!(
                 session = %snap.session_id,
                 interface = %snap.interface,
-                "已回滚上次崩溃遗留的 TUN 会话"
+                "已回滚上次遗留的 TUN 会话（含 DNS 哨兵对账）"
             ),
             Ok(None) => {}
             Err(e) => tracing::error!(error = %e, "回滚遗留会话失败（网络可能仍处于异常状态）"),

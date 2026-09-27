@@ -20,6 +20,7 @@
 use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
+use xt_proto::{Cidr, DEFAULT_SENTINEL_DNS_V4, DEFAULT_TUN_NETWORK_V4};
 
 use crate::error::{Error, Result};
 use crate::macos::{args, run, run_ok};
@@ -31,9 +32,52 @@ use crate::validate::validate_service_name;
 pub struct DnsBackup {
     pub service: String,
     /// 原来的服务器列表。空表示原本是 DHCP 下发。
+    ///
+    /// ⚠️ 历史快照里**可能含隧道哨兵**（旧版 `backup()` 照抄当前值）。
+    /// 判断"用户原值到底是什么"必须走 [`DnsBackup::effective_servers`]。
     pub servers: Vec<String>,
     #[serde(default)]
     pub search_domains: Vec<String>,
+}
+
+/// 这个 DNS 地址是不是**我们自己的隧道哨兵**（不是用户配的解析器）。
+///
+/// 判据两条，任一成立即算：
+///
+/// 1. 精确等于协议层写死的 [`DEFAULT_SENTINEL_DNS_V4`]（`198.18.0.2`，现场那个值）；
+/// 2. 落在隧道网段 [`DEFAULT_TUN_NETWORK_V4`]（`198.18.0.0/15`，RFC 2544 保留、
+///    公网不可路由）内 —— 用户设置里的哨兵**可配置**，但一定落在这个网段里。
+///
+/// # 为什么必须认得它
+///
+/// `networksetup -getdnsservers` 读到的值可能是**上一次会话残留的哨兵**。
+/// 旧 `backup()` 无判据照抄：把哨兵当"用户原值"存进快照 ⇒ 之后每次"还原"
+/// 都是还原成一个死地址，**问题永久化**（用户终端永远解析不了域名）。
+pub fn is_sentinel(server: &str) -> bool {
+    let Ok(ip) = server.parse::<IpAddr>() else {
+        return false;
+    };
+    if DEFAULT_SENTINEL_DNS_V4.parse::<IpAddr>().map(|s| s == ip).unwrap_or(false) {
+        return true;
+    }
+    let Ok(net) = DEFAULT_TUN_NETWORK_V4.parse::<Cidr>() else {
+        return false;
+    };
+    net.network().contains(&Cidr::host(ip))
+}
+
+/// 一组 DNS 服务器里是否含哨兵。
+pub fn has_sentinel(servers: &[String]) -> bool {
+    servers.iter().any(|s| is_sentinel(s))
+}
+
+impl DnsBackup {
+    /// 备份里**真正属于用户**的服务器：剔除隧道哨兵。
+    ///
+    /// 还原与回滚复检都必须走这里 —— 否则磁盘上被旧版污染的备份会把死地址写回系统。
+    pub fn effective_servers(&self) -> Vec<String> {
+        self.servers.iter().filter(|s| !is_sentinel(s)).cloned().collect()
+    }
 }
 
 /// 列出所有启用的网络服务名。
@@ -135,10 +179,25 @@ pub fn get_search_domains(service: &str) -> Result<Vec<String>> {
 }
 
 /// 备份某个服务的 DNS 配置。
+///
+/// **永远不许把隧道哨兵当用户原值**：若此刻读到的值里含哨兵（上一轮残留），
+/// 就把它们剔掉；全被剔掉 ⇒ 原值记为**未设置**（空 = 交还 DHCP）。
+/// 这样即使系统已处于残留状态，下一次"还原"也会还原成 DHCP 而不是死地址。
 pub fn backup(service: &str) -> Result<DnsBackup> {
+    let now = get_dns(service)?;
+    let poisoned: Vec<String> = now.iter().filter(|s| is_sentinel(s)).cloned().collect();
+    let servers: Vec<String> = now.iter().filter(|s| !is_sentinel(s)).cloned().collect();
+    if !poisoned.is_empty() {
+        tracing::warn!(
+            service = %service,
+            found = ?poisoned,
+            kept = ?servers,
+            "当前 DNS 里含隧道哨兵（上一轮残留）：不把它当用户原值；原值按「未设置」(DHCP) 记录"
+        );
+    }
     Ok(DnsBackup {
         service: service.to_string(),
-        servers: get_dns(service)?,
+        servers,
         search_domains: get_search_domains(service).unwrap_or_default(),
     })
 }
@@ -165,17 +224,31 @@ pub fn clear_dns(service: &str) -> Result<()> {
 }
 
 /// 还原备份。`servers` 为空时清空（等价于还原成 DHCP）。
+///
+/// **会剔除哨兵**：磁盘上的历史快照可能已被旧版污染（`servers = ["198.18.0.2"]`），
+/// 直接写回等于把用户永久钉在死地址上。
 pub fn restore(backup: &DnsBackup) -> Result<()> {
-    if backup.servers.is_empty() {
-        clear_dns(&backup.service)
-    } else {
-        let servers: Vec<IpAddr> = backup
-            .servers
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        set_dns(&backup.service, &servers)
+    let servers = backup.effective_servers();
+    if servers.len() != backup.servers.len() {
+        tracing::warn!(
+            service = %backup.service,
+            recorded = ?backup.servers,
+            "备份里含隧道哨兵（历史快照被污染）：按「未设置」还原成 DHCP，不把死地址写回系统"
+        );
     }
+    restore_servers(&backup.service, &servers)
+}
+
+/// 把某个服务的 DNS 恢复成给定列表；空列表 = 交还 DHCP。
+///
+/// 列表里若混入哨兵会被就地剔除（防止调用方把哨兵当"原值"传进来）。
+pub fn restore_servers(service: &str, servers: &[String]) -> Result<()> {
+    let ips: Vec<IpAddr> = servers
+        .iter()
+        .filter(|s| !is_sentinel(s))
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    set_dns(service, &ips)
 }
 
 /// 刷新 DNS 缓存。
@@ -243,5 +316,96 @@ An asterisk (*) denotes that a network service is disabled.
         // clear_dns 会真的去调 networksetup；这里只验证参数校验路径，
         // 实际调用在集成环境里跑。
         assert!(validate_service_name("Wi-Fi").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // task-??? P0：哨兵识别
+    //
+    // 现场：App 不在时系统 DNS 残留成哨兵 `198.18.0.2`，整机解析不了域名。
+    // 旧 `backup()` 是**无判据照抄当前值**：此刻读到的哨兵会被当成"用户原值"
+    // 存进快照 ⇒ 之后每次"还原"都是还原成死地址（问题永久化）。
+    // -----------------------------------------------------------------------
+
+    /// 记录所有 `networksetup -setdnsservers` 的 argv。
+    fn recording_exec(
+        get_dns: &'static str,
+    ) -> (
+        crate::macos::TestExecutor,
+        std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+    ) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&seen);
+        let exec: crate::macos::TestExecutor = Rc::new(move |program: &str, args: &[String]| {
+            if program == crate::tools::NETWORKSETUP {
+                if args.first().map(String::as_str) == Some("-getdnsservers") {
+                    return Ok(get_dns.to_string());
+                }
+                if args.first().map(String::as_str) == Some("-setdnsservers") {
+                    sink.borrow_mut().push(args.to_vec());
+                }
+                if args.first().map(String::as_str) == Some("-getsearchdomains") {
+                    return Ok("There aren't any search domains set on Wi-Fi.\n".to_string());
+                }
+            }
+            Ok(String::new())
+        });
+        (exec, seen)
+    }
+
+    /// **判据 ②（改前红）**：当前值就是哨兵时，`backup()` 不许把它当用户原值。
+    ///
+    /// 改前：`backup().servers == ["198.18.0.2"]`（照抄） ⇒ 这里红。
+    /// 改后：剔掉哨兵 ⇒ 原值记为 **未设置**（空 = 交还 DHCP）。
+    #[test]
+    fn backup_never_records_the_sentinel_as_the_users_original_dns() {
+        use crate::macos::with_executor;
+
+        let sentinel = xt_proto::DEFAULT_SENTINEL_DNS_V4;
+        let (exec, _seen) = recording_exec("198.18.0.2\n");
+        let b = with_executor(exec, || backup("Wi-Fi")).expect("读 DNS");
+        assert!(
+            !b.servers.iter().any(|s| s == sentinel),
+            "哨兵绝不能被当成用户原值备份（否则每次还原都还原成死地址）: {:?}",
+            b.servers
+        );
+        assert!(
+            b.servers.is_empty(),
+            "读到的唯一值就是哨兵 ⇒ 原值应记为「未设置」(DHCP): {:?}",
+            b.servers
+        );
+    }
+
+    /// **判据 ②的补强（改前红）**：混合列表里只剔哨兵，用户自己的服务器要留下。
+    #[test]
+    fn backup_drops_only_the_sentinel_from_a_mixed_list() {
+        use crate::macos::with_executor;
+
+        let (exec, _seen) = recording_exec("198.18.0.2\n1.1.1.1\n");
+        let b = with_executor(exec, || backup("Wi-Fi")).expect("读 DNS");
+        assert_eq!(b.servers, vec!["1.1.1.1"], "只许剔哨兵，用户自己的 DNS 必须留下");
+    }
+
+    /// **历史快照兜底（改前红）**：磁盘上可能已有被污染的备份
+    /// （`servers = ["198.18.0.2"]`，旧版写下的）。还原时也必须清成 DHCP，
+    /// 不能把死地址重新写回系统。
+    #[test]
+    fn restore_of_a_legacy_sentinel_backup_clears_to_dhcp() {
+        use crate::macos::with_executor;
+
+        let sentinel = xt_proto::DEFAULT_SENTINEL_DNS_V4;
+        let (exec, seen) = recording_exec("There aren't any DNS Servers set on Wi-Fi.\n");
+        let legacy = DnsBackup {
+            service: "Wi-Fi".into(),
+            servers: vec![sentinel.to_string()],
+            search_domains: vec![],
+        };
+        with_executor(exec, || restore(&legacy)).expect("还原");
+        let calls = seen.borrow().clone();
+        assert!(
+            calls.iter().any(|a| a == &vec!["-setdnsservers".to_string(), "Wi-Fi".into(), "Empty".into()]),
+            "被哨兵污染的旧备份必须按「未设置」还原成 DHCP，而不是把哨兵写回去: {calls:?}"
+        );
     }
 }

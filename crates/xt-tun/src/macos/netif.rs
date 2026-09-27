@@ -86,6 +86,44 @@ pub fn list_interfaces() -> Result<Vec<String>> {
     Ok(out.split_whitespace().map(|s| s.to_string()).collect())
 }
 
+/// 接口**此刻是否真的存在**（只读探测）。
+///
+/// 判据分两层：
+///
+/// 1. 主路径解析 `ifconfig -l`（走可注入的 `run`，测试能精确控制）；
+/// 2. `ifconfig` 读不到时退回内核 `if_nametoindex(3)`。
+///
+/// # 为什么不看 `snap.state == Up`
+///
+/// 快照是**上一个进程**写的，它只能证明"当时"会话建起来了。进程退出后 fd 关闭、
+/// utun 随之消失，而磁盘上的快照仍写着 `Up` —— 只看标志位就会漏掉这种
+/// 「App 不在，DNS 却还指着隧道哨兵」的残留。
+///
+/// 退回 `if_nametoindex` 时若它也答"不存在"，我们**不**据此断言不存在（可能只是
+/// 读不到）：返回 `Err` 让调用方按"不误拆"处理（见 `controller::SessionLiveness`）。
+pub fn interface_exists(interface: &str) -> Result<bool> {
+    validate_interface_name(interface)?;
+    match list_interfaces() {
+        Ok(names) => Ok(names.iter().any(|n| n == interface)),
+        Err(e) => match kernel_interface_index(interface) {
+            Some(_) => Ok(true),
+            None => Err(e),
+        },
+    }
+}
+
+/// `if_nametoindex(3)` 的只读包装；接口不存在（内核回 0）时返回 `None`。
+fn kernel_interface_index(interface: &str) -> Option<u32> {
+    let c = std::ffi::CString::new(interface).ok()?;
+    // SAFETY: `c` 是有效的 NUL 结尾字符串；该调用只读内核接口表，无副作用。
+    let idx = unsafe { libc::if_nametoindex(c.as_ptr()) };
+    if idx == 0 {
+        None
+    } else {
+        Some(idx)
+    }
+}
+
 /// 读取接口收发计数。
 ///
 /// 解析策略：**从行尾往前数**。`netstat -ibn` 的尾部 7 列固定是
@@ -171,5 +209,21 @@ utun4 1500 <Link#12>    10     0    1024    20     0    2048    0
     #[test]
     fn rejects_bad_interface_name() {
         assert!(interface_counters("-rf").is_err());
+    }
+
+    /// 只读探测本身：`lo0` 永远在，编造的 utun 名永远不在。
+    ///
+    /// 这条不碰路由/DNS，可以安全地在普通用户下跑。
+    #[test]
+    fn interface_exists_answers_for_real_and_bogus_names() {
+        assert!(
+            interface_exists("lo0").expect("ifconfig -l 应当能读"),
+            "lo0 在任何 macOS 上都存在"
+        );
+        assert!(
+            !interface_exists("utun99999").expect("ifconfig -l 应当能读"),
+            "编造的接口名不该被算成存在"
+        );
+        assert!(interface_exists("-rf").is_err(), "接口名必须先过白名单校验");
     }
 }
