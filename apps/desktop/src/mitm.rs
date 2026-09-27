@@ -610,6 +610,122 @@ mod tests {
         }
     }
 
+    /// **逐字段 golden（比 721325d 的组合断言更强）**：`MitmStatus` 是给界面的契约，
+    /// 收敛三道闸门时**任何一个字段的名字或取值漂移都必须红**。
+    ///
+    /// 五种组合覆盖 `note` 的全部四个分支 + `core_steering` 的三态：
+    /// ① 关着 ② 开着但名单空 ③ 开着+名单非空+CA 未信任
+    /// ④ 闸门①②都过、但没记录过核心状态（`core_steering = null` ⇒ 不声称要重连）
+    /// ⑤ 闸门①②都过 + 核心上次**没带**引导规则（⇒ 要重连，note 追加那句）
+    ///
+    /// 为什么不起真代理：`stats` 会带动态计数器/监听端口，golden 就不稳定；
+    /// `running=true` 那一格由 `three_gates_matrix_pins_core_restart_and_the_null_tristate` 覆盖。
+    ///
+    /// 判别性（本次真做过突变实验）：把 `core_restart_required` 写死 `false`
+    /// ⇒ ⑤ 红；把 `None` 压成 `Some(false)` ⇒ ④ 的 `core_steering` 红；
+    /// 把闸门②（CA 信任）从 active 里去掉 ⇒ ③ 的 note 红。
+    #[test]
+    fn mitm_status_is_pinned_field_by_field_across_gate_combinations() {
+        fn status_json(
+            enabled: bool,
+            domains: &[&str],
+            trusted: bool,
+            steering: Option<bool>,
+        ) -> serde_json::Value {
+            let s = MitmSettings {
+                enabled,
+                domains: domains.iter().map(|d| d.to_string()).collect(),
+                listen_port: 18080,
+                upstream_port: 18081,
+                ..Default::default()
+            };
+            let mut rt = MitmRuntime::default();
+            if let Some(v) = steering {
+                rt.mark_core_steering(v);
+            }
+            serde_json::to_value(rt.status(&s, trusted)).expect("MitmStatus 必须能序列化")
+        }
+
+        let expect = |enabled: bool,
+                      active: bool,
+                      domains: &[&str],
+                      note: Option<&str>,
+                      steering: Option<bool>,
+                      restart: bool| {
+            serde_json::json!({
+                "enabled": enabled,
+                "active": active,
+                "running": false,
+                "listen_port": 18080,
+                "upstream_port": 18081,
+                "domains": domains,
+                "block_quic": false,
+                "ca_fingerprint": null,
+                "ca_expires_at": null,
+                "stats": null,
+                "note": note,
+                "applied": null,
+                "core_steering": steering,
+                "core_restart_required": restart,
+            })
+        };
+
+        // ① 关着
+        assert_eq!(
+            status_json(false, &["ads.example"], true, None),
+            expect(false, false, &["ads.example"], Some("MITM 没开启"), None, false),
+            "① 关着：enabled=false、note=没开启、不声称要重连"
+        );
+        // ② 开着但名单空
+        assert_eq!(
+            status_json(true, &[], true, None),
+            expect(true, false, &[], Some("名单为空：一个域名都不会被拆包"), None, false),
+            "② 名单空：active=false（闸门①没过）"
+        );
+        // ③ 开着+名单非空+CA 未信任
+        assert_eq!(
+            status_json(true, &["ads.example"], false, None),
+            expect(
+                true,
+                true,
+                &["ads.example"],
+                Some("根证书还没装进系统钥匙串：引导规则不会下发给核心，HTTPS 照常直连"),
+                None,
+                false
+            ),
+            "③ 未信任：闸门②没过 ⇒ note 必须指向证书（引导规则不下发）"
+        );
+        // ④ 闸门①②都过 + core_steering = null（没记录过）
+        assert_eq!(
+            status_json(true, &["ads.example"], true, None),
+            expect(
+                true,
+                true,
+                &["ads.example"],
+                Some("根证书已信任，但代理没在跑（点「应用」启动）"),
+                None,
+                false
+            ),
+            "④ null 是独立一态：不声称需要重连"
+        );
+        // ⑤ 闸门①②都过 + 核心上次没带引导规则
+        assert_eq!(
+            status_json(true, &["ads.example"], true, Some(false)),
+            expect(
+                true,
+                true,
+                &["ads.example"],
+                Some(
+                    "根证书已信任，但代理没在跑（点「应用」启动）\
+                     ；另外：核心要重连一次才会带上引导规则"
+                ),
+                Some(false),
+                true
+            ),
+            "⑤ 核心那次没带 ⇒ core_restart_required=true 且 note 追加那句"
+        );
+    }
+
     fn free_port() -> u16 {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("拿空闲端口");
         l.local_addr().unwrap().port()
