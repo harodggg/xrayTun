@@ -20,10 +20,28 @@
 //! 回连走 `mitm-upstream` 那个 socks 入站 ⇒ 它的 `inboundTag` 不在 steer 规则里
 //! ⇒ **构造上不可能自环**。
 //!
+//! # 请求/应答的 framing（本版支持到哪）
+//!
+//! * **请求体**：`Content-Length` 与 `Transfer-Encoding: chunked` 都支持；body
+//!   **逐字节原样**转发（chunked 连分块框架一起原样转发，不重新编码）。
+//! * **响应体**：`Content-Length`、`chunked`（读到终止 chunk 为止）、以及
+//!   "既没有 CL 也没有 TE"（读到上游关闭）三种都支持。原样转发时**一个字节都不动**。
+//! * body 不重压：请求一律**去掉 `Accept-Encoding`**（要求上游给未压缩体），
+//!   否则既没法看广告标记、裁剪的字节数与 `Content-Length` 又会打架。
+//!
+//! # 「只观察、不改写」模式（默认关闭，按域名 opt-in）
+//!
+//! 装了 [`Observer`] 的代理会为每条交换写一条**摘要**（见 [`crate::observe`]）：
+//! host / method / path / status / content-type / body 字节数 / 标记词命中计数 / 短哈希。
+//! 它**不改写任何字节**，`apply_rewrite` 那条路径的行为一点没动；
+//! 观察看到的永远是**上游原样**的响应体。隐私取舍与"看不到什么"写在
+//! [`crate::observe`] 的模块文档里，那里才是准的。
+//!
 //! # 本版的已知限制（写在这里，不藏）
 //!
 //! * **WebSocket 升级不支持**：双向长期搬运需要非阻塞手动泵 TLS 记录，
-//!   本版直接回 `501` 并计入 `failed`。缓解：**opt-in 名单里不要放 WebSocket 端点**。
+//!   本版直接回 `501`，**但会计入 `websocket_refused` 并写 `warn` 日志**（不许静默）。
+//!   缓解：**opt-in 名单里不要放 WebSocket 端点**。
 //!   修法明确（把 `rustls::ServerConnection` 拿在手里手动 `read_tls`/`write_tls`），
 //!   但那是独立一步。
 //! * **响应体裁剪是"可选 + 有上限"的**：只有装了 [`BodyRewriter`] 才生效，
@@ -31,8 +49,9 @@
 //!   代价要如实说：为了裁剪，**这条路径先把整个响应读全再写回**，
 //!   首字节延迟因此变差（对 opt-in 的少数域名才付这个成本，
 //!   没装 rewriter 的 `serve` 也照样先把响应读全 —— 见 `exchange` 的注释）。
-//! * body 不重压：请求一律**去掉 `Accept-Encoding`**（要求上游给未压缩体），
-//!   否则裁剪的字节数与 `Content-Length` 又会打架。
+//! * **body 有上限**：请求体/响应体超过 [`MAX_BODY_BYTES`] 时**明确关闭连接**
+//!   （fail-open：宁可断开，也不发半截请求或截断的响应）。
+//! * **`Expect: 100-continue` 不代传**：客户端可能在等 100 时超时。已知盲点。
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -42,6 +61,7 @@ use std::time::Duration;
 
 use crate::decide::{blocked_response, Decider, Decision};
 use crate::http1::{head_end, remove_header, RequestHead, MAX_HEAD_BYTES};
+use crate::observe::{ExchangeMeta, Observer};
 use crate::rewrite::{
     apply_body_change, length_matches, BodyRewriter, DeclineReason,
 };
@@ -105,6 +125,14 @@ pub struct ProxyStats {
     /// 走到裁剪接缝但**没有改**的条数（原因见日志；必须可见，
     /// 否则"功能开着却一直不生效"没人发现）。
     pub body_rewrite_declined: AtomicU64,
+    /// 真的被观察并写了摘要的交换条数（"观察模式到底看到了多少条"）。
+    pub observed: AtomicU64,
+    /// 观察到的**标记词命中总数**（采数据的产出量指标）。
+    pub observed_marker_hits: AtomicU64,
+    /// 成功转发的**带 body 请求**条数。
+    pub request_bodies_forwarded: AtomicU64,
+    /// 原样透传的 **chunked 响应**条数。
+    pub chunked_responses: AtomicU64,
 }
 
 impl ProxyStats {
@@ -118,6 +146,10 @@ impl ProxyStats {
             websocket_refused: self.websocket_refused.load(Ordering::Relaxed),
             body_rewritten: self.body_rewritten.load(Ordering::Relaxed),
             body_rewrite_declined: self.body_rewrite_declined.load(Ordering::Relaxed),
+            observed: self.observed.load(Ordering::Relaxed),
+            observed_marker_hits: self.observed_marker_hits.load(Ordering::Relaxed),
+            request_bodies_forwarded: self.request_bodies_forwarded.load(Ordering::Relaxed),
+            chunked_responses: self.chunked_responses.load(Ordering::Relaxed),
         }
     }
 }
@@ -136,6 +168,14 @@ pub struct ProxyStatsSnapshot {
     pub websocket_refused: u64,
     pub body_rewritten: u64,
     pub body_rewrite_declined: u64,
+    /// 观察模式：写入摘要的交换条数。
+    pub observed: u64,
+    /// 观察模式：标记词命中总数。
+    pub observed_marker_hits: u64,
+    /// 带 body 的请求被成功转发的条数。
+    pub request_bodies_forwarded: u64,
+    /// chunked 响应被原样透传的条数。
+    pub chunked_responses: u64,
 }
 
 /// 正在运行的代理。`Drop` 停掉接受循环并等它退出（**不留后台线程**）。
@@ -173,15 +213,15 @@ impl Drop for ProxyHandle {
     }
 }
 
-/// 起代理（**不装响应体裁剪**）。返回的 handle 一 drop 就停。
+/// 起代理（**不装响应体裁剪、不观察**）。返回的 handle 一 drop 就停。
 ///
-/// 只是 [`serve_with`] 的薄封装，为的是让"没有裁剪"这条路径在类型上就是默认的。
+/// 只是 [`serve_with`] 的薄封装，为的是让"没有裁剪、没有观察"这条路径在类型上就是默认的。
 pub fn serve(
     config: ProxyConfig,
     ca: Arc<LocalCa>,
     decider: Arc<dyn Decider>,
 ) -> Result<ProxyHandle, TlsError> {
-    serve_with(config, ca, decider, None)
+    serve_full(config, ca, decider, None, None)
 }
 
 /// 起代理，并（可选）装上响应体裁剪。
@@ -190,6 +230,44 @@ pub fn serve_with(
     ca: Arc<LocalCa>,
     decider: Arc<dyn Decider>,
     rewriter: Option<Arc<dyn BodyRewriter>>,
+) -> Result<ProxyHandle, TlsError> {
+    serve_full(config, ca, decider, rewriter, None)
+}
+
+/// 起代理，并装上**观察者**（只观察、不改写；默认关闭由观察者自己保证）。
+///
+/// 这是"数据采集"那条路：传 [`crate::observe::DomainObserver`] 就是产品行为，
+/// 传自定义 [`Observer`] 就是测试/实验。要同时裁剪用 [`serve_with_observer`]。
+pub fn serve_observing(
+    config: ProxyConfig,
+    ca: Arc<LocalCa>,
+    decider: Arc<dyn Decider>,
+    observer: Arc<dyn Observer>,
+) -> Result<ProxyHandle, TlsError> {
+    serve_full(config, ca, decider, None, Some(observer))
+}
+
+/// 起代理：**同时**装响应体裁剪与观察者。
+///
+/// 观察看到的是**上游原样**的响应体（在 `apply_rewrite` 之前汇总），
+/// 而写回客户端的是裁剪后的结果 —— 两者刻意分开，免得"观察"被裁剪污染。
+pub fn serve_with_observer(
+    config: ProxyConfig,
+    ca: Arc<LocalCa>,
+    decider: Arc<dyn Decider>,
+    rewriter: Option<Arc<dyn BodyRewriter>>,
+    observer: Arc<dyn Observer>,
+) -> Result<ProxyHandle, TlsError> {
+    serve_full(config, ca, decider, rewriter, Some(observer))
+}
+
+/// 所有 `serve*` 的唯一实现（外部签名保持兼容，别在 `serve_with` 上加参数）。
+fn serve_full(
+    config: ProxyConfig,
+    ca: Arc<LocalCa>,
+    decider: Arc<dyn Decider>,
+    rewriter: Option<Arc<dyn BodyRewriter>>,
+    observer: Option<Arc<dyn Observer>>,
 ) -> Result<ProxyHandle, TlsError> {
     let listener = TcpListener::bind(config.listen)
         .map_err(|e| TlsError::Config(format!("绑定 {} 失败: {e}", config.listen)))?;
@@ -210,6 +288,7 @@ pub fn serve_with(
     let (s2, st2, inf2) = (stop.clone(), stats.clone(), inflight.clone());
     let cfg = config.clone();
     let rw = rewriter.clone();
+    let obs = observer.clone();
 
     let join = std::thread::spawn(move || {
         while !s2.load(Ordering::Relaxed) {
@@ -229,16 +308,17 @@ pub fn serve_with(
                         continue;
                     }
                     inf2.fetch_add(1, Ordering::Relaxed);
-                    let (cfg, dec, sc, st, inf, rw) = (
+                    let (cfg, dec, sc, st, inf, rw, obs) = (
                         cfg.clone(),
                         decider.clone(),
                         server_config.clone(),
                         st2.clone(),
                         inf2.clone(),
                         rw.clone(),
+                        obs.clone(),
                     );
                     std::thread::spawn(move || {
-                        handle_connection(sock, &cfg, &dec, sc, &st, rw.as_ref());
+                        handle_connection(sock, &cfg, &dec, sc, &st, rw.as_ref(), obs.as_ref());
                         inf.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
@@ -264,6 +344,7 @@ fn handle_connection(
     server_config: Arc<rustls::ServerConfig>,
     stats: &Arc<ProxyStats>,
     rewriter: Option<&Arc<dyn BodyRewriter>>,
+    observer: Option<&Arc<dyn Observer>>,
 ) {
     let _ = sock.set_read_timeout(Some(cfg.io_timeout));
     let _ = sock.set_write_timeout(Some(cfg.io_timeout));
@@ -284,7 +365,9 @@ fn handle_connection(
     // 用带标签的 `break` 而不是 `return`：所有退出路径都必须走到函数末尾去发
     // `close_notify`（原因见末尾注释）。
     'conn: loop {
-        let head = match read_head(&mut tls) {
+        // `leftover` = 已经读进缓冲、但属于 body（或流水线的下一请求）的字节。
+        // 丢掉它就等于把 body 前缀吃掉 —— 这是"带 body 的请求"最容易写错的地方。
+        let (head, leftover) = match read_head(&mut tls) {
             Ok(Some(h)) => h,
             Ok(None) => break 'conn, // 客户端正常关闭
             Err(e) => {
@@ -299,6 +382,8 @@ fn handle_connection(
             stats.websocket_refused.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 host = ?head.host(),
+                path = %head.path(),
+                total_refused = stats.websocket_refused.load(Ordering::Relaxed),
                 "MITM：收到 WebSocket 升级请求，本版不支持（回 501）——不要把它放进 opt-in 名单"
             );
             let _ = tls.write_all(
@@ -320,8 +405,26 @@ fn handle_connection(
             Decision::Pass => {}
         }
 
+        // ---- 读请求体（`Content-Length` / `chunked`；**逐字节原样**持有）----
+        //
+        // 放在判定之后：被阻断/被拒的请求不需要为 body 付内存与时间。
+        // 读失败**明确关闭**（fail-open 的"明确关闭"那一支）：绝不把半截请求发给上游。
+        let request_body = match read_request_body(&mut tls, &head, leftover) {
+            Ok(b) => b,
+            Err(e) => {
+                stats.failed.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    error = %e,
+                    host = ?head.host(),
+                    path = %head.path(),
+                    "MITM：读请求体失败，明确关闭连接（不许发半截请求给上游）"
+                );
+                break 'conn;
+            }
+        };
+
         // ---- 转发一次请求/应答 ----
-        match exchange(&mut tls, cfg, &head, rewriter, stats) {
+        match exchange(&mut tls, cfg, &head, &request_body, rewriter, observer, stats) {
             Ok(close) => {
                 stats.passed.fetch_add(1, Ordering::Relaxed);
                 if close {
@@ -346,10 +449,13 @@ fn handle_connection(
     let _ = tls.flush();
 }
 
-/// 读一个完整的请求头（**不读 body**；本版只处理无 body 的请求形态）。
+/// 读一个完整的请求头，并**把它后面已经读进来的字节一并交出来**。
 ///
 /// 返回 `Ok(None)` = 客户端在请求边界前关闭（正常结束）。
-fn read_head<S: Read>(tls: &mut S) -> std::io::Result<Option<RequestHead>> {
+///
+/// `leftover` 是本函数读头时"读多了"的字节 —— 对带 body 的请求，它通常就是 body 的
+/// 开头。**丢掉它 = 吃掉 body 前缀**，这是这类代理最经典的 bug，所以类型上强制调用方接住。
+fn read_head<S: Read>(tls: &mut S) -> std::io::Result<Option<(RequestHead, Vec<u8>)>> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     // 把「找到头结尾」的下标直接从循环里带出来：旧实现先 `is_some()` 判断、
@@ -378,18 +484,51 @@ fn read_head<S: Read>(tls: &mut S) -> std::io::Result<Option<RequestHead>> {
     };
     let head = RequestHead::parse(&buf[..end])
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    // 本版只支持**没有 body** 的请求形态（GET/HEAD 之类）。带 body 的请求
-    // （POST/PUT）如果被 steer 到这里，我们不猜它的长度 —— 直接明确拒绝，
-    // 而不是发一个半截请求给上游（那会让上游挂在那里等 body）。
-    if let Some(len) = head.header("content-length").and_then(|v| v.trim().parse::<usize>().ok()) {
-        if len > 0 {
+    let leftover = buf[end..].to_vec();
+    Ok(Some((head, leftover)))
+}
+
+/// 按请求头里的 framing 读出**完整请求体**，返回逐字节原样的字节。
+///
+/// * `Transfer-Encoding: chunked` ⇒ 连分块框架一起原样持有（不重新编码）；
+/// * `Content-Length: N` ⇒ 精确读 N 字节；
+/// * 两者都没有 ⇒ 没有 body（`leftover` 里若还有字节，那是不支持的流水线，只记日志）。
+///
+/// 超过 [`MAX_BODY_BYTES`] ⇒ 明确报错，调用方关连接（fail-open：宁可断开也不发半截请求）。
+fn read_request_body<S: Read>(
+    tls: &mut S,
+    head: &RequestHead,
+    leftover: Vec<u8>,
+) -> std::io::Result<Vec<u8>> {
+    let chunked = head.headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding")
+            && v.to_ascii_lowercase().contains("chunked")
+    });
+    if chunked {
+        let (raw, _payload) = read_chunked(tls, leftover)?;
+        return Ok(raw);
+    }
+    if let Some(want) = head
+        .header("content-length")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        if want > MAX_BODY_BYTES {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                format!("本版不处理带 body 的请求（Content-Length: {len}）"),
+                std::io::ErrorKind::InvalidData,
+                format!("请求体 {want} 字节超过上限 {MAX_BODY_BYTES}"),
             ));
         }
+        return read_exact_body(tls, leftover, want);
     }
-    Ok(Some(head))
+    if !leftover.is_empty() {
+        // 没有 framing 却读到了多余字节：要么是流水线的下一请求，要么是对端不守规矩。
+        // 本版一次连接只处理一条请求，直接丢弃并留痕（不静默）。
+        tracing::debug!(
+            bytes = leftover.len(),
+            "MITM：无 body 的请求后仍有多余字节，已丢弃（本版不支持流水线）"
+        );
+    }
+    Ok(Vec::new())
 }
 
 /// 转发一次请求并读回应答，写回客户端。返回 `true` 表示"该关连接了"。
@@ -397,7 +536,9 @@ fn exchange<S: Read + Write>(
     tls: &mut S,
     cfg: &ProxyConfig,
     head: &RequestHead,
+    request_body: &[u8],
     rewriter: Option<&Arc<dyn BodyRewriter>>,
+    observer: Option<&Arc<dyn Observer>>,
     stats: &Arc<ProxyStats>,
 ) -> std::io::Result<bool> {
     let host = head
@@ -410,59 +551,106 @@ fn exchange<S: Read + Write>(
     upstream.set_write_timeout(Some(cfg.io_timeout))?;
 
     // 重新序列化请求头，并**去掉 Accept-Encoding**：
-    // 我们要的是未压缩的响应体（否则裁剪会与 Content-Length 打架），
+    // 我们要的是未压缩的响应体（否则既搜不到广告标记、裁剪也会与 Content-Length 打架），
     // 同时把 `Connection: close` 写死 —— 本版一次连接一条请求，语义最简单也最安全。
+    //
+    // **body 不动**：`request_body` 是逐字节原样的字节（chunked 连框架一起），
+    // 紧跟在头后面原样写出。
     let mut forwarded = head.clone();
     remove_header(&mut forwarded.headers, "accept-encoding");
     remove_header(&mut forwarded.headers, "connection");
     forwarded.headers.push(("Connection".to_string(), "close".to_string()));
     upstream.write_all(&forwarded.to_bytes())?;
+    if !request_body.is_empty() {
+        upstream.write_all(request_body)?;
+        stats.request_bodies_forwarded.fetch_add(1, Ordering::Relaxed);
+    }
     upstream.flush()?;
 
-    // 读应答头 → 读应答体（按 Content-Length；chunked 本版不支持，明确报错）。
-    let (mut resp_head, mut body) = read_response(&mut upstream)?;
+    // 读应答头 → 读应答体（`Content-Length` / `chunked` / 读到关闭三种 framing）。
+    let resp = read_response(&mut upstream)?;
+    if resp.chunked {
+        stats.chunked_responses.fetch_add(1, Ordering::Relaxed);
+    }
     tracing::debug!(
         host = %host,
         path = %head.path(),
-        status = resp_head.first().map(String::as_str).unwrap_or(""),
-        body_len = body.len(),
+        status = %resp.status_line,
+        body_len = resp.payload.len(),
+        chunked = resp.chunked,
         "MITM：放行"
     );
 
-    // ---- 响应体裁剪（装了才生效；没装则连内容都不看）----
-    if let Some(rw) = rewriter {
-        match apply_rewrite(&mut resp_head, &mut body, rw.as_ref(), host, head.path()) {
-            None => {
-                stats.body_rewritten.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(host = %host, path = %head.path(), "MITM：响应体裁剪已生效");
-            }
-            Some(reason) => {
-                stats.body_rewrite_declined.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    host = %host,
-                    path = %head.path(),
-                    reason = reason.as_str(),
-                    "MITM：响应体裁剪未生效（原样转发）"
-                );
-            }
+    // ---- 观察（**任何改写之前**：看的永远是上游原样的内容）----
+    //
+    // 只有观察者点名了这个域名才做汇总；`observe` 里的失败绝不影响转发。
+    if let Some(obs) = observer {
+        if obs.observes(host) {
+            let meta = ExchangeMeta {
+                host: host.to_string(),
+                method: head.method.clone(),
+                path: crate::observe::sanitize_path(head.path()),
+                status: resp.status,
+                status_line: resp.status_line.clone(),
+                content_type: resp.content_type.clone(),
+                body_bytes: resp.payload.len(),
+                request_body_bytes: request_body.len(),
+            };
+            let record = crate::observe::summarize(&meta, &resp.payload, obs.markers());
+            stats.observed.fetch_add(1, Ordering::Relaxed);
+            stats
+                .observed_marker_hits
+                .fetch_add(record.marker_total as u64, Ordering::Relaxed);
+            obs.observe(&record, &resp.payload);
         }
     }
 
-    // 写回客户端：头 + body（长度保持一致）。
+    // ---- 决定写回客户端的 (头行, body) ----
     //
-    // `resp_head` **不含**尾随空行（见 `read_response` 的注释），所以这里补
+    // **没装 rewriter 时不碰任何字节**：原样写回头与 `raw`（chunked 连框架一起）。
+    // 装了 rewriter 时：
+    //   * 真改了 ⇒ 用改后的头 + 载荷（`apply_body_change` 会去掉 TE、写上精确 CL）；
+    //   * 没改 ⇒ 回到**上游原样**的 `raw`（chunked 仍然 chunked）。
+    let Response { lines, raw, payload, .. } = resp;
+    let (out_lines, out_body) = match rewriter {
+        Some(rw) => {
+            let mut head_lines = lines.clone();
+            let mut body = payload;
+            match apply_rewrite(&mut head_lines, &mut body, rw.as_ref(), host, head.path()) {
+                None => {
+                    stats.body_rewritten.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(host = %host, path = %head.path(), "MITM：响应体裁剪已生效");
+                    (head_lines, body)
+                }
+                Some(reason) => {
+                    stats.body_rewrite_declined.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        host = %host,
+                        path = %head.path(),
+                        reason = reason.as_str(),
+                        "MITM：响应体裁剪未生效（原样转发）"
+                    );
+                    (lines, raw)
+                }
+            }
+        }
+        // 只观察（或纯放行）：**一个字节都不改**。
+        None => (lines, raw),
+    };
+
+    // 写回客户端：头 + body。
+    //
+    // 头行列表**不含**尾随空行（见 `read_response` 的注释），所以这里补
     // `\r\n\r\n`：一个结束最后一行、一个就是那个空行。少补一个字节，
     // 客户端就找不到头/体分隔，症状是"读不到响应"而不是"读到错响应"。
-    let mut out = resp_head.join("\r\n").into_bytes();
+    let mut out = out_lines.join("\r\n").into_bytes();
     out.extend_from_slice(b"\r\n\r\n");
     tls.write_all(&out)?;
-    if !body.is_empty() {
-        tls.write_all(&body)?;
+    if !out_body.is_empty() {
+        tls.write_all(&out_body)?;
     }
     tls.flush()?;
     // 上游是 `Connection: close`，所以我们也让客户端关掉。
-    let _ = &mut resp_head;
-    body.clear();
     Ok(true)
 }
 
@@ -524,8 +712,32 @@ fn apply_rewrite(
     None
 }
 
-/// 读一个应答：返回 `(头行, 体)`。**只支持 Content-Length**（本版）。
-fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<(Vec<String>, Vec<u8>)> {
+/// 一条应答的读入结果。
+///
+/// `raw` 是**要原样写回客户端**的体字节（chunked 时含分块框架），
+/// `payload` 是去掉 chunked 框架后的载荷（观察/裁剪用；非 chunked 时两者相同）。
+#[derive(Debug)]
+struct Response {
+    /// 状态行 + 头字段（**不含**尾随 CRLF）。
+    lines: Vec<String>,
+    /// 解析出的状态码（解析不出来是 0）。
+    status: u16,
+    /// 原样状态行。
+    status_line: String,
+    content_type: Option<String>,
+    raw: Vec<u8>,
+    payload: Vec<u8>,
+    chunked: bool,
+}
+
+/// 读一个应答：头 + 体。**三种 framing 都支持**：
+///
+/// * `Transfer-Encoding: chunked` ⇒ 读到终止 chunk（含 trailer）为止，`raw` 原样保留；
+/// * `Content-Length: N` ⇒ 精确读 N 字节；
+/// * 都没有 ⇒ 读到上游关闭（我们强制了 `Connection: close`）。
+///
+/// 无 body 的状态码（1xx/204/304）直接当空体，免得为一个没有体的响应等 EOF。
+fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<Response> {
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut chunk = [0u8; 4096];
     let end = loop {
@@ -548,10 +760,10 @@ fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<(Vec<String>, Vec
     // 于是症状是"功能开着却一直不生效"。这里必须精确。
     let head_text = String::from_utf8_lossy(&buf[..end - 4]).to_string();
     let lines: Vec<String> = head_text.split("\r\n").map(str::to_string).collect();
-    // 下面两条是**诊断**，不是正确性判据：畸形应答照样原样转发（或在上面的
-    // chunked 检查里报错）。旧实现写成 `debug_assert!` —— debug 构建里一条
-    // 对端发来的畸形应答就能 panic，而 release（`panic = "abort"`）里它又
-    // 完全不存在。现在统一成 debug 日志：两个构建里行为一致，且不会 panic。
+    // 下面两条是**诊断**，不是正确性判据：畸形应答照样原样转发。
+    // 旧实现写成 `debug_assert!` —— debug 构建里一条对端发来的畸形应答就能 panic，
+    // 而 release（`panic = "abort"`）里它又完全不存在。现在统一成 debug 日志：
+    // 两个构建里行为一致，且不会 panic。
     if !lines.first().is_some_and(|l| l.starts_with("HTTP/")) {
         tracing::debug!("MITM：应答头第一行不是状态行，仍原样转发");
     }
@@ -559,34 +771,123 @@ fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<(Vec<String>, Vec
         tracing::debug!("MITM：应答头列表里出现空行（裁剪路径会因此放弃）");
     }
 
-    let declared = lines
-        .iter()
-        .find_map(|l| {
-            let (k, v) = l.split_once(':')?;
-            k.eq_ignore_ascii_case("content-length")
-                .then(|| v.trim().parse::<usize>().ok())
-                .flatten()
-        });
-    if lines.iter().any(|l| {
+    let status_line = lines.first().cloned().unwrap_or_default();
+    let status = parse_status(&status_line);
+    let content_type = header_in_lines(&lines, "content-type").map(str::to_string);
+    let leftover = buf[end..].to_vec();
+
+    let chunked = lines.iter().any(|l| {
         l.split_once(':')
-            .map(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.contains("chunked"))
+            .map(|(k, v)| {
+                k.eq_ignore_ascii_case("transfer-encoding")
+                    && v.to_ascii_lowercase().contains("chunked")
+            })
             .unwrap_or(false)
-    }) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "本版不支持 chunked 应答（透明转发 chunked 需要另一套 framing 处理）",
-        ));
+    });
+
+    // 这些状态码按 RFC 没有 body：不要为它去等 EOF/CL。
+    let bodyless = (100..200).contains(&status) || status == 204 || status == 304;
+    if bodyless {
+        return Ok(Response {
+            lines,
+            status,
+            status_line,
+            content_type,
+            raw: Vec::new(),
+            payload: Vec::new(),
+            chunked: false,
+        });
     }
-    let want = declared.unwrap_or(0);
-    if want > MAX_BODY_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("应答体 {want} 字节超过上限 {MAX_BODY_BYTES}"),
-        ));
+
+    if chunked {
+        let (raw, payload) = read_chunked(upstream, leftover)?;
+        return Ok(Response { lines, status, status_line, content_type, raw, payload, chunked: true });
     }
-    let mut body = buf[end..].to_vec();
+
+    if let Some(want) = header_in_lines(&lines, "content-length")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        if want > MAX_BODY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("应答体 {want} 字节超过上限 {MAX_BODY_BYTES}"),
+            ));
+        }
+        let body = read_exact_body(upstream, leftover, want)?;
+        return Ok(Response {
+            lines,
+            status,
+            status_line,
+            content_type,
+            raw: body.clone(),
+            payload: body,
+            chunked: false,
+        });
+    }
+
+    // 既没有 CL 也没有 chunked：HTTP/1.x 靠"连接关闭"分帧（我们已强制 Connection: close）。
+    let body = read_until_eof(upstream, leftover)?;
+    Ok(Response {
+        lines,
+        status,
+        status_line,
+        content_type,
+        raw: body.clone(),
+        payload: body,
+        chunked: false,
+    })
+}
+
+/// 状态行里的数字状态码（解析不出来返回 0，绝不 panic）。
+fn parse_status(status_line: &str) -> u16 {
+    status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
+/// 在"状态行 + 头字段"的行列表里取一个头（大小写不敏感，取第一个）。
+fn header_in_lines<'a>(lines: &'a [String], name: &str) -> Option<&'a str> {
+    lines.iter().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+/// 精确读 `want` 字节；`initial` 是"已经读进来的"前缀。
+fn read_exact_body<S: Read>(
+    src: &mut S,
+    mut body: Vec<u8>,
+    want: usize,
+) -> std::io::Result<Vec<u8>> {
+    if body.len() > want {
+        // 只可能来自流水线/上游多话；本版一次一条请求，多出来的直接截掉。
+        body.truncate(want);
+    }
+    let mut chunk = [0u8; 8192];
     while body.len() < want {
-        let n = upstream.read(&mut chunk)?;
+        let n = src.read(&mut chunk)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "应答体没读完就 EOF",
+            ));
+        }
+        let take = (want - body.len()).min(n);
+        body.extend_from_slice(&chunk[..take]);
+    }
+    Ok(body)
+}
+
+/// 读到上游关闭（上限 [`MAX_BODY_BYTES`]）。
+fn read_until_eof<S: Read>(src: &mut S, mut body: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    if body.len() > MAX_BODY_BYTES {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "应答体超过上限"));
+    }
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = src.read(&mut chunk)?;
         if n == 0 {
             break;
         }
@@ -595,8 +896,106 @@ fn read_response<S: Read>(upstream: &mut S) -> std::io::Result<(Vec<String>, Vec
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "应答体超过上限"));
         }
     }
-    body.truncate(want);
-    Ok((lines, body))
+    Ok(body)
+}
+
+/// 读一个 chunked 体：返回 `(原样字节, 去框架后的载荷)`。
+///
+/// 原样字节包含分块框架、终止 chunk 与 trailer —— 透明转发要的就是它们。
+/// 载荷用于观察（搜标记词）与裁剪（重算 `Content-Length`）。
+fn read_chunked<S: Read>(src: &mut S, mut raw: Vec<u8>) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut payload: Vec<u8> = Vec::new();
+    let mut pos = 0usize;
+    let mut chunk = [0u8; 8192];
+    loop {
+        // chunk-size 行（允许 chunk-ext：分号后面的部分忽略；转发时原样保留）。
+        let line_end = loop {
+            if let Some(i) = find_crlf(&raw, pos) {
+                break i;
+            }
+            if raw.len().saturating_sub(pos) > MAX_HEAD_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chunk 长度行超过上限",
+                ));
+            }
+            let n = src.read(&mut chunk)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "chunked 应答体没读完就 EOF",
+                ));
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        };
+        let token = raw[pos..line_end].split(|&b| b == b';').next().unwrap_or(&[]);
+        let size = parse_hex_usize(token).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk 长度不是十六进制")
+        })?;
+        pos = line_end + 2;
+        if size == 0 {
+            // last-chunk 之后的 trailer-part：读到空行为止（`0\r\n\r\n` 就是空 trailer）。
+            loop {
+                let le = loop {
+                    if let Some(i) = find_crlf(&raw, pos) {
+                        break i;
+                    }
+                    let n = src.read(&mut chunk)?;
+                    if n == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "chunked 结束块没读完就 EOF",
+                        ));
+                    }
+                    raw.extend_from_slice(&chunk[..n]);
+                };
+                let empty = le == pos;
+                pos = le + 2;
+                if empty {
+                    break;
+                }
+            }
+            break;
+        }
+        let need = pos + size + 2; // chunk-data + 结尾 CRLF
+        if need > MAX_BODY_BYTES.saturating_add(MAX_HEAD_BYTES) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "chunked 体超过上限"));
+        }
+        while raw.len() < need {
+            let n = src.read(&mut chunk)?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "chunked 应答体没读完就 EOF",
+                ));
+            }
+            raw.extend_from_slice(&chunk[..n]);
+        }
+        if payload.len() + size > MAX_BODY_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "chunked 载荷超过上限"));
+        }
+        payload.extend_from_slice(&raw[pos..pos + size]);
+        pos = need;
+    }
+    raw.truncate(pos);
+    Ok((raw, payload))
+}
+
+/// 在 `buf[from..]` 里找下一个 `\r\n` 的起始下标。
+fn find_crlf(buf: &[u8], from: usize) -> Option<usize> {
+    if from >= buf.len() {
+        return None;
+    }
+    buf[from..].windows(2).position(|w| w == b"\r\n").map(|p| p + from)
+}
+
+/// 十六进制 chunk 长度（允许前后空白；空串/非十六进制 = `None`）。
+fn parse_hex_usize(token: &[u8]) -> Option<usize> {
+    let s = std::str::from_utf8(token).ok()?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    usize::from_str_radix(s, 16).ok()
 }
 
 /// 手写 SOCKS5 CONNECT（无认证）。与 `xt-intent`/测试里那份同形。
@@ -693,9 +1092,12 @@ mod tests {
     #[test]
     fn a_head_split_across_reads_is_parsed() {
         let raw = b"GET /a HTTP/1.1\r\nHost: news.example\r\n\r\n";
-        let head = read_head(&mut chunky(raw, 3)).expect("不该报错").expect("应当解析出请求头");
+        let (head, leftover) = read_head(&mut chunky(raw, 3))
+            .expect("不该报错")
+            .expect("应当解析出请求头");
         assert_eq!(head.method, "GET");
         assert_eq!(head.host(), Some("news.example"));
+        assert!(leftover.is_empty(), "没有 body 时 leftover 必须是空的");
     }
 
     /// 客户端在请求边界前关连接 = 正常结束，**不是**错误、更不是 panic。
@@ -717,9 +1119,10 @@ mod tests {
     #[test]
     fn a_non_http_response_head_does_not_panic() {
         let raw = b"NOT-HTTP 200 OK\r\nContent-Length: 0\r\n\r\n";
-        let (lines, body) = read_response(&mut Cursor::new(raw.to_vec())).expect("应当原样接受");
-        assert_eq!(lines.first().map(String::as_str), Some("NOT-HTTP 200 OK"));
-        assert!(body.is_empty());
+        let resp = read_response(&mut Cursor::new(raw.to_vec())).expect("应当原样接受");
+        assert_eq!(resp.lines.first().map(String::as_str), Some("NOT-HTTP 200 OK"));
+        assert_eq!(resp.status, 200, "状态码仍要从第二段解析出来");
+        assert!(resp.payload.is_empty());
     }
 
     /// 空输入必须报错，不许 panic。
@@ -733,18 +1136,115 @@ mod tests {
     #[test]
     fn a_normal_response_is_split_into_head_lines_and_body() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
-        let (lines, body) = read_response(&mut Cursor::new(raw.to_vec())).unwrap();
-        assert_eq!(lines.first().map(String::as_str), Some("HTTP/1.1 200 OK"));
-        assert_eq!(lines.len(), 3, "尾随空行不许进列表");
-        assert_eq!(body, b"{\"a\":1}");
+        let resp = read_response(&mut Cursor::new(raw.to_vec())).unwrap();
+        assert_eq!(resp.lines.first().map(String::as_str), Some("HTTP/1.1 200 OK"));
+        assert_eq!(resp.lines.len(), 3, "尾随空行不许进列表");
+        assert_eq!(resp.payload, b"{\"a\":1}");
+        assert_eq!(resp.raw, b"{\"a\":1}", "非 chunked 时 raw 就是 payload");
+        assert!(!resp.chunked);
+        assert_eq!(resp.content_type.as_deref(), Some("application/json"));
     }
 
-    /// chunked 明确拒绝（本版不支持），而不是把它当 Content-Length=0 放过去。
+    /// **判据 1**：`Content-Length` 请求体逐字节读出来（含 leftover 前缀）。
     #[test]
-    fn a_chunked_response_is_refused_explicitly() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    fn a_content_length_request_body_is_read_byte_for_byte() {
+        let body: &[u8] = &[0x00, 0x01, 0xff, 0xfe, b'\r', b'\n', 0x7f];
+        let mut raw = b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 7\r\n\r\n".to_vec();
+        raw.extend_from_slice(body);
+        let mut cur = Cursor::new(raw);
+        let (head, leftover) = read_head(&mut cur).unwrap().unwrap();
+        let got = read_request_body(&mut cur, &head, leftover).unwrap();
+        assert_eq!(got, body, "请求体必须逐字节原样");
+    }
+
+    /// **判据 1**：chunked 请求体**连分块框架一起**原样读出（不许解码重编码）。
+    #[test]
+    fn a_chunked_request_body_is_read_verbatim() {
+        let chunked: &[u8] = b"4;ext=1\r\n\x00\x01\xff\xfe\r\n5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n";
+        let mut raw = b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        raw.extend_from_slice(chunked);
+        let mut cur = Cursor::new(raw);
+        let (head, leftover) = read_head(&mut cur).unwrap().unwrap();
+        let got = read_request_body(&mut cur, &head, leftover).unwrap();
+        assert_eq!(got, chunked, "chunked 请求体必须原样（含 chunk-ext 与 trailer）");
+    }
+
+    /// 没有 framing 的请求 = 没有 body。
+    #[test]
+    fn a_request_without_framing_has_an_empty_body() {
+        let mut cur = Cursor::new(b"GET /x HTTP/1.1\r\nHost: h\r\n\r\n".to_vec());
+        let (head, leftover) = read_head(&mut cur).unwrap().unwrap();
+        assert!(read_request_body(&mut cur, &head, leftover).unwrap().is_empty());
+    }
+
+    /// **判据 2**：chunked 应答读到终止 chunk；`raw` 原样、`payload` 是去框架后的载荷。
+    /// 用每次只吐 1 字节的读端，专门压 chunk 边界跨 read 的情况。
+    #[test]
+    fn a_chunked_response_is_read_to_the_terminating_chunk() {
+        let chunked: &[u8] = b"7\r\n{\"a\":1,\r\n6\r\n\"b\":2}\r\n0\r\n\r\n";
+        let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        raw.extend_from_slice(chunked);
+        let resp = read_response(&mut chunky(&raw, 1)).expect("chunked 必须被支持");
+        assert!(resp.chunked);
+        assert_eq!(resp.raw, chunked, "raw 必须逐字节保留分块框架");
+        assert_eq!(resp.payload, b"{\"a\":1,\"b\":2}", "payload 必须是去框架后的载荷");
+    }
+
+    /// `Transfer-Encoding` 大小写不敏感；`chunked` 后面带别的编码也认（RFC 允许）。
+    #[test]
+    fn chunked_detection_is_case_insensitive() {
+        let raw = b"HTTP/1.1 200 OK\r\ntransfer-encoding: CHUNKED\r\n\r\n0\r\n\r\n";
+        let resp = read_response(&mut Cursor::new(raw.to_vec())).unwrap();
+        assert!(resp.chunked);
+        assert!(resp.raw.ends_with(b"0\r\n\r\n"));
+        assert!(resp.payload.is_empty());
+    }
+
+    /// 截断的 chunked（没有终止 chunk）必须报错，不许把半截体当完整响应放行。
+    #[test]
+    fn a_truncated_chunked_response_is_an_error() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
         let err = read_response(&mut Cursor::new(raw.to_vec())).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported, "{err}");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof, "{err}");
+    }
+
+    /// 非法 chunk 长度：明确报错，不做任何猜测。
+    #[test]
+    fn a_non_hex_chunk_size_is_an_error() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n";
+        let err = read_response(&mut Cursor::new(raw.to_vec())).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
+    }
+
+    /// 既没有 CL 也没有 chunked ⇒ 读到上游关闭（`Connection: close` 的语义）。
+    #[test]
+    fn a_response_without_framing_is_read_until_eof() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nuntil the close";
+        let resp = read_response(&mut Cursor::new(raw.to_vec())).unwrap();
+        assert_eq!(resp.payload, b"until the close");
+        assert_eq!(resp.raw, b"until the close");
+    }
+
+    /// 204/304/1xx 没有 body：不要为一个没有体的响应去等 EOF。
+    #[test]
+    fn bodyless_statuses_do_not_wait_for_a_body() {
+        for raw in [
+            &b"HTTP/1.1 204 No Content\r\n\r\n"[..],
+            &b"HTTP/1.1 304 Not Modified\r\n\r\n"[..],
+            &b"HTTP/1.1 100 Continue\r\n\r\n"[..],
+        ] {
+            let resp = read_response(&mut Cursor::new(raw.to_vec())).unwrap();
+            assert!(resp.payload.is_empty(), "{raw:?}");
+            assert!(resp.raw.is_empty(), "{raw:?}");
+        }
+    }
+
+    /// 超过上限的 `Content-Length` 明确报错（fail-open：关连接，不发截断的响应）。
+    #[test]
+    fn an_oversized_content_length_is_refused() {
+        let raw = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", MAX_BODY_BYTES + 1);
+        let err = read_response(&mut Cursor::new(raw.into_bytes())).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "{err}");
     }
 
     struct NoopRewriter;
