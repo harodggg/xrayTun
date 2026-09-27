@@ -271,7 +271,7 @@ const BASE_SNAPSHOT: AppSnapshot = {
       body_strip: { pointer: "/data/items", field: "promoted" },
       // 「只观察、不改写」在预览里保持**默认全关**：这样界面上那句
       // "这里空着不代表没有广告"的空态说明才能被看见（它比一张假数据表更重要）。
-      observe: { enabled: false, hosts: [], capture_body_dir: null },
+      observe: { enabled: false, hosts: [], markers: null, capture_body_dir: null },
     },
   },
   subscriptions: [

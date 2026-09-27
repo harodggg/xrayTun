@@ -297,6 +297,35 @@ export function formatMarkerHits(markers: Array<{ marker: string; count: number 
 }
 
 /**
+ * 后端读不到时，词表编辑框与说明的**展示兜底**。
+ *
+ * 真值来自 `observe.rs::effective_markers`（`report.markers`）；这个常量只在
+ * IPC 读失败那一瞬间用，保证输入框不会是空的（空框会被误读成"不统计"）。
+ */
+const DEFAULT_MARKER_FALLBACK = [
+  "is_ad",
+  "ad_type",
+  "promoted",
+  "sponsored",
+  "adsbygoogle",
+  "广告",
+];
+
+/**
+ * 设置里的词表 → 编辑框文本。
+ *
+ * `null`（缺省 = 用默认表）时显示**后端实际生效**的词表；后端也读不到才用兜底。
+ * `[]`（明确不统计）会如实显示成空框 —— 那是用户的决定，不许被默认表盖掉。
+ */
+export function markersToText(
+  configured: string[] | null | undefined,
+  effective: string[] | undefined,
+): string {
+  const list = configured ?? effective ?? DEFAULT_MARKER_FALLBACK;
+  return list.join("\n");
+}
+
+/**
  * 概率显示：拿不到值一律显示「—」。
  *
  * ⚠️ 判据必须是 `typeof === "number" && Number.isFinite`，**不能**只判 `=== null`：
@@ -337,6 +366,8 @@ export default function Intent() {
   const [domainsText, setDomainsText] = useState<string | null>(null);
   /** 编辑中的**观察**名单文本（与拆包名单分开：两份名单是两件事）。 */
   const [observeHostsText, setObserveHostsText] = useState<string | null>(null);
+  /** 编辑中的标记词表文本（每行一个词；空 = 明确不统计，见 `parseMarkers`）。 */
+  const [observeMarkersText, setObserveMarkersText] = useState<string | null>(null);
   /** 编辑中的观察落盘目录（绝对路径）。 */
   const [observeDirText, setObserveDirText] = useState<string | null>(null);
 
@@ -409,6 +440,18 @@ export default function Intent() {
 
   /** 名单文本框 → 数组：按行/空白/逗号切，去空。 */
   const parseDomains = (text: string): string[] =>
+    text
+      .split(/[\s,]+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+  /**
+   * 词表文本框 → 数组：按行/空白/逗号切，去空。
+   *
+   * **允许结果为空**：那表示"明确不统计标记词"（后端 `marker_counting=false`），
+   * 不是"没配"——所以这里**不**回退到默认词表。
+   */
+  const parseMarkers = (text: string): string[] =>
     text
       .split(/[\s,]+/)
       .map((t) => t.trim())
@@ -1012,6 +1055,29 @@ export default function Intent() {
         </div>
 
         <div className="field">
+          <label htmlFor="mitm-observe-markers">
+            标记词表（每行一个词；留空 = 明确不统计标记词，不是"没有命中"）
+          </label>
+          <textarea
+            id="mitm-observe-markers"
+            rows={4}
+            value={observeMarkersText ?? markersToText(m.observe.markers, mitm?.observe?.markers)}
+            onChange={(e) => setObserveMarkersText(e.target.value)}
+            onBlur={() => {
+              if (observeMarkersText !== null) {
+                void patchObserve({ markers: parseMarkers(observeMarkersText) }, "改观察标记词表");
+                setObserveMarkersText(null);
+              }
+            }}
+          />
+          <div className="note">
+            这就是"先采数据、再决定规则"的那一步：换一组词，结论立刻按新词表计数。
+            <strong>留空表示明确不统计标记词</strong> —— 仍然按域名采条数与短哈希，
+            但界面会写明"不统计任何标记词"，不会给你一个全部为 0 的假结论。
+          </div>
+        </div>
+
+        <div className="field">
           <label htmlFor="mitm-observe-dir">
             把完整响应体落盘到这个目录（可选，必须是绝对路径；留空 = 不落盘）
           </label>
@@ -1074,11 +1140,18 @@ export default function Intent() {
             </tbody>
           </table>
         )}
-        <p className="note">
-          词表（本版固定）：{mitm?.observe?.markers?.join("、") ?? "is_ad、ad_type、promoted、sponsored、adsbygoogle、广告"}
-          。命中计数是<strong>出现次数</strong>，不是"命中就 1"；命中是强证据，
-          但<strong>不命中什么也证明不了</strong>。
-        </p>
+        {mitm?.observe && mitm.observe.marker_counting === false ? (
+          <p className="note note--warn">
+            标记词表为空：本次观察<strong>不统计任何标记词</strong>（仍然按域名采条数与短哈希）。
+            这不是"没有命中"、更不是"干净" —— 我们不会把"没测量"讲成"测出来是 0"。
+          </p>
+        ) : (
+          <p className="note">
+            词表：{mitm?.observe?.markers?.join("、") ?? DEFAULT_MARKER_FALLBACK.join("、")}
+            。命中计数是<strong>出现次数</strong>，不是"命中就 1"；命中是强证据，
+            但<strong>不命中什么也证明不了</strong>。
+          </p>
+        )}
 
         <div className="note">
           <strong>观察看不到什么（如实列出）：</strong>

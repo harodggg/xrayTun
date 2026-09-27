@@ -1117,6 +1117,20 @@ pub struct ObserveSettings {
     /// 只观察**这些域名**（子域命中，按标签边界）。空 = 一条摘要都不写。
     #[serde(default)]
     pub hosts: Vec<String>,
+    /// 自定义**标记词表**（每项一个词）。
+    ///
+    /// 三态各有明确语义，**都不允许**被静默地读成全 0 的"干净结论"：
+    ///
+    /// * `None`（缺省；没有这个字段的老 `settings.json` 也是这样）= 用
+    ///   `xt_mitm::default_markers()`；
+    /// * `Some(list)` = 用这份词表（逐项去空白、丢空项、去重，由上层解析）；
+    /// * `Some(vec![])` = **显式不统计标记词**：仍按名单采条数与短哈希，但命中数恒为 0；
+    ///   报告会带 `marker_counting = false` 把这件事说出来。
+    ///
+    /// 用 `Option` 而不是在 `xt-core` 里再抄一份默认词表：词表归 `xt-mitm` 所有，
+    /// 抄两份就有两个会漂移的真相。缺省语义的解析在 `apps/desktop/src/observe.rs`。
+    #[serde(default)]
+    pub markers: Option<Vec<String>>,
     /// **显式**留完整 body 的目录。默认 `None` = 不落盘；只接受绝对路径。
     #[serde(default)]
     pub capture_body_dir: Option<PathBuf>,
@@ -1635,6 +1649,7 @@ mod tests {
         let mut o = ObserveSettings {
             enabled: true,
             hosts: vec!["news.example".into()],
+            markers: None,
             capture_body_dir: Some(PathBuf::from("crates/xt-core/leak")),
         };
         let errs = o.validate();
@@ -1665,12 +1680,52 @@ mod tests {
         s.mitm.observe = ObserveSettings {
             enabled: true,
             hosts: vec!["news.example".into(), "cdn.news.example".into()],
+            markers: Some(vec!["promoted".into(), "广告".into()]),
             capture_body_dir: Some(PathBuf::from("/tmp/xraytun-observe")),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
         assert_eq!(back.mitm.observe.hosts.len(), 2);
+        assert_eq!(
+            back.mitm.observe.markers.as_deref(),
+            Some(["promoted".to_string(), "广告".to_string()].as_slice()),
+            "自定义词表必须原样往返"
+        );
+    }
+
+    /// 词表字段的三态都要能从 JSON 读出来，**老设置（缺字段）必须是 `None`**：
+    ///
+    /// * 缺 `markers` ⇒ `None`（= 用默认词表），不是空表 —— 空表是一条**用户决定**，
+    ///   不能被"没配"冒充；
+    /// * `"markers": []` ⇒ `Some([])`（显式不统计）；
+    /// * `"markers": null` ⇒ `None`（与缺字段同义，JSON 里显式写 null 也合法）。
+    #[test]
+    fn observe_markers_tristate_survives_json_including_the_missing_field() {
+        let missing: AppSettings = serde_json::from_str(
+            r#"{ "settings_version": 1, "mitm": { "observe": { "enabled": true, "hosts": ["news.example"] } } }"#,
+        )
+        .expect("缺 markers 的老设置必须能读");
+        assert_eq!(
+            missing.mitm.observe.markers, None,
+            "缺字段 ⇒ None（用默认词表），不是空表"
+        );
+
+        let empty: AppSettings = serde_json::from_str(
+            r#"{ "settings_version": 1, "mitm": { "observe": { "enabled": true, "hosts": ["news.example"], "markers": [] } } }"#,
+        )
+        .expect("空词表必须能读");
+        assert_eq!(
+            empty.mitm.observe.markers,
+            Some(Vec::new()),
+            "空数组是**用户决定**：显式不统计，不能被 None 吞掉"
+        );
+
+        let explicit_null: AppSettings = serde_json::from_str(
+            r#"{ "settings_version": 1, "mitm": { "observe": { "markers": null } } }"#,
+        )
+        .expect("显式 null 必须能读");
+        assert_eq!(explicit_null.mitm.observe.markers, None);
     }
 
     #[test]

@@ -251,6 +251,15 @@ export interface ObserveSettings {
   /** 只观察这些域名（子域命中）；**空 = 一条摘要都不写**。 */
   hosts: string[];
   /**
+   * 自定义**标记词表**。三态（对应 `model.rs::ObserveSettings::markers`）：
+   *
+   * * `null` = 没配（老设置也长这样）⇒ 用后端默认词表；
+   * * `string[]`（非空）⇒ 用这份词表计数；
+   * * `[]` = **明确不统计标记词**：仍按名单采条数与短哈希，命中恒为 0。
+   *   界面必须据此说"不统计任何标记词"，**不许**读成"没有命中 / 干净"。
+   */
+  markers: string[] | null;
+  /**
    * 显式把完整响应体落盘到这个目录。默认 `null` = 不落盘。
    *
    * 只接受**绝对路径**：相对路径会被后端拒绝并降级为不落盘（界面会显示原因），
@@ -288,6 +297,11 @@ export interface ObserveReport {
   configured_hosts: string[];
   /** 实际用于计数的词表。 */
   markers: string[];
+  /**
+   * `false` = 词表为空：这份结论**没有统计标记词**（不是"全部为 0 的干净结论"）。
+   * 界面必须明确说出来。
+   */
+  marker_counting: boolean;
   exchanges: number;
   marker_total: number;
   /** 每个域名一条，命中多的在前。空 = **没有采到证据**（不是"干净"）。 */

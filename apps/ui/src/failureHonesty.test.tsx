@@ -109,6 +109,7 @@ function mitmStatus(over: Partial<MitmStatus> = {}): MitmStatus {
       enabled: false,
       configured_hosts: [],
       markers: [],
+      marker_counting: true,
       exchanges: 0,
       marker_total: 0,
       hosts: [],

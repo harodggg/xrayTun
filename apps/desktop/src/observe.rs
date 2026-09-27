@@ -56,8 +56,14 @@ pub struct ObserveReport {
     pub enabled: bool,
     /// 配置里的 opt-in 名单原样回传。**空 = 一条摘要都不会写。**
     pub configured_hosts: Vec<String>,
-    /// 实际用于计数的词表（来自 `xt_mitm::default_markers`）。
+    /// 实际用于计数的词表（来自设置；缺省 = `xt_mitm::default_markers()`）。
     pub markers: Vec<String>,
+    /// **这份结论有没有统计标记词**。
+    ///
+    /// `false` = 用户把词表清空了（`Some(vec![])`）：仍然按名单采条数与短哈希，
+    /// 但命中数恒为 0。界面**必须**据此说"不统计任何标记词"，**不许**把它
+    /// 渲染成"没有命中 / 干净"—— 那是把"没测量"讲成"测出来是 0"。
+    pub marker_counting: bool,
     /// 已写摘要的交换总条数（**零就是零**）。
     pub exchanges: u64,
     /// 所有域名的标记词命中总数。
@@ -123,10 +129,12 @@ impl ObserveLedger {
                 .cmp(&a.marker_total)
                 .then_with(|| a.host.cmp(&b.host))
         });
+        let markers = effective_markers(settings);
         ObserveReport {
             enabled: settings.observe.enabled,
             configured_hosts: settings.observe.hosts.clone(),
-            markers: default_markers(),
+            marker_counting: !markers.is_empty(),
+            markers,
             exchanges: g.exchanges,
             marker_total: g.marker_total,
             hosts,
@@ -160,6 +168,13 @@ impl ObserveLedger {
 pub struct RecordingObserver {
     inner: DomainObserver,
     ledger: Arc<ObserveLedger>,
+    /// 本次会话**实际生效**的词表（允许为空 = 显式不统计）。
+    ///
+    /// 必须自己存一份、而不是转发 `inner.markers()`：`DomainObserver::new` 会把
+    /// **空词表当成"没配"替换成默认表**（那是库层的既有语义，本卡不动它）。
+    /// 而产品口径是"空 = 用户明确不统计"，所以计数的词表由这一层给代理
+    /// （`proxy.rs` 用的是 `Observer::markers()`），空表就真的一词不数。
+    markers: Vec<String>,
 }
 
 impl RecordingObserver {
@@ -167,6 +182,7 @@ impl RecordingObserver {
         Self {
             inner: DomainObserver::new(config),
             ledger,
+            markers: config.markers.clone(),
         }
     }
 }
@@ -177,7 +193,8 @@ impl Observer for RecordingObserver {
     }
 
     fn markers(&self) -> &[String] {
-        self.inner.markers()
+        // **不是** `self.inner.markers()`：见字段注释，库层会把空表换成默认表。
+        &self.markers
     }
 
     fn observe(&self, record: &ExchangeRecord, body: &[u8]) {
@@ -194,15 +211,44 @@ impl Observer for RecordingObserver {
 
 /// 从 MITM 设置装配 `xt_mitm::ObserveConfig`。
 ///
-/// 词表**固定用** `xt_mitm::default_markers()`：本版不给用户改词表（先采数据，
-/// 再决定规则）；观察开不开、看哪些域名、落不落盘由用户分别决定。
+/// 词表按 [`effective_markers`] 解析：`None` ⇒ 默认表；`Some(list)` ⇒ 归一化后的表
+/// （**允许为空**，空表由 [`RecordingObserver`] 如实执行成"不统计"）。
+/// 观察开不开、看哪些域名、落不落盘由用户分别决定。
 pub fn observe_config_for(settings: &MitmSettings) -> ObserveConfig {
     ObserveConfig {
         enabled: settings.observe.enabled,
         hosts: settings.observe.hosts.clone(),
-        markers: default_markers(),
+        markers: effective_markers(settings),
         capture_body_dir: settings.observe.capture_body_dir.clone(),
     }
+}
+
+/// 本次会话**生效**的标记词表。
+///
+/// * `None`（缺省 / 老 `settings.json`）= `xt_mitm::default_markers()`；
+/// * `Some(list)` = 归一化后的表：逐项去首尾空白、丢掉空项、按首次出现去重。
+///   **允许为空** —— 那是用户明确说了"不统计标记词"（`ObserveReport::marker_counting`
+///   会如实带 `false`），不是"没配"。
+pub fn effective_markers(settings: &MitmSettings) -> Vec<String> {
+    match &settings.observe.markers {
+        None => default_markers(),
+        Some(list) => normalize_markers(list),
+    }
+}
+
+/// 归一化用户词表：去空白、丢空项、去重（保序）。
+fn normalize_markers(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let word = raw.trim();
+        if word.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|w| w == word) {
+            out.push(word.to_string());
+        }
+    }
+    out
 }
 
 /// 配置里的观察问题，翻成给用户看的一句话（没问题时 `None`）。
@@ -238,6 +284,11 @@ mod tests {
 
     fn record(host: &str, body: &[u8]) -> ExchangeRecord {
         summarize(&meta(host, body.len()), body, &default_markers())
+    }
+
+    /// 用**指定词表**摘要，忠实复刻 `proxy.rs` 的调用（它用的是 `Observer::markers()`）。
+    fn record_with(host: &str, body: &[u8], markers: &[String]) -> ExchangeRecord {
+        summarize(&meta(host, body.len()), body, markers)
     }
 
     fn settings(enabled: bool, hosts: &[&str]) -> MitmSettings {
@@ -378,6 +429,7 @@ mod tests {
             "enabled",
             "configured_hosts",
             "markers",
+            "marker_counting",
             "exchanges",
             "marker_total",
             "hosts",
@@ -390,5 +442,105 @@ mod tests {
         for key in ["host", "exchanges", "marker_total", "markers", "last_seen_unix"] {
             assert!(host.get(key).is_some(), "域名报告缺字段 {key}: {host}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 「标记词表可配置」：None / 自定义 / 空表 三态
+    // -----------------------------------------------------------------------
+
+    /// 归一化：去空白、丢空项、去重（保序）；`None` ⇒ 默认表。
+    #[test]
+    fn marker_normalization_trims_drops_blank_and_dedupes() {
+        let mut s = settings(true, &["news.example"]);
+        s.observe.markers = Some(vec![
+            "  promoted ".into(),
+            "".into(),
+            "   ".into(),
+            "promoted".into(),
+            " 广告".into(),
+        ]);
+        assert_eq!(
+            effective_markers(&s),
+            vec!["promoted".to_string(), "广告".to_string()],
+            "去空白 / 丢空项 / 去重"
+        );
+
+        s.observe.markers = None;
+        assert_eq!(
+            effective_markers(&s),
+            default_markers(),
+            "None（缺省 / 老 settings.json）⇒ 默认词表"
+        );
+    }
+
+    /// **判据⑤（自定义词表）**：用户给的词表是**唯一**的计数口径 ——
+    /// 默认表里的词即使真实出现，也不再计入。
+    #[test]
+    fn a_custom_marker_list_replaces_the_default_vocabulary() {
+        let mut s = settings(true, &["news.example"]);
+        s.observe.markers = Some(vec!["sponsored".into()]);
+        let cfg = observe_config_for(&s);
+        assert_eq!(cfg.markers, vec!["sponsored".to_string()]);
+
+        let ledger = Arc::new(ObserveLedger::default());
+        let ob = RecordingObserver::new(&cfg, ledger.clone());
+        assert_eq!(
+            ob.markers(),
+            ["sponsored".to_string()].as_slice(),
+            "代理计数用的必须是外层词表（proxy.rs 走 Observer::markers()）"
+        );
+
+        let body = br#"{"sponsored":true,"promoted":true,"is_ad":true}"#;
+        let rec = record_with("news.example", body, ob.markers());
+        assert_eq!(rec.marker_total, 1, "只数新词表里的 sponsored");
+        ob.observe(&rec, body);
+
+        let report = ledger.report(&s);
+        assert!(report.marker_counting, "有词表 ⇒ 统计是开着的");
+        assert_eq!(report.markers, vec!["sponsored".to_string()]);
+        assert_eq!(report.exchanges, 1);
+        assert_eq!(report.marker_total, 1, "promoted / is_ad 已不在词表里");
+        assert_eq!(report.hosts[0].markers[0].marker, "sponsored");
+    }
+
+    /// **判据⑤（空词表）**：`Some(vec![])` = **明确不统计** ——
+    /// 条目照常采（域名 / 条数 / 短哈希），命中恒 0，且报告带 `marker_counting=false`。
+    ///
+    /// 判别性：把 `RecordingObserver::markers()` 改回转发 `self.inner.markers()`
+    /// ⇒ 库层会把空表换成默认表、`marker_total` 变成 3 ⇒ 这条红（那正是"静默全 0
+    /// 之外更坏的一种"：用户以为没统计，其实在用默认词表统计）。
+    #[test]
+    fn an_empty_marker_list_is_explicit_no_counting_not_a_silent_all_zero() {
+        let mut s = settings(true, &["news.example"]);
+        s.observe.markers = Some(Vec::new());
+        let cfg = observe_config_for(&s);
+        assert!(
+            cfg.markers.is_empty(),
+            "空表要原样交给观察者（产品口径：用户明确不统计）"
+        );
+
+        let ledger = Arc::new(ObserveLedger::default());
+        let ob = RecordingObserver::new(&cfg, ledger.clone());
+        assert!(
+            ob.markers().is_empty(),
+            "外层 markers() 必须是空：proxy.rs 用它算命中，空表就真的一词不数"
+        );
+
+        let body = br#"{"promoted":true,"is_ad":true,"广告":true}"#;
+        let rec = record_with("news.example", body, ob.markers());
+        assert_eq!(rec.marker_total, 0, "空词表 ⇒ 一个词都不数");
+        ob.observe(&rec, body);
+
+        let report = ledger.report(&s);
+        assert!(!report.marker_counting, "必须显式说「这份结论没有统计标记词」");
+        assert!(report.markers.is_empty());
+        assert_eq!(report.exchanges, 1, "仍然采条数（不统计词 ≠ 不观察）");
+        assert_eq!(report.marker_total, 0);
+        assert_eq!(report.hosts.len(), 1, "域名照常留下（结论才有可执行性）");
+        // 空词表**不是**"干净"：报告里没有任何能读成"没有广告"的字段。
+        assert!(
+            !report.marker_counting,
+            "`marker_total == 0` 在空词表下是「没测量」，不是「测出来是 0」"
+        );
     }
 }

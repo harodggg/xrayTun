@@ -71,6 +71,7 @@ function report(over: Partial<ObserveReport> = {}): ObserveReport {
     enabled: false,
     configured_hosts: [],
     markers: ["is_ad", "ad_type", "promoted", "sponsored", "adsbygoogle", "广告"],
+    marker_counting: true,
     exchanges: 0,
     marker_total: 0,
     hosts: [],
