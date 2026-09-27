@@ -16,6 +16,7 @@ import type {
   IntentExplain,
   IntentSummary,
   MitmStatus,
+  ObserveReportFile,
   RecoveryState,
   NodeExport,
   RecentConnections,
@@ -77,6 +78,19 @@ export const api = {
   mitmRemoveCa: () => invoke<MitmStatus>("mitm_ca_remove"),
   /** 按当前设置起/停本地 MITM 代理。 */
   mitmApply: () => invoke<MitmStatus>("mitm_apply"),
+  /**
+   * 把观察结论导出到用户给的**绝对路径**；返回写好的路径。
+   * 与数据目录留档同源；失败会返回可读原因（相对路径 / 没有摘要 / 写不进去）。
+   */
+  mitmObserveExport: (path: string) =>
+    invoke<string>("mitm_observe_export", { path }),
+  /** 清空本会话观察结论并删除数据目录留档文件；返回最新状态。 */
+  mitmObserveClear: () => invoke<MitmStatus>("mitm_observe_clear"),
+  /**
+   * 读回上一轮留在数据目录里的观察结论（重启后仍能看到"看到了什么"）。
+   * `null` = 还没留过档；文件坏掉会 reject（不许静默当成没有）。
+   */
+  mitmObserveSaved: () => invoke<ObserveReportFile | null>("mitm_observe_saved"),
 
   setMode: (mode: ProxyMode) => invoke<AppSnapshot>("set_mode", { mode }),
 

@@ -123,8 +123,12 @@ pub async fn mitm_ca_remove(state: State<'_, AppState>) -> Result<MitmStatus, St
 /// 域名层与内容层不会得到两个结论。
 #[tauri::command]
 pub async fn mitm_apply(state: State<'_, AppState>) -> Result<MitmStatus, String> {
+    // 观察留档的目标是**数据目录下的固定文件**（在锁外把 root 取出来传进闭包：
+    // `Inner` 里没有 `store`，而且 `with` 不许重入）。
+    let report_root = state.store.root().to_path_buf();
     let snapshot = state
         .with(|i| {
+            i.mitm.set_report_path_in(&report_root);
             let settings = i.settings.mitm.clone();
             let allow = i.intent.rules().allow_domains();
             let mut block: Vec<String> = i.intent.rules().block_domains();
@@ -147,4 +151,54 @@ pub async fn mitm_apply(state: State<'_, AppState>) -> Result<MitmStatus, String
         .with(|i| i.mitm.start(&settings, block_hosts, rewriter))
         .ok_or_else(|| "启动 MITM 失败（状态锁不可用）".to_string())??;
     mitm_status(state).await
+}
+
+/// 把当前观察结论**导出**到用户给的**绝对路径**；返回写好的路径。
+///
+/// 导出与数据目录留档共用同一份文档构造（同源），失败一律是可读原因
+/// （相对路径 / 没有摘要 / 没启动过 / 写文件失败）。
+#[tauri::command]
+pub async fn mitm_observe_export(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<String, String> {
+    let written = state
+        .with(|i| i.mitm.export_observe(&path))
+        .ok_or_else(|| "导出观察结论失败（状态锁不可用）".to_string())??;
+    state.log("mitm", "info", format!("已导出观察结论：{written}"));
+    Ok(written)
+}
+
+/// **清空**本会话的观察结论，并删掉数据目录里的留档文件。
+///
+/// 返回最新状态（界面据此重画）。删文件失败会给出可读原因 —— 不许静默。
+#[tauri::command]
+pub async fn mitm_observe_clear(state: State<'_, AppState>) -> Result<MitmStatus, String> {
+    let root = state.store.root().to_path_buf();
+    let removed = state
+        .with(|i| {
+            i.mitm.clear_observe();
+            crate::observe::remove_report_file(&crate::observe::report_path_in(&root))
+        })
+        .ok_or_else(|| "清空观察结论失败（状态锁不可用）".to_string())??;
+    match removed {
+        Some(p) => {
+            state.log("mitm", "info", format!("已清空观察结论与留档：{p}"));
+        }
+        None => {
+            state.log("mitm", "info", "已清空观察结论（数据目录里没有留档文件）");
+        }
+    }
+    mitm_status(state).await
+}
+
+/// 读回**上一轮**留在数据目录里的观察结论（App 重启后仍能看到"看到了什么"）。
+///
+/// * 没有文件 ⇒ `Ok(None)`（"还没采到过"是正常状态）；
+/// * 文件坏掉 ⇒ `Err(可读原因)`（**不许**静默当成"没有留档"）。
+#[tauri::command]
+pub async fn mitm_observe_saved(
+    state: State<'_, AppState>,
+) -> Result<Option<crate::observe::ObserveReportFile>, String> {
+    crate::observe::read_report_file(&crate::observe::report_path_in(state.store.root()))
 }

@@ -280,6 +280,11 @@ export interface HostObservation {
    * 命中计数是**出现次数**，不是"命中就 1"。
    */
   markers: Array<{ marker: string; count: number }>;
+  /**
+   * 去重后的 body **短哈希**（最多 64 个）。它是内容指纹，**不是正文**，
+   * 也无法还原正文；留档里带它是为了"看到了什么"能复核。
+   */
+  body_hashes: string[];
   /** 最近一次观察到这个域名的时间（Unix 秒；0 = 还没采到）。 */
   last_seen_unix: number;
 }
@@ -309,6 +314,36 @@ export interface ObserveReport {
   capture_body_dir: string | null;
   /** 配置里的问题（例如落盘目录是相对路径 ⇒ 已降级为不落盘）。 */
   note: string | null;
+}
+
+/**
+ * 落档 / 导出的文档（`observe.rs::ObserveReportFile`）。
+ *
+ * 落盘与导出**共用同一个构造点**，所以导出的东西就是留档的东西。
+ * 口径头（`schema` / `app_version` / 起止时间 / 观察了哪些域名 / 词表）是刻意的：
+ * 没有口径的计数在事后无法解释。**里面只有摘要，没有正文 / 完整 URL / query。**
+ */
+export interface ObserveReportFile {
+  schema: string;
+  app_version: string;
+  generated_unix: number;
+  /** `null` = 没采到过。 */
+  started_unix: number | null;
+  /** `null` = 还在进行 / 没停过。 */
+  ended_unix: number | null;
+  enabled: boolean;
+  configured_hosts: string[];
+  /** 真的采到过摘要的域名。 */
+  observed_hosts: string[];
+  markers: string[];
+  marker_counting: boolean;
+  exchanges: number;
+  marker_total: number;
+  hosts: HostObservation[];
+  capture_body_dir: string | null;
+  note: string | null;
+  /** 隐私口径（逐字写进文件）。 */
+  privacy: string;
 }
 
 /** 响应体裁剪的唯一口径（`model.rs::MitmBodyStrip`）。 */

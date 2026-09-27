@@ -159,6 +159,7 @@ describe("MITM 观察：没有证据 ≠ 干净", () => {
             { marker: "promoted", count: 3 },
             { marker: "is_ad", count: 1 },
           ],
+          body_hashes: ["0123456789abcdef"],
           last_seen_unix: 1_700_000_000,
         },
       ],

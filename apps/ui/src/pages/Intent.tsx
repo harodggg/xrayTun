@@ -37,6 +37,7 @@ import type {
   MitmSettings,
   MitmStatus,
   ObserveReport,
+  ObserveReportFile,
 } from "../types";
 
 /**
@@ -371,6 +372,16 @@ export default function Intent() {
   const [observeHostsText, setObserveHostsText] = useState<string | null>(null);
   /** 编辑中的标记词表文本（每行一个词；空 = 明确不统计，见 `parseMarkers`）。 */
   const [observeMarkersText, setObserveMarkersText] = useState<string | null>(null);
+  /** 导出目标路径（用户填**绝对路径**；本版不做原生保存对话框）。 */
+  const [observeExportPath, setObserveExportPath] = useState<string>("");
+  /** 导出/清空的成功回执。 */
+  const [observeActionMsg, setObserveActionMsg] = useState<string | null>(null);
+  /** 导出/清空的**可读失败原因** —— 绝不允许静默失败。 */
+  const [observeActionErr, setObserveActionErr] = useState<string | null>(null);
+  /** 上一轮留在数据目录里的观察结论（重启后仍能看到"看到了什么"）。 */
+  const [savedObserve, setSavedObserve] = useState<ObserveReportFile | null>(null);
+  /** 读上次留档失败的原因（文件坏掉 ⇒ 必须明说，不许静默当成"没有"）。 */
+  const [savedObserveErr, setSavedObserveErr] = useState<string | null>(null);
   /** 编辑中的观察落盘目录（绝对路径）。 */
   const [observeDirText, setObserveDirText] = useState<string | null>(null);
 
@@ -391,6 +402,14 @@ export default function Intent() {
     } catch (e) {
       setMitm(null);
       setMitmErr(errorText(e));
+    }
+    // 上一轮留档也单独取：文件坏掉要**明说**，不许静默当成"没有留档"。
+    try {
+      setSavedObserve(await api.mitmObserveSaved());
+      setSavedObserveErr(null);
+    } catch (e) {
+      setSavedObserve(null);
+      setSavedObserveErr(errorText(e));
     }
   }, []);
 
@@ -482,6 +501,50 @@ export default function Intent() {
     },
     [settings, runVoid, refresh],
   );
+
+  /**
+   * 导出观察结论到用户填的**绝对路径**。
+   *
+   * 空路径就地拦下（给可读原因），后端再兜一次绝对路径校验；失败一律显示，
+   * 不许静默（用户会以为留档成功，实际什么都没有）。
+   */
+  const exportObserve = useCallback(() => {
+    const path = observeExportPath.trim();
+    if (path === "") {
+      setObserveActionErr(
+        "导出失败：请先填一个绝对路径（例如 /Users/you/observe-report.json）",
+      );
+      setObserveActionMsg(null);
+      return;
+    }
+    void runVoid("导出观察结论", async () => {
+      try {
+        const written = await api.mitmObserveExport(path);
+        setObserveActionMsg(`已导出到 ${written}`);
+        setObserveActionErr(null);
+        setSavedObserve(await api.mitmObserveSaved());
+      } catch (e) {
+        setObserveActionErr(`导出失败：${errorText(e)}`);
+        setObserveActionMsg(null);
+      }
+    });
+  }, [observeExportPath, runVoid]);
+
+  /** 清空本会话结论与数据目录留档；失败同样要显示原因。 */
+  const clearObserve = useCallback(() => {
+    void runVoid("清空观察结论", async () => {
+      try {
+        await api.mitmObserveClear();
+        setObserveActionMsg("已清空本会话的观察结论与留档文件");
+        setObserveActionErr(null);
+        setSavedObserve(null);
+        await refresh();
+      } catch (e) {
+        setObserveActionErr(`清空失败：${errorText(e)}`);
+        setObserveActionMsg(null);
+      }
+    });
+  }, [runVoid, refresh]);
 
   const allow = useCallback(
     (host: string, action: IntentAllowAction) => {
@@ -1154,6 +1217,67 @@ export default function Intent() {
             。命中计数是<strong>出现次数</strong>，不是"命中就 1"；命中是强证据，
             但<strong>不命中什么也证明不了</strong>。
           </p>
+        )}
+
+        {/*
+         * 留档与导出：结论只活在内存里会"重启即丢"，所以它同时写数据目录里的固定文件
+         * （observe-report.json），并可以把**同一份内容**导出到用户给的绝对路径。
+         * 导出/清空的失败必须显示原因 —— 不许让用户以为留档成功了。
+         */}
+        <div className="field">
+          <label htmlFor="mitm-observe-export">
+            导出观察结论到（绝对路径；只含摘要，不含正文）
+          </label>
+          <input
+            id="mitm-observe-export"
+            value={observeExportPath}
+            placeholder="/Users/you/observe-report.json"
+            onChange={(e) => setObserveExportPath(e.target.value)}
+          />
+          <div className="row">
+            <button className="btn" onClick={exportObserve}>
+              导出
+            </button>
+            <button className="btn btn--danger" onClick={clearObserve}>
+              清空
+            </button>
+          </div>
+          <div className="note">
+            导出内容与数据目录里的留档 observe-report.json <strong>同源</strong>：都是摘要 ——
+            域名、条数、标记词命中、时间、短哈希与口径头（schema / 版本 / 起止时间 / 名单 / 词表），
+            <strong>没有正文、没有完整 URL、没有 query</strong>。
+            「清空」会清掉本会话结论并删掉留档文件；跑着的观察随后采到的新数据仍会继续留档。
+          </div>
+        </div>
+
+        {observeActionErr && (
+          <div className="banner banner--warn" role="alert">
+            {observeActionErr}
+          </div>
+        )}
+        {observeActionMsg && <p className="note">{observeActionMsg}</p>}
+
+        {/*
+         * 上一轮留档：App 重启后"看到了什么"不该消失。文件坏掉必须明说 ——
+         * 静默当成"没有留档"会让一次故障长得和"确实没采到"一模一样。
+         */}
+        {savedObserveErr && (
+          <div className="banner banner--warn" role="alert">
+            读不到上次留档：{savedObserveErr}
+          </div>
+        )}
+        {savedObserve && (
+          <div className="note">
+            <strong>上次留档</strong>：{savedObserve.observed_hosts.length} 个域名 ·{" "}
+            {savedObserve.exchanges} 条摘要 · 生成于 {fmtTime(savedObserve.generated_unix)}
+            {savedObserve.ended_unix
+              ? ` · 结束于 ${fmtTime(savedObserve.ended_unix)}`
+              : " · （没有结束时间：还在跑或没停过）"}
+            。域名：{savedObserve.observed_hosts.length > 0
+              ? savedObserve.observed_hosts.join("、")
+              : "没有采到任何域名（没有证据 ≠ 干净）"}
+            。schema {savedObserve.schema} · v{savedObserve.app_version}
+          </div>
         )}
 
         <div className="note">

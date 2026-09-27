@@ -29,6 +29,8 @@
 
 use std::sync::Arc;
 
+use std::path::{Path, PathBuf};
+
 use xt_core::model::{AppSettings, MitmSettings};
 use xt_mitm::{
     serve_with_observer, BlocklistDecider, BodyRewriter, JsonStripRewriter, LocalCa, ProxyConfig,
@@ -36,7 +38,8 @@ use xt_mitm::{
 };
 
 use crate::observe::{
-    observe_config_for, ObserveLedger, ObserveReport, RecordingObserver,
+    observe_config_for, report_path_in, ObserveArchive, ObserveLedger, ObserveReport,
+    RecordingObserver,
 };
 
 /// 下发给核心的**有效设置**：根证书没被信任时，把 MITM 摘掉。
@@ -110,6 +113,13 @@ pub struct MitmRuntime {
     observe: Arc<ObserveLedger>,
     /// 当前代理实际用的观察者（诊断/测试用）。`stop` 之后为 `None`。
     observer: Option<Arc<RecordingObserver>>,
+    /// 观察留档目标（数据目录下的固定文件）。`None` = 不落盘（测试 / 未配置）。
+    ///
+    /// 由命令层在 `mitm_apply` 时设置；`Default` 是 `None`，这样单测不会
+    /// 意外往真实数据目录里写东西（判据①要的就是"默认不产生文件"）。
+    report_path: Option<PathBuf>,
+    /// 留档器（`stop` 之后**保留**：导出/清空要能拿到会话口径）。
+    archive: Option<Arc<ObserveArchive>>,
 }
 
 /// 给界面看的状态。字段名就是 TS 那边的字段名（契约测试盯着）。
@@ -230,6 +240,14 @@ impl MitmRuntime {
             .map(|ca| xt_tun::macos::trust::sha1_fingerprint(ca.cert_der().as_ref()))
     }
 
+    /// 设观察留档的**数据目录根**（命令层在 `mitm_apply` 时调用）。
+    ///
+    /// 留档路径固定为根下的 [`report_path_in`] —— 不让用户选：用户要选路径的那个
+    /// 动作是「导出」，不是留档。`Default` 是 `None`：单测不会意外往真实数据目录写。
+    pub fn set_report_path_in(&mut self, root: &Path) {
+        self.report_path = Some(report_path_in(root));
+    }
+
     /// 起代理。已经用同一份输入在跑时是空操作（幂等），不会白白换个监听端口。
     pub fn start(
         &mut self,
@@ -247,11 +265,14 @@ impl MitmRuntime {
         self.stop();
         let ca = self.ca()?;
         let decider = Arc::new(BlocklistDecider::new(block_hosts));
-        // 每次启动换一份新的观察汇总与观察者：旧数据属于上一份配置，混在一起
+        // 每次启动换一份新的观察汇总、观察者与留档器：旧数据属于上一份配置，混在一起
         // 会让"这个域名到底采到没有"说不清。
         let ledger = Arc::new(ObserveLedger::default());
-        let observer: Arc<RecordingObserver> =
-            Arc::new(RecordingObserver::new(&observe_config_for(settings), ledger.clone()));
+        let archive = Arc::new(ObserveArchive::new(settings, self.report_path.clone()));
+        let observer: Arc<RecordingObserver> = Arc::new(
+            RecordingObserver::new(&observe_config_for(settings), ledger.clone())
+                .with_archive(archive.clone()),
+        );
         let handle = serve_with_observer(cfg, ca, decider, rewriter, observer.clone())
             .map_err(|e| format!("启动 MITM 代理失败：{e}"))?;
         tracing::info!(
@@ -264,6 +285,7 @@ impl MitmRuntime {
         self.handle = Some(handle);
         self.applied = Some(key);
         self.observe = ledger;
+        self.archive = Some(archive);
         self.observer = Some(observer);
         Ok(())
     }
@@ -271,12 +293,57 @@ impl MitmRuntime {
     /// 停代理。幂等；**留下的 CA 不动**（卸信任锚是单独的、需要 helper 的动作）。
     ///
     /// 观察汇总**不清空**（见字段注释）；只把"当前代理用的观察者"摘掉。
+    /// 停的时候把**最后一份**摘要强制落盘（带结束时间）—— 零摘要时**不产生文件**。
+    /// 写失败不静默：记进留档器的 `last_error`，`status().observe.note` 会显示它。
     pub fn stop(&mut self) {
         if self.handle.take().is_some() {
             tracing::info!("MITM 代理已停止");
         }
+        if !self.observe.is_empty() {
+            self.observe.mark_stopped();
+            if let Some(archive) = &self.archive {
+                if let Err(e) = archive.write_now(&self.observe) {
+                    tracing::warn!(error = %e, "停止时写观察留档失败");
+                }
+            }
+        }
         self.applied = None;
         self.observer = None;
+    }
+
+    /// 导出当前观察结论到用户给的**绝对路径**；返回写入的路径。
+    ///
+    /// 导出与数据目录留档共用 [`ObserveArchive::document`]，因此**内容同源**。
+    /// 失败一律给出可读原因（相对路径 / 没有摘要 / 没启动过 / 写文件失败）。
+    pub fn export_observe(&self, path: &str) -> Result<String, String> {
+        let target = PathBuf::from(path.trim());
+        if !target.is_absolute() {
+            return Err(format!(
+                "导出路径必须是绝对路径：{path} —— 相对路径会落到当前工作目录（可能是仓库）"
+            ));
+        }
+        if self.observe.is_empty() {
+            return Err("还没有采到任何摘要：没有东西可以导出".to_string());
+        }
+        let archive = self.archive.as_ref().ok_or_else(|| {
+            "观察没有启动过：先点「应用」把 MITM 跑起来，采到摘要后再导出".to_string()
+        })?;
+        let doc = archive.document(&self.observe, xt_core::util::now_unix());
+        crate::observe::write_document(&target, &doc)
+            .map_err(|e| format!("导出观察结论失败：{e}"))?;
+        Ok(target.display().to_string())
+    }
+
+    /// 清空**内存**里的观察结论（就地清空，跑着的观察者看得到）。
+    ///
+    /// 数据目录留档文件由命令层按 root 删除（那里才有数据目录）。
+    pub fn clear_observe(&mut self) {
+        self.observe.clear();
+    }
+
+    /// 留档器最近一次失败的可读原因（没有失败时 `None`）——不许静默。
+    pub fn observe_persist_error(&self) -> Option<String> {
+        self.archive.as_ref().and_then(|a| a.last_error())
     }
 
     /// 按当前设置求出状态。取 `ca_trusted` 由调用方给（它要跑 `security(1)` 查询，
@@ -331,7 +398,18 @@ impl MitmRuntime {
             core_restart_required,
             // 观察报告是"配置 + 已采数据"的合并视图：即使代理没在跑，
             // 也要能回答"观察开没开、名单是什么、有没有采到过"。
-            observe: self.observe.report(settings),
+            observe: {
+                let mut report = self.observe.report(settings);
+                // 留档失败**不许静默**：并进 note，让界面上那条 banner 显示出来
+                // （用户会以为自己真的在留档，实际一条都没写下去）。
+                if let Some(err) = self.observe_persist_error() {
+                    report.note = Some(match report.note {
+                        Some(n) => format!("{n}；另外：{err}"),
+                        None => err,
+                    });
+                }
+                report
+            },
         }
     }
 }
@@ -715,6 +793,7 @@ mod tests {
                     "enabled": false,
                     "configured_hosts": [],
                     "markers": xt_mitm::default_markers(),
+                    "marker_counting": true,
                     "exchanges": 0,
                     "marker_total": 0,
                     "hosts": [],
@@ -908,5 +987,136 @@ mod tests {
         dir.observe.capture_body_dir = Some(std::path::PathBuf::from("/tmp/xraytun-observe"));
         let d = MitmRuntime::digest(&dir, &[], false);
         assert_ne!(a, d, "落盘目录进摘要");
+    }
+
+    // -----------------------------------------------------------------------
+    // 「观察结论可持久化 / 可导出」在运行态这一层的接线
+    // -----------------------------------------------------------------------
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("xt-mitm-observe-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时数据目录");
+        dir
+    }
+
+    /// **判据①（落盘面）**：默认关起代理 → 停 → 数据目录里**一个文件都没有**。
+    ///
+    /// 判别性：把 `ObserveArchive::write` 里那句"零摘要直接返回"删掉 ⇒ 这条红。
+    #[test]
+    fn a_default_start_creates_no_report_file_even_after_stop() {
+        let root = temp_root("off");
+        let mut s = mitm_settings_with_ports();
+        s.observe = xt_core::model::ObserveSettings::default();
+        let mut rt = MitmRuntime::default();
+        rt.set_report_path_in(&root);
+        rt.start(&s, vec![], None).expect("起代理");
+        rt.stop();
+
+        let entries: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(entries.is_empty(), "默认关不得产生任何落盘文件：{entries:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **判据②（落盘面）**：开启 + 命中 → 停 → 数据目录出现留档，
+    /// 带结束时间，且**不含正文**。
+    #[test]
+    fn an_observed_run_persists_a_summary_on_stop_and_never_the_body() {
+        let root = temp_root("on");
+        let mut s = mitm_settings_with_ports();
+        s.observe.enabled = true;
+        s.observe.hosts = vec!["news.example".into()];
+        let mut rt = MitmRuntime::default();
+        rt.set_report_path_in(&root);
+        rt.start(&s, vec![], None).expect("起代理");
+
+        let ob = rt.observer.clone().expect("观察者");
+        let body = br#"{"title":"SUPER_SECRET_BODY_TOKEN_9f2","promoted":true}"#;
+        ob.observe(&observed_record("news.example", body), body);
+        rt.stop();
+
+        let path = crate::observe::report_path_in(&root);
+        let text = std::fs::read_to_string(&path).expect("停之后留档必须存在");
+        assert!(
+            !text.contains("SUPER_SECRET_BODY_TOKEN_9f2"),
+            "**留档里不许出现正文片段**：{text}"
+        );
+        assert!(text.contains("news.example"), "{text}");
+        assert!(text.contains("\"ended_unix\": "), "停之后必须带结束时间：{text}");
+        assert!(text.contains("\"exchanges\": 1"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 导出：相对路径被拒（可读原因）/ 没摘要被拒；有摘要时写到绝对路径，
+    /// 且与数据目录留档的**摘要部分同源**。
+    #[test]
+    fn export_refuses_relative_paths_and_no_data_then_writes_the_same_document() {
+        let root = temp_root("export");
+        let mut s = mitm_settings_with_ports();
+        s.observe.enabled = true;
+        s.observe.hosts = vec!["news.example".into()];
+        let mut rt = MitmRuntime::default();
+        rt.set_report_path_in(&root);
+
+        // 还没启动过 / 还没采到：给可读原因，不是静默失败。
+        let err = rt.export_observe("/tmp/xraytun-never.json").unwrap_err();
+        assert!(err.contains("没有摘要"), "{err}");
+
+        rt.start(&s, vec![], None).expect("起代理");
+        let err = rt.export_observe("relative/leak.json").unwrap_err();
+        assert!(err.contains("绝对路径"), "相对路径必须被拒：{err}");
+        let err = rt.export_observe("/tmp/xraytun-never.json").unwrap_err();
+        assert!(err.contains("没有摘要"), "{err}");
+
+        let ob = rt.observer.clone().expect("观察者");
+        let body = br#"{"promoted":true}"#;
+        ob.observe(&observed_record("news.example", body), body);
+
+        let target = root.join("export.json");
+        let written = rt.export_observe(target.to_str().unwrap()).expect("导出");
+        assert_eq!(written, target.display().to_string());
+        let exported = crate::observe::read_report_file(&target)
+            .expect("读导出")
+            .expect("导出文件必须存在");
+
+        rt.stop();
+        let persisted = crate::observe::read_report_file(&crate::observe::report_path_in(&root))
+            .expect("读留档")
+            .expect("停之后留档必须存在");
+        assert_eq!(exported.exchanges, persisted.exchanges, "导出与留档同源");
+        assert_eq!(exported.hosts, persisted.hosts, "导出与留档的摘要同源");
+        assert_eq!(exported.configured_hosts, persisted.configured_hosts);
+        assert_eq!(exported.markers, persisted.markers);
+        assert_eq!(exported.schema, persisted.schema);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 清空：内存结论立刻归零（跑着的观察者看得到）；数据目录留档由命令层删除。
+    #[test]
+    fn clearing_observe_empties_the_live_ledger_in_place() {
+        let root = temp_root("clear");
+        let mut s = mitm_settings_with_ports();
+        s.observe.enabled = true;
+        s.observe.hosts = vec!["news.example".into()];
+        let mut rt = MitmRuntime::default();
+        rt.set_report_path_in(&root);
+        rt.start(&s, vec![], None).expect("起代理");
+        let ob = rt.observer.clone().expect("观察者");
+        let body = br#"{"promoted":true}"#;
+        ob.observe(&observed_record("news.example", body), body);
+        assert_eq!(rt.status(&s, true).observe.exchanges, 1);
+
+        rt.clear_observe();
+        assert_eq!(rt.status(&s, true).observe.exchanges, 0, "清空必须立刻生效");
+        // 跑着的观察者与运行态是**同一个 Arc**：新数据还是会继续采。
+        ob.observe(&observed_record("news.example", body), body);
+        assert_eq!(rt.status(&s, true).observe.exchanges, 1);
+        rt.stop();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

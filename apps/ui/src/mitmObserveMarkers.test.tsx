@@ -241,6 +241,7 @@ describe("标记词表可配置：界面行为", () => {
               exchanges: 2,
               marker_total: 0,
               markers: [],
+              body_hashes: [],
               last_seen_unix: 1_700_000_000,
             },
           ],
