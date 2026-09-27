@@ -938,4 +938,76 @@ mod tests {
             "bring_up 不许裸建快照 —— 那会整份覆盖旧快照、丢掉旧信任锚记录"
         );
     }
+
+    /// **task-25 判据（三条）**：回滚失败时，失败字符串必须**指名道姓**地把
+    /// 「哪个信任锚（指纹）」「哪个网络服务（DNS）」「哪条路由（目的地）」
+    /// 写出来 —— 界面/日志据此才能告诉用户"哪一步没退干净"。
+    ///
+    /// 这是抽 `try_each` 之前**先立**的判据（它是这次重构唯一的等价性依据）：
+    /// 三条断言针对的是**当前实现**的行为，抽函数后必须逐字不变。
+    #[test]
+    fn rollback_failure_text_names_the_anchor_dns_service_and_route() {
+        use crate::macos::snapshot::with_test_root;
+        use crate::macos::trust::with_security_stub;
+        use crate::macos::with_executor;
+
+        const FP: &str = "AB:CD:EF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00";
+        const SERVICE: &str = "Wi-Fi";
+        const DEST: &str = "203.0.113.0/24";
+
+        let root = tmp_snapshot_root("rollback-texts");
+        let mut snap = SessionSnapshot::new("s-text".into(), "utun9".into(), fixture_uplink());
+        snap.trust_anchors.push(crate::macos::trust::TrustAnchorBackup {
+            fingerprint: FP.into(),
+            cert_path: "/nonexistent/rollback-text-ca.pem".into(),
+            existed_before: false,
+        });
+        snap.dns_backups.push(crate::macos::dns::DnsBackup {
+            service: SERVICE.into(),
+            servers: vec!["1.1.1.1".into()],
+            search_domains: vec![],
+        });
+        // 无 `replaced` ⇒ 回滚动作只有 Delete（不引入 Restore 的额外文案）。
+        snap.installed_routes = vec![fixture_route(DEST)];
+        with_test_root(&root, || snap.save()).expect("写快照");
+
+        // 三个来源同时失败：security 替身失败（stderr 不是"not found"）+
+        // 外部命令替身全失败（DNS 与路由都走 `macos::run`）。
+        let security: crate::macos::trust::SecurityStub = std::rc::Rc::new(
+            |_args: &[String]| (false, Vec::new(), b"SecKeychain: permission denied".to_vec()),
+        );
+        let exec: crate::macos::TestExecutor =
+            std::rc::Rc::new(|_p: &str, _a: &[String]| Err(Error::Invalid("注入：命令失败".into())));
+
+        let (err_msg, kept) = with_test_root(&root, || {
+            let r = with_executor(exec, || {
+                with_security_stub(security, || rollback(&snap))
+            });
+            let kept = SessionSnapshot::snapshot_path().exists();
+            let msg = r
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| format!("_ = {r:?} —— 有失败就必须 Err"));
+            (msg, kept)
+        });
+
+        assert!(kept, "有失败时快照必须留着（失败可重试）");
+        // 判据 1/3：信任锚 —— 指纹必须在文案里。
+        assert!(
+            err_msg.contains("移除信任锚") && err_msg.contains(FP),
+            "锚指纹必须出现在失败文案里：{err_msg}"
+        );
+        // 判据 2/3：DNS —— 服务名必须在文案里。
+        assert!(
+            err_msg.contains(SERVICE) && err_msg.contains("DNS"),
+            "DNS 服务名必须出现在失败文案里：{err_msg}"
+        );
+        // 判据 3/3：路由 —— 目的地必须在文案里。
+        assert!(
+            err_msg.contains(DEST) && err_msg.contains("路由"),
+            "路由目的地必须出现在失败文案里：{err_msg}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
