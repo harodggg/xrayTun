@@ -748,6 +748,36 @@ export interface ProbeResult {
   tested_at: number;
 }
 
+/**
+ * 一个节点**最近一次启动尝试失败**的类别与时间（后端 `node_health.rs` 的节点尝试账）。
+ *
+ * # 为什么必须有它（用户原话：「切换节点，没用，没有切换到香港，还是在美国」）
+ *
+ * 用户选中的香港节点当时**不可用**（`egress-broken`：TCP 能连、经它的真实请求
+ * 拿不到响应），App 按既有约定**自动回落到另一个可用节点**继续连接，而且
+ * **不去改用户选中的项** —— 这是对的。但界面过去只能看到「延迟探测」的结果
+ * （`ProbeResult`），而**启动尝试**的失败类别（`egress-broken` / `tcp-unreachable` /
+ * `local-port` / `unknown`）从来没有结构化地到达过界面 ⇒ 坏节点在列表里
+ * 看起来和好节点一样，用户会反复切到它、反复触发回落。
+ *
+ * 字段一一对应 Rust 侧 `NodeHealthRecord`（`apps/desktop/src/state.rs`），
+ * 字段名由 `apps/desktop/tests/type_contract.rs` 的顶层键比对保护。
+ */
+export interface NodeHealthRecord {
+  /** 机器可读的类别短名：`egress-broken` / `tcp-unreachable` / `local-port` / `unknown`。 */
+  class: string;
+  /** 类别的中文名（后端 `NodeFailureClass::label`，例如「节点可达但出口不通」）。 */
+  label: string;
+  /** **下一步做什么**（后端 `NodeFailureClass::advice`；界面原样转述，不自己编）。 */
+  advice: string;
+  /** 连续失败次数（成功即清零）。 */
+  failures: number;
+  /** 最近一次失败的 unix 秒。 */
+  last_failed_at: number;
+  /** 失败原文（可复制给开发者；界面上必须去 markdown 记号再显示）。 */
+  detail: string;
+}
+
 export interface LogEntry {
   ts_unix: number;
   source: string;
@@ -783,6 +813,25 @@ export interface AppSnapshot {
   runtime: CoreRuntime;
   latency: Record<string, ProbeResult>;
   traffic: TrafficSample;
+  /**
+   * **本次连接实际使用的节点 id**（自动回落之后可能与 `settings.selected_node` 不同）。
+   *
+   * 与 `settings.selected_node` 的分工是刻意的，也是一个用户踩过的坑：
+   * * `settings.selected_node` = **你选的**（意图），回落时**不会被改写**；
+   * * `active_node` = **数据面正在用的**（事实），只由启动成功那条路写。
+   *
+   * 界面上这两件事必须**同时**出现（`nodeInUse.ts` 是唯一真源）—— 只显示
+   * 「选中项」正是「我切到香港了，但出口还是美国，切换没用」的误导源头。
+   * 为 `null` 表示后端还没告诉我们（未连接 / 旧快照）⇒ 界面**不猜**，什么都不显示。
+   */
+  active_node: string | null;
+  /**
+   * 每个节点**最近一次尝试失败**的类别 / 时间（key = 节点 id；成功即清除）。
+   *
+   * 空对象表示「没有任何节点失败过」—— 与「读不到」不是同一件事，但界面
+   * 在两种情况下都只是**不显示坏节点标记**（没有可依据的失败事实，不许编）。
+   */
+  node_health: Record<string, NodeHealthRecord>;
   notice: string | null;
   helper: HelperAvailability;
   core: CoreAvailability;

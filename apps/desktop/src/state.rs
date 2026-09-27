@@ -246,6 +246,41 @@ pub struct Inner {
     /// [`crate::node_health::CONSECUTIVE_FAILURES_BEFORE_SUB_REFRESH`] 且它来自订阅时，
     /// 提示「重拉订阅」（见 `node_health::subscription_refresh_hint`）。
     pub node_fail_streak: HashMap<String, u32>,
+    /// 每个节点**最近一次尝试失败**的类别 / 次数 / 时间 / 原文（key = 节点 id）。
+    ///
+    /// # 为什么单独存一份（不是从 `node_fail_streak` 推）
+    ///
+    /// 用户原话：「切换节点，没用，没有切换到香港，还是在美国」。他反复切到一个
+    /// **必然回落**的节点上 —— 因为那个节点在**节点列表里和好节点长得一样**：
+    /// 列表上只有「延迟探测」的结果（`latencies`），而 `egress-broken`
+    /// 是**启动尝试**的结论（`node_health::classify`）。
+    ///
+    /// 这份账本让界面上「坏节点看得出来」有据可依：类别（
+    /// [`crate::node_health::NodeFailureClass::slug`]）、最近一次失败时间、
+    /// 连续次数、以及可复制给开发者的原文。**成功即清**（见 `commands::core`），
+    /// 否则一个已经恢复的节点会一直挂着红标（另一种假陈述）。
+    pub node_health: HashMap<String, NodeHealthRecord>,
+}
+
+/// 一个节点最近一次尝试失败的账本条目（**给界面看的形状**）。
+///
+/// 字段全部是「后端自己算出来的事实」，界面只做转述 —— 尤其是 `class`：
+/// 它是 `NodeFailureClass::slug()`（`egress-broken` / `tcp-unreachable` / …），
+/// 界面据此给出可核对的标记，**不许自己按错误文案猜类别**。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeHealthRecord {
+    /// 机器可读的类别短名（[`crate::node_health::NodeFailureClass::slug`]）。
+    pub class: String,
+    /// 类别的中文名（[`crate::node_health::NodeFailureClass::label`]）。
+    pub label: String,
+    /// **下一步做什么**（[`crate::node_health::NodeFailureClass::advice`]）。
+    pub advice: String,
+    /// 连续失败次数（与 `node_fail_streak` 同源，成功即清零后这条记录也会被删）。
+    pub failures: u32,
+    /// 最近一次失败的 unix 秒。
+    pub last_failed_at: u64,
+    /// 失败原文（可复制给开发者）。
+    pub detail: String,
 }
 
 /// DNS 探测状态。
@@ -431,6 +466,7 @@ impl Inner {
             mitm: crate::mitm::MitmRuntime::default(),
             active_node: None,
             node_fail_streak: HashMap::new(),
+            node_health: HashMap::new(),
         }
     }
 
@@ -615,6 +651,24 @@ pub struct AppSnapshot {
     pub runtime: CoreRuntime,
     pub latency: LatencyTable,
     pub traffic: TrafficSample,
+    /// **本次连接实际使用的节点 id**（自动回落之后可能与
+    /// `settings.selected_node` 不同；`None` = 没在跑 / 还不知道）。
+    ///
+    /// # 为什么必须下发（用户原话：「切换节点，没用，没有切换到香港，还是在美国」）
+    ///
+    /// 用户选中了**香港**，但它当时不可用（`egress-broken`），App 按既有约定
+    /// **自动回落到另一个可用的美国节点**继续连接、且**不改用户选中的项**。
+    /// 这是对的行为 —— 但界面过去拿不到「实际在用哪个」，只能显示选中项，
+    /// 于是两件事被读成了一件。
+    ///
+    /// 与 [`Inner::active_node`] 是**同一条事实**（这里只是把它给界面）：
+    /// 写入点唯一，见 `commands/core.rs` 里启动成功那一处。
+    pub active_node: Option<String>,
+    /// 每个节点**最近一次尝试失败**的账本（key = 节点 id；成功即清除）。
+    ///
+    /// 界面据此把坏节点标出来（类别 + 最近一次失败时间），避免用户反复切到一个
+    /// **必然回落**的节点上。空表 = 没有任何节点失败过（不是「读不到」）。
+    pub node_health: HashMap<String, NodeHealthRecord>,
     pub notice: Option<String>,
     pub helper: HelperAvailability,
     pub core: CoreAvailability,

@@ -17,6 +17,7 @@ import {
 } from "./topbarStatus";
 import { StoreProvider, useStore } from "./store";
 import { MODE_LABEL, formatBytes, formatRate, type ProxyMode } from "./types";
+import { inUseView } from "./nodeInUse";
 import Dashboard from "./pages/Dashboard";
 import Nodes from "./pages/Nodes";
 import Subscriptions from "./pages/Subscriptions";
@@ -144,6 +145,14 @@ function Shell({ initialView }: { initialView?: View }) {
   }, [view]);
 
   const running = snapshot?.runtime.running ?? false;
+  /**
+   * 「本次实际使用的节点 vs 你选的节点」（`nodeInUse.ts` 是唯一真源）。
+   *
+   * 只有**真的发生了回落**时才非空（核心在跑 + 后端给了 `active_node` +
+   * 它与 `settings.selected_node` 不同）。没有回落时 `null` —— 下面那条横幅
+   * 与顶栏徽章一起消失，**不会**拿「实际使用」去重复一遍选中项（防狼来了）。
+   */
+  const inUse = snapshot ? inUseView(snapshot) : null;
   /** 失败横幅上的动作与「按钮现在叫什么」（都由 `failure.ts` 推，见那里）。 */
   const errorActions = error ? failureActions(error) : [];
   const errorNameNote = error ? buttonNameNote(error, running) : null;
@@ -222,6 +231,27 @@ function Shell({ initialView }: { initialView?: View }) {
       <main className="main">
         <TopBar view={view} />
         <div className="content">
+          {/*
+           * 自动回落的**可见**说明（用户原话：「切换节点，没用，没有切换到香港，
+           * 还是在美国」）。回落本身是对的 —— 缺的是「说清楚」：
+           *
+           *   · 本次用的到底是哪个节点（数据面事实，`snapshot.active_node`）；
+           *   · 你选的是哪个、为什么没被用（节点尝试账里的类别）；
+           *   · **你的选择没有被改动**（回落从不写回 `settings.selected_node`）。
+           *
+           * 刻意**不加** `role`：顶栏已经有一个 `role="status"` 的 live region
+           * （`failureHonesty.test.tsx` 用 `getByRole("status")` 定位它，多一个就
+           * 会让那条断言「找到多个」而红）。这里承载的是**看得见**的那一份。
+           */}
+          {inUse && (
+            <div className="banner banner--warn" data-testid="fallback-notice">
+              <span>⇄</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="banner__reason">{inUse.headline}</div>
+                <div className="banner__steps">{inUse.detail}</div>
+              </div>
+            </div>
+          )}
           {/*
            * task-23 F1：有未保存的规则草稿时，切页前先问一次。
            * 「留在本页」是默认安全项（用户如果不小心按了导航，工作不会丢）。
@@ -364,6 +394,19 @@ export function TopBar({ view }: { view: View }) {
   const socksPort = snapshot?.settings.socks_port ?? null;
   /** 只有在「核心运行中 + 系统代理模式」时才有内容（task-72，见 `systemProxyBadge`）。 */
   const proxyBadge = systemProxyBadge(mode, running, socksPort);
+  /**
+   * 「本次实际使用的节点 vs 你选的节点」（文案由 `nodeInUse.ts` 那个唯一真源拼）。
+   *
+   * 顶栏是用户切换节点后第一眼看的地方：过去它**一个节点名都不写**，而仪表盘
+   * 状态区写的是**选中项** ⇒ 用户得到「我切到香港了，出口却是美国」。
+   * 现在两个事实在同一行里同时出现。
+   *
+   * 刻意**不加** `role="status"`：本 header 里已经有一个 sr-only 的 live region，
+   * 多一个会让 `screen.getByRole("status")` 变成「找到多个」（见
+   * `failureHonesty.test.tsx`）。这条徽章是**看得见**的载体，完整解释在
+   * `title` 与 App 顶部那条横幅里。
+   */
+  const inUse = snapshot ? inUseView(snapshot) : null;
   const traffic = snapshot?.traffic;
   // 窗口用的是 `hiddenTitle`（见 tauri.conf.json），macOS 的标题栏文字是
   // 隐藏的 —— 这条顶栏才是用户真正看到的「标题栏」。所以网速要显示在这里，
@@ -511,6 +554,19 @@ export function TopBar({ view }: { view: View }) {
       {proxyBadge && (
         <span className="badge badge--unknown" title={status.detail}>
           {proxyBadge}
+        </span>
+      )}
+
+      {/* 回落发生时，**两个事实同一行**：数据面正在用的那个 + 你选的那个。
+          文案由 `nodeInUse.ts` 拼（唯一真源）；这里只负责呈现。
+          没有回落时不渲染 —— 见 `inUse` 的注释（防狼来了）。 */}
+      {inUse && (
+        <span
+          className="badge badge--unknown topbar__in-use"
+          data-testid="active-node-badge"
+          title={inUse.detail}
+        >
+          {inUse.headline}
         </span>
       )}
 

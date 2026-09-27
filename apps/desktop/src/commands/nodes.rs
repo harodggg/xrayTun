@@ -236,6 +236,9 @@ pub async fn delete_node(
         .with(|i| {
             i.nodes.retain(|n| n.id != node_id);
             i.latencies.remove(&node_id);
+            // 失败账本也跟着走：节点都没了，它的「上次失败」再留着就是一条
+            // 指不到任何东西的记录（同一个 id 将来复用时还会误标新节点）。
+            i.node_health.remove(&node_id);
             if i.settings.selected_node.as_deref() == Some(node_id.as_str()) {
                 i.settings.selected_node = i.nodes.first().map(|n| n.id.clone());
             }

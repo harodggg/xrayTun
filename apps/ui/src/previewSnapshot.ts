@@ -1,7 +1,7 @@
 /**
  * 预览桥接 · 假快照（`snapshot` 命令）。
  *
- * `?preview=1&state=connected|uncommitted|disconnected|no-core|stale|notice`
+ * `?preview=1&state=connected|uncommitted|disconnected|no-core|stale|notice|node-fallback`
  * 决定返回哪一种状态 —— 这样每种异常态都能在预览里看到、能截图、能回归。
  * 场景开关的解析就放在数据旁边，**不要再散到别处**。
  *
@@ -92,7 +92,7 @@ function probe(nodeId: string, rtt: number | null, ok: boolean, err: string | nu
 /**
  * 按场景改造快照，方便用截图检查各状态的呈现。
  *
- * `?preview=1&state=connected|uncommitted|disconnected|no-core|stale|notice`
+ * `?preview=1&state=connected|uncommitted|disconnected|no-core|stale|notice|node-fallback`
  * 默认 `uncommitted`（两阶段启动的中间态，最值得看的一种）。
  */
 /**
@@ -160,6 +160,26 @@ export function scenarioSnapshot(): AppSnapshot {
       };
       break;
     case "uncommitted":
+      break;
+    case "node-fallback":
+      // 用户原话那条路径：**你选中的香港不可用（egress-broken），App 自动回落到
+      // 美国**，而你的选择没有被改动。预览用它检查「两个事实同屏」与坏节点标记
+      // （`?preview=1&state=node-fallback`）。
+      base.settings.mode = "tun";
+      base.runtime = { ...base.runtime, running: true, routes_committed: true, tun_interface: "utun3" };
+      base.settings.selected_node = "n-hk-1";
+      base.active_node = "n-us-3";
+      base.node_health = {
+        "n-hk-1": {
+          class: "egress-broken",
+          label: "节点可达但出口不通",
+          advice: "换一个节点；这个节点本身能连上，但它转发不出去（墙或节点出口的问题）",
+          failures: 2,
+          last_failed_at: now - 90,
+          detail: "经它发出的真实请求拿不到响应（000）。**已在接管默认路由之前中止**，系统网络未被改动。",
+        },
+      };
+      break;
     default:
       break;
   }
@@ -328,6 +348,14 @@ const BASE_SNAPSHOT: AppSnapshot = {
     "n-sg-4": probe("n-sg-4", 61, false, "探针失败: 等待首字节超时（总预算 5s）"),
   },
   traffic: { rx_bytes: 8_412_774_400, tx_bytes: 1_204_887_552, rx_rate: 1_886_464, tx_rate: 235_520 },
+  /**
+   * 数据面实际在用的节点。预览默认取**与选中项相同**的值（`n-hk-1`）：
+   * 常态下两者本就该一致 —— 于是预览里**不会**凭空多出「实际在用」那条
+   * 回落说明（见 `nodeInUse.ts` 的负向对照）。
+   */
+  active_node: "n-hk-1",
+  /** 预览默认没有任何节点失败过 —— 于是节点列表里不会凭空出现失败标记。 */
+  node_health: {},
   notice: "helper 未安装：TUN 模式需要它。系统代理模式不受影响。",
   helper: {
     socket_present: false,

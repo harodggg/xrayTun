@@ -29,6 +29,8 @@ import { InlineConfirm } from "../InlineConfirm";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
 import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
 import { useStore } from "../store";
+// 「正在用的节点」与「你选的节点」是两件事：判据只在 `nodeInUse.ts` 里写一份。
+import { inUseView } from "../nodeInUse";
 import type { AppSnapshot, UpdateStatus } from "../types";
 import {
   formatBytes,
@@ -192,8 +194,18 @@ export default function Dashboard({
 
   const { runtime, helper, core, nodes, settings, traffic, latency } = snapshot;
   const selected = nodes.find((n) => n.id === settings.selected_node) ?? null;
-  const selectedLatency = selected ? latency[selected.id] : undefined;
-  const rtt = selectedLatency?.server_rtt_ms ?? null;
+  /**
+   * 回落发生时，「已连接 · X」这一处的 X 必须是**数据面正在用的**那个节点
+   * （`nodeInUse.ts` 的唯一真源），并把「你选的」显式写在旁边。
+   *
+   * 这里原来无条件用 `settings.selected_node` —— 于是用户切到香港、App 回落到
+   * 美国之后，状态区写着「已连接 · 香港」，用户看到出口是美国，得到
+   * 「切换没用」（用户原话）。**选中项不是正在用的那一项。**
+   */
+  const inUse = inUseView(snapshot);
+  const shownId = inUse ? inUse.used.id : selected?.id ?? null;
+  const shownLatency = shownId ? latency[shownId] : undefined;
+  const rtt = shownLatency?.server_rtt_ms ?? null;
   const connected = runtime.running;
   /**
    * 自动恢复（task-22）：看门狗在自愈时**不能说成「未连接」** —— 那会让用户以为
@@ -249,10 +261,18 @@ export default function Dashboard({
         <div className={`dash__state ${state.toneClass}`}>
           <span className={`dot ${state.dotClass}`} />
           <span className="dash__state-label">{state.label}</span>
-          {connected && selected && (
+          {connected && (inUse || selected) && (
             <>
               <span className="dash__sep">·</span>
-              <span className="dash__state-node">{selected.name}</span>
+              {/* 显示的节点名 = **数据面正在用的**那个（回落时不是选中项）。 */}
+              <span className="dash__state-node">{inUse ? inUse.used.name : selected!.name}</span>
+              {/* 回落时把「你选的」显式写在旁边：同一行两个事实都在，
+                  用户不会再把选中项读成「正在用的」（见 `nodeInUse.ts`）。 */}
+              {inUse && (
+                <span className="dash__state-selected">
+                  你选的：{inUse.selected.name}（本次未使用）
+                </span>
+              )}
               {/* task-120：**延迟数字不能替「这个节点能不能用」背书。**
                   `ProbeResult` 里有 `available` 与 `server_rtt_ms` 两个独立字段，
                   后端明确保留「不可用但量得到距离」这一态
@@ -260,8 +280,10 @@ export default function Dashboard({
                   节点页早就按这个口径做了中性色（`Nodes.tsx:257`
                   `available === false ? "unknown" : latencyTier(...)`），
                   而这里原来无条件按 `latencyTier(rtt)` 上色 ——
-                  一个刚探测失败的节点会在这里显示成绿色的「53 ms」。 */}
-              {selectedLatency?.available === false ? (
+                  一个刚探测失败的节点会在这里显示成绿色的「53 ms」。
+                  回落后徽章跟着**数据面正在用的那台**走（`shownLatency`）：
+                  拿选中项的延迟去配正在用的名字，是同一族的假陈述。 */}
+              {shownLatency?.available === false ? (
                 <span
                   className="badge badge--unknown"
                   title={

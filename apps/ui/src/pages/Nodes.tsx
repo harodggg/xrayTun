@@ -23,12 +23,15 @@ import { CopyButton } from "../IncidentReport";
 import { InlineConfirm } from "../InlineConfirm";
 import SnapshotFallback from "../SnapshotState";
 import { useStore } from "../store";
+// 失败类别 + 最近一次失败时间（节点尝试账）与「正在用 vs 你选的」的唯一真源。
+import { healthBadge, healthOf, inUseView } from "../nodeInUse";
 import {
   formatTimestamp,
   latencyTier,
   nodeSummary,
   type Node,
   type NodeExport,
+  type NodeHealthRecord,
   type ProbeResult,
 } from "../types";
 
@@ -59,6 +62,15 @@ export default function Nodes() {
    * 放在 `useMemo` **之后**：hook 的调用顺序必须与其它 render 一致。
    */
   if (!snapshot) return <SnapshotFallback />;
+
+  /**
+   * 回落视图（`nodeInUse.ts` 的唯一真源）：只有**真的换了节点**时才非空。
+   *
+   * 用它给「你选中的那台」在列表里加一句「本次回落未使用」—— 否则列表里
+   * 那行仍然只写「已选中」，用户会以为它正在被使用（用户原话：「切换节点，
+   * 没用，没有切换到香港，还是在美国」）。
+   */
+  const inUse = inUseView(snapshot);
 
   /**
    * task-23 B1：行内 roving tabindex 的落点。
@@ -207,6 +219,10 @@ export default function Nodes() {
               key={node.id}
               node={node}
               selected={node.id === selectedId}
+              /** 你选中的那台这次**没被使用**（回落发生了）。 */
+              fallbackSelected={inUse?.selected.id === node.id}
+              /** 后端节点尝试账里这台最近一次失败；`null` = 没有失败记录。 */
+              health={healthOf(snapshot, node.id)}
               probe={latency[node.id]}
               busy={busy !== null}
               tabIndex={busy !== null || node.id !== rovingId ? -1 : 0}
@@ -288,6 +304,8 @@ export default function Nodes() {
 function NodeRow({
   node,
   selected,
+  fallbackSelected,
+  health,
   probe,
   busy,
   tabIndex,
@@ -298,6 +316,10 @@ function NodeRow({
 }: {
   node: Node;
   selected: boolean;
+  /** 它被选中，但**本次没有被使用**（App 回落到了别的节点）。 */
+  fallbackSelected: boolean;
+  /** 最近一次**启动尝试失败**的账本（类别 + 次数 + 时间）；`null` = 没有失败记录。 */
+  health: NodeHealthRecord | null;
   /** 本地 → 服务器的 TCP 握手 RTT（中位数）。这是「延迟」。 */
   /** 这个节点的最近一次探测结果（`snapshot.latency[node.id]`）；`undefined` = 没测过。 */
   probe: ProbeResult | undefined;
@@ -330,16 +352,34 @@ function NodeRow({
   const availabilityLabel = availabilityLabelFor(available);
   const availabilityTitle = availabilityTitleFor(probe);
   const availabilityTone = available === null ? "unknown" : available ? "fast" : "slow";
+  /**
+   * 启动尝试失败的可见标记（类别 + 最近一次失败时间）。
+   *
+   * # 为什么需要它（用户原话：「切换节点，没用…还是在美国」）
+   *
+   * 他反复切到一个**必然回落**的节点上 —— 因为那个节点在列表里和好节点长得
+   * 一模一样（这个页面上只有「延迟探测」的结果，而 `egress-broken` 是
+   * **启动尝试**的结论）。失败类别与时间都来自后端账本（`node_health`），
+   * 界面上原样转述，不自己归因。
+   */
+  const healthInfo = healthBadge(health);
+  const unhealthy = health !== null;
 
   return (
     <div
-      className={`list__row node-row${selected ? " is-selected" : ""}`}
+      className={`list__row node-row${selected ? " is-selected" : ""}${
+        unhealthy ? " node-row--unhealthy" : ""
+      }`}
       // task-23 B1：整行是一个**单选**项。键盘：Enter/Space 选中、方向键组内移动；
       // 读屏：能听到「单选、已选中/未选中」。
       role="radio"
       aria-checked={selected}
       aria-disabled={busy || undefined}
       tabIndex={tabIndex}
+      // **把「哪一行是哪个节点」变成可断言的事实**：界面上「坏节点看得出来」这条
+      // 判据（jsdom 里 CSS 不加载）只能靠这两个锚点钉住。
+      data-node-id={node.id}
+      data-health={health?.class ?? undefined}
       onClick={busy ? undefined : onSelect}
       onKeyDown={onKeyDown}
       // task-120：这里原来是「**正在使用**这个节点」/「当前」。判据是
@@ -358,15 +398,21 @@ function NodeRow({
       title={
         busy
           ? "操作进行中，暂时不能切换节点"
-          : selected
-            ? "已选中：核心运行时流量走这个节点"
-            : "点击切换到该节点"
+          : unhealthy
+            ? `这个节点上次启动尝试失败：${health!.label}（${health!.class}）—— 现在切到它会再回落一次`
+            : selected
+              ? "已选中：核心运行时流量走这个节点"
+              : "点击切换到该节点"
       }
     >
       <div className="list__main">
         <div className="node-row__head">
           <span className="list__name">{node.name}</span>
           {selected && <span className="node-row__tag">已选中</span>}
+          {/* 选中 ≠ 正在用：回落发生时必须写清这一点，否则这行看起来就是「正在用香港」。 */}
+          {selected && fallbackSelected && (
+            <span className="node-row__tag node-row__tag--warn">本次回落未使用</span>
+          )}
         </div>
         <div className="list__meta">
           {nodeSummary(node)} · {node.address}:{node.port}
@@ -390,6 +436,24 @@ function NodeRow({
       >
         {availabilityLabel}
       </span>
+
+      {/* ---- 启动尝试失败的可见标记（类别 + 最近一次失败时间）----
+          类别与时间**都来自后端账本**（`snapshot.node_health[node.id]`），
+          界面只转述；`title` 里带上「下一步」与失败原文。
+          这一条是「坏节点不能看起来和好节点一样」的全部依据。 */}
+      {healthInfo && health && (
+        <span
+          className="badge badge--slow node-row__metric node-row__health"
+          data-testid={`node-health-${node.id}`}
+          title={
+            `${healthInfo.title}` +
+            `要在它恢复之前别再切到它：点右侧「删除」把它移出列表` +
+            `（订阅带来的节点下次更新成功时可能回来）。`
+          }
+        >
+          {healthInfo.text} · {formatTimestamp(health.last_failed_at)}
+        </span>
+      )}
 
       <span className="node-row__actions">
         <button

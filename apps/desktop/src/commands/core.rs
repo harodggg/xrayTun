@@ -106,7 +106,14 @@ pub async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
 ///   · `start_core` 的循环只剩「决策 + 调用」，长度可读；
 ///   · 「连续 N 次 + 来自订阅 ⇒ 提示」这条从「只能整条启动路径间接验」
 ///     变成可单测（见 `note_node_failure_counts_streaks_and_only_hints_for_subscriptions`）。
-/// 三件事的顺序与内容与内联版逐条相同：**计数 → 日志 → 提示**。
+/// 顺序与内容与内联版逐条相同：**计数 → 日志 → 提示**；本次在计数之后**新增**
+/// 一件给界面的**账本**（见下），它不参与控制流。
+///
+/// # 账本（新增的那一件）
+///
+/// `i.node_health` 是**给界面**的那一份（类别 + 次数 + 时间 + 原文）：用户
+/// 「切换节点，没用」的根因之一是列表里看不出哪台必然回落。它必须在这里写，
+/// 因为这里是「一个节点这次以什么类别失败」的**唯一**判定点。
 fn note_node_failure(
     state: &AppState,
     node: &Node,
@@ -114,11 +121,26 @@ fn note_node_failure(
     elapsed: Duration,
     message: &str,
 ) {
+    let now = xt_core::util::now_unix();
     let streak = state
         .with(|i| {
             let n = i.node_fail_streak.entry(node.id.clone()).or_insert(0);
             *n += 1;
-            *n
+            let streak = *n;
+            // 给界面的账本：**成功即清**（见 `start_core` 成功那一处），
+            // 否则一个已经恢复的节点会一直挂着失败标记 —— 另一种假陈述。
+            i.node_health.insert(
+                node.id.clone(),
+                crate::state::NodeHealthRecord {
+                    class: class.slug().to_string(),
+                    label: class.label().to_string(),
+                    advice: class.advice().to_string(),
+                    failures: streak,
+                    last_failed_at: now,
+                    detail: message.to_string(),
+                },
+            );
+            streak
         })
         .unwrap_or(1);
     state.log(
@@ -492,6 +514,11 @@ pub(crate) async fn start_core_with_outcome(
                 i.last_notice = Some(msg.clone());
             });
             events::runtime_changed(app, state);
+            // 全试完才失败：这次的**每个节点**都在账本里留了一条（类别 + 时间）。
+            // 命令返回的是 `Err`，前端那条 `run()` 路径**不会**自动拉新快照 ——
+            // 所以这里必须主动说一声，否则「刚才试过的那批节点各自怎么失败的」
+            // 在界面上（节点列表的失败标记）永远是空的。
+            events::nodes_changed(app);
             return Err(msg);
         }
     };
@@ -501,6 +528,10 @@ pub(crate) async fn start_core_with_outcome(
     state.with(|i| {
         i.active_node = Some(used_node_id.clone());
         i.node_fail_streak.remove(&used_node_id);
+        // **成功即清失败标记**：这台已经能用了，界面上不该再挂着「上次失败」。
+        // （只清**成功**的这一台；其它失败过的节点各自的记录留着 —— 那正是
+        // 「坏节点看得出来」的全部依据。）
+        i.node_health.remove(&used_node_id);
     });
     // **无论有没有换，都把「这次实际用了哪个」写进日志。**
     // 换了还要再给一条**提示条**：说清换了哪个、为什么换、用户的选择没被改动。
@@ -576,6 +607,15 @@ pub(crate) async fn start_core_with_outcome(
         }
     }
     events::runtime_changed(app, state);
+
+    // **节点账本变了 ⇒ 让界面重读快照。**
+    //
+    // `runtime://changed` 的载荷只带 runtime/traffic（那是既有契约），而
+    // `active_node` 与 `node_health` 在快照里 —— 自动重建（看门狗 / 换网）
+    // 这条路径**不经过命令返回值**，不主动说一声的话，界面会一直拿着上一份
+    // 「谁在用、谁坏过」。复用既有的 `nodes://changed`（前端收到就重拉快照），
+    // 不新增事件名、不改任何载荷形状。
+    events::nodes_changed(app);
 
     // 日志转发任务：核心的 stdout/stderr → 状态环形缓冲 + UI 事件。
     let app_handle = app.clone();
@@ -768,6 +808,9 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
             monitor.abort();
         }
         i.traffic = crate::state::TrafficSample::default();
+        // **核心没了，「实际在用哪个节点」这个问题就不该再有答案** ——
+        // 留着它会让界面在断开之后继续说「正在用 X」（假陈述）。
+        i.active_node = None;
         // 运行态由纯函数决定（见 `runtime_after_stop` 的注释）：
         // **先算完再看结果**，而不是先清干净再补日志。
         i.runtime = runtime_after_stop(&i.runtime, &result);
@@ -3983,6 +4026,70 @@ mod tests {
             notice.is_none(),
             "手工节点没有订阅可重拉 ⇒ 不许出现订阅提示：{notice:?}"
         );
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// **节点失败账本**（给界面的那一份）：类别 / 次数 / 时间 / 原文都要写进去。
+    ///
+    /// 判据是用户原话那条路径（「切换节点，没用，没有切换到香港，还是在美国」）：
+    /// 界面上「坏节点看得出来」的**唯一**依据就是这条记录 —— 所以它必须由
+    /// `note_node_failure`（类别判定的唯一处）来写，而不是界面按错误文案猜。
+    ///
+    /// 已知边界：**「成功即清」发生在 `start_core` 成功那一条路**（要真的起核心），
+    /// 这条单测覆盖不到；它由 `start_core` 里 `i.node_health.remove(&used_node_id)`
+    /// 那一行 + UI 侧 `nodeFallbackHonesty.test.tsx` 的负向对照共同钉住。
+    #[test]
+    fn node_failure_is_recorded_in_the_ui_ledger() {
+        let (state, store) = route_audit_state("node-health-ledger");
+        let node = Node {
+            id: "n-egress".into(),
+            name: "香港 · REALITY 01".into(),
+            address: "45.207.197.185".into(),
+            port: 443,
+            protocol: xt_core::model::Protocol::Vless {
+                uuid: "00000000-0000-0000-0000-000000000000".into(),
+                flow: String::new(),
+                encryption: "none".into(),
+            },
+            transport: Default::default(),
+            tls: Default::default(),
+            mux: None,
+            source: xt_core::model::NodeSource::Manual,
+            tags: Vec::new(),
+            raw_uri: None,
+        };
+        note_node_failure(
+            &state,
+            &node,
+            crate::node_health::NodeFailureClass::EgressBroken,
+            Duration::from_secs(3),
+            "经它发出的真实请求拿不到响应（000）",
+        );
+        let rec = state
+            .with(|i| i.node_health.get("n-egress").cloned())
+            .unwrap()
+            .expect("失败必须进「给界面」的账本（否则列表里看不出哪台必然回落）");
+        assert_eq!(rec.class, "egress-broken", "机器可读的类别必须与 classify 的结论一致");
+        assert_eq!(rec.label, "节点可达但出口不通", "中文类别名给用户看");
+        assert!(!rec.advice.is_empty(), "下一步必须能原样转述给用户");
+        assert_eq!(rec.failures, 1);
+        assert!(rec.last_failed_at > 0, "最近一次失败时间必须有值（界面要显示它）");
+        assert!(rec.detail.contains("拿不到响应"), "原文必须带着：{}", rec.detail);
+
+        // 第二次失败：次数递增、类别可被更新（同一个节点只有一条「最近一次」）。
+        note_node_failure(
+            &state,
+            &node,
+            crate::node_health::NodeFailureClass::TcpUnreachable,
+            Duration::from_secs(8),
+            "联系不上代理服务器",
+        );
+        let rec2 = state
+            .with(|i| i.node_health.get("n-egress").cloned())
+            .unwrap()
+            .expect("第二次失败后账本还在");
+        assert_eq!(rec2.failures, 2);
+        assert_eq!(rec2.class, "tcp-unreachable", "留下的是**最近一次**的类别");
         let _ = std::fs::remove_dir_all(store.root());
     }
 

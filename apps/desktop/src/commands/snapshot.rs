@@ -50,6 +50,10 @@ pub(crate) async fn build_snapshot(app: &AppHandle, state: &AppState) -> Result<
             runtime: inner.runtime.clone(),
             latency: inner.latencies.clone(),
             traffic: inner.traffic.clone(),
+            // 「数据面正在用哪个节点」与「每个节点的最近一次失败」——
+            // 界面「你选的 vs 正在用的」这条修复的唯一数据来源（见 state.rs 的字段文档）。
+            active_node: inner.active_node.clone(),
+            node_health: inner.node_health.clone(),
             notice: inner.last_notice.clone(),
             helper,
             core,

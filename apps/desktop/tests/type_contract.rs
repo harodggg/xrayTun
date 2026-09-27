@@ -128,6 +128,10 @@ fn full_snapshot() -> AppSnapshot {
         runtime: CoreRuntime::default(),
         latency: Default::default(),
         traffic: TrafficSample::default(),
+        // 「数据面实际在用哪个节点」+「每个节点最近一次失败」：界面「你选的 vs
+        // 正在用的」那条修复的两个新顶层字段（名称集合与 types.ts 双向比对）。
+        active_node: None,
+        node_health: Default::default(),
         notice: None,
         helper: HelperAvailability::default(),
         core: CoreAvailability::default(),
