@@ -623,7 +623,15 @@ PY
 METRICS_NOTE=""
 METRICS_DETAIL=""
 if [ -f "${REPO}/scripts/net-metrics.py" ]; then
-  if python3 "${REPO}/scripts/net-metrics.py" --json \
+  # ⚠️ `--log-dir "${LOG_DIR}"` **必须显式给**（不能靠 net-metrics.py 自己的默认值）：
+  #    本脚本的日志目录来源是 `--data-dir`（上面 LOG_DIR="${DATA_DIR}/logs"），而 net-metrics.py
+  #    的默认值是写死的 `~/Library/Application Support/com.xraytun.desktop/logs`。不传时，
+  #    「events/core-tail 读 A 目录、metrics 读 B 目录」——`--data-dir` 非默认时必然错位。
+  #    真实红例（CI 36305825221）：`--self-test` 用 `--data-dir <临时目录>` 跑完整出包，
+  #    runner 上默认目录不存在 ⇒ net-metrics 退出 2（找不到日志文件）⇒ metrics.json 变成
+  #    「不可用」占位 ⇒ 判据②（metrics.json 必须是真指标）红 ⇒ 自测 exit 1。
+  #    作者本机默认目录有真实日志，所以这条**只在干净机器上红**（CI 每次都是干净机器）。
+  if python3 "${REPO}/scripts/net-metrics.py" --json --log-dir "${LOG_DIR}" \
       --since "$SINCE_LOCAL" --until "$NOW_LOCAL" >"${BUNDLE_DIR}/metrics.json" 2>"${BUNDLE_DIR}/metrics.err"; then
     echo "  metrics.json：已生成（口径头与选择内容指纹在文件内）"
   else
