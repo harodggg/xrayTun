@@ -186,6 +186,19 @@ describe("标记词表可配置：源码契约（Rust 不在本机编译）", ()
     expect(src, "报告必须带 marker_counting 显式标志").toContain("marker_counting");
   });
 
+  it("mitm.rs：词表必须进 digest（否则改完词表点「应用」是空操作）", async () => {
+    const fs = (await import("node:" + "fs")) as {
+      readFileSync: (p: string, enc: string) => string;
+    };
+    const path = (await import("node:" + "path")) as {
+      resolve: (...parts: string[]) => string;
+    };
+    const src = fs.readFileSync(path.resolve("..", "desktop", "src", "mitm.rs"), "utf8");
+    expect(src, "digest 必须把生效词表算进去").toMatch(
+      /fn digest\([\s\S]*?effective_markers\(settings\)\.join/,
+    );
+  });
+
   it("Intent.tsx：有每行一个词的编辑框，且空词表有一句明确的「不统计」说明", async () => {
     const fs = (await import("node:" + "fs")) as {
       readFileSync: (p: string, enc: string) => string;

@@ -38,8 +38,8 @@ use xt_mitm::{
 };
 
 use crate::observe::{
-    observe_config_for, report_path_in, ObserveArchive, ObserveLedger, ObserveReport,
-    RecordingObserver,
+    effective_markers, observe_config_for, report_path_in, ObserveArchive, ObserveLedger,
+    ObserveReport, RecordingObserver,
 };
 
 /// 下发给核心的**有效设置**：根证书没被信任时，把 MITM 摘掉。
@@ -169,14 +169,14 @@ impl MitmRuntime {
     /// 重启会打断所有连接，和核心规则一样必须由用户显式触发（`mitm_apply`）。
     fn digest(settings: &MitmSettings, block_hosts: &[String], rewriter: bool) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             settings.listen_port,
             settings.upstream_port,
             settings.domains.join(","),
             settings.block_quic,
             block_hosts.join(","),
             rewriter,
-            // 观察配置也要进摘要：改了"看哪些域名/落不落盘"之后，
+            // 观察配置也要进摘要：改了"看哪些域名/落不落盘/用哪份词表"之后，
             // 用户点「应用」必须真的换掉代理里的观察者（否则界面显示的和跑的不是一回事）。
             settings.observe.enabled,
             settings.observe.hosts.join(","),
@@ -185,7 +185,10 @@ impl MitmRuntime {
                 .capture_body_dir
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            // 词表进摘要用**生效值**：`None`（默认表）与 `Some(默认表)` 是同一份口径，
+            // 不该因为写法不同就重启一次代理。
+            effective_markers(settings).join(",")
         )
     }
 
@@ -987,6 +990,22 @@ mod tests {
         dir.observe.capture_body_dir = Some(std::path::PathBuf::from("/tmp/xraytun-observe"));
         let d = MitmRuntime::digest(&dir, &[], false);
         assert_ne!(a, d, "落盘目录进摘要");
+
+        // 词表必须进摘要：否则用户改完词表点「应用」是个空操作，
+        // 界面显示新词表、代理还用旧词表计数。
+        let mut markers = s.clone();
+        markers.observe.markers = Some(vec!["sponsored".into()]);
+        let e = MitmRuntime::digest(&markers, &[], false);
+        assert_ne!(a, e, "词表进摘要");
+
+        // 但 `None`（缺省 = 默认表）与 `Some(默认表)` 是**同一份**口径：不该白白重启。
+        let mut same = s.clone();
+        same.observe.markers = Some(xt_mitm::default_markers());
+        assert_eq!(
+            MitmRuntime::digest(&same, &[], false),
+            a,
+            "生效词表相同 ⇒ 摘要相同（写法不同不该触发重启）"
+        );
     }
 
     // -----------------------------------------------------------------------
