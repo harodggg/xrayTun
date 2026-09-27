@@ -71,11 +71,13 @@ FONT_LATIN_BOLD = [
     "/System/Library/Fonts/Helvetica.ttc",
     # 非 macOS 发版机的回退（Linux）。**必须放在 macOS 路径之后**：
     # macOS 上行为逐字不变，只有在缺那套系统字体时才用它。
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 FONT_LATIN = [
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
 FONT_CJK = [
