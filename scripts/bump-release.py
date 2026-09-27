@@ -736,7 +736,7 @@ GENERATORS = [
     (["python3", "scripts/gen-site-jsonld.py", "check"], "JSON-LD（check）"),
     (["python3", "scripts/gen-site-geo.py"], "GEO 索引"),
 ]
-IMAGE_GEN = (["/usr/local/bin/python3.10", "scripts/gen-site-images.py"], "社交卡片/图标")
+IMAGE_GEN = ([sys.executable, "scripts/gen-site-images.py"], "社交卡片/图标")
 
 
 def run_generators(root: Path, include_images: bool) -> int:
