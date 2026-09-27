@@ -368,6 +368,8 @@ const BASE_SNAPSHOT: AppSnapshot = {
     latest_app: null,
     /** 后端比过版本才算出来的字段（见 types.ts 的说明）。 */
     app_update_available: false,
+    /** 预览没有「已检查过的核心」⇒ 三态里取「未知」（不是 false）。 */
+    core_update_available: null,
     checked_at: now - 300,
     check_error: null,
     checked_at_app: now - 300,

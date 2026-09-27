@@ -300,6 +300,24 @@ pub struct UpdateStatus {
     /// 客户端与 GitHub 都是 0.8.23 时，按钮仍然出现、点了白跑一趟。
     #[serde(default)]
     pub app_update_available: bool,
+
+    /// 是否**确实**有比当前已装核心更新的核心版本（P0 修复）。
+    ///
+    /// **三态**，由后端用 `xt_core::update::compare_versions` 算：
+    /// * `Some(true)`  = GitHub 上的核心 tag 比已装核心新 ⇒ 给「更新核心到 …」按钮；
+    /// * `Some(false)` = 已装就是最新（或更新）⇒ 界面**明说**「核心已是最新（X）」，
+    ///   **不**给按钮；
+    /// * `None` = **未知**（还没检查过 / 核心没装 / `xray version` 读不出可解析的版本）
+    ///   ⇒ 界面**不许**把它当 `false` 说「已是最新」，保守地保留按钮。
+    ///
+    /// **为什么必须有这一格**：`latest_core` 有值只说明「查到了 GitHub 上的最新核心」——
+    /// 你装的就是它时也有值（`version_check.rs::apply_core_geo_check_result` 成功即写）。
+    /// 界面只看它的存在性就会永远显示「更新核心到 vX」——与 `app_update_available`
+    /// 修过的「查到了 ≠ 有新版」是同一个错（见该字段的注释）。
+    ///
+    /// `#[serde(default)]`：旧载荷/缺字段 ⇒ `None`（未知），**不是** `false`。
+    #[serde(default)]
+    pub core_update_available: Option<bool>,
     pub checked_at: Option<u64>,
     /// 检查更新时的错误（**派生字段**）：按 客户端 → 核心 → geo 取**第一条非空**的子系统错误。
     ///

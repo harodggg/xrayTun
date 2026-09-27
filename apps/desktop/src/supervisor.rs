@@ -1356,7 +1356,17 @@ fn version_meets(version_output: &str, min: &str) -> bool {
     compare_versions(&found, min) != std::cmp::Ordering::Less
 }
 
-fn extract_version(text: &str) -> Option<String> {
+/// 从 `xray version` 的整行输出里抽出**纯数字点号**的版本号（`Xray 26.1.31 (go…)` → `26.1.31`）。
+///
+/// `pub(crate)`：快照层要用它把 `core.version`（整行）与 GitHub 上的 tag 比较
+/// （见 `commands/snapshot.rs::core_update_available`）—— 直接用整行喂
+/// `xt_core::update::compare_versions` 会把首段 `Xray` 解成 0 而误判「有新版」。
+///
+/// ⚠️ **边界（单测钉死）**：本函数只接受「以数字开头、只含数字与点」的 token，
+/// 所以**含 `-` 的 token 一律读不出**（`26.9.9-1` → `None`、`v26.9.9-beta` → `None`），
+/// 而 `xt_core::update::compare_versions` **接受**含 `-` 的串（按 `-` 分段）。
+/// 调用方必须把「读不出」如实表达成**未知**，绝不能当成「没有新版」。
+pub(crate) fn extract_version(text: &str) -> Option<String> {
     // "Xray 26.1.31 (go1.24.0 darwin/arm64)" -> "26.1.31"
     for token in text.split_whitespace() {
         let cleaned = token.trim_start_matches('v');
@@ -1842,6 +1852,38 @@ mod tests {
         assert_eq!(extract_version("no version here"), None);
         // go1.24.0 含有 'o'，不应被误认为版本号
         assert_eq!(extract_version("go1.24.0"), None);
+    }
+
+    /// **`extract_version` 与 `compare_versions` 的接受面不同** —— 边界钉死。
+    ///
+    /// `extract_version` 只认「以数字开头、只含数字与点」的 token ⇒ 含 `-` 的一律
+    /// 读不出；而 `xt_core::update::compare_versions` 按 `['.', '-', '_']` 分段、
+    /// **接受**预发布后缀。所以快照层比较已装版本时必须**先 extract 再 compare**；
+    /// 读不出时如实返回「未知」，绝不能因为 compare 能比就当成「读出了版本」。
+    #[test]
+    fn version_extraction_rejects_dash_while_compare_accepts_it() {
+        // extract_version：含 `-` ⇒ 读不出（None）。
+        assert_eq!(extract_version("26.9.9-1"), None);
+        assert_eq!(extract_version("v26.9.9-beta"), None);
+        assert_eq!(extract_version("Xray v26.9.9-beta (go1.24.0)"), None);
+        // 同一批串，compare_versions 是接受的 —— 这正是不能拿它当「读出了版本」判据的原因。
+        assert_eq!(
+            xt_core::update::compare_versions("26.9.9-1", "26.9.9"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            xt_core::update::compare_versions("26.9.9", "26.9.9-1"),
+            std::cmp::Ordering::Less
+        );
+        // 反面对照：干净的版本号两边都认，比较结果一致。
+        assert_eq!(
+            extract_version("Xray 26.9.9 (go1.24.0)"),
+            Some("26.9.9".into())
+        );
+        assert_eq!(
+            xt_core::update::compare_versions("26.9.9", "26.9.9"),
+            std::cmp::Ordering::Equal
+        );
     }
 
     #[test]

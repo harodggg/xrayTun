@@ -438,7 +438,7 @@ pub async fn install_geo_update(
                 "info",
                 format!(
                     "geo 数据已更新到 {}（下次连接生效）",
-                    meta.geo_tag.clone().unwrap_or_default()
+                    geo_tag_for_display(meta.geo_tag.as_deref()).unwrap_or_default()
                 ),
             ),
             Err(e) => i.push_log("app", "error", format!("geo 数据更新失败：{e}")),
@@ -596,6 +596,52 @@ pub(crate) fn stage_app_update(
     Ok(app)
 }
 
+/// 已装核心 vs GitHub 上的最新核心：**三态**（P0 修复的判据）。
+///
+/// * `Some(true)`  = 有新核心可装；
+/// * `Some(false)` = 已装就是最新（或更新）；
+/// * `None`        = **未知** —— 还没检查过、核心没装、或 `xray version` 的输出里
+///   抽不出可解析的版本号。界面必须把 `None` 与 `false` 区别对待：
+///   `false` 才说「核心已是最新」，`None` **绝不许**这么说。
+///
+/// **为什么必须先 `extract_version` 再 `compare_versions`**：`core.version` 是
+/// `xray version` 的整行（形如 `Xray 26.9.9 (go1.24.0)`）。直接把它交给
+/// `compare_versions` 会把首段 `Xray` 解成 0 ⇒ 误判成「有新版」。
+///
+/// ⚠️ **已知边界（`supervisor.rs` 的单测钉住）**：`extract_version` 不接受含 `-`
+/// 的 token（`26.9.9-1` → `None`），而 `compare_versions` 接受（按 `-` 分段）。
+/// 于是预发布后缀的已装版本读不出 ⇒ 这里如实返回 `None`（未知），
+/// **不**降级成 `false`（否则界面会谎称「已是最新」，用户再也装不上）。
+pub(crate) fn core_update_available(
+    latest: Option<&xt_core::update::Available>,
+    installed_raw: Option<&str>,
+) -> Option<bool> {
+    let latest = latest?;
+    let installed = crate::supervisor::extract_version(installed_raw?)?;
+    Some(xt_core::update::compare_versions(&latest.version, &installed).is_gt())
+}
+
+/// 把 `InstalledMeta::geo_tag` 收敛成**一处**编号再交给界面 / 日志（P0 bug 2）。
+///
+/// 上游（`crates/xt-core/src/update.rs::install_geo`）把它写成
+/// `format!("{base} {}", available.version)`，而同文件 `geo_urls` 返回的 `base`
+/// **就是** `available.version`（`tag.clone()`）⇒ 落盘的是同一个编号印两遍
+/// （`v26.9.9 v26.9.9`）。本卡边界不允许改 `crates/**`，所以在上游产出与
+/// 界面/日志之间**仅有的两个消费点**收敛（不在前端去重）。
+///
+/// `install_core` 写的 `随核心 26.9.9` 两个词不同 ⇒ 原样保留；只去掉**重复出现**的
+/// 同一个 token。幂等：一旦上游那行改成 `Some(base)`，本函数是直通。
+pub(crate) fn geo_tag_for_display(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let mut seen: Vec<&str> = Vec::new();
+    for token in raw.split_whitespace() {
+        if !seen.contains(&token) {
+            seen.push(token);
+        }
+    }
+    Some(seen.join(" "))
+}
+
 /// 更新状态里**不需要 `AppHandle`/`AppState`** 的那部分（纯函数，可单测）。
 ///
 /// `core` 必须由调用方传入**已经算好的**那份 —— 这就是本卡要消掉的那次重复
@@ -614,10 +660,13 @@ pub(crate) fn update_status_with(
         .latest_app
         .as_ref()
         .is_some_and(|a| xt_core::update::compare_versions(&a.version, current_app_version).is_gt());
+    // 同一条口径用到核心上：`latest_core` 有值 ≠ 有新版。三态由 helper 负责。
+    u.core_update_available =
+        core_update_available(u.latest_core.as_ref(), core.version.as_deref());
     u.core_version = core.version.clone();
     u.core_managed = core_managed;
     u.core_managed_version = meta.core_version.clone();
-    u.geo_tag = meta.geo_tag.clone();
+    u.geo_tag = geo_tag_for_display(meta.geo_tag.as_deref());
     u.geo_installed_at = meta.geo_installed_at;
     u
 }
@@ -825,6 +874,171 @@ mod tests {
             &xt_core::update::InstalledMeta::default(),
         );
         assert!(!u.app_update_available);
+    }
+
+    // -----------------------------------------------------------------------
+    // P0 bug 1：核心「查到了 ≠ 有新版」—— 与客户端 app_update_available 同一口径
+    // -----------------------------------------------------------------------
+
+    /// 三态判据：`Some(true)` 有新版 / `Some(false)` 已最新 / `None` 未知。
+    ///
+    /// **改前红**：状态里没有核心的对应字段，前端只看 `latest_core` 的存在性 ⇒
+    /// 已装==最新时仍显示「更新核心到 v26.9.9（预发布）」。
+    #[test]
+    fn core_update_available_is_three_state() {
+        let latest = an_available("v26.9.9");
+        // 已装 == GitHub 上的最新版 ⇒ 没有可更新（这正是用户报的那一格）。
+        assert_eq!(
+            core_update_available(Some(&latest), Some("Xray 26.9.9 (go1.24.0)")),
+            Some(false)
+        );
+        // 已装更旧 ⇒ 有新版。
+        assert_eq!(
+            core_update_available(Some(&latest), Some("Xray 26.1.31 (go1.24.0)")),
+            Some(true)
+        );
+        // 已装更新（受管核心比 release 还新）⇒ 同样不该劝降级。
+        assert_eq!(
+            core_update_available(Some(&latest), Some("Xray 26.9.10 (go1.24.0)")),
+            Some(false)
+        );
+        // 未知三连：没有检查结果 / 没装核心 / 输出读不出 —— 都必须是 None，不是 false。
+        assert_eq!(
+            core_update_available(None, Some("Xray 26.9.9 (go1.24.0)")),
+            None
+        );
+        assert_eq!(core_update_available(Some(&latest), None), None);
+        assert_eq!(core_update_available(Some(&latest), Some("garbage")), None);
+        // **边界**：含 `-` 的已装版本 `extract_version` 读不出 ⇒ 未知，**绝不当 false**
+        //（否则界面谎称「已是最新」，用户再也装不上）。
+        assert_eq!(
+            core_update_available(Some(&latest), Some("Xray 26.9.9-1")),
+            None
+        );
+        // 反过来，含 `-` 的 GitHub tag 是 `compare_versions` 能处理的 ⇒ 已装旧版时仍判「有新版」。
+        let beta = an_available("v26.9.9-1");
+        assert_eq!(
+            core_update_available(Some(&beta), Some("Xray 26.9.9 (go1.24.0)")),
+            Some(true)
+        );
+    }
+
+    /// 为什么必须**先抽版本号再比**：整行直接喂 `compare_versions` 会把 `Xray` 解成 0。
+    #[test]
+    fn core_update_available_extracts_the_version_before_compare() {
+        let latest = an_available("v26.9.9");
+        // 前置反例：整行直接比较确实会误判成「有新版」。
+        assert!(
+            xt_core::update::compare_versions(&latest.version, "Xray 26.9.9 (go1.24.0)").is_gt(),
+            "前置：整行直接比较会误判"
+        );
+        // 正解：先 extract 再 compare ⇒ 判为「已是最新」。
+        assert_eq!(
+            core_update_available(Some(&latest), Some("Xray 26.9.9 (go1.24.0)")),
+            Some(false)
+        );
+    }
+
+    /// 整条 `update_status_with` 每个快照都按**当前**已装版本重算（缓存里的旧结论必须被覆盖）。
+    #[test]
+    fn update_status_recomputes_core_availability_by_version() {
+        let cached = crate::state::UpdateStatus {
+            latest_core: Some(an_available("v26.9.9")),
+            core_update_available: Some(true), // 缓存里是旧结论
+            ..Default::default()
+        };
+        let meta = xt_core::update::InstalledMeta::default();
+
+        let same = CoreAvailability {
+            version: Some("Xray 26.9.9 (go1.24.0)".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            update_status_with(&cached, "0.8.44", &same, false, &meta).core_update_available,
+            Some(false),
+            "已装就是最新时不得显示「更新核心」"
+        );
+
+        let older = CoreAvailability {
+            version: Some("Xray 26.1.31 (go1.24.0)".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            update_status_with(&cached, "0.8.44", &older, false, &meta).core_update_available,
+            Some(true),
+            "落后时应当显示「更新核心」"
+        );
+
+        // 读不到版本 ⇒ 未知；既不许被缓存里的旧 true 复活，也不许被当成 false。
+        assert_eq!(
+            update_status_with(&cached, "0.8.44", &CoreAvailability::default(), false, &meta)
+                .core_update_available,
+            None
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P0 bug 2：geo 编号印两遍 —— 在后端快照层收敛（不在前端去重）
+    // -----------------------------------------------------------------------
+
+    /// 上游 `install_geo` 写的 `"{base} {available.version}"`（`base == available.version`）
+    /// 就是重复串；`geo_tag_for_display` 把它收敛成一处，`install_core` 的写法原样保留。
+    #[test]
+    fn geo_tag_is_deduped_before_it_reaches_the_ui() {
+        assert_eq!(
+            geo_tag_for_display(Some("v26.9.9 v26.9.9")),
+            Some("v26.9.9".into())
+        );
+        assert_eq!(
+            geo_tag_for_display(Some("26.9.9 26.9.9")),
+            Some("26.9.9".into())
+        );
+        // install_core 的 `随核心 26.9.9` 两个词不同 ⇒ 原样保留。
+        assert_eq!(
+            geo_tag_for_display(Some("随核心 26.9.9")),
+            Some("随核心 26.9.9".into())
+        );
+        assert_eq!(geo_tag_for_display(Some("geo-v1")), Some("geo-v1".into()));
+        assert_eq!(geo_tag_for_display(None), None);
+        // 幂等：上游那行修好后本函数是直通。
+        let once = geo_tag_for_display(Some("v26.9.9 v26.9.9"));
+        assert_eq!(geo_tag_for_display(once.as_deref()), once);
+
+        // 经 update_status_with 到达快照字段的那一份也不重复。
+        let u = update_status_with(
+            &crate::state::UpdateStatus::default(),
+            "0.8.44",
+            &CoreAvailability::default(),
+            false,
+            &xt_core::update::InstalledMeta {
+                geo_tag: Some("v26.9.9 v26.9.9".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(u.geo_tag.as_deref(), Some("v26.9.9"));
+    }
+
+    /// **源码守卫**：`meta.geo_tag` 只准经 `geo_tag_for_display` 到达界面 / 日志。
+    ///
+    /// 回归形状：`update_status_with` 里写 `u.geo_tag = meta.geo_tag.clone()`、
+    /// 安装日志里写 `meta.geo_tag.clone()` ⇒ 重复串原样上屏 / 进日志。
+    #[test]
+    fn geo_tag_only_reaches_display_through_the_dedupe_helper() {
+        let src = include_str!("snapshot.rs");
+        let prod = src.split("\n#[cfg(test)]\nmod tests").next().unwrap_or(src);
+        assert!(
+            prod.contains("fn geo_tag_for_display("),
+            "必须存在收敛函数"
+        );
+        let uses = prod.matches("geo_tag_for_display(").count();
+        assert!(
+            uses >= 3,
+            "定义 + 两个消费点（快照字段 / 更新日志），实得 {uses}"
+        );
+        assert!(
+            !prod.contains(".geo_tag.clone()"),
+            "裸 `meta.geo_tag.clone()` 会把重复串直接交给界面 / 日志"
+        );
     }
 
     // -----------------------------------------------------------------------

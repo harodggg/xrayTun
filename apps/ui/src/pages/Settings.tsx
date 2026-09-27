@@ -1233,16 +1233,31 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
                   onClick={() => void run("check-updates", () => api.checkUpdates())}>
             检查更新
           </button>
-          {snapshot.update.latest_core && (
+          {/* P0：只在**确实**有新版时给「更新核心」。`latest_core` 有值只说明
+              「查到了 GitHub 上的最新核心」—— 你装的就是它时也有值（`version_check.rs`
+              成功即写）。判据用后端比过版本的三态 `core_update_available`，
+              与下面客户端那颗按钮（`app_update_available`）**同一口径**。
+
+              `!== false` 而不是 `=== true`：`null` 是**未知**（读不到已装版本），
+              未知 ≠ 已是最新 ⇒ 保守地保留按钮，绝不静默吞掉升级入口。 */}
+          {snapshot.update.latest_core && snapshot.update.core_update_available !== false && (
             <button className="btn btn--primary" disabled={busy !== null}
-                    onClick={() => void run("install-core", () => api.installCoreUpdate())}>
+                    onClick={() => void run("install-core-update", () => api.installCoreUpdate())}>
               更新核心到 {snapshot.update.latest_core.version}
               {snapshot.update.latest_core.prerelease ? "（预发布）" : ""}
             </button>
           )}
+          {/* 没有新版时**明说**「核心已是最新」，不是静默隐藏 ——
+              静默隐藏会退化成「点了检查更新没反应」。
+              只有 `=== false`（后端确证已最新）才这么说；`null` 是未知，走上面那一支。 */}
+          {snapshot.update.latest_core && snapshot.update.core_update_available === false && (
+            <span className="field__hint" style={{ alignSelf: "center" }}>
+              核心已是最新（{snapshot.update.latest_core.version}）
+            </span>
+          )}
           {snapshot.update.latest_geo && (
             <button className="btn btn--primary" disabled={busy !== null}
-                    onClick={() => void run("install-geo", () => api.installGeoUpdate())}>
+                    onClick={() => void run("install-geo-update", () => api.installGeoUpdate())}>
               更新 geo 到 {snapshot.update.latest_geo.version}
             </button>
           )}
@@ -1267,7 +1282,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
                   : ""
               }与 geo 文件，核心改回包内自带的那一版，需要重新连接才会生效。`}
               confirmLabel="确认回退"
-              onConfirm={() => void run("revert-update", () => api.revertManagedUpdate())}
+              onConfirm={() => void run("revert-managed-update", () => api.revertManagedUpdate())}
             />
           )}
         </div>
@@ -1335,7 +1350,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
 
           <div className="row row--wrap" style={{ gap: 8 }}>
             <button className="btn" disabled={busy !== null || downloading}
-                    onClick={() => void run("check-app", () => api.checkAppUpdate())}>
+                    onClick={() => void run("check-app-update", () => api.checkAppUpdate())}>
               检查客户端更新
             </button>
             {/* 只在**确实**有新版时给「更新并重启」。
@@ -1356,7 +1371,7 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
               snapshot.update.latest_app &&
               !snapshot.update.check_error_app && (
               <button className="btn btn--primary" disabled={busy !== null || downloading}
-                      onClick={() => void run("install-app", () => api.installAppUpdate())}>
+                      onClick={() => void run("install-app-update", () => api.installAppUpdate())}>
                 更新到 {snapshot.update.latest_app.version} 并重启
               </button>
             )}

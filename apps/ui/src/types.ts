@@ -702,6 +702,19 @@ export interface UpdateStatus {
    * 这是「**查到了 ≠ 有新版**」—— 本项目修过四次的「查不到 ≠ 没有」的镜像。
    */
   app_update_available: boolean;
+  /**
+   * 核心是否**确实**有新版（三态，后端比过版本）。
+   *
+   * `latest_core` 有值只说明「查到了 GitHub 上的最新核心」—— 你装的就是它时也有值。
+   * 后端已经比过版本（`commands/snapshot.rs::core_update_available`）：
+   *   * `true`  → 给「更新核心到 …」按钮；
+   *   * `false` → **明说**「核心已是最新（X）」，不给按钮；
+   *   * `null`  → **未知**（还没查 / 核心没装 / 版本读不出）⇒ 不许说「已是最新」，保守保留按钮。
+   *
+   * 与 `app_update_available` 是同一口径（task-44 的「查到了 ≠ 有新版」）——
+   * 只是落在核心这条线上。**界面只该用这个字段**决定要不要显示核心更新按钮。
+   */
+  core_update_available: boolean | null;
   /** 正在进行的更新下载。null 表示没有在下载。 */
   progress: UpdateProgress | null;
   /** **合并/手动路径**的检查时刻（核心/geo/客户端共用；不能代表「客户端上次检查」）。 */

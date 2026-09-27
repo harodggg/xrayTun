@@ -98,6 +98,15 @@ const BUSY_LABEL: Record<string, string> = {
   mode: "正在切换模式…",
   start: "正在连接…",
   stop: "正在断开…",
+  // 下面这批是「扫源码守卫」（`busyKeysGuard.test.ts`）在补齐 key 名时顺带暴露的
+  // 同类缺口：键真实存在，但表里没有 ⇒ 顶栏只说兜底句。补上准确的人话。
+  save: "正在保存设置…",
+  restart: "正在重启核心…",
+  "login-item": "正在设置开机自启…",
+  "probe-dns": "正在测试 DNS…",
+  "open-login-items": "正在打开登录项设置…",
+  "open-dir": "正在打开数据目录…",
+  "refresh-subs": "正在更新全部订阅…",
 };
 
 /** `busy` → 给用户看的一句话；`null` = 没有操作在进行。 */
