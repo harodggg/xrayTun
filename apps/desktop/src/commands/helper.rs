@@ -489,20 +489,29 @@ mod tests {
             },
             "包内 helper 报当前 PROTOCOL_VERSION；它必须与老 helper 自报的 2 不等",
         );
-        assert_eq!(xt_proto::PROTOCOL_VERSION, 3, "本版行为契约版本必须是 3");
+        // **不写死当前版本号**：这条只要求「当前契约版本与老 helper 自报的 2 不同」。
+        // 写死数字（曾经是 `assert_eq!(PROTOCOL_VERSION, 3)`）会让每次升号都要来改这里，
+        // 而它证明的本来就不是某个具体数字，而是"升号让老 helper 被判 Mismatch"。
+        assert_ne!(
+            xt_proto::PROTOCOL_VERSION,
+            2,
+            "本版行为契约版本必须已从 2 升起（否则老 helper 会被判 Match、修复静默不生效）"
+        );
     }
 
-    /// **负向对照**：两边协议都是当前值（`Some(3)`）⇒ `Match`，不许「狼来了」。
+    /// **负向对照**：两边协议都是**当前值** ⇒ `Match`，不许「狼来了」。
     ///
     /// 包版本可以不同：helper 行为没变的 App-only 更新不该提示重装。
+    /// 这里用 `xt_proto::PROTOCOL_VERSION` 而不是写死数字 ⇒ 升号后这条依然钉的是"当前值"。
     #[test]
     fn same_current_protocol_on_both_sides_is_match() {
+        let cur = Some(xt_proto::PROTOCOL_VERSION);
         assert_eq!(
-            classify_helper_versions(probe("0.8.43", Some(3)), probe("0.8.44", Some(3))),
+            classify_helper_versions(probe("0.8.43", cur), probe("0.8.44", cur)),
             HelperVersionCheck::Match {
                 version: "0.8.43".into(),
             },
-            "两边都是协议 3（包版本不同）⇒ Match —— 否则每次 App-only 更新都喊重装",
+            "两边都是当前协议（包版本不同）⇒ Match —— 否则每次 App-only 更新都喊重装",
         );
     }
 

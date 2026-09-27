@@ -50,8 +50,20 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// * `13ed699` 回滚复检：默认路由 / 捕获路由 / DNS 三态，不再假报「已回滚」；
 /// * `364c937` 启动对账：会话死活看 utun 是否还在 + 哨兵 `198.18.0.2` 不再残留。
 ///
+/// # 本版 3 → 4：又是 **helper 侧**修复（所以又必须升）
+///
+/// * `31b47b0` capture 路由的 `replaced` 改成「网络号 + 前缀长度」精确匹配
+///   （`route -n get -net` 实测会最长前缀匹配到**别的**路由，旧实现据此把 `0/1` 的
+///   `replaced` 记成物理网卡那两条 ⇒ 回滚后留下 `0/1 → en0`，半个 IPv4 表被钉在网卡上、
+///   可致流量绕过隧道）。
+///
+/// **教训（这条比版本号本身重要）**：只要这一版碰了 `crates/xt-tun` / `crates/xt-helper`，
+/// 就已经改了 helper 的可观察行为 —— 不升号 = 用户更新 App 后拿不到这版修复，而且**完全无声**。
+/// 发版前自问：`git diff <上个 tag>..HEAD -- crates/xt-helper crates/xt-tun crates/xt-proto`
+/// 是不是空的？不是空的就必须升。
+///
 /// 代价：所有已装老 helper 的用户会被提示重装一次（一次管理员授权）。
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// helper 监听的 Unix domain socket 路径。
 ///
@@ -710,7 +722,7 @@ mod tests {
     /// 匹配、helper 侧修复**静默不生效**。所以这个数字本身值得钉住。
     #[test]
     fn the_protocol_version_was_bumped_for_the_helper_side_fixes() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     use super::*;
