@@ -46,7 +46,7 @@ ASSETS = SITE / "assets"
 # 卡片的**文件名里带版本号**，原因是一次实测事故：og 卡片内容每个版本都会变，而 `_headers`
 # 给了长缓存；文件名不变时，改版后 CDN 继续发旧卡片（实测 `cf-cache-status: HIT`、`age: 1674`、
 # 旧字节数，图上还印着旧版本号）。用带版本的文件名 = 每次发版换 URL，缓存可以放心长。
-SITE_VERSION = "0.8.44"
+SITE_VERSION = "0.8.45"
 WASM_VERSION = "0.7.0"
 
 # 配色**逐字取自 site/assets/site.css 的 :root**（改这里等于改官网，不要另起一套）
@@ -69,10 +69,14 @@ FONT_LATIN_BOLD = [
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
+    # 非 macOS 发版机的回退（Linux）。**必须放在 macOS 路径之后**：
+    # macOS 上行为逐字不变，只有在缺那套系统字体时才用它。
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 FONT_LATIN = [
     "/System/Library/Fonts/Supplemental/Arial.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 ]
 FONT_CJK = [
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -80,6 +84,9 @@ FONT_CJK = [
     "/System/Library/Fonts/STHeiti Light.ttc",
     "/System/Library/Fonts/Supplemental/Songti.ttc",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    # 非 macOS 发版机的回退（Linux；`apt install fonts-noto-cjk`）。同上，排在最后。
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
 ]
 
 OG_W, OG_H = 1200, 630
@@ -162,7 +169,7 @@ CARDS = [
         "brand": "XrayTun",
         "title": "macOS 上的 Xray 图形客户端",
         "subtitle": "原生 TUN 模式接管系统流量",
-        "chips": ["macOS 13.0+", "通用包 arm64 + x86_64", "包内自带 Xray 核心", "v0.8.44"],
+        "chips": ["macOS 13.0+", "通用包 arm64 + x86_64", "包内自带 Xray 核心", "v0.8.45"],
         "note": None,
     },
     {
@@ -171,7 +178,7 @@ CARDS = [
         "brand": "XrayTun",
         "title": "An Xray GUI client for macOS",
         "subtitle": "Native TUN mode takes over system traffic",
-        "chips": ["macOS 13.0+", "Universal arm64 + x86_64", "Xray core included", "v0.8.44"],
+        "chips": ["macOS 13.0+", "Universal arm64 + x86_64", "Xray core included", "v0.8.45"],
         "note": None,
     },
     {
