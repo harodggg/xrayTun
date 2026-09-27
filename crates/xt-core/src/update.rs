@@ -1245,7 +1245,11 @@ pub fn install_geo(
     }
 
     let mut meta = InstalledMeta::load(managed_dir);
-    meta.geo_tag = Some(format!("{base} {}", available.version));
+    // `base` 就是 `geo_urls` 返回的 release tag（与 `available.version` 同源），
+    // 所以这里**只能印一次** —— 旧写法 `format!("{base} {}", available.version)`
+    // 会落盘成「v26.9.9 v26.9.9」。界面侧的 `geo_tag_for_display()` 是幂等兜底，
+    // 根因修在这里之后它就是直通。
+    meta.geo_tag = Some(base);
     meta.geo_installed_at = Some(now_unix());
     meta.save(managed_dir)?;
     let _ = std::fs::remove_dir_all(&staging);
