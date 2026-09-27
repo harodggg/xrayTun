@@ -66,10 +66,20 @@ impl NodeFailureClass {
     }
 
     /// **下一步做什么**（错误文案必须回答这个）。
+    ///
+    /// # 为什么「换一个网络」不许排第一（用户明确抗议过）
+    ///
+    /// 用户原话：「总会会有这个问题。切换网络不应该影响网络。」他遇到的是
+    /// **本机网络完全正常、只是某个节点不通**，而旧文案把「先换一个网络
+    /// （例如切到热点）」列在第一位 —— 把他引去改一个没坏的东西，改完还是不通。
+    /// 现在每个类别的第一步都是**在 App 里就能做、而且指向真正原因**的动作；
+    /// 「换网络」只在最后，并且写明**前提**（整台 Mac 都上不了网）。
     pub(crate) fn advice(self) -> &'static str {
         match self {
             Self::TcpUnreachable => {
-                "换一个网络（如手机热点）重试；核对节点地址/端口；或点「刷新订阅」重拉一次节点列表"
+                "先在节点列表里换一个节点重试（App 已按真实可用性替你试过一轮）；\
+                 核对这个节点的地址 / 端口是否过期；订阅节点可点「刷新订阅」重拉一次；\
+                 **只有**整台 Mac 直连也上不了网时，才需要换网络（如手机热点）"
             }
             Self::EgressBroken => {
                 "换一个节点；这个节点本身能连上，但它转发不出去（墙或节点出口的问题）"
@@ -77,7 +87,10 @@ impl NodeFailureClass {
             Self::LocalPort => {
                 "本地端口被占用或被拒绝：把「设置」里的 SOCKS 端口换一个，或关掉占用它的程序后重试"
             }
-            Self::Unknown => "把这条错误原文发给开发者；同时可以先换一个节点或换网络试试",
+            Self::Unknown => {
+                "把这条错误原文发给开发者；同时先在节点列表里换一个节点，\
+                 **只有**整台 Mac 直连也上不了网时才需要换网络"
+            }
         }
     }
 
@@ -155,11 +168,17 @@ pub(crate) fn classify(facts: &FailureFacts<'_>) -> NodeFailureClass {
 }
 
 /// 一个节点的一次尝试结果（成功也记 —— 清单里要能看出「哪个是活的」）。
-#[derive(Debug, Clone)]
+///
+/// **带地址与端口**：用户报的问题原话就是「请检查节点地址 / 端口」，
+/// 而旧清单里只有节点**名字** —— 名字是用户自己起的，凭它核不了任何东西。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeAttempt {
     pub node_id: String,
     pub node_name: String,
-    /// 失败类别。**成功**的尝试也给一个（`None` 表示成功）。
+    /// 节点地址（域名或 IP）—— 与 `port` 一起给用户核对。
+    pub address: String,
+    pub port: u16,
+    /// 失败类别。**成功**的尝试给 `None`。
     pub class: Option<NodeFailureClass>,
     pub elapsed: Duration,
     pub detail: String,
@@ -170,6 +189,8 @@ impl NodeAttempt {
         Self {
             node_id: node.id.clone(),
             node_name: node.name.clone(),
+            address: node.address.clone(),
+            port: node.port,
             class: None,
             elapsed,
             detail: "连接成功".into(),
@@ -185,10 +206,22 @@ impl NodeAttempt {
         Self {
             node_id: node.id.clone(),
             node_name: node.name.clone(),
+            address: node.address.clone(),
+            port: node.port,
             class: Some(class),
             elapsed,
             detail: detail.into(),
         }
+    }
+
+    /// `地址:端口` —— 用户能直接照着核对 / 复制的形态。
+    pub(crate) fn endpoint(&self) -> String {
+        format!("{}:{}", self.address, self.port)
+    }
+
+    /// `「名字」（地址:端口）` —— 名字与地址都要在，缺一个都核不了。
+    pub(crate) fn label(&self) -> String {
+        format!("「{}」（{}）", self.node_name, self.endpoint())
     }
 }
 
@@ -213,34 +246,60 @@ impl TrialReport {
 
     /// 全部尝试都失败时的**节点级失败清单**。
     ///
-    /// 形状：先说清「网络没被动过」，再逐节点列（类别 + 用时 + 各自的下一步），
-    /// 最后给一条**不承诺做不到的事**的总体说明。
+    /// 形状（顺序是刻意的，见 [`NodeFailureClass::advice`] 的说明）：
+    /// 1. 先说清「网络没被动过」；
+    /// 2. **逐节点**列（名字 + 地址:端口 + 类别 + 用时 + 各自的下一步）——
+    ///    这是用户要求的「先把我们已经替你试过哪些节点、各自怎么失败的讲清楚」；
+    /// 3. 「本机网络是不是有问题」这条**用证据回答**：只要有一个节点在 TCP 层
+    ///    可达，就明说本机网络没问题、不需要先换网络；
+    /// 4. 最后才是**可做的动作**，并且「换网络」排在最后、带前提。
     pub(crate) fn all_failed_message(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
             "试了 {} 个节点都没能建立可用隧道，本次启动已中止：\
-             **默认路由没有被接管、系统网络没有被改动**。\n各节点的结果：\n",
+             **默认路由没有被接管、系统网络没有被改动**。\n\
+             我们已经替你逐个试过这些节点，各自的结果（名字 · 地址:端口 · 类别 · 耗时）：\n",
             self.attempts.len()
         ));
         for (i, a) in self.attempts.iter().enumerate() {
             let class = a.class.unwrap_or(NodeFailureClass::Unknown);
             out.push_str(&format!(
-                "  {}. 节点「{}」：{}（{:.1}s）—— 下一步：{}\n",
+                "  {}. 节点{}：{}（{:.1}s）\n     下一步：{}\n",
                 i + 1,
-                a.node_name,
+                a.label(),
                 class.label(),
                 a.elapsed.as_secs_f32(),
                 class.advice(),
             ));
         }
+        if self.any_node_tcp_reachable() {
+            out.push_str(
+                "另外：上面有节点在 **TCP 层是可达的** ⇒ **本机网络本身没问题**，\
+                 问题在那个节点或它的出口 —— 这种情况**不需要**先换网络。\n",
+            );
+        }
         out.push_str(
             "说明：App **不能**让一个不可达的节点变得可达（节点宕机、地址写错、\
              出网链路被挡都在我们之外）。这里能保证的是：不接管你的默认路由、\
              不让你猜、也不会只试一个节点就放弃。\n\
-             下一步：换一个网络（如手机热点）后重试；如果这些节点都来自订阅，\
-             点「刷新订阅」重拉一次列表。",
+             下一步（按这个顺序）：\n\
+             \x20 1) 先在节点列表里换一个节点重试 —— 上面的清单就是「哪个能用」的结论；\n\
+             \x20 2) 核对清单里每个节点的地址 / 端口是否过期；订阅来的节点点「刷新订阅」重拉一次；\n\
+             \x20 3) **只有**换了节点仍然全部不通、而且整台 Mac 直连也上不了网时，\
+             才需要换网络（如手机热点）。",
         );
         out
+    }
+
+    /// 有没有节点在 **TCP 层可达**（= 本机网络没问题，问题在节点/出口）。
+    ///
+    /// 判据是 [`NodeFailureClass::EgressBroken`]：它成立的前提正是
+    /// 「本机 → 节点 的 TCP 握手成功、但经它转发的真实请求拿不到响应」。
+    /// 有这条证据时，文案就**不许**把「换网络」排在前面 —— 用户明确抗议过那条引导。
+    pub(crate) fn any_node_tcp_reachable(&self) -> bool {
+        self.attempts
+            .iter()
+            .any(|a| a.class == Some(NodeFailureClass::EgressBroken))
     }
 
     /// 一行一条的**机器友好**摘要（进日志；给用户看的是 [`Self::all_failed_message`]）。
@@ -252,9 +311,10 @@ impl TrialReport {
             .iter()
             .map(|a| {
                 format!(
-                    "{}:{}:{}:{}ms:{}",
+                    "{}:{}@{}:{}:{}ms:{}",
                     a.node_id,
                     a.node_name,
+                    a.endpoint(),
                     a.class.map(|c| c.slug()).unwrap_or("ok"),
                     a.elapsed.as_millis(),
                     a.detail.replace('\n', " ")
@@ -262,6 +322,121 @@ impl TrialReport {
             })
             .collect::<Vec<_>>()
             .join(" | ")
+    }
+}
+
+/// 一次**自动回落的结局**：实际用了哪个节点、为什么换、试了几个。
+///
+/// # 为什么要有这个类型
+///
+/// 「首连」与「自动重建（看门狗 / 换网）」走的是**同一条回落策略**
+/// （`commands::core` 里唯一的那一个候选循环 `run_node_fallbacks`）。但策略的
+/// 结局过去只写进一句内联提示，`start_core` 的返回值是 `Result<(), String>` ——
+/// 于是**重建路径拿到 `Ok(())` 时说不出「这次实际用了哪个节点、为什么换」**，
+/// 只能写一句「已自动恢复」。这个类型就是那个缺失的返回值。
+///
+/// # 不许静默改用户选中的节点
+///
+/// `selected_id` 只用于**对比与文案**：策略从来不写回
+/// `settings.selected_node`。`switched()` 为真时 [`Self::notice`] 会明说
+/// 「你的选择没有被改动」，`false` 时它返回 `None`（没换就不打扰）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NodeFallbackOutcome {
+    /// 用户选中的节点 id（`None` = 没选）。
+    pub selected_id: Option<String>,
+    /// 实际成功的那个节点（`class = None`）。
+    pub used: NodeAttempt,
+    /// 这一次一共试了几个节点（含成功那次）。
+    pub attempts: usize,
+    /// 选中节点这一次的失败类别；选中节点就是成功那个时为 `None`。
+    pub selected_failure: Option<NodeFailureClass>,
+    /// 选中节点的 `「名」（addr:port）`；账本里没有就是 `None`。
+    pub selected_label: Option<String>,
+}
+
+impl NodeFallbackOutcome {
+    /// 从「试到成功为止」的账本里取出结局。**纯函数**（不发起任何探测）。
+    ///
+    /// `used` 必须已经记进 `report`（调用方先 `record` 再构造），
+    /// 否则 `attempts` 会比实际少一条。
+    pub(crate) fn from_report(
+        selected: Option<&str>,
+        used: NodeAttempt,
+        report: &TrialReport,
+    ) -> Self {
+        let sel = selected.and_then(|id| report.attempts().iter().find(|a| a.node_id == id));
+        let selected_id = selected.map(str::to_string);
+        Self {
+            selected_failure: sel.and_then(|a| a.class),
+            selected_label: sel.map(NodeAttempt::label),
+            selected_id,
+            used,
+            attempts: report.attempts().len(),
+        }
+    }
+
+    /// 这次是不是**没按用户选中的节点**连（回落发生了）。
+    pub(crate) fn switched(&self) -> bool {
+        self.selected_id.as_deref() != Some(self.used.node_id.as_str())
+    }
+
+    pub(crate) fn used_node_id(&self) -> &str {
+        &self.used.node_id
+    }
+
+    pub(crate) fn used_node_name(&self) -> &str {
+        &self.used.node_name
+    }
+
+    /// 选中节点的可读标签（回落到别的节点时用；缺失时退回 id 或「（未选择）」）。
+    fn selected_text(&self) -> String {
+        self.selected_label
+            .clone()
+            .or_else(|| self.selected_id.clone())
+            .unwrap_or_else(|| "（未选择）".to_string())
+    }
+
+    /// 选中节点**为什么**没被用 —— 有类别就给类别，否则如实说本次不可达。
+    fn selected_reason(&self) -> &'static str {
+        self.selected_failure
+            .map(NodeFailureClass::label)
+            .unwrap_or("本次不可达")
+    }
+
+    /// **一行、进日志**：这次实际用了哪个节点、是不是换了、为什么。
+    ///
+    /// 无论有没有换都必须能说清「实际用的是哪个」—— 这正是用户要的
+    /// 「别静默改我选的节点」。
+    pub(crate) fn describe(&self) -> String {
+        if !self.switched() {
+            return format!("本次实际使用节点{}（就是你选中的那个）", self.used.label());
+        }
+        format!(
+            "本次实际使用节点{}；选中的{} {} —— 已自动回落（共试了 {} 个节点，\
+             你的选择没有被改动）",
+            self.used.label(),
+            self.selected_text(),
+            self.selected_reason(),
+            self.attempts,
+        )
+    }
+
+    /// 给用户的提示条：**只在实际换了节点时**有内容（没换不打扰）。
+    ///
+    /// 三件事缺一不可：换了哪个、为什么换、**你的选择没有被改动**。
+    pub(crate) fn notice(&self) -> Option<String> {
+        if !self.switched() {
+            return None;
+        }
+        Some(format!(
+            "原选中节点{} {}（本次共试了 {} 个节点），已自动改用节点{}连接。\
+             你的选择没有被改动 —— 设置里仍然是原节点；要固定用新节点，\
+             请在节点列表里手动选中它。",
+            self.selected_text(),
+            self.selected_reason(),
+            self.attempts,
+            self.used.label(),
+        ))
     }
 }
 
@@ -533,8 +708,15 @@ mod tests {
 
     // ------------------------------------------- 全挂时的节点级失败清单（验收）
 
-    /// **验收判据**：两个节点全挂 ⇒ 清单里两个节点**各自一条**，
-    /// 带类别与下一步；并说清「系统网络没被动过」与「App 做不到什么」。
+    /// **验收判据 ② 的文案面**：两个节点全挂 ⇒ 清单里两个节点**各自一条**，
+    /// 每条都带**名字 + 地址:端口 + 类别 + 耗时 + 下一步**；
+    /// 并说清「系统网络没被动过」与「App 做不到什么」。
+    ///
+    /// **为什么必须带地址**（这是本次修的缺口）：用户原话就是
+    /// 「请检查节点地址 / 端口」，而旧清单只写节点**名字** —— 名字是用户自己起的，
+    /// 照着它核不了任何东西。
+    ///
+    /// 判别性：把 `NodeAttempt` 的 `address`/`port` 从清单里去掉 ⇒ 前两条断言红。
     #[test]
     fn two_dead_nodes_produce_a_per_node_failure_list() {
         let a = node("n-a", "香港 A", "1.1.1.1");
@@ -571,17 +753,126 @@ mod tests {
             report.attempts().iter().all(|a| a.class.is_some()),
             "两个都挂了，不该有成功"
         );
-        assert!(msg.contains("1. 节点「香港 A」"), "{msg}");
-        assert!(msg.contains("2. 节点「日本 B」"), "{msg}");
+        assert!(msg.contains("1. 节点「香港 A」（1.1.1.1:443）"), "{msg}");
+        assert!(msg.contains("2. 节点「日本 B」（2.2.2.2:443）"), "{msg}");
         assert!(msg.contains("本机→节点 TCP 不通"), "A 的类别要写清：{msg}");
         assert!(msg.contains("节点可达但出口不通"), "B 的类别要写清：{msg}");
-        assert!(msg.contains("换一个网络"), "A 的下一步：{msg}");
+        assert!(msg.contains("8.4s"), "A 的耗时要写清：{msg}");
+        assert!(msg.contains("6.2s"), "B 的耗时要写清：{msg}");
         assert!(msg.contains("换一个节点"), "B 的下一步：{msg}");
         assert!(msg.contains("默认路由没有被接管"), "好消息必须保留：{msg}");
         assert!(
             msg.contains("不能**让一个不可达的节点变得可达"),
             "诚实边界必须写进文案：{msg}"
         );
+        // B 是 EgressBroken（TCP 可达）⇒ 文案必须**用证据**说本机网络没问题。
+        assert!(
+            report.any_node_tcp_reachable(),
+            "B 的类别是「节点可达但出口不通」⇒ 本机网络已被证明是通的"
+        );
+        assert!(msg.contains("本机网络本身没问题"), "{msg}");
+    }
+
+    /// **验收判据 ③（文案顺序）**：本机网络正常、只是节点不通时，
+    /// **不许**把「先换一个网络（例如切到热点）」列在第一位 —— 用户已明确抗议。
+    ///
+    /// 判别性：把 `TcpUnreachable::advice` 改回「换一个网络（如手机热点）重试；…」
+    /// ⇒ 这条红。
+    #[test]
+    fn network_switch_is_never_the_first_thing_we_tell_the_user() {
+        let tcp = NodeFailureClass::TcpUnreachable.advice();
+        assert!(
+            !tcp.starts_with("换一个网络") && !tcp.starts_with("先换一个网络"),
+            "「换网络」不许排第一：{tcp}"
+        );
+        assert!(
+            tcp.starts_with("先在节点列表里换一个节点"),
+            "第一步必须是 App 里就能做、而且指向真正原因的动作：{tcp}"
+        );
+        assert!(
+            tcp.contains("只有") && tcp.contains("整台 Mac"),
+            "「换网络」必须带前提（整台 Mac 都上不了网）：{tcp}"
+        );
+
+        // 全挂清单也一样：讲完「替用户试过哪些节点、各自怎么失败」之后，
+        // 动作里的「换网络」必须排在最后，且带同一个前提。
+        let a = node("n-a", "香港 A", "1.1.1.1");
+        let mut report = TrialReport::new();
+        report.record(NodeAttempt::failed(
+            &a,
+            NodeFailureClass::TcpUnreachable,
+            Duration::from_millis(8400),
+            "接管默认路由之前就联系不上代理服务器 1.1.1.1:443（第1次失败、第2次失败，每次 4 秒）",
+        ));
+        let msg = report.all_failed_message();
+        let list_at = msg.find("1. 节点「香港 A」").expect("清单要在");
+        let switch_at = msg.find("换网络").expect("最后仍要允许换网络");
+        let node_action_at = msg.find("先在节点列表里换一个节点").expect("换节点动作要在");
+        assert!(
+            list_at < node_action_at && node_action_at < switch_at,
+            "顺序必须是：节点清单 → 换节点 → 换网络：\n{msg}"
+        );
+    }
+
+    // ------------------------------------------- 自动回落的结局（验收判据 ①）
+
+    /// **验收判据 ① 的文案面**：选中节点不通、另一个节点通 ⇒
+    /// 回落成功，而且**结局里说清「实际用了哪个、为什么换」**，
+    /// 同时明说**用户选中的节点没有被改动**。
+    ///
+    /// 判别性：把 `FallbackOutcome::notice` 改回旧的
+    /// 「原选中节点「A」不可达……已自动改用「B」连接」（不带地址与类别）
+    /// ⇒ 这条红。
+    #[test]
+    fn a_successful_fallback_says_which_node_and_why_without_touching_the_choice() {
+        let a = node("n-a", "香港 A", "1.1.1.1");
+        let b = node("n-b", "日本 B", "2.2.2.2");
+        let mut report = TrialReport::new();
+        report.record(NodeAttempt::failed(
+            &a,
+            NodeFailureClass::TcpUnreachable,
+            Duration::from_millis(8400),
+            "接管默认路由之前就联系不上代理服务器 1.1.1.1:443（第1次失败、第2次失败，每次 4 秒）",
+        ));
+        let used = NodeAttempt::ok(&b, Duration::from_millis(1500));
+        report.record(used.clone());
+
+        let choice = NodeFallbackOutcome::from_report(Some("n-a"), used, &report);
+        assert!(choice.switched(), "选中 A、实际用 B ⇒ 必须认得出「换了」");
+        assert_eq!(choice.used_node_id(), "n-b");
+        assert_eq!(choice.used_node_name(), "日本 B");
+        assert_eq!(choice.attempts, 2, "账本要记满两个节点");
+
+        // ① 用了哪个：name + address:port 都要在（用户要照着核对）。
+        let desc = choice.describe();
+        assert!(desc.contains("日本 B"), "{desc}");
+        assert!(desc.contains("2.2.2.2:443"), "{desc}");
+        // ② 为什么换：选中节点的**类别**要在，不能只写一句「不可达」。
+        assert!(desc.contains("香港 A"), "{desc}");
+        assert!(desc.contains("1.1.1.1:443"), "{desc}");
+        assert!(desc.contains("本机→节点 TCP 不通"), "{desc}");
+
+        let notice = choice.notice().expect("换了节点就必须有提示条");
+        assert!(notice.contains("已自动改用节点「日本 B」（2.2.2.2:443）"), "{notice}");
+        assert!(notice.contains("本机→节点 TCP 不通"), "要说清为什么换：{notice}");
+        assert!(
+            notice.contains("你的选择没有被改动"),
+            "不许静默改用户的选择，这句必须在：{notice}"
+        );
+
+        // 反向：没换节点 ⇒ 不许打扰（`notice` 为 None），但日志仍要能说出用了哪个。
+        let mut same = TrialReport::new();
+        let used_a = NodeAttempt::ok(&a, Duration::from_millis(900));
+        same.record(used_a.clone());
+        let kept = NodeFallbackOutcome::from_report(Some("n-a"), used_a, &same);
+        assert!(!kept.switched());
+        assert!(kept.notice().is_none(), "没换就别弹提示条");
+        assert!(
+            kept.describe().contains("就是你选中的那个"),
+            "{}",
+            kept.describe()
+        );
+        assert!(kept.describe().contains("1.1.1.1:443"), "{}", kept.describe());
     }
 
     /// 一个成功一个失败 ⇒ 清单里也要有，但 `succeeded()` 认得出成功那个。

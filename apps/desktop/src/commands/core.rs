@@ -154,11 +154,162 @@ fn note_node_failure(
     }
 }
 
+/// `start_core` 的返回值：**说清这次用的是哪个节点、有没有换**。
+///
+/// # 为什么必须把它从 `Result<(), String>` 换掉
+///
+/// 「首连」与「自动重建（看门狗 / 换网）」走的是同一条回落策略，但重建路径
+/// 拿到的是 `Ok(())` —— 于是自动重建成功时只能写一句「已自动恢复」，
+/// **说不出这次实际用了哪个节点、是不是悄悄换掉了用户选的那个**。
+/// 用户要的正是后一句（「不许静默改我选中的节点」）。
+#[derive(Debug, Clone)]
+pub(crate) enum CoreStartOutcome {
+    /// 核心本来就在跑（幂等早退）：这次**没有**做任何节点回落。
+    AlreadyRunning { pid: Option<u32> },
+    /// 这次真的起来了：带上回落结局（哪个节点、有没有换、为什么）。
+    Started {
+        choice: crate::node_health::NodeFallbackOutcome,
+    },
+}
+
+impl CoreStartOutcome {
+    /// 一行、进日志 / 提示条。
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::AlreadyRunning { pid } => {
+                format!("核心已在运行（pid {pid:?}），本次未做节点回落")
+            }
+            Self::Started { choice } => choice.describe(),
+        }
+    }
+}
+
+/// 一次「按候选顺序试节点」的成功结局（内部聚合，避免四元组）。
+struct FallbackSuccess {
+    runtime: CoreRuntime,
+    events: tokio::sync::mpsc::UnboundedReceiver<xray::CoreEvent>,
+    choice: crate::node_health::NodeFallbackOutcome,
+    report: crate::node_health::TrialReport,
+}
+
+/// **首连与自动重建共用的那一条回落策略**（本文件里唯一的实现）。
+///
+/// 语义三件事，缺一不可：
+/// 1. 顺序由 [`crate::node_health::rank_candidates`] 给出 —— 用户选中的永远第一，
+///    其次上次验证过的，其次按真实可用性；
+/// 2. 节点级失败 ⇒ 试下一个；**本地端口问题 ⇒ 立刻停**（换多少节点都白搭）；
+/// 3. **全试完才失败** —— 失败时返回每节点一条记录的
+///    [`crate::node_health::TrialReport`]（用户看到的是它的
+///    [`crate::node_health::TrialReport::all_failed_message`]）。
+///
+/// 它**不写回** `settings.selected_node`：每次尝试用的是自己的
+/// `attempt_settings`。成功时把「用了哪个、为什么换」装进
+/// [`crate::node_health::NodeFallbackOutcome`] 作为返回值。
+#[allow(clippy::too_many_arguments)]
+async fn run_node_fallbacks(
+    state: &AppState,
+    settings: &AppSettings,
+    nodes: &[Node],
+    candidates: &[String],
+    port_free: bool,
+    search_paths: crate::supervisor::CoreSearchPaths,
+    supervisor: &mut crate::supervisor::Supervisor,
+    helper: &mut crate::helper_client::HelperClient,
+) -> Result<FallbackSuccess, crate::node_health::TrialReport> {
+    let mut report = crate::node_health::TrialReport::new();
+    for (idx, candidate_id) in candidates.iter().enumerate() {
+        let Some(node) = nodes.iter().find(|n| &n.id == candidate_id).cloned() else {
+            continue;
+        };
+        // 每个尝试一个**独立**事件通道：失败尝试的日志不该混进成功那次。
+        let (tx, attempt_rx) = tokio::sync::mpsc::unbounded_channel::<xray::CoreEvent>();
+        let mut attempt_settings = settings.clone();
+        attempt_settings.selected_node = Some(candidate_id.clone());
+        let started = std::time::Instant::now();
+        match supervisor
+            .start(
+                &state.store,
+                &attempt_settings,
+                nodes,
+                helper,
+                Some(tx),
+                search_paths.clone(),
+            )
+            .await
+        {
+            Ok(runtime) => {
+                let used = crate::node_health::NodeAttempt::ok(&node, started.elapsed());
+                report.record(used.clone());
+                let choice = crate::node_health::NodeFallbackOutcome::from_report(
+                    settings.selected_node.as_deref(),
+                    used,
+                    &report,
+                );
+                return Ok(FallbackSuccess {
+                    runtime,
+                    events: attempt_rx,
+                    choice,
+                    report,
+                });
+            }
+            Err(e) => {
+                let elapsed = started.elapsed();
+                let class = crate::node_health::classify(&crate::node_health::FailureFacts {
+                    message: &e,
+                    node_tcp_ok: None,
+                    local_port_free: Some(port_free),
+                });
+                report.record(crate::node_health::NodeAttempt::failed(
+                    &node,
+                    class,
+                    elapsed,
+                    e.clone(),
+                ));
+                note_node_failure(state, &node, class, elapsed, &e);
+                // 本地端口问题：换节点没用，立刻停（别让用户白等一轮）。
+                if !class.is_node_level() {
+                    break;
+                }
+                if idx + 1 < candidates.len() {
+                    state.log(
+                        "app",
+                        "info",
+                        format!("继续尝试下一个节点（候选 {}/{}）", idx + 2, candidates.len()),
+                    );
+                }
+            }
+        }
+    }
+    Err(report)
+}
+
+/// **首连 / 切节点 / 切模式 / 自动重连**都走这个入口：只要 `Result<(), String>`。
+///
+/// 需要知道「这次实际用了哪个节点、有没有换」的调用点用孪生入口
+/// [`start_core_with_outcome`] —— 这里保持原签名，是因为
+/// `settings::apply_mode_switch` 的类型约束就是 `Result<(), String>`
+/// （那个文件不在本次改动范围内）。
 pub(crate) async fn start_core(
     app: &AppHandle,
     state: &AppState,
     trigger: CoreStartTrigger,
 ) -> Result<(), String> {
+    start_core_with_outcome(app, state, trigger).await.map(|_| ())
+}
+
+/// 与 [`start_core`] **完全相同**，只是把**回落结局**也返回出来。
+///
+/// # 为什么需要孪生入口（本次修的核心之一）
+///
+/// 自动重建（看门狗 / 换网）成功后必须能说出「这次实际用了哪个节点、为什么换」。
+/// 旧实现 `start_core` 只返回 `Ok(())`，于是重建路径只能写一句「已自动恢复」——
+/// 用户不知道它是不是悄悄换掉了他选的节点。判据就是
+/// [`CoreStartOutcome::describe`] 里那两句。
+pub(crate) async fn start_core_with_outcome(
+    app: &AppHandle,
+    state: &AppState,
+    trigger: CoreStartTrigger,
+) -> Result<CoreStartOutcome, String> {
     // **先落盘「谁启动了核心」**（task-108）：这一行是 Q7「来源不明的 core 启动」
     // 的唯一解药，也是 after 对照的锚点（带 App 版本 ⇒ 不用再猜「新版在跑吗」）。
     //
@@ -219,7 +370,7 @@ pub(crate) async fn start_core(
         drop(helper);
         drop(supervisor);
         spawn_monitors(app, egress_before.clone(), pid);
-        return Ok(());
+        return Ok(CoreStartOutcome::AlreadyRunning { pid });
     }
 
     // 意图过滤：把**这一次应该生效**的规则交给 supervisor（它在生成配置时用）。
@@ -287,82 +438,31 @@ pub(crate) async fn start_core(
         &latencies,
         last_good.as_deref(),
     );
-    let mut report = crate::node_health::TrialReport::new();
-    let mut success: Option<(
-        CoreRuntime,
-        tokio::sync::mpsc::UnboundedReceiver<xray::CoreEvent>,
-        String,
-    )> = None;
-
-    for (idx, candidate_id) in candidates.iter().enumerate() {
-        let Some(node) = nodes.iter().find(|n| &n.id == candidate_id).cloned() else {
-            continue;
-        };
-        // 每个尝试一个**独立**事件通道：失败尝试的日志不该混进成功那次。
-        let (tx, attempt_rx) = tokio::sync::mpsc::unbounded_channel::<xray::CoreEvent>();
-        let mut attempt_settings = effective_settings.clone();
-        attempt_settings.selected_node = Some(candidate_id.clone());
-        let started = std::time::Instant::now();
-        match supervisor
-            .start(
-                &state.store,
-                &attempt_settings,
-                &nodes,
-                &mut helper,
-                Some(tx),
-                search_paths.clone(),
-            )
-            .await
-        {
-            Ok(rt) => {
-                report.record(crate::node_health::NodeAttempt::ok(
-                    &node,
-                    started.elapsed(),
-                ));
-                success = Some((rt, attempt_rx, candidate_id.clone()));
-                break;
-            }
-            Err(e) => {
-                let class = crate::node_health::classify(&crate::node_health::FailureFacts {
-                    message: &e,
-                    node_tcp_ok: None,
-                    local_port_free: Some(port_free),
-                });
-                report.record(crate::node_health::NodeAttempt::failed(
-                    &node,
-                    class,
-                    started.elapsed(),
-                    e.clone(),
-                ));
-                note_node_failure(state, &node, class, started.elapsed(), &e);
-                // 本地端口问题：换节点没用，立刻停（别让用户白等一轮）。
-                if !class.is_node_level() {
-                    break;
-                }
-                if idx + 1 < candidates.len() {
-                    state.log(
-                        "app",
-                        "info",
-                        format!(
-                            "继续尝试下一个节点（候选 {}/{}）",
-                            idx + 2,
-                            candidates.len()
-                        ),
-                    );
-                }
-            }
-        }
-    }
+    let attempted = run_node_fallbacks(
+        state,
+        &effective_settings,
+        &nodes,
+        &candidates,
+        port_free,
+        search_paths,
+        &mut supervisor,
+        &mut helper,
+    )
+    .await;
 
     // task-176：**先取走路由审计再 drop**（审计要落盘，不能随 supervisor 一起丢）。
-    // 放在 `success` 判定之前 ⇒ **成功与失败两条路径都会记**。
+    // 放在成功/失败判定之前 ⇒ **两条路径都会记**。
     let route_audits = supervisor.take_route_audits();
     drop(helper);
     drop(supervisor);
     log_route_audits(state, &route_audits);
 
-    // 节点尝试账：一行一个节点（id:名称:类别:耗时:原文），成功与失败都记。
+    // 节点尝试账：一行一个节点（id:名称@地址:端口:类别:耗时:原文），成功与失败都记。
     // 这是「为什么这次用了/没用某个节点」的唯一结构化留痕。
+    let report = match &attempted {
+        Ok(success) => success.report.clone(),
+        Err(report) => report.clone(),
+    };
     if !report.attempts().is_empty() {
         state.log(
             "app",
@@ -371,45 +471,53 @@ pub(crate) async fn start_core(
         );
     }
 
-    let Some((runtime, mut rx, used_node_id)) = success else {
-        // 全试完才报错：给一份**节点级失败清单**（类别 + 用时 + 各自的下一步）。
-        let msg = report.all_failed_message();
-        state.with(|i| {
-            i.runtime = CoreRuntime {
-                running: false,
-                last_error: Some(msg.clone()),
-                ..Default::default()
-            };
-            i.active_node = None;
-            i.push_log("app", "error", format!("启动失败：{msg}"));
-            i.last_notice = Some(msg.clone());
-        });
-        events::runtime_changed(app, state);
-        return Err(msg);
+    let FallbackSuccess {
+        runtime,
+        events: mut rx,
+        choice,
+        ..
+    } = match attempted {
+        Ok(success) => success,
+        Err(report) => {
+            // 全试完才报错：给一份**节点级失败清单**（名字 + 地址 + 类别 + 用时 + 下一步）。
+            let msg = report.all_failed_message();
+            state.with(|i| {
+                i.runtime = CoreRuntime {
+                    running: false,
+                    last_error: Some(msg.clone()),
+                    ..Default::default()
+                };
+                i.active_node = None;
+                i.push_log("app", "error", format!("启动失败：{msg}"));
+                i.last_notice = Some(msg.clone());
+            });
+            events::runtime_changed(app, state);
+            return Err(msg);
+        }
     };
 
     // 成功：记下**实际**用的节点（不写回 `settings.selected_node`），并清零失败计数。
+    let used_node_id = choice.used_node_id().to_string();
     state.with(|i| {
         i.active_node = Some(used_node_id.clone());
         i.node_fail_streak.remove(&used_node_id);
     });
-    if used_node_id != selected_id.clone().unwrap_or_default() {
+    // **无论有没有换，都把「这次实际用了哪个」写进日志。**
+    // 换了还要再给一条**提示条**：说清换了哪个、为什么换、用户的选择没被改动。
+    if let Some(notice) = choice.notice() {
         let selected_name =
             crate::node_health::node_name_or(&nodes, selected_id.as_deref(), "（未选择）");
-        let used_name =
-            crate::node_health::node_name_or(&nodes, Some(used_node_id.as_str()), "（未选择）");
-        let notice = format!(
-            "原选中节点「{selected_name}」不可达（本次共试了 {} 个节点），已自动改用「{used_name}」连接。\
-             你的选择没有被改动 —— 设置里仍然是「{selected_name}」；\
-             要固定用新节点，请在节点列表里手动选中它。",
-            report.attempts().len()
-        );
         state.with(|i| {
             i.push_log("app", "warn", notice.clone());
             i.last_notice = Some(notice.clone());
         });
-        tracing::warn!(from = %selected_name, to = %used_name, "选中节点不可达，已自动回落到其它节点");
+        tracing::warn!(
+            from = %selected_name,
+            to = %choice.used_node_name(),
+            "选中节点不可达，已自动回落到其它节点"
+        );
     }
+    state.log("app", "info", choice.describe());
 
     // 新核心起来了：启动它的监控（换网检测 / 连通性检查 / 看门狗）。
     // 与「已经在跑」那条路径共用同一个入口，避免两处各写一份。
@@ -583,7 +691,7 @@ pub(crate) async fn start_core(
         }
     });
 
-    Ok(())
+    Ok(CoreStartOutcome::Started { choice })
 }
 
 /// 停止核心后应当写回的运行态（**纯函数，便于单测**）。
@@ -694,16 +802,27 @@ impl FallbackOutcome {
         }
     }
 
-    /// `(level, 应用日志, 顶部提示条)`。
+    /// `(level, 应用日志, 顶部提示条)`；`node_failures` = 这一次的**节点级失败清单**
+    /// （`start_core` 失败时返回的原文，见
+    /// [`crate::node_health::TrialReport::all_failed_message`]）。
+    ///
+    /// # 顺序（用户明确要求过）
+    ///
+    /// 提示条必须**先把「我们已经替你试过哪些节点、各自怎么失败的」讲清楚**，
+    /// 再给用户能做的动作 —— 不许一上来就把「先换一个网络（例如切到热点）」
+    /// 摆在第一位：那会把本机网络完全正常、只是节点不通的用户引去改一个没坏的东西。
     ///
     /// **全程不出现「网络可用」**：回滚成功只证明配置已还原，不证明能上网；
     /// 回滚失败更连配置状态都不知道。宁可说「未能确认」，也不编一个好消息。
-    pub(crate) fn messages(&self) -> (&'static str, String, String) {
+    pub(crate) fn messages(&self, node_failures: &str) -> (&'static str, String, String) {
         match self {
             Self::DirectRestored => (
                 "error",
                 "自动重建失败，已退回直连：网络配置已回滚，流量不再走代理".to_string(),
-                "自动恢复失败，已退回直连（网络配置已回滚）。可在节点页重新连接".to_string(),
+                format!(
+                    "自动恢复失败，已退回直连（网络配置已回滚）。\
+                     下面是这次**实际试过的节点**与各自的失败原因：\n{node_failures}"
+                ),
             ),
             Self::DirectUnverified { error } => (
                 "error",
@@ -713,7 +832,8 @@ impl FallbackOutcome {
                 ),
                 format!(
                     "自动恢复失败，回退直连未完成：**未能确认网络已恢复**（{error}）。\
-                     请点「修复网络」重试回滚"
+                     请点「修复网络」重试回滚。\n\
+                     下面是这次**实际试过的节点**与各自的失败原因：\n{node_failures}"
                 ),
             ),
         }
@@ -1007,15 +1127,18 @@ pub(crate) fn should_rebuild_tunnel(still_mine: bool, user_wants_it: bool, conse
 /// **为什么必须是这个顺序**：`start_core` 会**重新探测物理出口**并据此重算路由、
 /// 重写配置（`sockopt.interface` 因此变成新网卡）；但旧隧道没停干净就会撞上
 /// 「核心已经在运行」/「已有活跃会话」。
-pub(crate) async fn rebuild_tunnel_in_order<Stop, Start, SF, TF>(
+pub(crate) async fn rebuild_tunnel_in_order<Stop, Start, SF, TF, T>(
     mut stop: Stop,
     mut start: Start,
-) -> Result<(), String>
+) -> Result<T, String>
 where
     Stop: FnMut() -> SF,
     SF: std::future::Future<Output = Result<(), String>>,
     Start: FnMut() -> TF,
-    TF: std::future::Future<Output = Result<(), String>>,
+    // `T` = `start` 的成功值（现在是 [`CoreStartOutcome`]）—— 直接透传出去，
+    // 这样重建路径才能说出「这次实际用了哪个节点、有没有换」。`T = ()` 时
+    // 与旧签名逐字等价（既有测试用的就是 `Ok::<(), String>(())`）。
+    TF: std::future::Future<Output = Result<T, String>>,
 {
     // 停不下来就直接失败：不要在坏状态上再叠一层。
     stop().await?;
@@ -1669,12 +1792,15 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                         r
                     }
                 },
-                || start_core(&handle, &state, CoreStartTrigger::WatchdogRebuild),
+                || start_core_with_outcome(&handle, &state, CoreStartTrigger::WatchdogRebuild),
             )
             .await;
             let stop_failed = stop_failed.load(std::sync::atomic::Ordering::Relaxed);
 
-            if rebuilt.is_ok() {
+            if let Ok(started) = &rebuilt {
+                // **成功也要说清「实际用了哪个节点、有没有换」**（本次修的核心）：
+                // 只看一句「已自动恢复」，用户根本不知道它是不是悄悄换掉了他选的节点。
+                let rebuilt_detail = started.describe();
                 state.with(|i| {
                     i.runtime.recovery.succeeded(xt_core::util::now_unix());
                     // **清掉恢复中的提示条**（逻辑在 state.rs，有单测：
@@ -1683,14 +1809,18 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                     // 从「该显示时看不见」变成「恢复完了还一直显示恢复中」。
                     crate::state::clear_recovering_notice(&mut i.last_notice);
                 });
-                state.log("app", "info", format!("隧道已自动恢复（第 {attempt} 次自动重建）"));
+                state.log(
+                    "app",
+                    "info",
+                    format!("隧道已自动恢复（第 {attempt} 次自动重建）：{rebuilt_detail}"),
+                );
                 // 被动哨兵（task-130）：自愈成功也要留一条 —— 现场包里「恢复过几次」
                 // 与「作废过几次」是同一件事的两面，只记失败会看不出自愈在起作用。
                 record(
                     &state,
                     "self_healed",
                     "info",
-                    format!("隧道已自动恢复（第 {attempt} 次自动重建）"),
+                    format!("隧道已自动恢复（第 {attempt} 次自动重建）：{rebuilt_detail}"),
                 );
                 // 显式推一次：让界面收到 `recovering=false` + `last_outcome=recovered`，
                 // 这样「恢复成功」是**可感知的结束**，不是静默变回「已连接」。
@@ -1724,8 +1854,12 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                         // 界面据此显示「探测失败 N 次」的 degraded 态。
                         i.runtime.recovery.recovering = false;
                         i.runtime.recovery.finished_unix = Some(xt_core::util::now_unix());
-                        i.last_notice =
-                            Some(format!("自动恢复未成功，隧道仍在运行，{wait} 秒后重试"));
+                        // 先讲清「这次试过哪些节点、各自怎么失败」，再给用户下一步 ——
+                        // 与退回直连那条路径同一个顺序（用户明确要求过）。
+                        i.last_notice = Some(format!(
+                            "自动恢复未成功，隧道仍在运行，{wait} 秒后重试。\
+                             这次试过的节点与失败原因：\n{rebuild_err}"
+                        ));
                     });
                     state.log(
                         "app",
@@ -1744,7 +1878,7 @@ pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: M
                     // 失败被丢掉，紧接着无条件写「网络可用」—— 那是在断言我们没验证过的事。
                     let stop_result = stop_core(&handle, &state).await;
                     let outcome = FallbackOutcome::from_stop(&stop_result);
-                    let (level, log_line, notice) = outcome.messages();
+                    let (level, log_line, notice) = outcome.messages(&rebuild_err);
                     state.with(|i| {
                         i.runtime.recovery.fell_back_to_direct(xt_core::util::now_unix());
                         // 失败时 notice **保留**，并说清下一步能做什么（诚实版：不声称网络可用）。
@@ -2083,20 +2217,25 @@ pub(crate) fn spawn_network_watch(
 
             match rebuild_tunnel_in_order(
                 || stop_core(&handle, &state),
-                || start_core(&handle, &state, CoreStartTrigger::EgressChange),
+                || start_core_with_outcome(&handle, &state, CoreStartTrigger::EgressChange),
             )
             .await
             {
-                Ok(()) => {
+                Ok(started) => {
+                    // **成功也要说清「实际用了哪个节点、有没有换」**（本次修的核心）。
+                    let rebuilt_detail = started.describe();
                     state.with(|i| {
                         i.runtime.recovery.succeeded(xt_core::util::now_unix());
                         crate::state::clear_recovering_notice(&mut i.last_notice);
                     });
-                    // **结果也可读**：用户应该知道「刚才是因为换网，我重建了一次」。
+                    // **结果也可读**：用户应该知道「刚才是因为换网，我重建了一次」，
+                    // 以及**重建后实际用的是哪个节点**。
                     state.log(
                         "app",
                         "info",
-                        format!("已因换网重建隧道（{from} → {to}）：路由与 DNS 已按新出口重装"),
+                        format!(
+                            "已因换网重建隧道（{from} → {to}）：路由与 DNS 已按新出口重装；{rebuilt_detail}"
+                        ),
                     );
                     events::runtime_changed(&handle, &state);
                 }
@@ -2104,7 +2243,8 @@ pub(crate) fn spawn_network_watch(
                     // 重建失败：退回直连（与看门狗同一处置），并如实说清失败在哪一步。
                     let stop_result = stop_core(&handle, &state).await;
                     let outcome = FallbackOutcome::from_stop(&stop_result);
-                    let (level, log_line, notice) = outcome.messages();
+                    // `e` 就是 `start_core` 返回的**节点级失败清单** ⇒ 提示条先讲它、再给动作。
+                    let (level, log_line, notice) = outcome.messages(&e);
                     state.with(|i| {
                         i.push_log("app", level, format!("换网后重建失败：{e}；{log_line}"));
                         i.runtime
@@ -3196,7 +3336,10 @@ mod tests {
             FallbackOutcome::DirectUnverified { error: "stop failed".into() }
         );
 
-        let (level, log_line, notice) = outcome.messages();
+        // 节点级失败清单（`start_core` 失败时返回的原文）必须**原样**进提示条：
+        // 「先讲清试过哪些节点、各自怎么失败」是用户明确要求的顺序。
+        let node_failures = "试了 2 个节点都没能建立可用隧道……\n  1. 节点「香港 A」（1.1.1.1:443）：本机→节点 TCP 不通（8.4s）";
+        let (level, log_line, notice) = outcome.messages(node_failures);
         assert_eq!(level, "error");
         for text in [&log_line, &notice] {
             assert!(
@@ -3206,20 +3349,29 @@ mod tests {
             assert!(!text.contains("网络可用"), "不许编好消息：{text}");
         }
         assert!(notice.contains("修复网络"), "要给出下一步能做什么：{notice}");
+        assert!(
+            notice.contains("香港 A") && notice.contains("1.1.1.1:443"),
+            "节点级失败清单必须先讲清楚：{notice}"
+        );
     }
 
-    /// 回退成功：只声称「网络配置已回滚」（有证据），不声称「能上网」。
+    /// 回退成功：只声称「网络配置已回滚」（有证据），不声称「能上网」；
+    /// 并且提示条里**先**是「这次实际试过的节点与失败原因」，再是动作。
     #[test]
     fn fallback_success_claims_rollback_not_reachability() {
         let outcome = FallbackOutcome::from_stop(&Ok(()));
         assert_eq!(outcome, FallbackOutcome::DirectRestored);
 
-        let (_, log_line, notice) = outcome.messages();
+        let node_failures = "试了 2 个节点都没能建立可用隧道……\n  1. 节点「香港 A」（1.1.1.1:443）：本机→节点 TCP 不通（8.4s）";
+        let (_, log_line, notice) = outcome.messages(node_failures);
         for text in [&log_line, &notice] {
             assert!(text.contains("网络配置已回滚"), "实际：{text}");
             assert!(!text.contains("未能确认"), "成功路径不该说未确认：{text}");
             assert!(!text.contains("网络可用"), "实际：{text}");
         }
+        let list_at = notice.find("实际试过的节点").expect("先讲清单");
+        let node_at = notice.find("香港 A").expect("清单里要有节点");
+        assert!(list_at < node_at, "顺序：先说明试过什么，再列节点：{notice}");
     }
 
     /// `fell_back_to_direct` 现在确实会被走到（回退路径有判定，不再是死代码）：
@@ -4549,12 +4701,12 @@ mod tests {
             ),
             (
                 &core,
-                "start_core(&handle, &state, CoreStartTrigger::EgressChange)",
+                "start_core_with_outcome(&handle, &state, CoreStartTrigger::EgressChange)",
                 "换网重建",
             ),
             (
                 &core,
-                "start_core(&handle, &state, CoreStartTrigger::WatchdogRebuild)",
+                "start_core_with_outcome(&handle, &state, CoreStartTrigger::WatchdogRebuild)",
                 "看门狗重建",
             ),
             (
@@ -4567,6 +4719,94 @@ mod tests {
                 file.contains(anchor),
                 "「{what}」这个调用点不见了它自己的触发者（改成别的来源或写死都会让锚点消失）：{anchor}"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 自动重建 ⇄ 首连：**同一条回落策略**，且成功必须说出用了哪个节点
+    // -----------------------------------------------------------------------
+
+    /// **源码级守卫**：自动重建（看门狗 / 换网）**不许自己再写一份回落**。
+    ///
+    /// 判据：
+    /// 1. 两条重建路径都调 [`start_core_with_outcome`]（回落 + 带回结局）；
+    /// 2. 回落循环**只有一处实现** —— `run_node_fallbacks(` 全文件出现 2 次
+    ///    （定义 1 + 调用 1）。多一处就说明有人复制了第二份策略。
+    ///
+    /// 判别性：把任一重建点改回 `start_core(`（丢掉结局）或把循环复制一份 ⇒ 红。
+    #[test]
+    fn auto_rebuild_shares_the_single_fallback_strategy() {
+        let strip = |src: &str| src.split("#[cfg(test)]").next().unwrap_or("").to_string();
+        let core = strip(include_str!("core.rs"));
+
+        for anchor in [
+            "start_core_with_outcome(&handle, &state, CoreStartTrigger::WatchdogRebuild)",
+            "start_core_with_outcome(&handle, &state, CoreStartTrigger::EgressChange)",
+        ] {
+            assert!(core.contains(anchor), "重建路径必须走带回结局的入口：{anchor}");
+        }
+        assert!(
+            core.contains("start_core_with_outcome(app, state, trigger).await.map(|_| ())"),
+            "首连入口必须与重建入口**共用同一个实现**（薄包装），不许各写一份回落"
+        );
+        assert_eq!(
+            core.matches("run_node_fallbacks(").count(),
+            2,
+            "回落策略只许有一处实现（定义 1 次 + 调用 1 次）：{}",
+            core.matches("run_node_fallbacks(").count()
+        );
+    }
+
+    /// **验收判据 ①（自动重建那一半）**：重建成功后返回的结局必须能说出
+    /// 「实际用了哪个节点、有没有换」—— 否则用户无从知道它是不是悄悄换了节点。
+    ///
+    /// 这里用 [`CoreStartOutcome`] 的两个变体把「返回值里说明」钉死。
+    #[test]
+    fn rebuild_outcome_names_the_node_it_actually_used() {
+        use crate::node_health::{NodeAttempt, NodeFailureClass, NodeFallbackOutcome, TrialReport};
+        let sel = node_fixture("n-sel", "旧节点", "1.1.1.1");
+        let other = node_fixture("n-other", "备用节点", "2.2.2.2");
+        let mut report = TrialReport::new();
+        report.record(NodeAttempt::failed(
+            &sel,
+            NodeFailureClass::TcpUnreachable,
+            Duration::from_millis(8400),
+            "接管默认路由之前就联系不上代理服务器 1.1.1.1:443（第1次失败、第2次失败，每次 4 秒）",
+        ));
+        let used = NodeAttempt::ok(&other, Duration::from_millis(1200));
+        report.record(used.clone());
+        let choice = NodeFallbackOutcome::from_report(Some("n-sel"), used, &report);
+
+        let started = CoreStartOutcome::Started { choice };
+        let text = started.describe();
+        assert!(text.contains("备用节点") && text.contains("2.2.2.2:443"), "{text}");
+        assert!(text.contains("1.1.1.1:443"), "要说清为什么换：{text}");
+        assert!(text.contains("本机→节点 TCP 不通"), "{text}");
+
+        // 幂等早退那条路径**没有**做回落 ⇒ 不许假装知道用了哪个节点。
+        let already = CoreStartOutcome::AlreadyRunning { pid: Some(42) };
+        let text = already.describe();
+        assert!(text.contains("未做节点回落"), "{text}");
+        assert!(!text.contains("本次实际使用节点"), "{text}");
+    }
+
+    fn node_fixture(id: &str, name: &str, address: &str) -> Node {
+        Node {
+            id: id.into(),
+            name: name.into(),
+            address: address.into(),
+            port: 443,
+            protocol: xt_core::model::Protocol::Vless {
+                uuid: "00000000-0000-0000-0000-000000000000".into(),
+                flow: String::new(),
+                encryption: "none".into(),
+            },
+            transport: Default::default(),
+            tls: Default::default(),
+            mux: None,
+            source: xt_core::model::NodeSource::Manual,
+            tags: Vec::new(),
+            raw_uri: None,
         }
     }
 }
