@@ -473,12 +473,11 @@ impl AuditReport {
                 rate * 100.0, self.cache_hits, self.cache_misses)),
             None => s.push_str("- 缓存命中率：**无法计算**（没有记录）\n"),
         }
-        match self.applied_rate() {
-            Some(rate) => s.push_str(&format!(
+        if let Some(rate) = self.applied_rate() {
+            s.push_str(&format!(
                 "- 判决真正生效：**{:.1}%**（未生效 {} 行 —— 演练模式或已被回滚）\n",
                 rate * 100.0, self.unapplied_rows
-            )),
-            None => {}
+            ));
         }
         if self.rows_with_context > 0 {
             s.push_str(&format!(

@@ -905,7 +905,7 @@ mod tests {
         let t = FakeTransport::ok();
         let run = rt.sync_now_with(&t);
         assert_eq!(t.calls(), 0);
-        assert!(run.error.unwrap().contains("token"), "{run:?}");
+        assert!(run.error.clone().unwrap().contains("token"), "{run:?}");
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
         assert!(err.contains("401"), "{err}");
         let s = rt.status();
         assert_eq!(s.last_uploaded_day, None, "失败不许推进进度");
-        assert!(s.last_error.unwrap().contains("401"));
+        assert!(s.last_error.clone().unwrap().contains("401"));
         assert!(s.next_retry_unix.is_some(), "失败后要进退避");
     }
 
@@ -962,7 +962,7 @@ mod tests {
         let p = rt.preview(Some("2026-09-24".into()));
         assert_eq!(p.day.as_deref(), Some("2026-09-24"));
         assert_eq!(p.rows, 1);
-        let text = p.plaintext.unwrap();
+        let text = p.plaintext.clone().unwrap();
         assert!(text.contains("ads.example"), "预览要能让人看清会传什么");
         assert!(
             !text.contains("用户正在看的页面内容"),
@@ -979,7 +979,7 @@ mod tests {
         write_audit(&dir, &[rec(20_720 * 86_400, "ads.example")]);
         let p = rt.preview(None);
         assert_eq!(p.rows, 1);
-        assert!(p.note.unwrap().contains("临时"), "要说清这是临时设备 id");
+        assert!(p.note.clone().unwrap().contains("临时"), "要说清这是临时设备 id");
         assert!(!dir.join(STATE_FILE).exists(), "预览不该写状态文件");
     }
 
@@ -993,7 +993,7 @@ mod tests {
         write_audit(&dir, &[rec(now, "ads.example")]);
         let p = rt.preview(None);
         assert!(p.plaintext.is_none());
-        assert!(p.note.unwrap().contains("已结束"), "{p:?}");
+        assert!(p.note.clone().unwrap().contains("已结束"), "{p:?}");
     }
 
     #[test]
