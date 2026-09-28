@@ -50,7 +50,7 @@ const NAV: Array<{ id: View; label: string }> = [
   { id: "routing", label: "分流" },
   { id: "intent", label: "意图过滤" },
   { id: "topology", label: "拓扑" },
-  { id: "globe", label: "地球仪" },
+  { id: "globe", label: "位置" },
   { id: "logs", label: "日志" },
   { id: "settings", label: "设置" },
 ];

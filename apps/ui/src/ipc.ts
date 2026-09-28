@@ -108,8 +108,13 @@ export const api = {
   refreshSubscriptions: (ids?: string[]) =>
     invoke<AppSnapshot>("refresh_subscriptions", { ids: ids ?? null }),
 
-  /** 地球仪数据：本机与出口节点的地理位置（来自 ip-api.com）。 */
-  globeData: () => invoke<GlobeData>("globe_data"),
+  /**
+   * 位置数据：本机与出口节点的地理位置（多源互校：ipwho.is / ip-api.com / ipapi.co）。
+   *
+   * `force=false`（默认）时后端按**公网 IP** 复用缓存 —— IP 没变就不重新联网查询；
+   * `force=true` 是「重新定位」按钮：忽略缓存重查一次。
+   */
+  globeData: (force = false) => invoke<GlobeData>("globe_data", { force }),
 
   /** 网络流动拓扑：真实入口/规则链/出口 + 实测流量。 */
   routingTopology: () => invoke<Topology>("routing_topology"),

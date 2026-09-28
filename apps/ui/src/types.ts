@@ -1177,6 +1177,21 @@ export interface GlobeRoute {
   traffic: GlobeTrafficProvenance;
 }
 
+/**
+ * 位置数据的来源与新鲜度（0.9.1：按公网 IP 缓存的定位结果）。
+ *
+ * 缓存的目的：**进这个页面不该每次都重新联网查**。位置只在**公网 IP 变化**时才重查；
+ * IP 没变就复用上次结果。字段名与 Rust 的 `commands/globe.rs::GlobeCacheInfo` 逐字一致。
+ */
+export interface GlobeCacheInfo {
+  /** true = 直接用了缓存，**没有**重新联网查询坐标。 */
+  from_cache: boolean;
+  /** 该缓存条目的抓取时间（Unix 秒）；本次刚查出来时为 null。 */
+  fetched_unix: number | null;
+  /** 本次探测到的公网 IP 与缓存不同 ⇒ 触发了重新查询（首查也算 true）。 */
+  ip_changed: boolean;
+}
+
 export interface GlobeData {
   route: GlobeRoute | null;
   origin: GeoLocation | null;
@@ -1184,6 +1199,13 @@ export interface GlobeData {
   error: string | null;
   /** 「本机 · IP」这条陈述的**可验证来源**（task-179 / A21）。 */
   self_check: GlobeSelfCheck;
+  /**
+   * 缓存状态（0.9.1）。
+   *
+   * 用可选：预览快照与旧后端可能不带这个字段 —— 缺字段时界面**不许**编造
+   * 「来自缓存」或「刚查过」，按「不知道」处理（本项目对缺字段的一贯口径）。
+   */
+  cache?: GlobeCacheInfo;
 }
 
 // ---------------------------------------------------------------------------

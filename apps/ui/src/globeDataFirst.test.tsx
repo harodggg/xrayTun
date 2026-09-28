@@ -18,7 +18,7 @@
  *   覆盖；本文件只补一条「主数字槽位仍然是同一个槽位」，防止有人把降级路径挪到次要位置。
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ globeData: vi.fn() }));
@@ -32,7 +32,7 @@ vi.mock("./ipc", async (importOriginal) => {
   };
 });
 
-import Globe from "./pages/Globe";
+import Globe, { locationFreshnessText, relativeAge } from "./pages/Globe";
 import { StoreProvider } from "./store";
 import type { GeoLocation, GlobeData } from "./types";
 
@@ -48,7 +48,7 @@ const LOC = (ip: string): GeoLocation => ({
   sources: ["ipwho.is"],
 });
 
-function globeData(verified: boolean): GlobeData {
+function globeData(verified: boolean, cache?: GlobeData["cache"]): GlobeData {
   return {
     route: {
       from: LOC("39.144.146.165"),
@@ -72,6 +72,7 @@ function globeData(verified: boolean): GlobeData {
       trusted: true,
       reason: null,
     },
+    ...(cache === undefined ? {} : { cache }),
   };
 }
 
@@ -155,5 +156,84 @@ describe("0.9.0 · PRD P0-3② 主数字换成累计流量", () => {
     expect(main).not.toBeNull();
     expect(main!.textContent).toBe("—");
     expect(mid!.textContent).toContain("归属未验证");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.9.1 · 改名「地球仪」→「位置」+ 定位缓存（IP 变了才重查）
+// ---------------------------------------------------------------------------
+
+describe("0.9.1 · 页面改名为「位置」", () => {
+  it("页内主标题是「位置」，且不再出现旧词「地球仪」", async () => {
+    await renderGlobe(globeData(true));
+
+    const title = document.querySelector(".page__title");
+    expect(title?.textContent).toBe("位置");
+    // 用户可见文本里不该再有旧名（注释/文档里的词不参与，这里只看渲染结果）
+    expect(document.body.textContent).not.toContain("地球仪");
+  });
+});
+
+describe("0.9.1 · 位置新鲜度必须如实写出来", () => {
+  it("relativeAge：分钟 / 小时 / 天，且未来时间戳不写负值", () => {
+    expect(relativeAge(1_000_000, 1_000_030)).toBe("刚刚");
+    expect(relativeAge(1_000_000, 1_000_000 + 120)).toBe("2 分钟前");
+    expect(relativeAge(1_000_000, 1_000_000 + 7200)).toBe("2 小时前");
+    expect(relativeAge(1_000_000, 1_000_000 + 3 * 86400)).toBe("3 天前");
+    expect(relativeAge(1_000_000, 999_000)).toBe("刚刚"); // 时钟回拨不出现「-1 分钟前」
+    expect(relativeAge(Number.NaN, 1_000_000)).toBeNull();
+  });
+
+  it("来自缓存 ⇒ 说清「来自缓存」+ 多久以前 + IP 未变化", () => {
+    const text = locationFreshnessText(
+      { from_cache: true, fetched_unix: 1_000_000, ip_changed: false },
+      1_000_000 + 3 * 86400,
+    );
+    expect(text).toContain("位置来自缓存");
+    expect(text).toContain("3 天前");
+    expect(text).toContain("公网 IP 未变化");
+  });
+
+  it("IP 变了 ⇒ 说「按新的公网 IP 重新查询」（与「手动重查」区分开）", () => {
+    expect(
+      locationFreshnessText(
+        { from_cache: false, fetched_unix: null, ip_changed: true },
+        1_000_000,
+      ),
+    ).toBe("已按新的公网 IP 重新查询");
+    expect(
+      locationFreshnessText(
+        { from_cache: false, fetched_unix: null, ip_changed: false },
+        1_000_000,
+      ),
+    ).toBe("已重新查询（手动触发）");
+  });
+
+  it("缺 cache 字段（旧后端/预览）⇒ 不渲染这一行，也**不许**编造「来自缓存」", async () => {
+    await renderGlobe(globeData(true)); // 不带 cache
+    expect(screen.queryByTestId("location-freshness")).toBeNull();
+    expect(document.body.textContent).not.toContain("来自缓存");
+  });
+
+  it("有 cache 字段 ⇒ 渲染成 role=status（点重新定位后读屏能听到变化）", async () => {
+    await renderGlobe(
+      globeData(true, { from_cache: true, fetched_unix: 1_790_000_000, ip_changed: false }),
+    );
+    const line = screen.getByTestId("location-freshness");
+    expect(line.getAttribute("role")).toBe("status");
+    expect(line.textContent).toContain("来自缓存");
+  });
+});
+
+describe("0.9.1 · 「重新定位」是强制刷新；进页面走缓存", () => {
+  it("挂载时 force=false（用缓存，不强制联网）", async () => {
+    await renderGlobe(globeData(true));
+    expect(mocks.globeData).toHaveBeenCalledWith(false);
+  });
+
+  it("点「重新定位」⇒ force=true（忽略缓存重查一次）", async () => {
+    await renderGlobe(globeData(true));
+    fireEvent.click(screen.getByRole("button", { name: "重新定位" }));
+    await waitFor(() => expect(mocks.globeData).toHaveBeenCalledWith(true));
   });
 });

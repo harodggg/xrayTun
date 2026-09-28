@@ -31,7 +31,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "../ipc";
 import { LAND_MASK_HEX, decodeLandMaskFlat, sampleLand } from "../landmask";
 import { formatBytes } from "../types";
-import type { GeoLocation, GlobeData, GlobeSelfCheck, GlobeTrafficProvenance } from "../types";
+import type {
+  GeoLocation,
+  GlobeCacheInfo,
+  GlobeData,
+  GlobeSelfCheck,
+  GlobeTrafficProvenance,
+} from "../types";
 
 const DEG = Math.PI / 180;
 
@@ -82,15 +88,69 @@ function angularDistance(
   return Math.acos(dot);
 }
 
+/** 相对时间（「3 天前」）。纯函数，便于单测；`nowSec` 由调用方给，避免测试依赖真实时钟。 */
+export function relativeAge(unixSec: number, nowSec: number): string | null {
+  if (!Number.isFinite(unixSec)) return null;
+  const d = Math.max(0, Math.floor(nowSec - unixSec));
+  if (d < 60) return "刚刚";
+  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
+  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`;
+  return `${Math.floor(d / 86400)} 天前`;
+}
+
+/**
+ * 「这条位置有多新」的如实陈述（0.9.1：定位按公网 IP 缓存）。
+ *
+ * # 为什么必须写出来
+ *
+ * 位置**只在公网 IP 变化时**才重新联网查询 ⇒ 页面上的那个点可能是很久以前的。
+ * 不说清楚，用户会把三天前的定位当成刚测的 —— 这正是本项目反复在防的一类假陈述
+ * （同族的还有「流量不可用」不许显示 0、域名带 `*` 必须标注配对）。
+ *
+ * # 缺字段怎么办
+ *
+ * `cache` 是 0.9.1 新增的可选字段（旧后端、预览快照可能没有）。缺字段时
+ * **整行不渲染**：不编造「来自缓存」，也不编造「刚查过」。
+ */
+export function locationFreshnessText(
+  cache: GlobeCacheInfo | undefined,
+  nowSec: number,
+): string | null {
+  if (!cache) return null;
+  if (cache.from_cache) {
+    const age =
+      cache.fetched_unix === null ? null : relativeAge(cache.fetched_unix, nowSec);
+    return age
+      ? `位置来自缓存（${age}查询），公网 IP 未变化`
+      : "位置来自缓存，公网 IP 未变化";
+  }
+  return cache.ip_changed ? "已按新的公网 IP 重新查询" : "已重新查询（手动触发）";
+}
+
+function LocationFreshness({ cache }: { cache: GlobeCacheInfo | undefined }) {
+  const text = locationFreshnessText(cache, Math.floor(Date.now() / 1000));
+  if (!text) return null;
+  // role=status：点「重新定位」后这一行会变，读屏用户需要听到变化。
+  return (
+    <p className="page__desc" role="status" data-testid="location-freshness">
+      {text}
+    </p>
+  );
+}
+
 export default function Globe() {
   const [data, setData] = useState<GlobeData | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async () => {
+  /**
+   * `force=false`（进页面/挂载）：后端按**公网 IP** 复用缓存 —— IP 没变就不重新联网查询。
+   * `force=true`（「重新定位」按钮）：忽略缓存重查一次。
+   */
+  const load = useCallback(async (force = false) => {
     setBusy(true);
     try {
-      setData(await api.globeData());
+      setData(await api.globeData(force));
       setLoadError(null);
     } catch (e) {
       setLoadError(errorText(e));
@@ -108,14 +168,24 @@ export default function Globe() {
       <section className="page__sec">
         <div className="row row--between">
           <div>
-            <h2 className="page__title">地球仪</h2>
+            <h2 className="page__title">位置</h2>
             <p className="page__desc">
               从本机到出口节点的大圆弧航线。飞机数量由这条航线的<strong>累计流量</strong>决定
               （累计值；飞行快慢是视觉节奏，与当前网速无关）。
               大陆轮廓是 2° 分辨率的粗略示意，不是导航级海岸线。
             </p>
+            {/* 位置只在**公网 IP 变化**时重新联网查询；IP 没变就用上次的结果。
+                这一行把「这条位置有多新、是不是缓存」如实写出来 —— 否则用户无从判断
+                图上这个点是刚测的还是三天前的。缺 `cache` 字段（旧后端/预览）时整行不渲染，
+                不编造「来自缓存」。 */}
+            <LocationFreshness cache={data?.cache} />
           </div>
-          <button className="btn btn--ghost" disabled={busy} onClick={() => void load()}>
+          <button
+            className="btn btn--ghost"
+            disabled={busy}
+            title="忽略缓存，重新联网查询一次位置"
+            onClick={() => void load(true)}
+          >
             {busy ? <span className="spin" /> : null}
             重新定位
           </button>

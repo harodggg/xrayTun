@@ -113,7 +113,9 @@ export function installPreviewBridge(): () => void {
           return scenarioSnapshot();
         case "routing_topology":
           return topologyScenario();
-        case "globe_data":
+        case "globe_data": {
+          // 「重新定位」按钮会带 force=true —— 预览里也照它切换缓存状态。
+          const force = Boolean((_args as { force?: boolean } | undefined)?.force);
           // 用与 Rust 侧一致的形状；坐标取自实测（本机=大理，节点=香港）
           return {
             route: {
@@ -130,7 +132,7 @@ export function installPreviewBridge(): () => void {
                 reason: null,
               },
             },
-            origin: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 25.61", "ip-api.com: 25.69"] },
+            origin: { ip: "39.144.146.165", country: "中国", city: "广州市", lat: 23.1317, lon: 113.266, isp: "China Mobile", source: "ipwho.is", consistent: true, sources: ["ipwho.is: 25.61", "ip-api.com: 25.69", "ipapi.co: 25.62"] },
             error: null,
             self_check: {
               ip: "39.144.146.165",
@@ -138,7 +140,16 @@ export function installPreviewBridge(): () => void {
               trusted: true,
               reason: null,
             },
+            // 0.9.1 缓存：预览里按 `globe_data(force)` 的入参给出两种状态，
+            // 这样「来自缓存」与「刚重新定位」两条文案都能在预览里被核对到
+            // （与 task-179 让降级分支可截图是同一套理由）。
+            cache: {
+              from_cache: !force,
+              fetched_unix: force ? null : 1_790_000_000,
+              ip_changed: force,
+            },
           };
+        }
         case "explain_dest": {
           // 判定用真实规则会命中哪条 —— 预览里给一个**与真实配置同形**的结果，
           // 便于核对界面文案；真实判定由 Rust 侧完成（已与真实核心对拍）。
