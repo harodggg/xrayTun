@@ -25,8 +25,6 @@ pub(crate) enum CoreStartTrigger {
     ModeSwitch,
     /// 切换节点（`select_node`）。
     NodeSwitch,
-    /// 切节点时的**回退**路径（新节点起不来，换一个）。
-    NodeSwitchFallback,
     /// 物理出口变化（换网）触发的重建。
     EgressChange,
     /// 看门狗发现隧道不通触发的重建。
@@ -44,7 +42,6 @@ impl CoreStartTrigger {
             Self::UserConnect => "用户点击连接",
             Self::ModeSwitch => "切换模式",
             Self::NodeSwitch => "切换节点",
-            Self::NodeSwitchFallback => "切换节点（回退）",
             Self::EgressChange => "物理出口变化（换网）",
             Self::WatchdogRebuild => "看门狗重建",
             Self::AutoReconnect => "启动时自动重连",
@@ -61,7 +58,6 @@ impl CoreStartTrigger {
         Self::UserConnect,
         Self::ModeSwitch,
         Self::NodeSwitch,
-        Self::NodeSwitchFallback,
         Self::EgressChange,
         Self::WatchdogRebuild,
         Self::AutoReconnect,
@@ -1092,14 +1088,12 @@ pub(crate) enum FailureExit {
     NetworkWatchRebuild,
     /// 自动重连试满 `RECONNECT_ATTEMPTS` 仍未成功（门禁没过）。
     ReconnectExhausted,
-    /// 切换节点：目标起不来，且**没有可回退的节点**。
-    NodeSwitchNoFallback,
-    /// 切换节点：目标起不来，且取不到回退所需的状态。
-    NodeSwitchFallbackStateUnavailable,
-    /// 切换节点：目标起不来，且回退节点的选择没能落盘。
-    NodeSwitchFallbackPersistFailed,
-    /// 切换节点：目标起不来，回退节点也起不来。
-    NodeSwitchFallbackFailed,
+    /// 切换节点失败：**隧道已还原，用户选中的节点保留**。
+    ///
+    /// 「回退到别的节点」这条路 2026-09-28 被整个删掉了（用户裁决：选择就使用，
+    /// 不使用任何回落）。所以这里原本的四个出口收敛成一个 ——
+    /// 「切到该节点失败」就是一个**终局**，不再有"回退也失败"这种中间态。
+    NodeSwitchFailed,
 }
 
 impl FailureExit {
@@ -1110,14 +1104,11 @@ impl FailureExit {
     /// `dead_code`。但**它必须留在生产模块里**：它就是「清单」本身 —— 守卫测试
     /// 靠它知道该检查哪些变体；挪进测试模块，新增变体就能悄悄溜过守卫。
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const ALL: [FailureExit; 7] = [
+    pub(crate) const ALL: [FailureExit; 4] = [
         Self::WatchdogRebuild,
         Self::NetworkWatchRebuild,
         Self::ReconnectExhausted,
-        Self::NodeSwitchNoFallback,
-        Self::NodeSwitchFallbackStateUnavailable,
-        Self::NodeSwitchFallbackPersistFailed,
-        Self::NodeSwitchFallbackFailed,
+        Self::NodeSwitchFailed,
     ];
 
     /// 给人看的「发生了什么」。**只陈述事实**，不猜原因（不许写「节点被封了」这种）。
@@ -1126,10 +1117,7 @@ impl FailureExit {
             Self::WatchdogRebuild => "看门狗重建隧道失败，已退回直连",
             Self::NetworkWatchRebuild => "换网后重建隧道失败，已退回直连",
             Self::ReconnectExhausted => "自动重连多次仍未成功（门禁未过）",
-            Self::NodeSwitchNoFallback => "切换到该节点失败，且没有可回退的节点",
-            Self::NodeSwitchFallbackStateUnavailable => "切换到该节点失败，且取不到回退所需的状态",
-            Self::NodeSwitchFallbackPersistFailed => "切换到该节点失败，且回退节点的选择未能落盘",
-            Self::NodeSwitchFallbackFailed => "切换到该节点失败，回退节点也未能启动",
+            Self::NodeSwitchFailed => "切换到该节点失败（隧道已还原，你选的节点保留）",
         }
     }
 }
@@ -4874,11 +4862,6 @@ mod tests {
                 &nodes,
                 "start_core(&app, &state, CoreStartTrigger::NodeSwitch)",
                 "切节点",
-            ),
-            (
-                &nodes,
-                "start_core(&app, &state, CoreStartTrigger::NodeSwitchFallback)",
-                "切节点（回退）",
             ),
             (
                 &core,

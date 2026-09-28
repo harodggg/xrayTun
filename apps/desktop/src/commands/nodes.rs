@@ -18,20 +18,30 @@ pub async fn select_node(
         return Err("找不到该节点".into());
     }
     let mut settings = state.with(|i| i.settings.clone()).ok_or(util::STATE_UNAVAILABLE)?;
-    let previous = settings.selected_node.clone();
+    // 先把**选择**落盘：用户点了就是选了，后面无论成败都保留这个选择
+    // （这正是「选择就使用」的最低要求 —— 连选择都没存住就谈不上）。
     settings.selected_node = Some(node_id.clone());
     persist_settings(&state, &settings)?;
 
     // 核心在跑就重启，让新节点立即生效（配置变更走重启，见 docs/03）。
     //
-    // **这一步是几秒钟的拆建，不是瞬时切换**：Xray 没有配置热重载，
-    // 换节点必须换配置、换配置必须重启核心。所以要有明确的过程提示 ——
-    // 否则用户看到的就是「点了没反应，然后所有连接断一遍」。
+    // # 「选择就用」——本路径**不做任何回落**（2026-09-28 按用户裁决简化）
+    //
+    // 旧实现在新节点起不来时会**自动退回**上一个节点（`switch_plan.fallback_to`）。
+    // 那条逻辑整个删掉了，因为它带来的坏处大于好处：
+    //
+    // * 用户点的是某台节点，App 却把出口换成另一台 —— 屏幕上的「已连接」背后
+    //   是他没选的那条路。这是**行为上的撒谎**，不只是慢；
+    // * 失败一次要跑**两遍完整拆建**（实测最坏 ≈ 30 秒），而它想避免的
+    //   「用户断网」恰恰是用户自己点一下就能解决的事；
+    // * 「哪台能用」本来就**不该由我们的探测来判**（见 `supervisor` 里
+    //   「接管前门禁已删」那段注释：我们测不出用户真正在意的"流量能不能出去"）。
+    //
+    // 现在：失败就把**真实原因**原样交出去，**保留用户的选择**，隧道回到
+    // 「没有接管」的干净状态。要不要换一台，由用户自己决定。
     let running = state.with(|i| i.runtime.running).unwrap_or(false);
-    let last_good = state.with(|i| i.runtime.last_good_node.clone()).unwrap_or(None);
-    let plan = switch_plan(running, previous.as_deref(), last_good.as_deref(), &node_id);
 
-    if plan.restart {
+    if running {
         let name = state
             .with(|i| i.nodes.iter().find(|n| n.id == node_id).map(|n| n.name.clone()))
             .unwrap_or(None)
@@ -46,58 +56,24 @@ pub async fn select_node(
             return Err(e);
         }
 
-        // **这里失败必须回退。** 旧的隧道已经拆了，如果新节点起不来就直接
-        // 把用户丢在断网状态 —— 而「新节点是坏的」是常见情况（实测有节点
-        // TCP 可达却转发不了流量）。没有这一段，一次误选就是一次连环爆炸。
+        // **失败不再回退到别的节点。**（旧实现在这里会把用户的出口悄悄换成
+        // `last_good`/切换前那台 —— 见上面「选择就用」那段。）
+        //
+        // 但失败仍然**必须收尾**：旧的隧道已经拆了，新节点又没起来 ⇒ 隧道是断的。
+        // 所以照旧作废「自动重连」意图（否则下次启动会拿这个刚被证明起不来的节点
+        // 再接管一次网络，task-75 ①），并把**真实原因**交给用户。
         if let Err(e) = core::start_core(&app, &state, CoreStartTrigger::NodeSwitch).await {
             state.with(|i| {
                 i.push_log(
                     "app",
                     "error",
-                    format!("切到该节点失败（{e}），正在退回上一个可用节点"),
+                    format!("切到该节点失败（{e}）；隧道已还原，你选的节点保留"),
                 )
             });
-            match plan.fallback_to.clone() {
-                None => {
-                    // 无处可退 ⇒ **隧道是断的**：作废「自动重连」意图，否则下次启动
-                    // 会拿这个刚被证明起不来的节点再接管一次网络（task-75 ①）。
-                    settle_switch(
-                        &state,
-                        SwitchEnd::NoTunnel(FailureExit::NodeSwitchNoFallback),
-                    );
-                    return Err(format!("切到该节点失败，已退回：{e}"));
-                }
-                Some(back) => {
-                    let Some(mut s2) = state.with(|i| i.settings.clone()) else {
-                        settle_switch(
-                            &state,
-                            SwitchEnd::NoTunnel(FailureExit::NodeSwitchFallbackStateUnavailable),
-                        );
-                        return Err(util::STATE_UNAVAILABLE.to_string());
-                    };
-                    s2.selected_node = Some(back);
-                    if let Err(pe) = persist_settings(&state, &s2) {
-                        settle_switch(
-                            &state,
-                            SwitchEnd::NoTunnel(FailureExit::NodeSwitchFallbackPersistFailed),
-                        );
-                        return Err(pe);
-                    }
-                    if let Err(e2) =
-                        core::start_core(&app, &state, CoreStartTrigger::NodeSwitchFallback).await
-                    {
-                        settle_switch(
-                            &state,
-                            SwitchEnd::NoTunnel(FailureExit::NodeSwitchFallbackFailed),
-                        );
-                        return Err(e2);
-                    }
-                    // 回退节点起来了：**用户仍然连着** ⇒ 意图必须留着
-                    // （独立反例测试钉住：「切换失败」不等于「想断开」）。
-                    settle_switch(&state, SwitchEnd::FellBackUp);
-                    return Err(format!("切到该节点失败，已退回：{e}"));
-                }
-            }
+            settle_switch(&state, SwitchEnd::NoTunnel(FailureExit::NodeSwitchFailed));
+            return Err(format!(
+                "切到该节点失败：{e}\n\n隧道已还原；**你选的那台节点仍然选中**（选择就使用）。\n要不要换一台，由你决定。"
+            ));
         }
 
         // 目标节点起来了 —— 用户想要的状态，意图保留。
@@ -115,8 +91,6 @@ pub async fn select_node(
 pub(crate) enum SwitchEnd {
     /// 目标节点起来了。
     TargetUp,
-    /// 目标节点没起来，但**回退节点起来了** —— 用户仍然是连着的。
-    FellBackUp,
     /// 隧道是断的。带上 `FailureExit` 说明是哪个出口（源码守卫的锚点）。
     NoTunnel(FailureExit),
     /// 拆隧道那一步就失败了：**状态未知**（旧核心可能还在跑）。
@@ -125,15 +99,16 @@ pub(crate) enum SwitchEnd {
 
 /// 切换结束后，还要不要留住「用户希望连着」的意图。
 ///
-/// * `TargetUp` / `FellBackUp` → **留住**：切换动作本身不等于想断开
-///   （`FellBackUp` 尤其容易写错：切换**失败**了，但用户仍连着）；
+/// * `TargetUp` → **留住**：切换动作本身不等于想断开；
 /// * `NoTunnel(_)` → **作废**：否则下次启动会拿这个刚被证明起不来的节点
-///   再接管一次网络（与 task-64 修的是同一族）；
+///   再接管一次网络（与 task-64 修的是同一族）。**删掉回落之后**，
+///   `NoTunnel` 只剩一个出口（`NodeSwitchFailed`）——"切换失败但用户仍连着"
+///   这种中间态不再存在（那正是回落的产物）；
 /// * `TeardownFailed` → **留住**：根本没拆成、状态未知；凭不确定作废会误伤
 ///   一条可能仍然可用的连接。
 pub(crate) fn switch_end_keeps_intent(end: SwitchEnd) -> bool {
     match end {
-        SwitchEnd::TargetUp | SwitchEnd::FellBackUp => true,
+        SwitchEnd::TargetUp => true,
         SwitchEnd::NoTunnel(_) => false,
         SwitchEnd::TeardownFailed => true,
     }
@@ -150,46 +125,6 @@ pub(crate) fn settle_switch(state: &AppState, end: SwitchEnd) {
     if let SwitchEnd::NoTunnel(exit) = end {
         core::invalidate_after_failure(state, exit);
     }
-}
-
-/// 决定「要不要重启核心」以及「失败后退回哪里」。
-///
-/// * `previous` —— 这次切换**之前**选中的节点（正在跑的那台）。
-/// * `last_good` —— 上一次**验证过能用**的节点。
-///
-/// 两者都可能是坏的，也都没有「接下来该用谁」的完整答案。关键约束：
-/// **绝不为了回退而换到「刚刚失败的那台」**，也尽量不退回「已经不在运行的那台」。
-pub(crate) fn switch_plan(
-    running: bool,
-    previous: Option<&str>,
-    last_good: Option<&str>,
-    target: &str,
-) -> SwitchPlan {
-    if !running {
-        return SwitchPlan {
-            restart: false,
-            fallback_to: None,
-        };
-    }
-    // 优先级：验证过的 > 切换前正在跑的。
-    let candidate = last_good.or(previous);
-    SwitchPlan {
-        restart: true,
-        // 等于目标节点时不算回退 —— 那正是刚刚失败的那台。
-        fallback_to: candidate.filter(|c| *c != target).map(str::to_string),
-    }
-}
-
-/// 切换节点时的决策。
-///
-/// 抽成纯函数是为了能测：这段逻辑决定「切换失败后用户会不会断网」，
-/// 而它是整个 App 里最危险的链路（旧的隧道已经被拆掉了）。
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SwitchPlan {
-    /// 核心在跑才需要重建隧道；没跑就只是改个选择。
-    pub restart: bool,
-    /// 新节点起不来时退回哪台。`None` = 无处可退。
-    pub fallback_to: Option<String>,
 }
 
 #[tauri::command]
@@ -488,60 +423,6 @@ pub struct NodeExport {
 mod tests {
     use super::*;
 
-        /// 正常情况：从 a 切到 b，b 起不来就退回 a —— 用户不该断网。
-        #[test]
-        fn switch_plan_falls_back_to_running_old_node() {
-            let plan = switch_plan(true, Some("a"), None, "b");
-            assert!(plan.restart);
-            assert_eq!(plan.fallback_to.as_deref(), Some("a"));
-        }
-        /// 核心没在跑时，切换只是改个选择：不重启、也谈不上回退。
-        #[test]
-        fn switch_plan_is_inert_when_core_is_idle() {
-            let plan = switch_plan(false, Some("a"), Some("a"), "b");
-            assert!(!plan.restart, "核心没跑就不该重建隧道");
-            assert_eq!(plan.fallback_to, None, "没跑就不用回退");
-        }
-        /// **回归测试（最容易把用户搞断网的那条边界）。**
-        ///
-        /// 场景：正在跑的是 b，`last_good` 也记着 b，用户要切到 c。
-        ///
-        /// `last_good` 因为等于**当时的选中节点** b 而被过滤掉，此时必须退到
-        /// 「切换前正在跑的 b」，而不是退化成一个都不回退。
-        /// 早先用 `last_good.or(previous)` 会得到 `Some(b)`，再被 `!= target`
-        /// 过滤成 `None` —— 于是切换失败就直接断网。
-        #[test]
-        fn switch_plan_keeps_running_node_when_last_good_equals_previous() {
-            let plan = switch_plan(true, Some("b"), Some("b"), "c");
-            assert!(plan.restart);
-            assert_eq!(
-                plan.fallback_to.as_deref(),
-                Some("b"),
-                "切 c 失败时必须退回正在跑的 b"
-            );
-        }
-        /// 从不回退到「刚刚失败的那台」：只有它可退时，宁可如实返回无处可退，
-        /// 也不要假装回退成功而把用户丢在同一个坑里。
-        #[test]
-        fn switch_plan_never_falls_back_to_the_failed_target() {
-            let plan = switch_plan(true, Some("x"), Some("x"), "x");
-            assert!(plan.restart);
-            assert_eq!(plan.fallback_to, None, "回退目标不能是刚失败的那台");
-        }
-        /// 验证过的节点优先于「切换前选中的节点（可能其实连不上）」。
-        #[test]
-        fn switch_plan_prefers_last_verified_node() {
-            let plan = switch_plan(true, Some("broken"), Some("good"), "new");
-            assert_eq!(plan.fallback_to.as_deref(), Some("good"));
-        }
-        /// 没有历史信息时（首次启动、记录被清）不能凭空编一个回退目标。
-        #[test]
-        fn switch_plan_reports_no_fallback_without_history() {
-            let plan = switch_plan(true, None, None, "only-one");
-            assert!(plan.restart);
-            assert_eq!(plan.fallback_to, None);
-        }
-
         // -------------------------------------------------------------------
         // task-75 ①：**切换失败才作废意图；切换成功必须保留**
         //
@@ -560,11 +441,7 @@ mod tests {
         fn switch_end_intent_decision_is_pinned() {
             assert!(switch_end_keeps_intent(SwitchEnd::TargetUp), "切换成功 —— 用户要的就是这个");
             assert!(
-                switch_end_keeps_intent(SwitchEnd::FellBackUp),
-                "目标是坏的但**回退起来了** —— 用户仍然连着，意图必须保留",
-            );
-            assert!(
-                !switch_end_keeps_intent(SwitchEnd::NoTunnel(FailureExit::NodeSwitchFallbackFailed)),
+                !switch_end_keeps_intent(SwitchEnd::NoTunnel(FailureExit::NodeSwitchFailed)),
                 "隧道是断的 —— 必须作废意图（否则下次启动拿坏节点再接管一次网络）",
             );
             assert!(
@@ -597,12 +474,9 @@ mod tests {
         /// **切换失败、隧道没起来 ⇒ 意图作废**（四个出口各验一遍）。
         #[test]
         fn failed_switch_drops_intent_on_disk() {
-            for exit in [
-                FailureExit::NodeSwitchNoFallback,
-                FailureExit::NodeSwitchFallbackStateUnavailable,
-                FailureExit::NodeSwitchFallbackPersistFailed,
-                FailureExit::NodeSwitchFallbackFailed,
-            ] {
+            // 删掉回落之后只剩一个出口：「切到该节点失败」。旧实现的三个
+            // "回退也失败"出口随回落逻辑一起删掉了（`FailureExit::ALL` 里已无它们）。
+            for exit in [FailureExit::NodeSwitchFailed] {
                 let (state, dir) = connected_state("switch-fail");
                 settle_switch(&state, SwitchEnd::NoTunnel(exit));
                 // **从盘上读回来**：这就是「重启后」看到的东西。
@@ -619,12 +493,12 @@ mod tests {
             }
         }
 
-        /// **独立反例：切换成功 / 回退成功 ⇒ 意图必须原样留着。**
+        /// **独立反例：切换成功 ⇒ 意图必须原样留着。**
         ///
         /// 这条不许被上面那条吃掉：它证明「我们不是见切换就作废」。
         #[test]
         fn successful_switch_keeps_intent_on_disk() {
-            for end in [SwitchEnd::TargetUp, SwitchEnd::FellBackUp] {
+            for end in [SwitchEnd::TargetUp] {
                 let (state, dir) = connected_state("switch-ok");
                 settle_switch(&state, end);
                 let after = xt_core::store::Store::new(&dir).load_settings();
