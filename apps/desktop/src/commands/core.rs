@@ -416,13 +416,10 @@ pub(crate) async fn start_core_with_outcome(
         // 若撞上这个早退，就落在这里。实测日志里 2 小时内
         // `[info] 连通性检查通过` 一条都没有，而看门狗每 10 秒就该记一条。
         //
-        // 用 `running_pid()` 而不是 `runtime.pid`：这里要的是**进程真的活着**
-        // 那个 pid（`is_running` 刚确认过）。重复 spawn 由 `spawn_monitors`
-        // 内部的 pid 去重挡住。
+        // 用 `running_pid()` 而不是 `runtime.pid`：这里要的是**进程真的活着**那个 pid。
         let pid = supervisor.running_pid();
         drop(helper);
         drop(supervisor);
-        spawn_monitors(app, egress_before.clone(), pid);
         return Ok(CoreStartOutcome::AlreadyRunning { pid });
     }
 
@@ -580,10 +577,6 @@ pub(crate) async fn start_core_with_outcome(
         );
     }
     state.log("app", "info", choice.describe());
-
-    // 新核心起来了：启动它的监控（换网检测 / 连通性检查 / 看门狗）。
-    // 与「已经在跑」那条路径共用同一个入口，避免两处各写一份。
-    spawn_monitors(app, egress_before, runtime.pid);
 
     // 记下"这次下发的配置里到底带了没有引导规则" —— 证书刚装上/刚卸掉时，
     // 界面靠它说"要重连一次核心才生效"（`MitmStatus::core_restart_required`）。
@@ -830,7 +823,6 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
     // 事实去回答现在的问题）。
     state.with(|i| i.mitm.clear_core_steering());
     // 核心已经停了：它的监控凭据作废，否则表里会留下永远不会释放的旧 pid。
-    release_monitors(pid);
 
     state.with(|i| {
         // 采样任务必须先收掉：核心没了，api 端口也没人监听，

@@ -504,22 +504,6 @@ async fn bootstrap(app: tauri::AppHandle) {
         }
     }
 
-    // 上次是连着的话就连回来。
-    //
-    // 必须放在**遗留回滚之后**：先确保 helper 那边的旧会话清干净了，
-    // 再建新的，否则会撞上「已有活跃会话」。
-    //
-    // **后台跑，不能 await**：它会重试最多约 2 分钟（开机时网络还没就绪），
-    // 在这里 await 的话窗口要等两分钟才出来。
-    {
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Some(state) = handle.try_state::<AppState>() {
-                crate::commands::reconnect_if_needed(&handle, &state).await;
-            }
-        });
-    }
-
     // 启动时在后台探一次 DNS，把最快的排到前面。
     //
     // **不阻塞启动**：探测要联网、约 10 秒。启动流程里已经有「找核心 / 探 helper /
