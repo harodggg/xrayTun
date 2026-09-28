@@ -60,7 +60,7 @@ export function RecentConnections({
       <p className="page__desc">
         每条连接 = 核心访问日志里的一行 <span className="mono">accepted</span>。
         点一条会展开它的详情；<strong>入口与出口都在车流图里的连接</strong>
-        （也就是经节点出去的那些）<strong>才会</strong>在上面那张车流图上高亮那条路
+        （也就是经节点出去的那些）<strong>才会</strong>在下面那张车流图上高亮那条路
         （入口 → 出站）。走<span className="mono">内部通道</span>的
         （<span className="mono">dns-out</span> / <span className="mono">api</span> /
         <span className="mono">direct</span>）<strong>画不出线</strong> —— 这类行上有

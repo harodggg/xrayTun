@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { api } from "../ipc";
-import { CopyButton } from "../IncidentReport";
-import { InlineConfirm } from "../InlineConfirm";
-import SnapshotFallback from "../SnapshotState";
-import { useStore } from "../store";
+import { api } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/ipc.ts";
+import { CopyButton } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/IncidentReport.tsx";
+import { InlineConfirm } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/InlineConfirm.tsx";
+import SnapshotFallback from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/SnapshotState.tsx";
+import { useStore } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/store.tsx";
 import {
   DNS_MODE_LABEL,
   IPV6_LABEL,
@@ -15,7 +15,7 @@ import {
   type HelperVersionCheck,
   type Ipv6Mode,
   type UpdateStatus,
-} from "../types";
+} from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/types.ts";
 
 /**
  * 设置页的两级结构：**分类 → 分节**（task-48）。
@@ -1865,3 +1865,5 @@ function fmtBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
+
+const VERIFY09_CALIBRATION: = ;

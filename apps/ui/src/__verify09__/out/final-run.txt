@@ -1,0 +1,36 @@
+=== FINAL BUILD ===
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.40 kB │ gzip:   0.27 kB
+dist/assets/index-DM4JGPEC.css   28.81 kB │ gzip:   6.20 kB
+dist/assets/index-4gPaxEfM.js   315.32 kB │ gzip: 113.91 kB
+✓ built in 3.55s
+BUILD_RC=0
+=== FINAL GUARD ===
+
+---- regression_guard: PASS=44 FAIL=0 ----
+guard_rc=0
+=== FINAL PROBES ===
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+=== FINAL SENSITIVITY ===
+         original: Tests  1 passed | 10 skipped (11)
+  [PASS] S2-b3-switch-notice · B3 换节点进行中提示: mutant rc=1（应≠0） original rc=0（应=0）
+         mutant: Tests  1 failed | 10 skipped (11)
+         original: Tests  1 passed | 10 skipped (11)
+  [PASS] S3-d1-dasharray · D1 线型第二编码（渲染路径）: mutant rc=1（应≠0） original rc=0（应=0）
+         mutant: Tests  1 failed | 10 skipped (11)
+         original: Tests  1 passed | 10 skipped (11)
+  [PASS] S4-d2-level-char · D2 日志等级字符: mutant rc=1（应≠0） original rc=0（应=0）
+         mutant: Tests  1 failed | 10 skipped (11)
+         original: Tests  1 passed | 10 skipped (11)
+  [PASS] S5-f1-empty-cta · F1 空态主按钮: mutant rc=1（应≠0） original rc=0（应=0）
+         mutant: Tests  1 failed | 10 skipped (11)
+         original: Tests  1 passed | 10 skipped (11)
+
+---- sensitivity: 5/5 案件通过 ----
+原始输出：/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/__verify09__/out/sens-*.txt
+sens_rc=0
+=== post-run key hashes ===
+da36b1f692c88e11e5894dcf9a12e8282cc14fb7ec600e8bc8d509f3e72d394d  apps/ui/src/styles.css
+4f25576ee280f17d2db0ca0a46ae0ff6841239cf0683cb7fbe3835448047d42e  apps/ui/tsconfig.json

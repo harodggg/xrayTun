@@ -10,6 +10,19 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 只读仓库：`scripts/check.sh` 只跑构建/lint/测试，不写回仓库、不改 issue/PR。
+# 不显式声明就是「默认权限」，比这里需要的宽 —— 另外三个 workflow 都钉了最小权限。
+permissions:
+  contents: read
+
+# 同一个 ref 同时只跑一个 check。
+#   * PR：取消被后一次推送取代的旧 run（常见做法，省 runner 的同时不给误导性的红）；
+#   * main push：**不取消**（`cancel-in-progress` 只在 pull_request 时为真）——
+#     与 pages.yml / cloudflare-pages.yml 的取舍一致：已发生的构建记录要留得住。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   # 依赖缓存放进工作区，和 scripts/dev.sh 的约定一致。
@@ -24,6 +37,8 @@ jobs:
   check:
     name: 构建 / lint / 测试
     runs-on: macos-14
+    # 默认 360 分钟；一次 check 实测 3–8 分钟。给个上限，避免卡死的 run 白烧 runner。
+    timeout-minutes: 30
     steps:
       # `fetch-depth: 0` 是**必需的**，不是优化：`scripts/check.sh` 现在会跑
       # `scripts/bump-release.py self-test`，而后者的夹具是**真实历史树**

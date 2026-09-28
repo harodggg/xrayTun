@@ -1828,3 +1828,162 @@ describe("渲染后颜色（读 DOM fill）", () => {
     expect(bad.slice(0, 6), `颜色不符 ${bad.length} 处`).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// D1：线型第二编码 + 图例必须是「真实线段的缩影」
+//
+// 为什么单列：颜色是拓扑上唯一的分类编码 —— 对色觉障碍用户（以及灰度截图）
+// 四个去向读起来一样。D1 加了 `stroke-dasharray` 作为**第二**编码，但「第二编码」
+// 只有在**真的写进 DOM**、且**图例承诺的形状与图上一致**时才算数。
+//
+// 与上面那条颜色测试同一原则：**不 import 实现的常量**。期望的线型写死在测试里
+// （独立金标），实际线型从 **DOM** 读；图例的线宽/透明度则与 `styles.css` 里
+// `.flow__route` 的**声明值**对比 —— 这样「图例缩小了 4.97 倍的亮度」这类
+// 图例说谎（VISUAL-AND-UI #7）会立刻变红。
+// ---------------------------------------------------------------------------
+
+/** 期望线型（写死在测试里 = 独立于实现的金标）。实线 = 不写属性。 */
+const GOLDEN_DASH: Record<string, string> = {
+  node: "5 3",
+  direct: "1.5 3",
+  block: "1 4",
+};
+
+/** 图例文案 → 出口类别。顺序与 `Highway.tsx` 的 `LEGEND_KINDS` 无关（按文案查）。 */
+const GOLDEN_LEGEND_LABEL: Record<string, string> = {
+  经节点: "node",
+  直连: "direct",
+  已拦截: "block",
+};
+
+/** 每条路线的「主干 + 各去程分支」路径，按 DOM 顺序（主干=下标 0，去程=奇数下标）。 */
+function routePathsByParity(): { trunk: SVGPathElement; branches: SVGPathElement[] }[] {
+  const out: { trunk: SVGPathElement; branches: SVGPathElement[] }[] = [];
+  for (const grp of document.querySelectorAll("svg.flow g[data-route-paths]")) {
+    const paths = [...grp.querySelectorAll("path.flow__route")] as SVGPathElement[];
+    if (paths.length < 3) continue;
+    // 段序被 `Flow.tsx` 的 `spansByKey` 同样依此约定：
+    //   主干, 去₁, 回₁, 去₂, 回₂, …, 去ₙ, 回ₙ, 回主干。
+    // 去掉首（主干）尾（回主干）之后，剩下的成对交替，偶数位就是去程段。
+    const middle = paths.slice(1, -1);
+    const branches = middle.filter((_, i) => i % 2 === 0);
+    out.push({ trunk: paths[0]!, branches });
+  }
+  return out;
+}
+
+/** 从 `styles.css` 的 `.flow__route { … }` 声明里读实线参数的**唯一来源**。 */
+async function flowRouteCss(): Promise<{ strokeWidth: number; opacity: number }> {
+  const fs = (await import("node:fs" as string)) as {
+    readFileSync: (p: string, encoding: string) => string;
+  };
+  const path = (await import("node:path" as string)) as {
+    resolve: (...parts: string[]) => string;
+  };
+  const css = fs.readFileSync(path.resolve("src", "styles.css"), "utf8");
+  // 只匹配 `.flow__route {`，不会匹配 `.flow__route--trunk {`
+  const body = css.match(/(?:^|\n)\.flow__route\s*\{([^}]*)\}/)?.[1] ?? "";
+  const num = (prop: string): number =>
+    Number(body.match(new RegExp(`${prop}\\s*:\\s*([\\d.]+)`))?.[1] ?? NaN);
+  return { strokeWidth: num("stroke-width"), opacity: num("opacity") };
+}
+
+describe("D1：线型第二编码（读 DOM 的 stroke-dasharray）", () => {
+  it("三个去向各有线型、主干是实线，且线型与出口类别一一对应", async () => {
+    await mount(baseTopo());
+
+    const kinds = outletKindsFromDom().filter((k) => k !== "dns" && k !== "internal");
+    expect(kinds.length, "没有读到用户的出口类别").toBeGreaterThanOrEqual(3);
+    // 三种去向的线型必须**两两不同**，否则「第二编码」等于没编码
+    const patterns = kinds.map((k) => GOLDEN_DASH[k]!);
+    expect(patterns.every(Boolean), `有去向没有金标线型：${kinds.join(",")}`).toBe(true);
+    expect(new Set(patterns).size, "线型重复了，颜色仍是唯一区分手段").toBe(kinds.length);
+
+    const routes = routePathsByParity();
+    expect(routes.length, "没有渲染出任何路线").toBeGreaterThan(0);
+
+    const bad: string[] = [];
+    for (const r of routes) {
+      if (r.trunk.getAttribute("stroke-dasharray") !== null) {
+        bad.push(`主干应当是实线，却写了 stroke-dasharray=${r.trunk.getAttribute("stroke-dasharray")}`);
+      }
+      if (r.branches.length !== kinds.length) {
+        bad.push(`分支数 ${r.branches.length} 与出口类别数 ${kinds.length} 不一致`);
+        continue;
+      }
+      r.branches.forEach((p, bi) => {
+        const kind = kinds[bi]!;
+        const want = GOLDEN_DASH[kind]!;
+        const got = p.getAttribute("stroke-dasharray");
+        if (got !== want) {
+          bad.push(`第 ${bi} 条分支（${kind}）的线型是 ${String(got)}，应为 ${want}`);
+        }
+      });
+    }
+    expect(bad.slice(0, 6), `线型不符 ${bad.length} 处`).toEqual([]);
+  });
+
+  it("图例是真实线段的缩影：颜色/线型与图上分支相同，线宽/透明度与 .flow__route 相同", async () => {
+    await mount(baseTopo());
+    const route = await flowRouteCss();
+    // 先证这条测试有牙：CSS 里读到的实线参数必须是有限数
+    expect(Number.isFinite(route.strokeWidth), "没从 styles.css 读到 .flow__route 的 stroke-width").toBe(true);
+    expect(Number.isFinite(route.opacity), "没从 styles.css 读到 .flow__route 的 opacity").toBe(true);
+    expect(route.opacity, "图例必须带上实线的透明度，否则又是「图例比线亮」").toBeLessThan(1);
+
+    const kinds = outletKindsFromDom().filter((k) => k !== "dns" && k !== "internal");
+    const branchByKind = new Map<string, SVGPathElement>();
+    const first = routePathsByParity()[0];
+    expect(first, "没有渲染出路线").toBeTruthy();
+    first!.branches.forEach((p, bi) => branchByKind.set(kinds[bi]!, p));
+
+    const items = [...document.querySelectorAll<HTMLElement>(".highway__legend-item")];
+    expect(items.length, "图例项数应当等于有线的去向数").toBe(kinds.length);
+
+    const bad: string[] = [];
+    for (const item of items) {
+      const label = (item.textContent ?? "").trim();
+      const kind = GOLDEN_LEGEND_LABEL[label];
+      if (!kind) {
+        bad.push(`图例项「${label}」没有对应的出口类别（文案可能被改动了）`);
+        continue;
+      }
+      const line = item.querySelector("svg.highway__legend-line line");
+      if (!line) {
+        bad.push(`图例项「${label}」不是一条线段（真实线段的缩影）`);
+        continue;
+      }
+      const branch = branchByKind.get(kind);
+      if (!branch) {
+        bad.push(`图上没有 ${kind} 的分支，图例「${label}」在承诺一个不存在的东西`);
+        continue;
+      }
+      // ① 颜色与线型：与图上那条线逐字段相同（不是「看起来差不多」）
+      if (line.getAttribute("stroke") !== branch.getAttribute("stroke")) {
+        bad.push(
+          `图例「${label}」stroke=${line.getAttribute("stroke")}，图上 ${kind} 分支=${branch.getAttribute("stroke")}`,
+        );
+      }
+      if (line.getAttribute("stroke-dasharray") !== branch.getAttribute("stroke-dasharray")) {
+        bad.push(
+          `图例「${label}」线型=${String(line.getAttribute("stroke-dasharray"))}，图上=${String(branch.getAttribute("stroke-dasharray"))}`,
+        );
+      }
+      // ② 线宽与透明度：与 styles.css 的声明值相同（图例不能比线亮/粗）
+      if (Number(line.getAttribute("stroke-width")) !== route.strokeWidth) {
+        bad.push(
+          `图例「${label}」线宽=${line.getAttribute("stroke-width")}，.flow__route 是 ${route.strokeWidth}`,
+        );
+      }
+      if (Number(line.getAttribute("opacity")) !== route.opacity) {
+        bad.push(
+          `图例「${label}」透明度=${line.getAttribute("opacity")}，.flow__route 是 ${route.opacity}`,
+        );
+      }
+    }
+    expect(bad.slice(0, 6), `图例与实线不符 ${bad.length} 处`).toEqual([]);
+
+    // ③ 旧写法（9×5 的纯色块、100% 不透明）不许回来
+    expect(document.querySelector(".highway__legend-dot"), "图例又变回纯色块了").toBeNull();
+  });
+});

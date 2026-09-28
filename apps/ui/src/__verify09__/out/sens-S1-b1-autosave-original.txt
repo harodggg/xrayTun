@@ -1,0 +1,11 @@
+
+ RUN  v2.1.9 /Users/xbtg-/deepseek-harness/xray-tun/apps/ui
+
+ ✓ src/__verify09__/p0_probe.test.tsx (11 tests | 10 skipped) 473ms
+   ✓ B1 设置页：逐项自动保存 + 真的可撤销 > 拨一下开关就落盘：一次改动 = 一次 save_settings，且没有「保存/放弃」 470ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 10 skipped (11)
+   Start at  22:09:08
+   Duration  3.85s (transform 1.32s, setup 48ms, collect 1.83s, tests 473ms, environment 956ms, prepare 182ms)
+

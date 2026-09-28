@@ -18,13 +18,13 @@
  */
 
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { api, errorText } from "../ipc";
-import { CopyButton } from "../IncidentReport";
-import { InlineConfirm } from "../InlineConfirm";
-import SnapshotFallback from "../SnapshotState";
-import { useStore } from "../store";
+import { api, errorText } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/ipc.ts";
+import { CopyButton } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/IncidentReport.tsx";
+import { InlineConfirm } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/InlineConfirm.tsx";
+import SnapshotFallback from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/SnapshotState.tsx";
+import { useStore } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/store.tsx";
 // 失败类别 + 最近一次失败时间（节点尝试账）与「正在用 vs 你选的」的唯一真源。
-import { healthBadge, healthOf, inUseView } from "../nodeInUse";
+import { healthBadge, healthOf, inUseView } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/nodeInUse.ts";
 import {
   formatTimestamp,
   latencyTier,
@@ -33,7 +33,7 @@ import {
   type NodeExport,
   type NodeHealthRecord,
   type ProbeResult,
-} from "../types";
+} from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/types.ts";
 
 export default function Nodes() {
   const { snapshot, busy, run, probing } = useStore();
@@ -122,7 +122,7 @@ export default function Nodes() {
    * **不加二次确认**：换节点是高频动作（计划 §3 明确不做）。
    */
   const selectNode = (node: Node) => {
-    setSwitchingTo(node.name);
+    setSwitchingTo(null); // VERIFY09 MUTANT: 不显示目标节点
     void run("select", () => api.selectNode(node.id)).finally(() => setSwitchingTo(null));
   };
 

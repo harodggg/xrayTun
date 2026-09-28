@@ -111,14 +111,14 @@ describe("auto_reconnect：可见、可关、关得住（task-71）", () => {
     expect(box.checked).toBe(false);
   });
 
-  it("**关掉并保存：载荷里必须带着 false，读回仍是 false**（不能被 serde 默认值翻回 true）", async () => {
+  it("**关掉即自动保存：载荷里必须带着 false，读回仍是 false**（不能被 serde 默认值翻回 true）", async () => {
     const { box } = await renderSettings(snap(true));
     expect(box.checked).toBe(true);
 
     fireEvent.click(box);
     expect(box.checked, "点了应当立刻变成未勾选").toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // 0.9 B1：逐项自动保存 —— 勾选框**改完即存**，界面上不再有「保存」按钮。
     await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
 
     const payload = mocks.saveSettings.mock.calls[0]![0] as Record<string, unknown>;

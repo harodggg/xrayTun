@@ -1,0 +1,1038 @@
+
+ RUN  v2.1.9 /Users/xbtg-/deepseek-harness/xray-tun/apps/ui
+
+ ❯ src/__verify09__/p0_probe.test.tsx (11 tests | 1 failed | 10 skipped) 1438ms
+   × B1 设置页：逐项自动保存 + 真的可撤销 > 拨一下开关就落盘：一次改动 = 一次 save_settings，且没有「保存/放弃」 1436ms
+     → expected "spy" to be called 1 times, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"set"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"banner banner--info"[39m
+          [33mrole[39m=[32m"status"[39m
+        [36m>[39m
+          [36m<span>[39m
+            [0m✓[0m
+          [36m</span>[39m
+          [36m<div[39m
+            [33mstyle[39m=[32m"flex: 1 1 0%;"[39m
+          [36m>[39m
+            [0m已保存「自动连回来」[0m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn"[39m
+          [36m>[39m
+            [0m撤销[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-label[39m=[32m"设置分类"[39m
+          [33mclass[39m=[32m"set__tabs"[39m
+          [33mrole[39m=[32m"tablist"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-conn"[39m
+            [33maria-selected[39m=[32m"true"[39m
+            [33mclass[39m=[32m"set__tab is-active"[39m
+            [33mid[39m=[32m"set-tab-conn"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"0"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m连接[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-dns"[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m"set__tab"[39m
+            [33mid[39m=[32m"set-tab-dns"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mDNS[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-core"[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m"set__tab"[39m
+            [33mid[39m=[32m"set-tab-core"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m内核与更新[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-system"[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m"set__tab"[39m
+            [33mid[39m=[32m"set-tab-system"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m系统与助手[0m
+            [36m<span[39m
+              [33maria-label[39m=[32m"这一类里有需要处理的状态"[39m
+              [33mclass[39m=[32m"set__tab-dot"[39m
+              [33mrole[39m=[32m"img"[39m
+              [33mtitle[39m=[32m"这一类里有需要处理的状态"[39m
+            [36m/>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-labelledby[39m=[32m"set-tab-conn"[39m
+          [33mclass[39m=[32m"set__body"[39m
+          [33mid[39m=[32m"set-panel-conn"[39m
+          [33mrole[39m=[32m"tabpanel"[39m
+        [36m>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"card set__sec"[39m
+            [33mid[39m=[32m"set-entry"[39m
+          [36m>[39m
+            [36m<h2[39m
+              [33mclass[39m=[32m"card__title"[39m
+            [36m>[39m
+              [0m代理入口[0m
+            [36m</h2>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"card__desc"[39m
+            [36m>[39m
+              [0mSOCKS 入站的 UDP 支持是 TUN 模式和 QUIC 转发的必要条件，因此始终开启。 端口低于 1024 会被拒绝 —— 那是特权端口，与 helper 的最小权限设计冲突。[0m
+            [36m</p>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"grid-2"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0mSOCKS5 端口[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mmax[39m=[32m"65535"[39m
+                  [33mmin[39m=[32m"1024"[39m
+                  [33mtype[39m=[32m"number"[39m
+                  [33mvalue[39m=[32m"10808"[39m
+                [36m/>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0mHTTP 端口[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mmax[39m=[32m"65535"[39m
+                  [33mmin[39m=[32m"1024"[39m
+                  [33mtype[39m=[32m"number"[39m
+                  [33mvalue[39m=[32m"10809"[39m
+                [36m/>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m允许局域网设备使用本机代理（会监听 0.0.0.0，请确认网络环境可信）[0m
+            [36m</label>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px; margin-top: 14px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mchecked[39m=[32m""[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m启动时如果上次是连接状态，自动连回来[0m
+            [36m</label>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field__hint"[39m
+            [36m>[39m
+              [0m现在[0m
+              [36m<strong>[39m
+                [0m关着[0m
+              [36m</strong>[39m
+              [0m：[0m
+              [36m<strong>[39m
+                [0m启动时[0m
+              [36m</strong>[39m
+              [0m不会自动连回 —— 上面那四种情形（开机自启 / 应用自更新后重启 / 崩溃后被系统重启 / 你自己退出后再次打开）都不会把隧道拉起来。[0m
+              [36m<br />[39m
+              [0m⚠︎ 但「关掉它」[0m
+              [36m<strong>[39m
+                [0m不等于[0m
+              [36m</strong>[39m
+              [0m「不会再自动连」：隧道已经连着时， 运行期间的[0m
+              [36m<strong>[39m
+                [0m看门狗重建[0m
+              [36m</strong>[39m
+              [0m与[0m
+              [36m<strong>[39m
+                [0m换网重建[0m
+              [36m</strong>[39m
+              [36m<strong>[39m
+                [0m不看这个开关[0m
+              [36m</strong>[39m
+              [0m，只看「你是否还想连着」这个意图。 要真的让它停下来，请点顶栏的「[0m
+              [36m<strong>[39m
+                [0m断开[0m
+              [36m</strong>[39m
+              [0m」—— 那会同时作废「下次自动连回」的意图。[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field"[39m
+              [33mstyle[39m=[32m"margin-top: 14px;"[39m
+            [36m>[39m
+              [36m<label>[39m
+                [0m日志级别[0m
+              [36m</label>[39m
+              [36m<select>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"none"[39m
+                [36m>[39m
+                  [0mnone（不输出日志）[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"error"[39m
+                [36m>[39m
+                  [0merror[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"warning"[39m
+                [36m>[39m
+                  [0mwarning[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"info"[39m
+                [36m>[39m
+                  [0minfo[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"debug"[39m
+                [36m>[39m
+                  [0mdebug[0m
+                [36m</option>[39m
+              [36m</select>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field__hint"[39m
+              [36m>[39m
+                [0mdebug 会产生大量日志。排查连接问题时临时打开，用完记得调回去。[0m
+              [36m</div>[39m
+            [36m</div>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"card set__sec"[39m
+            [33mid[39m=[32m"set-tun"[39m
+          [36m>[39m
+            [36m<h2[39m
+              [33mclass[39m=[32m"card__title"[39m
+            [36m>[39m
+              [0mTUN 模式[0m
+            [36m</h2>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"card__desc"[39m
+            [36m>[39m
+              [0m当前模式：[0m
+              [36m<strong>[39m
+                [0m系统代理[0m
+              [36m</strong>[39m
+              [0m。 TUN 通过 Xray 原生的 tun 入站（内置 gVisor 协议栈）接管系统流量， 由特权 helper 负责建网卡、装路由与改 DNS。[0m
+            [36m</p>[39m
+            [36m<details[39m
+              [33mclass[39m=[32m"page__details"[39m
+            [36m>[39m
+              [36m<summary>[39m
+                [0m高级：隧道网段 / MTU / IPv6 / 出站绑定接口[0m
+              [36m</summary>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"grid-2"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field"[39m
+                [36m>[39m
+                  [36m<label>[39m
+                    [0m隧道网段[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mtype[39m=[32m"text"[39m
+                    [33mvalue[39m=[32m"198.18.0.1/15"[39m
+                  [36m/>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"field__hint"[39m
+                  [36m>[39m
+                    [0m默认 [0m
+                    [36m<span[39m
+                      [33mclass[39m=[32m"mono"[39m
+                    [36m>[39m
+                      [0m198.18.0.1/15[0m
+                    [36m</span>[39m
+                    [0m（RFC 2544 保留段，公网不可路由）。[0m
+                    [36m<strong>[39m
+                      [0m主机位会被保留[0m
+                    [36m</strong>[39m
+                    [0m —— 这里的 .1 是接口自己的地址，不是网络地址。[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field"[39m
+                [36m>[39m
+                  [36m<label>[39m
+                    [0mMTU[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mmax[39m=[32m"9000"[39m
+                    [33mmin[39m=[32m"576"[39m
+                    [33mtype[39m=[32m"number"[39m
+                    [33mvalue[39m=[32m"1500"[39m
+                  [36m/>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"field__hint"[39m
+                  [36m>[39m
+                    [0m默认 1500。出现「大文件下载卡住但网页能开」时可以试 1400。[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field"[39m
+                [36m>[39m
+                  [36m<label>[39m
+                    [0mIPv6 处理[0m
+                  [36m</label>[39m
+                  [36m<select>[39m
+                    [36m<option[39m
+                      [33mvalue[39m=[32m"passthrough"[39m
+                    [36m>[39m
+                      [0m不接管（走物理网卡）[0m
+                    [36m</option>[39m
+                    [36m<option[39m
+                      [33mvalue[39m=[32m"override"[39m
+                    [36m>[39m
+                      [0m同样接管 IPv6[0m
+                    [36m</option>[39m
+                  [36m</select>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"field__hint"[39m
+                  [36m>[39m
+                    [0m选「不接管」时，IPv6 流量会绕过隧道走物理网卡 —— 可能泄漏真实出口， 但不会因为内核 IPv6 配置问题导致断网。这是一个刻意的取舍。[0m
+                    [36m<br />[39m
+                    [0m本版本[0m
+                    [36m<strong>[39m
+                      [0m不提供「禁用 v6」这一档[0m
+                    [36m</strong>[39m
+                    [0m：它在路由计划里与「不接管」 逐字节相同（没有任何代码会因为它去阻断 v6），摆出来就是一句假承诺。 所以当前版本 TUN [0m
+                    [36m<strong>[39m
+                      [0m不会阻断 IPv6[0m
+                    [36m</strong>[39m
+                    [0m，v6 流量仍然走物理网卡。 要真正避免 v6 泄漏，请在[0m
+                    [36m<strong>[39m
+                      [0m系统层面[0m
+                    [36m</strong>[39m
+                    [0m关闭 IPv6。[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0m出站绑定接口（防路由环）[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mplaceholder[39m=[32m"留空 = 自动使用物理出口（推荐）"[39m
+                  [33mtype[39m=[32m"text"[39m
+                  [33mvalue[39m=[32m""[39m
+                [36m/>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field__hint"[39m
+                [36m>[39m
+                  [0m填入 [0m
+                  [36m<span[39m
+                    [33mclass[39m=[32m"mono"[39m
+                  [36m>[39m
+                    [0men0[0m
+                  [36m</span>[39m
+                  [0m 这类物理接口名后，核心会用[0m
+                  [36m<span[39m
+                    [33mclass[39m=[32m"mono"[39m
+                  [36m>[39m
+                    [0m IP_BOUND_IF [0m
+                  [36m</span>[39m
+                  [0m把「连代理服务器」的 socket 绑到该接口，从根上杜绝 「代理流量又被送进隧道」的路由环。留空时由核心自动探测。[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</details>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field"[39m
+            [36m>[39m
+              [36m<label>[39m
+                [0m隧道内 DNS 地址（哨兵）[0m
+              [36m</label>[39m
+              [36m<input[39m
+                [33mtype[39m=[32m"text"[39m
+                [33mvalue[39m=[32m"198.18.0.2"[39m
+              [36m/>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field__hint"[39m
+              [36m>[39m
+                [0m写入系统的「假」解析器，位于隧道网段内且不会被真实路由 —— 唯一目的是让所有 53 端口流量必然进入隧道，从而被内核的 [0m
+                [36m<span[39m
+                  [33mclass[39m=[32m"mono"[39m
+                [36m>[39m
+                  [0mdns-out[0m
+                [36m</span>[39m
+                [0m 接管。[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mchecked[39m=[32m""[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m把内网 / 链路本地 / 多播地址排除在隧道之外（强烈建议保持开启）[0m
+            [36m</label>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"card set__sec"[39m
+            [33mid[39m=[32m"set-fakeip"[39m
+          [36m>[39m
+            [36m<h2[39m
+              [33mclass[39m=[32m"card__title"[39m
+            [36m>[39m
+              [0mFake-IP[0m
+            [36m</h2>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"card__desc"[39m
+            [36m>[39m
+              [0m很多人以为 Fake-IP 是 sing-box 独有 —— [0m
+              [36m<strong>[39m
+                [0m不是[0m
+              [36m</strong>[39m
+              [0m。Xray 有原生的[0m
+              [36m<span[39m
+                [33mclass[39m=[32m"mono"[39m
+              [36m>[39m
+                [0m fakedns [0m
+              [36m</span>[39m
+              [0m配置段，配合[0m
+              [36m<span[39m
+                [33mclass[39m=[32m"mono"[39m
+              [36m>[39m
+                [0m destOverride: ["fakedns+others"] [0m
+              [36m</span>[39m
+              [0m的语义与 sing-box 的 fakeip + sniffing 等价。[0m
+            [36m</p>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mchecked[39m=[32m""[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m启用 Fake-IP[0m
+            [36m</label>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field__hint"[39m
+              [33mstyle[39m=[32m"margin-top: 6px;"[39m
+            [36m>[39m
+              [0m开启 Fake-IP [0m
+              [36m<strong>[39m
+                [0m会同时把「流量嗅探」强制打开[0m
+              [36m</strong>[39m
+              [0m（假地址要靠嗅探还原成域名）—— 那之后到「DNS 解析器」里取消勾选嗅探[0m
+              [36m<strong>[39m
+                [0m不生效[0m
+              [36m</strong>[39m
+              [0m；想关掉嗅探，先关掉这里的 Fake-IP。[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"banner banner--warn"[39m
+              [33mstyle[39m=[32m"margin-top: 12px;"[39m
+            [36m>[39m
+              [36m<span>[39m
+                [0m⚠︎[0m
+              [36m</span>[39m
+              [36m<div>[39m
+                [0mFake-IP 会污染本机 DNS 缓存。隧道关闭后的一段时间内可能出现「网络无法访问」， 需要等缓存过期或手动刷新（[0m
+                [36m<span[39m
+                  [33mclass[39m=[32m"mono"[39m
+                [36m>[39m
+                  [0msudo killall -HUP mDNSResponder[0m
+                [36m</span>[39m
+                [0m）。 因此默认关闭。[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"grid-2"[39m
+              [33mstyle[39m=[32m"margin-top: 12px;"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0m地址池[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mtype[39m=[32m"text"[39m
+                  [33mvalue[39m=[32m"198.18.0.0/16"[39m
+                [36m/>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0m池大小[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mtype[39m=[32m"number"[39m
+                  [33mvalue[39m=[32m"65535"[39m
+                [36m/>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+          [36m</section>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 10 skipped (11)
+   Start at  22:09:01
+   Duration  5.14s (transform 1.60s, setup 95ms, collect 2.04s, tests 1.44s, environment 1.04s, prepare 175ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__verify09__/p0_probe.test.tsx > B1 设置页：逐项自动保存 + 真的可撤销 > 拨一下开关就落盘：一次改动 = 一次 save_settings，且没有「保存/放弃」
+AssertionError: expected "spy" to be called 1 times, but got 0 times
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"set"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"banner banner--info"[39m
+          [33mrole[39m=[32m"status"[39m
+        [36m>[39m
+          [36m<span>[39m
+            [0m✓[0m
+          [36m</span>[39m
+          [36m<div[39m
+            [33mstyle[39m=[32m"flex: 1 1 0%;"[39m
+          [36m>[39m
+            [0m已保存「自动连回来」[0m
+          [36m</div>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn"[39m
+          [36m>[39m
+            [0m撤销[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-label[39m=[32m"设置分类"[39m
+          [33mclass[39m=[32m"set__tabs"[39m
+          [33mrole[39m=[32m"tablist"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-conn"[39m
+            [33maria-selected[39m=[32m"true"[39m
+            [33mclass[39m=[32m"set__tab is-active"[39m
+            [33mid[39m=[32m"set-tab-conn"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"0"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m连接[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-dns"[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m"set__tab"[39m
+            [33mid[39m=[32m"set-tab-dns"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0mDNS[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-core"[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m"set__tab"[39m
+            [33mid[39m=[32m"set-tab-core"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m内核与更新[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33maria-controls[39m=[32m"set-panel-system"[39m
+            [33maria-selected[39m=[32m"false"[39m
+            [33mclass[39m=[32m"set__tab"[39m
+            [33mid[39m=[32m"set-tab-system"[39m
+            [33mrole[39m=[32m"tab"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtype[39m=[32m"button"[39m
+          [36m>[39m
+            [0m系统与助手[0m
+            [36m<span[39m
+              [33maria-label[39m=[32m"这一类里有需要处理的状态"[39m
+              [33mclass[39m=[32m"set__tab-dot"[39m
+              [33mrole[39m=[32m"img"[39m
+              [33mtitle[39m=[32m"这一类里有需要处理的状态"[39m
+            [36m/>[39m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-labelledby[39m=[32m"set-tab-conn"[39m
+          [33mclass[39m=[32m"set__body"[39m
+          [33mid[39m=[32m"set-panel-conn"[39m
+          [33mrole[39m=[32m"tabpanel"[39m
+        [36m>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"card set__sec"[39m
+            [33mid[39m=[32m"set-entry"[39m
+          [36m>[39m
+            [36m<h2[39m
+              [33mclass[39m=[32m"card__title"[39m
+            [36m>[39m
+              [0m代理入口[0m
+            [36m</h2>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"card__desc"[39m
+            [36m>[39m
+              [0mSOCKS 入站的 UDP 支持是 TUN 模式和 QUIC 转发的必要条件，因此始终开启。 端口低于 1024 会被拒绝 —— 那是特权端口，与 helper 的最小权限设计冲突。[0m
+            [36m</p>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"grid-2"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0mSOCKS5 端口[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mmax[39m=[32m"65535"[39m
+                  [33mmin[39m=[32m"1024"[39m
+                  [33mtype[39m=[32m"number"[39m
+                  [33mvalue[39m=[32m"10808"[39m
+                [36m/>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0mHTTP 端口[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mmax[39m=[32m"65535"[39m
+                  [33mmin[39m=[32m"1024"[39m
+                  [33mtype[39m=[32m"number"[39m
+                  [33mvalue[39m=[32m"10809"[39m
+                [36m/>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m允许局域网设备使用本机代理（会监听 0.0.0.0，请确认网络环境可信）[0m
+            [36m</label>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px; margin-top: 14px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mchecked[39m=[32m""[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m启动时如果上次是连接状态，自动连回来[0m
+            [36m</label>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field__hint"[39m
+            [36m>[39m
+              [0m现在[0m
+              [36m<strong>[39m
+                [0m关着[0m
+              [36m</strong>[39m
+              [0m：[0m
+              [36m<strong>[39m
+                [0m启动时[0m
+              [36m</strong>[39m
+              [0m不会自动连回 —— 上面那四种情形（开机自启 / 应用自更新后重启 / 崩溃后被系统重启 / 你自己退出后再次打开）都不会把隧道拉起来。[0m
+              [36m<br />[39m
+              [0m⚠︎ 但「关掉它」[0m
+              [36m<strong>[39m
+                [0m不等于[0m
+              [36m</strong>[39m
+              [0m「不会再自动连」：隧道已经连着时， 运行期间的[0m
+              [36m<strong>[39m
+                [0m看门狗重建[0m
+              [36m</strong>[39m
+              [0m与[0m
+              [36m<strong>[39m
+                [0m换网重建[0m
+              [36m</strong>[39m
+              [36m<strong>[39m
+                [0m不看这个开关[0m
+              [36m</strong>[39m
+              [0m，只看「你是否还想连着」这个意图。 要真的让它停下来，请点顶栏的「[0m
+              [36m<strong>[39m
+                [0m断开[0m
+              [36m</strong>[39m
+              [0m」—— 那会同时作废「下次自动连回」的意图。[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field"[39m
+              [33mstyle[39m=[32m"margin-top: 14px;"[39m
+            [36m>[39m
+              [36m<label>[39m
+                [0m日志级别[0m
+              [36m</label>[39m
+              [36m<select>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"none"[39m
+                [36m>[39m
+                  [0mnone（不输出日志）[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"error"[39m
+                [36m>[39m
+                  [0merror[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"warning"[39m
+                [36m>[39m
+                  [0mwarning[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"info"[39m
+                [36m>[39m
+                  [0minfo[0m
+                [36m</option>[39m
+                [36m<option[39m
+                  [33mvalue[39m=[32m"debug"[39m
+                [36m>[39m
+                  [0mdebug[0m
+                [36m</option>[39m
+              [36m</select>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field__hint"[39m
+              [36m>[39m
+                [0mdebug 会产生大量日志。排查连接问题时临时打开，用完记得调回去。[0m
+              [36m</div>[39m
+            [36m</div>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"card set__sec"[39m
+            [33mid[39m=[32m"set-tun"[39m
+          [36m>[39m
+            [36m<h2[39m
+              [33mclass[39m=[32m"card__title"[39m
+            [36m>[39m
+              [0mTUN 模式[0m
+            [36m</h2>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"card__desc"[39m
+            [36m>[39m
+              [0m当前模式：[0m
+              [36m<strong>[39m
+                [0m系统代理[0m
+              [36m</strong>[39m
+              [0m。 TUN 通过 Xray 原生的 tun 入站（内置 gVisor 协议栈）接管系统流量， 由特权 helper 负责建网卡、装路由与改 DNS。[0m
+            [36m</p>[39m
+            [36m<details[39m
+              [33mclass[39m=[32m"page__details"[39m
+            [36m>[39m
+              [36m<summary>[39m
+                [0m高级：隧道网段 / MTU / IPv6 / 出站绑定接口[0m
+              [36m</summary>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"grid-2"[39m
+              [36m>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field"[39m
+                [36m>[39m
+                  [36m<label>[39m
+                    [0m隧道网段[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mtype[39m=[32m"text"[39m
+                    [33mvalue[39m=[32m"198.18.0.1/15"[39m
+                  [36m/>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"field__hint"[39m
+                  [36m>[39m
+                    [0m默认 [0m
+                    [36m<span[39m
+                      [33mclass[39m=[32m"mono"[39m
+                    [36m>[39m
+                      [0m198.18.0.1/15[0m
+                    [36m</span>[39m
+                    [0m（RFC 2544 保留段，公网不可路由）。[0m
+                    [36m<strong>[39m
+                      [0m主机位会被保留[0m
+                    [36m</strong>[39m
+                    [0m —— 这里的 .1 是接口自己的地址，不是网络地址。[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field"[39m
+                [36m>[39m
+                  [36m<label>[39m
+                    [0mMTU[0m
+                  [36m</label>[39m
+                  [36m<input[39m
+                    [33mmax[39m=[32m"9000"[39m
+                    [33mmin[39m=[32m"576"[39m
+                    [33mtype[39m=[32m"number"[39m
+                    [33mvalue[39m=[32m"1500"[39m
+                  [36m/>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"field__hint"[39m
+                  [36m>[39m
+                    [0m默认 1500。出现「大文件下载卡住但网页能开」时可以试 1400。[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field"[39m
+                [36m>[39m
+                  [36m<label>[39m
+                    [0mIPv6 处理[0m
+                  [36m</label>[39m
+                  [36m<select>[39m
+                    [36m<option[39m
+                      [33mvalue[39m=[32m"passthrough"[39m
+                    [36m>[39m
+                      [0m不接管（走物理网卡）[0m
+                    [36m</option>[39m
+                    [36m<option[39m
+                      [33mvalue[39m=[32m"override"[39m
+                    [36m>[39m
+                      [0m同样接管 IPv6[0m
+                    [36m</option>[39m
+                  [36m</select>[39m
+                  [36m<div[39m
+                    [33mclass[39m=[32m"field__hint"[39m
+                  [36m>[39m
+                    [0m选「不接管」时，IPv6 流量会绕过隧道走物理网卡 —— 可能泄漏真实出口， 但不会因为内核 IPv6 配置问题导致断网。这是一个刻意的取舍。[0m
+                    [36m<br />[39m
+                    [0m本版本[0m
+                    [36m<strong>[39m
+                      [0m不提供「禁用 v6」这一档[0m
+                    [36m</strong>[39m
+                    [0m：它在路由计划里与「不接管」 逐字节相同（没有任何代码会因为它去阻断 v6），摆出来就是一句假承诺。 所以当前版本 TUN [0m
+                    [36m<strong>[39m
+                      [0m不会阻断 IPv6[0m
+                    [36m</strong>[39m
+                    [0m，v6 流量仍然走物理网卡。 要真正避免 v6 泄漏，请在[0m
+                    [36m<strong>[39m
+                      [0m系统层面[0m
+                    [36m</strong>[39m
+                    [0m关闭 IPv6。[0m
+                  [36m</div>[39m
+                [36m</div>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0m出站绑定接口（防路由环）[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mplaceholder[39m=[32m"留空 = 自动使用物理出口（推荐）"[39m
+                  [33mtype[39m=[32m"text"[39m
+                  [33mvalue[39m=[32m""[39m
+                [36m/>[39m
+                [36m<div[39m
+                  [33mclass[39m=[32m"field__hint"[39m
+                [36m>[39m
+                  [0m填入 [0m
+                  [36m<span[39m
+                    [33mclass[39m=[32m"mono"[39m
+                  [36m>[39m
+                    [0men0[0m
+                  [36m</span>[39m
+                  [0m 这类物理接口名后，核心会用[0m
+                  [36m<span[39m
+                    [33mclass[39m=[32m"mono"[39m
+                  [36m>[39m
+                    [0m IP_BOUND_IF [0m
+                  [36m</span>[39m
+                  [0m把「连代理服务器」的 socket 绑到该接口，从根上杜绝 「代理流量又被送进隧道」的路由环。留空时由核心自动探测。[0m
+                [36m</div>[39m
+              [36m</div>[39m
+            [36m</details>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field"[39m
+            [36m>[39m
+              [36m<label>[39m
+                [0m隧道内 DNS 地址（哨兵）[0m
+              [36m</label>[39m
+              [36m<input[39m
+                [33mtype[39m=[32m"text"[39m
+                [33mvalue[39m=[32m"198.18.0.2"[39m
+              [36m/>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field__hint"[39m
+              [36m>[39m
+                [0m写入系统的「假」解析器，位于隧道网段内且不会被真实路由 —— 唯一目的是让所有 53 端口流量必然进入隧道，从而被内核的 [0m
+                [36m<span[39m
+                  [33mclass[39m=[32m"mono"[39m
+                [36m>[39m
+                  [0mdns-out[0m
+                [36m</span>[39m
+                [0m 接管。[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mchecked[39m=[32m""[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m把内网 / 链路本地 / 多播地址排除在隧道之外（强烈建议保持开启）[0m
+            [36m</label>[39m
+          [36m</section>[39m
+          [36m<section[39m
+            [33mclass[39m=[32m"card set__sec"[39m
+            [33mid[39m=[32m"set-fakeip"[39m
+          [36m>[39m
+            [36m<h2[39m
+              [33mclass[39m=[32m"card__title"[39m
+            [36m>[39m
+              [0mFake-IP[0m
+            [36m</h2>[39m
+            [36m<p[39m
+              [33mclass[39m=[32m"card__desc"[39m
+            [36m>[39m
+              [0m很多人以为 Fake-IP 是 sing-box 独有 —— [0m
+              [36m<strong>[39m
+                [0m不是[0m
+              [36m</strong>[39m
+              [0m。Xray 有原生的[0m
+              [36m<span[39m
+                [33mclass[39m=[32m"mono"[39m
+              [36m>[39m
+                [0m fakedns [0m
+              [36m</span>[39m
+              [0m配置段，配合[0m
+              [36m<span[39m
+                [33mclass[39m=[32m"mono"[39m
+              [36m>[39m
+                [0m destOverride: ["fakedns+others"] [0m
+              [36m</span>[39m
+              [0m的语义与 sing-box 的 fakeip + sniffing 等价。[0m
+            [36m</p>[39m
+            [36m<label[39m
+              [33mclass[39m=[32m"row"[39m
+              [33mstyle[39m=[32m"font-size: 12px;"[39m
+            [36m>[39m
+              [36m<input[39m
+                [33mchecked[39m=[32m""[39m
+                [33mtype[39m=[32m"checkbox"[39m
+              [36m/>[39m
+              [0m启用 Fake-IP[0m
+            [36m</label>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"field__hint"[39m
+              [33mstyle[39m=[32m"margin-top: 6px;"[39m
+            [36m>[39m
+              [0m开启 Fake-IP [0m
+              [36m<strong>[39m
+                [0m会同时把「流量嗅探」强制打开[0m
+              [36m</strong>[39m
+              [0m（假地址要靠嗅探还原成域名）—— 那之后到「DNS 解析器」里取消勾选嗅探[0m
+              [36m<strong>[39m
+                [0m不生效[0m
+              [36m</strong>[39m
+              [0m；想关掉嗅探，先关掉这里的 Fake-IP。[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"banner banner--warn"[39m
+              [33mstyle[39m=[32m"margin-top: 12px;"[39m
+            [36m>[39m
+              [36m<span>[39m
+                [0m⚠︎[0m
+              [36m</span>[39m
+              [36m<div>[39m
+                [0mFake-IP 会污染本机 DNS 缓存。隧道关闭后的一段时间内可能出现「网络无法访问」， 需要等缓存过期或手动刷新（[0m
+                [36m<span[39m
+                  [33mclass[39m=[32m"mono"[39m
+                [36m>[39m
+                  [0msudo killall -HUP mDNSResponder[0m
+                [36m</span>[39m
+                [0m）。 因此默认关闭。[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"grid-2"[39m
+              [33mstyle[39m=[32m"margin-top: 12px;"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0m地址池[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mtype[39m=[32m"text"[39m
+                  [33mvalue[39m=[32m"198.18.0.0/16"[39m
+                [36m/>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"field"[39m
+              [36m>[39m
+                [36m<label>[39m
+                  [0m池大小[0m
+                [36m</label>[39m
+                [36m<input[39m
+                  [33mtype[39m=[32m"number"[39m
+                  [33mvalue[39m=[32m"65535"[39m
+                [36m/>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+          [36m</section>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+ ❯ src/__verify09__/p0_probe.test.tsx:138:52
+    136|     fireEvent.click(box);
+    137| 
+    138|     await waitFor(() => expect(fn("saveSettings")).toHaveBeenCalledTim…
+       |                                                    ^
+    139|     const payload = callsOf("saveSettings")[0]![0] as { auto_reconnect…
+    140|     expect(payload.auto_reconnect, "改动必须原样进载荷").toBe(!before);
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

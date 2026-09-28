@@ -1,0 +1,921 @@
+
+ RUN  v2.1.9 /Users/xbtg-/deepseek-harness/xray-tun/apps/ui
+
+ ❯ src/__verify09__/p0_probe.test.tsx (11 tests | 1 failed | 10 skipped) 1059ms
+   × F1 空态主按钮：添加订阅并直落订阅页 > 零节点时按钮是「添加订阅」，点击 onNavigate('subscriptions') 1056ms
+     → Unable to find role="button" and name "添加订阅"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"dash"[39m
+    [36m>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__status"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state dash__state--partial"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dot dot--partial"[39m
+          [36m/>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__state-label"[39m
+          [36m>[39m
+            [0m本地代理入口已就绪[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__meta"[39m
+        [36m>[39m
+          [0m系统代理[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m绕过大陆[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m已运行 [0m
+          [0m12 分钟[0m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state-sub"[39m
+        [36m>[39m
+          [0m系统代理未被本应用修改：需要手动把浏览器或系统代理指向 127.0.0.1:10808（HTTP 127.0.0.1:10809）。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"update-chip"[39m
+          [33mtitle[39m=[32m"点开可以去设置页手动检查一次"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m客户端更新检查没拿到版本信息[0m
+        [36m</button>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__actions"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m选择节点[0m
+            [0m /* VERIFY09 MUTANT: 空态不再是添加订阅 */[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+            [33mdisabled[39m=[32m""[39m
+          [36m>[39m
+            [0m测试延迟[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__traffic"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↓[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m1.80 MiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m7.84 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↑[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m230.00 KiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m1.12 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"banner banner--info dash__banner"[39m
+        [33mrole[39m=[32m"status"[39m
+      [36m>[39m
+        [36m<span>[39m
+          [0mℹ︎[0m
+        [36m</span>[39m
+        [36m<div[39m
+          [33mstyle[39m=[32m"flex: 1 1 0%;"[39m
+        [36m>[39m
+          [0mhelper 未安装：TUN 模式需要它。系统代理模式不受影响。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"btn"[39m
+        [36m>[39m
+          [0m去处理[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<details[39m
+        [33mclass[39m=[32m"dash__details"[39m
+      [36m>[39m
+        [36m<summary>[39m
+          [0m环境自检与诊断[0m
+        [36m</summary>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"card__desc"[39m
+        [36m>[39m
+          [0mTUN 模式需要两个外部条件：一个新版 Xray 核心，以及已授权的特权 helper （特权助手，安装时需要管理员密码）。任何一项不满足，TUN 都会失败 —— 这里显示的就是它们当前的真实状态。[0m
+        [36m</p>[39m
+        [36m<dl[39m
+          [33mclass[39m=[32m"kv"[39m
+        [36m>[39m
+          [36m<dt>[39m
+            [0mXray 核心[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"mono"[39m
+            [36m>[39m
+              [0m/Applications/XrayTun.app/Contents/Resources/xray[0m
+            [36m</span>[39m
+            [36m<br />[39m
+            [0m26.9.9[0m
+            [0m [0m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast"[39m
+            [36m>[39m
+              [0m支持原生 TUN[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m特权 helper[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mstyle[39m=[32m"color: var(--text-dim);"[39m
+            [36m>[39m
+              [0m未安装（仅影响 TUN 模式，系统代理模式不受影响）[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m核心进程[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m运行中（pid 36019）[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m运行中的配置[0m
+          [36m</dt>[39m
+          [36m<dd[39m
+            [33mclass[39m=[32m"mono"[39m
+          [36m>[39m
+            [0m/Users/me/Library/Application Support/com.xraytun.desktop/runtime/config.json[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m上次配置变更[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m2026/9/27 21:57:26[0m
+          [36m</dd>[39m
+        [36m</dl>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"row row--wrap"[39m
+          [33mstyle[39m=[32m"margin-top: 12px;"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m更新全部订阅[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m打开数据目录[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m查看日志[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m全部设置[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</details>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"dash"[39m
+    [36m>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__status"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state dash__state--partial"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dot dot--partial"[39m
+          [36m/>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__state-label"[39m
+          [36m>[39m
+            [0m本地代理入口已就绪[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__meta"[39m
+        [36m>[39m
+          [0m系统代理[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m绕过大陆[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m已运行 [0m
+          [0m12 分钟[0m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state-sub"[39m
+        [36m>[39m
+          [0m系统代理未被本应用修改：需要手动把浏览器或系统代理指向 127.0.0.1:10808（HTTP 127.0.0.1:10809）。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"update-chip"[39m
+          [33mtitle[39m=[32m"点开可以去设置页手动检查一次"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m客户端更新检查没拿到版本信息[0m
+        [36m</button>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__actions"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m选择节点[0m
+            [0m /* VERIFY09 MUTANT: 空态不再是添加订阅 */[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+            [33mdisabled[39m=[32m""[39m
+          [36m>[39m
+            [0m测试延迟[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__traffic"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↓[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m1.80 MiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m7.84 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↑[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m230.00 KiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m1.12 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"banner banner--info dash__banner"[39m
+        [33mrole[39m=[32m"status"[39m
+      [36m>[39m
+        [36m<span>[39m
+          [0mℹ︎[0m
+        [36m</span>[39m
+        [36m<div[39m
+          [33mstyle[39m=[32m"flex: 1 1 0%;"[39m
+        [36m>[39m
+          [0mhelper 未安装：TUN 模式需要它。系统代理模式不受影响。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"btn"[39m
+        [36m>[39m
+          [0m去处理[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<details[39m
+        [33mclass[39m=[32m"dash__details"[39m
+      [36m>[39m
+        [36m<summary>[39m
+          [0m环境自检与诊断[0m
+        [36m</summary>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"card__desc"[39m
+        [36m>[39m
+          [0mTUN 模式需要两个外部条件：一个新版 Xray 核心，以及已授权的特权 helper （特权助手，安装时需要管理员密码）。任何一项不满足，TUN 都会失败 —— 这里显示的就是它们当前的真实状态。[0m
+        [36m</p>[39m
+        [36m<dl[39m
+          [33mclass[39m=[32m"kv"[39m
+        [36m>[39m
+          [36m<dt>[39m
+            [0mXray 核心[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"mono"[39m
+            [36m>[39m
+              [0m/Applications/XrayTun.app/Contents/Resources/xray[0m
+            [36m</span>[39m
+            [36m<br />[39m
+            [0m26.9.9[0m
+            [0m [0m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast"[39m
+            [36m>[39m
+              [0m支持原生 TUN[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m特权 helper[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mstyle[39m=[32m"color: var(--text-dim);"[39m
+            [36m>[39m
+              [0m未安装（仅影响 TUN 模式，系统代理模式不受影响）[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m核心进程[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m运行中（pid 36019）[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m运行中的配置[0m
+          [36m</dt>[39m
+          [36m<dd[39m
+            [33mclass[39m=[32m"mono"[39m
+          [36m>[39m
+            [0m/Users/me/Library/Application Support/com.xraytun.desktop/runtime/config.json[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m上次配置变更[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m2026/9/27 21:57:26[0m
+          [36m</dd>[39m
+        [36m</dl>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"row row--wrap"[39m
+          [33mstyle[39m=[32m"margin-top: 12px;"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m更新全部订阅[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m打开数据目录[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m查看日志[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m全部设置[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</details>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 10 skipped (11)
+   Start at  22:09:45
+   Duration  4.41s (transform 1.39s, setup 82ms, collect 1.82s, tests 1.06s, environment 938ms, prepare 168ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__verify09__/p0_probe.test.tsx > F1 空态主按钮：添加订阅并直落订阅页 > 零节点时按钮是「添加订阅」，点击 onNavigate('subscriptions')
+TestingLibraryElementError: Unable to find role="button" and name "添加订阅"
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"dash"[39m
+    [36m>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__status"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state dash__state--partial"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dot dot--partial"[39m
+          [36m/>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__state-label"[39m
+          [36m>[39m
+            [0m本地代理入口已就绪[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__meta"[39m
+        [36m>[39m
+          [0m系统代理[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m绕过大陆[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m已运行 [0m
+          [0m12 分钟[0m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state-sub"[39m
+        [36m>[39m
+          [0m系统代理未被本应用修改：需要手动把浏览器或系统代理指向 127.0.0.1:10808（HTTP 127.0.0.1:10809）。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"update-chip"[39m
+          [33mtitle[39m=[32m"点开可以去设置页手动检查一次"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m客户端更新检查没拿到版本信息[0m
+        [36m</button>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__actions"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m选择节点[0m
+            [0m /* VERIFY09 MUTANT: 空态不再是添加订阅 */[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+            [33mdisabled[39m=[32m""[39m
+          [36m>[39m
+            [0m测试延迟[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__traffic"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↓[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m1.80 MiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m7.84 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↑[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m230.00 KiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m1.12 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"banner banner--info dash__banner"[39m
+        [33mrole[39m=[32m"status"[39m
+      [36m>[39m
+        [36m<span>[39m
+          [0mℹ︎[0m
+        [36m</span>[39m
+        [36m<div[39m
+          [33mstyle[39m=[32m"flex: 1 1 0%;"[39m
+        [36m>[39m
+          [0mhelper 未安装：TUN 模式需要它。系统代理模式不受影响。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"btn"[39m
+        [36m>[39m
+          [0m去处理[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<details[39m
+        [33mclass[39m=[32m"dash__details"[39m
+      [36m>[39m
+        [36m<summary>[39m
+          [0m环境自检与诊断[0m
+        [36m</summary>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"card__desc"[39m
+        [36m>[39m
+          [0mTUN 模式需要两个外部条件：一个新版 Xray 核心，以及已授权的特权 helper （特权助手，安装时需要管理员密码）。任何一项不满足，TUN 都会失败 —— 这里显示的就是它们当前的真实状态。[0m
+        [36m</p>[39m
+        [36m<dl[39m
+          [33mclass[39m=[32m"kv"[39m
+        [36m>[39m
+          [36m<dt>[39m
+            [0mXray 核心[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"mono"[39m
+            [36m>[39m
+              [0m/Applications/XrayTun.app/Contents/Resources/xray[0m
+            [36m</span>[39m
+            [36m<br />[39m
+            [0m26.9.9[0m
+            [0m [0m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast"[39m
+            [36m>[39m
+              [0m支持原生 TUN[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m特权 helper[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mstyle[39m=[32m"color: var(--text-dim);"[39m
+            [36m>[39m
+              [0m未安装（仅影响 TUN 模式，系统代理模式不受影响）[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m核心进程[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m运行中（pid 36019）[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m运行中的配置[0m
+          [36m</dt>[39m
+          [36m<dd[39m
+            [33mclass[39m=[32m"mono"[39m
+          [36m>[39m
+            [0m/Users/me/Library/Application Support/com.xraytun.desktop/runtime/config.json[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m上次配置变更[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m2026/9/27 21:57:26[0m
+          [36m</dd>[39m
+        [36m</dl>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"row row--wrap"[39m
+          [33mstyle[39m=[32m"margin-top: 12px;"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m更新全部订阅[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m打开数据目录[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m查看日志[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m全部设置[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</details>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+
+Ignored nodes: comments, script, style
+[36m<body>[39m
+  [36m<div>[39m
+    [36m<div[39m
+      [33mclass[39m=[32m"dash"[39m
+    [36m>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__status"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state dash__state--partial"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dot dot--partial"[39m
+          [36m/>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__state-label"[39m
+          [36m>[39m
+            [0m本地代理入口已就绪[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__meta"[39m
+        [36m>[39m
+          [0m系统代理[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m绕过大陆[0m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__sep"[39m
+          [36m>[39m
+            [0m·[0m
+          [36m</span>[39m
+          [0m已运行 [0m
+          [0m12 分钟[0m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__state-sub"[39m
+        [36m>[39m
+          [0m系统代理未被本应用修改：需要手动把浏览器或系统代理指向 127.0.0.1:10808（HTTP 127.0.0.1:10809）。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"update-chip"[39m
+          [33mtitle[39m=[32m"点开可以去设置页手动检查一次"[39m
+          [33mtype[39m=[32m"button"[39m
+        [36m>[39m
+          [0m客户端更新检查没拿到版本信息[0m
+        [36m</button>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__actions"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m选择节点[0m
+            [0m /* VERIFY09 MUTANT: 空态不再是添加订阅 */[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+            [33mdisabled[39m=[32m""[39m
+          [36m>[39m
+            [0m测试延迟[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<section[39m
+        [33mclass[39m=[32m"dash__traffic"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↓[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m1.80 MiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m7.84 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"dash__metric"[39m
+        [36m>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-arrow"[39m
+          [36m>[39m
+            [0m↑[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-rate"[39m
+          [36m>[39m
+            [0m230.00 KiB/s[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"dash__metric-total"[39m
+          [36m>[39m
+            [0m累计 [0m
+            [0m1.12 GiB[0m
+          [36m</span>[39m
+        [36m</div>[39m
+      [36m</section>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"banner banner--info dash__banner"[39m
+        [33mrole[39m=[32m"status"[39m
+      [36m>[39m
+        [36m<span>[39m
+          [0mℹ︎[0m
+        [36m</span>[39m
+        [36m<div[39m
+          [33mstyle[39m=[32m"flex: 1 1 0%;"[39m
+        [36m>[39m
+          [0mhelper 未安装：TUN 模式需要它。系统代理模式不受影响。[0m
+        [36m</div>[39m
+        [36m<button[39m
+          [33mclass[39m=[32m"btn"[39m
+        [36m>[39m
+          [0m去处理[0m
+        [36m</button>[39m
+      [36m</div>[39m
+      [36m<details[39m
+        [33mclass[39m=[32m"dash__details"[39m
+      [36m>[39m
+        [36m<summary>[39m
+          [0m环境自检与诊断[0m
+        [36m</summary>[39m
+        [36m<p[39m
+          [33mclass[39m=[32m"card__desc"[39m
+        [36m>[39m
+          [0mTUN 模式需要两个外部条件：一个新版 Xray 核心，以及已授权的特权 helper （特权助手，安装时需要管理员密码）。任何一项不满足，TUN 都会失败 —— 这里显示的就是它们当前的真实状态。[0m
+        [36m</p>[39m
+        [36m<dl[39m
+          [33mclass[39m=[32m"kv"[39m
+        [36m>[39m
+          [36m<dt>[39m
+            [0mXray 核心[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"mono"[39m
+            [36m>[39m
+              [0m/Applications/XrayTun.app/Contents/Resources/xray[0m
+            [36m</span>[39m
+            [36m<br />[39m
+            [0m26.9.9[0m
+            [0m [0m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast"[39m
+            [36m>[39m
+              [0m支持原生 TUN[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m特权 helper[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [36m<span[39m
+              [33mstyle[39m=[32m"color: var(--text-dim);"[39m
+            [36m>[39m
+              [0m未安装（仅影响 TUN 模式，系统代理模式不受影响）[0m
+            [36m</span>[39m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m核心进程[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m运行中（pid 36019）[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m运行中的配置[0m
+          [36m</dt>[39m
+          [36m<dd[39m
+            [33mclass[39m=[32m"mono"[39m
+          [36m>[39m
+            [0m/Users/me/Library/Application Support/com.xraytun.desktop/runtime/config.json[0m
+          [36m</dd>[39m
+          [36m<dt>[39m
+            [0m上次配置变更[0m
+          [36m</dt>[39m
+          [36m<dd>[39m
+            [0m2026/9/27 21:57:26[0m
+          [36m</dd>[39m
+        [36m</dl>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"row row--wrap"[39m
+          [33mstyle[39m=[32m"margin-top: 12px;"[39m
+        [36m>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m更新全部订阅[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m打开数据目录[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m查看日志[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m全部设置[0m
+          [36m</button>[39m
+        [36m</div>[39m
+      [36m</details>[39m
+    [36m</div>[39m
+  [36m</div>[39m
+[36m</body>[39m
+ ❯ waitForWrapper node_modules/@testing-library/dom/dist/wait-for.js:163:27
+ ❯ node_modules/@testing-library/dom/dist/query-helpers.js:86:33
+ ❯ src/__verify09__/p0_probe.test.tsx:192:30
+    190| 
+    191|     renderInStore(<Dashboard onNavigate={onNavigate} />);
+    192|     const btn = await screen.findByRole("button", { name: "添加订阅" }…
+       |                              ^
+    193|     fireEvent.click(btn);
+    194|     expect(onNavigate).toHaveBeenCalledWith("subscriptions");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

@@ -36,6 +36,7 @@ import { useEffect, useState } from "react";
 import { api } from "../ipc";
 import { useStore } from "../store";
 import SnapshotFallback from "../SnapshotState";
+import { DestChecker } from "../topology/DestChecker";
 import {
   PRESET_LABEL,
   ruleActionLabel,
@@ -44,6 +45,7 @@ import {
   type RoutingPreset,
   type RoutingRule,
   type RuleAction,
+  type Topology,
 } from "../types";
 
 /** 预设的说明。顺序即内置规则的执行顺序，不要随意调换（见下方说明）。 */
@@ -188,19 +190,23 @@ export default function Routing() {
   const startedAt = snapshot?.runtime.started_at_unix ?? null;
 
   /**
-   * 运行中配置的 ruleTag 列表（task-167）。`null` = 读不到（核心没在跑 / 命令缺席）——
-   * 那就**只**能靠前缀提示，并且要如实说自己没确认。失败了不打扰用户（这一页本来
-   * 就有「核心没在跑时读不到拓扑」的语义），但也**不假装**读过。
+   * 运行中的拓扑（生效规则链 + `geo_available`）。
+   *
+   * `undefined` = 还在读；`null` = 读不到（核心没在跑 / 命令失败）。
+   * 三态要分开：把「还在读」和「读不到」都说成「读不到」是一次假陈述。
+   *
+   * task-167 只用它的 `rule[].tag` 查重名；PRD P1-1 之后判定器与生效链都用**同一份**
+   * 数据（不各拉一次，避免两处结论来自两次不同的读取）。
    */
-  const [topoTags, setTopoTags] = useState<string[] | null>(null);
+  const [topo, setTopo] = useState<Topology | null | undefined>(undefined);
   useEffect(() => {
     let alive = true;
     const load = async () => {
       try {
         const t = await api.routingTopology();
-        if (alive) setTopoTags(t.rule.map((r) => r.tag));
+        if (alive) setTopo(t);
       } catch {
-        if (alive) setTopoTags(null);
+        if (alive) setTopo(null);
       }
     };
     void load();
@@ -208,6 +214,13 @@ export default function Routing() {
       alive = false;
     };
   }, []);
+
+  /**
+   * 运行中配置的 ruleTag 列表（task-167）。`null` = 读不到（核心没在跑 / 命令缺席）——
+   * 那就**只**能靠前缀提示，并且要如实说自己没确认。失败了不打扰用户（这一页本来
+   * 就有「核心没在跑时读不到拓扑」的语义），但也**不假装**读过。
+   */
+  const topoTags = topo ? topo.rule.map((r) => r.tag) : null;
 
   // 核心**重新启动**过（新配置已生成）→ 提示自动消失。
   // 这条同时覆盖「用户在顶栏自己重连」：那种情况下「需要重连」已经是假话了。
@@ -411,6 +424,68 @@ export default function Routing() {
         )}
       </section>
 
+      {/* ── P1-1：生效规则链（从拓扑页搬来）──────────────────────────────
+          顺序按 PRD §P1-1：预设 → 生效链 → 判定器 → 自定义规则。
+          这张链来自**运行中的配置**，不是下面那份草稿 —— 所以它自己是只读的。 */}
+      <section className="page__sec">
+        <h2 className="page__title">
+          生效规则链{topo ? `（${topo.rule.length} 条，自上而下判定）` : ""}
+        </h2>
+        <p className="page__desc">
+          Xray 自上而下取第一条命中的规则，所以顺序本身是语义的一部分：
+          「广告拦截」排在「大陆直连」之前才有意义。这里展示的是
+          <strong>核心当前真正在跑</strong>的配置。
+        </p>
+        {topo === undefined ? (
+          <div className="note">正在读取运行中的配置…</div>
+        ) : topo === null ? (
+          <div className="note">
+            读不到运行中的配置 —— 核心没在跑的时候就是这样。生效规则链与下面的判定器都来自
+            真实配置，这里<strong>不编</strong>一份出来。
+          </div>
+        ) : (
+          <div className="chain">
+            {topo.rule.map((r) => (
+              <div className="chain__row" key={r.index}>
+                <span className="chain__idx">{r.index}</span>
+                <span className="chain__tag">{r.tag}</span>
+                <span className="chain__conds">
+                  {r.conditions.length ? r.conditions.join(" · ") : "（无显式条件）"}
+                </span>
+                <span className="chain__arrow">→</span>
+                <span className="chain__out">{r.outbound}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* ── P1-1：判定器（从拓扑页搬来）────────────────────────────────
+          `id="judge"` 是跨页锚点：拓扑页的入口按钮走 `onNavigate("routing","judge")`
+          ⇒ `?view=routing#judge`（`App.tsx` 负责滚到这里）。三种状态都要有这个锚点，
+          否则「点了却滚不过去」。
+          ⚠️ 读不到拓扑时**不**渲染 `DestChecker`：它会拿 `geoAvailable=false` 说
+          「数据目录里没有 geosite.dat / geoip.dat」—— 可我们只是没读到拓扑，
+          并不知道 geo 数据在不在。缺数据 ≠ 没有数据（诚实清单）。 */}
+      <div id="judge">
+        {topo === undefined ? (
+          <section className="page__sec">
+            <h2 className="page__title">某个地址会走哪条路</h2>
+            <div className="note">正在读取运行中的配置…</div>
+          </section>
+        ) : topo === null ? (
+          <section className="page__sec">
+            <h2 className="page__title">某个地址会走哪条路</h2>
+            <div className="note">
+              读不到运行中的配置（通常是核心没在跑），所以现在无法判定 ——
+              这里<strong>不给</strong>任何结论。
+            </div>
+          </section>
+        ) : (
+          <DestChecker geoAvailable={topo.geo_available} />
+        )}
+      </div>
+
       <section className="page__sec">
         <h2 className="page__title">自定义规则</h2>
         <p className="page__desc">
@@ -500,7 +575,7 @@ export default function Routing() {
 
                   {open && (
                     <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                      <label className="row" style={{ gap: 8, fontSize: 12 }}>
+                      <label className="row" style={{ fontSize: 12 }}>
                         <input
                           type="checkbox"
                           checked={rule.enabled}

@@ -22,16 +22,16 @@
 
 import { useState } from "react";
 
-import { api, recoveryView } from "../ipc";
-import { buttonNameNote, failureActions, nextSteps, stripMarkup, sameFailureText } from "../failure";
-import SnapshotFallback from "../SnapshotState";
-import { InlineConfirm } from "../InlineConfirm";
+import { api, recoveryView } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/ipc.ts";
+import { buttonNameNote, failureActions, nextSteps, stripMarkup, sameFailureText } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/failure.ts";
+import SnapshotFallback from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/SnapshotState.tsx";
+import { InlineConfirm } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/InlineConfirm.tsx";
 // 状态语义的唯一真源：顶栏的线与这里的状态词必须同源（task-47）。
-import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "../topbarStatus";
-import { useStore } from "../store";
+import { appStatus, DASH_TONE_CLASS, DOT_TONE_CLASS } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/topbarStatus.ts";
+import { useStore } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/store.tsx";
 // 「正在用的节点」与「你选的节点」是两件事：判据只在 `nodeInUse.ts` 里写一份。
-import { inUseView } from "../nodeInUse";
-import type { AppSnapshot, UpdateStatus } from "../types";
+import { inUseView } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/nodeInUse.ts";
+import type { AppSnapshot, UpdateStatus } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/types.ts";
 import {
   formatBytes,
   formatRate,
@@ -39,7 +39,7 @@ import {
   latencyTier,
   MODE_LABEL,
   PRESET_LABEL,
-} from "../types";
+} from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/types.ts";
 
 /** 一条横幅。`tone` 决定配色，`rank` 只用于排序（越小越急）。 */
 export interface Notice {
@@ -399,7 +399,7 @@ export default function Dashboard({
             className="btn btn--ghost"
             onClick={() => onNavigate(nodes.length === 0 ? "subscriptions" : "nodes")}
           >
-            {nodes.length === 0 ? "添加订阅" : connected ? "切换节点" : "选择节点"}
+            {"选择节点"} /* VERIFY09 MUTANT: 空态不再是添加订阅 */
           </button>
           <button
             className="btn btn--ghost"

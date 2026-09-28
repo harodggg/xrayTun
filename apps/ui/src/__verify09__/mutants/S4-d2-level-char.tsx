@@ -20,12 +20,12 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { api } from "../ipc";
-import { InlineConfirm } from "../InlineConfirm";
-import { useFollowScroll, usePreserveReadingPosition } from "../useFollowScroll";
-import { useStore } from "../store";
-import IncidentReport, { CopyButton } from "../IncidentReport";
-import { formatTimestamp } from "../types";
+import { api } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/ipc.ts";
+import { InlineConfirm } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/InlineConfirm.tsx";
+import { useFollowScroll, usePreserveReadingPosition } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/useFollowScroll.ts";
+import { useStore } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/store.tsx";
+import IncidentReport, { CopyButton } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/IncidentReport.tsx";
+import { formatTimestamp } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/types.ts";
 
 const LEVELS = ["all", "info", "warn", "error", "debug"] as const;
 type Level = (typeof LEVELS)[number];
@@ -365,7 +365,7 @@ export default function Logs() {
                   这个 `<span>` 从 1 个文本节点变成 3 个，而这里是 1500 行的列表 ——
                   `logsDomStability.test.tsx` 会逐行重建整棵树，任何逐行开销都会被放大。 */}
               <span className="log-line__ts">
-                {`${LEVEL_CHAR[line.level] ?? "·"} ${formatClock(line.ts_unix)}`}
+                {`${formatClock(line.ts_unix)}`} /* VERIFY09 MUTANT: 去掉等级字符 */
               </span>
               <span className="log-line__src">{line.source}</span>
               <span className="log-line__msg">{line.message}</span>

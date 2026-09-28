@@ -1,0 +1,27 @@
+
+ RUN  v2.1.9 /Users/xbtg-/deepseek-harness/xray-tun/apps/ui
+
+ ❯ src/__verify09__/p0_probe.test.tsx (11 tests | 1 failed | 10 skipped) 276ms
+   × D1 线型第二编码：图例是真线段 + 渲染路径有 dasharray > 图例项内部是真实 <line>，且**流向图的分支线**带 stroke-dasharray 272ms
+     → 流向图分支线必须带线型第二编码（只改图例不算）: expected 0 to be greater than 0
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 10 skipped (11)
+   Start at  22:09:25
+   Duration  3.52s (transform 1.29s, setup 95ms, collect 1.78s, tests 276ms, environment 895ms, prepare 152ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__verify09__/p0_probe.test.tsx > D1 线型第二编码：图例是真线段 + 渲染路径有 dasharray > 图例项内部是真实 <line>，且**流向图的分支线**带 stroke-dasharray
+AssertionError: 流向图分支线必须带线型第二编码（只改图例不算）: expected 0 to be greater than 0
+ ❯ src/__verify09__/p0_probe.test.tsx:242:7
+    240|       flowDashed.length,
+    241|       "流向图分支线必须带线型第二编码（只改图例不算）",
+    242|     ).toBeGreaterThan(0);
+       |       ^
+    243| 
+    244|     // ③ 图例承诺的线型必须在图上真实出现过
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

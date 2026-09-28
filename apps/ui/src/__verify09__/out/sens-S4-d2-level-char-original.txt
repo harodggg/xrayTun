@@ -1,0 +1,10 @@
+
+ RUN  v2.1.9 /Users/xbtg-/deepseek-harness/xray-tun/apps/ui
+
+ ✓ src/__verify09__/p0_probe.test.tsx (11 tests | 10 skipped) 146ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 10 skipped (11)
+   Start at  22:09:40
+   Duration  3.43s (transform 1.30s, setup 88ms, collect 1.73s, tests 146ms, environment 964ms, prepare 162ms)
+

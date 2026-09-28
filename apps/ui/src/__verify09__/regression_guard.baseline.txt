@@ -1,0 +1,212 @@
+0.9.0 regression guard（结构/文本级 L3）
+ROOT=/Users/xbtg-/deepseek-harness/xray-tun
+
+== 明确不做 1：两阶段启动顺序 / supervisor 两次可达性检查 ==
+  [PASS] supervisor 仍做「失败再试一次」的两次探测
+         apps/desktop/src/supervisor.rs:54: /// 与 `tcp_reachable_with_retry` 的 700ms 同一个量级，理由也同一条：
+         apps/desktop/src/supervisor.rs:119: async fn tcp_reachable_with_retry(addr: std::net::SocketAddr, timeout: Duration) -> (bool, String) {
+         apps/desktop/src/supervisor.rs:120: tcp_reachable_with_retry_by(|| tcp_reachable(addr, timeout), Duration::from_millis(700)).await
+         apps/desktop/src/supervisor.rs:124: async fn tcp_reachable_with_retry_by<F, Fut>(mut probe: F, pause: Duration) -> (bool, String)
+         apps/desktop/src/supervisor.rs:134: if probe().await {
+         apps/desktop/src/supervisor.rs:544: // 理由与 `tcp_reachable_with_retry` 完全一样：这是**单发**探测，而它的结果
+  [PASS] 两次探测的轨迹仍被保留（不是静默重试）
+         apps/desktop/src/supervisor.rs:108: /// 单次 TCP 探测，**失败再试一次**；返回 `(是否可达, 两次的轨迹)`。
+         apps/desktop/src/supervisor.rs:117: /// 重试一次能把「瞬时抖动」与「真的不可达」分开；轨迹进日志与错误文案，
+         apps/desktop/src/supervisor.rs:1540: /// 负对照：两次都失败 ⇒ 判定不可达，而且轨迹里两次都记着
+  [PASS] 两阶段启动注释/结构仍在（state.rs / supervisor.rs / xt-proto）
+         apps/desktop/src/state.rs:140: /// 两阶段启动里「默认路由还没接管」的状态。
+         apps/desktop/src/supervisor.rs:3: //! # 启动顺序是这里的全部难点
+         crates/xt-proto/src/lib.rs:110: /// 两阶段启动的第二步：现在接管默认路由。
+         crates/xt-proto/src/lib.rs:318: /// **两阶段启动**：为 `true` 时，本次只建卡、配地址、装 bypass 路由，
+         crates/xt-helper/src/server.rs:59: /// 这也是「两阶段启动」的代价：helper 崩溃后 pending 路由只能被删除、
+         crates/xt-helper/src/server.rs:631: /// 两阶段启动的第二步。
+
+== 明确不做 2：helper 会话快照 / restore_stale / /1 路由 / 尽力而为回滚 ==
+  [PASS] restore_stale 仍存在且已注册
+         apps/desktop/src/commands/helper.rs:47: pub async fn restore_stale(
+  [PASS] /1 路由拆分仍在（v4 双 /1）
+         crates/xt-proto/src/lib.rs:380: /// 不动默认路由，只加 `0.0.0.0/1` + `128.0.0.0/1`（推荐）。
+         crates/xt-proto/src/lib.rs:453: /// 普通 App（未绑定）        → 0.0.0.0/1  → utun          （进隧道）
+         crates/xt-proto/src/lib.rs:671: // 而它比捕获用的 `0.0.0.0/1` **更具体**（`/8` > `/1`）⇒ TUN 卷不走回环。
+         crates/xt-proto/src/lib.rs:792: /// 而回环本来就不需要旁路：内核已把它指向 `lo0`，且比捕获用的 `0.0.0.0/1` 更具体。
+  [PASS] /1 路由拆分仍在（v6 双 /1）
+         crates/xt-proto/src/lib.rs:397: /// 同样用 `::/1` + `8000::/1` 接管 v6。
+         crates/xt-proto/src/lib.rs:667: "fe80::/10",
+         crates/xt-proto/src/lib.rs:758: assert!("::/129".parse::<Cidr>().is_err());
+  [PASS] 尽力而为回滚 + 不编好消息的措辞仍在（回滚失败 ⇒ 未知/未确认）
+         apps/desktop/src/commands/core.rs:85: /// 用户点「断开」但回滚失败时，写进提示条的那条**持久**陈述。
+         apps/desktop/src/commands/core.rs:89: /// 回滚失败时 `stop_core` 只把自己的日志写进环形缓冲，并以 `Err` 返回；而
+         apps/desktop/src/commands/core.rs:115: // **回滚失败不撒谎，也不静默。** `stop_core` 已经保留了 `tun_session`
+         apps/desktop/src/commands/core.rs:777: /// 于是 helper 回滚失败时，界面照样显示「已停止」，而真实情况可能是
+         apps/desktop/src/commands/core.rs:871: /// 回滚失败：**不知道**网络恢没恢复，会话可能仍在。
+         apps/desktop/src/commands/core.rs:894: /// 回滚失败更连配置状态都不知道。宁可说「未能确认」，也不编一个好消息。
+
+== 明确不做 3：看门狗 10s + 连续失败重建 + MonitorGuard pid 去重 + slept_for ==
+  [PASS] 看门狗仍是固定 10 秒节拍
+         apps/desktop/src/state.rs:50: /// 看门狗的探测是固定 10 秒一跳；一旦判定需要重建就**立刻**做，
+         apps/desktop/src/state.rs:63: /// 触发这次重建的连续探测失败次数（看门狗每 10 秒探测一次）。
+         apps/desktop/src/state.rs:75: /// （调用方据此决定要不要发事件，避免每 10 秒无谓地推一次）。
+         apps/desktop/src/state.rs:542: /// 由 `lib.rs` 的一个 10 秒定时任务调用。**没有引擎时是空操作**，
+         apps/desktop/src/state.rs:549: // 只在这轮真的做了事的时候记日志 —— 每 10 秒一条空账会把日志刷成噪音。
+         apps/desktop/src/state.rs:1053: /// 探测失败次数只在**变化**时报告变化 —— 否则看门狗每 10 秒都要推一次事件。
+  [PASS] MonitorGuard（按 pid 去重）仍在
+         apps/desktop/src/commands/core.rs:1559: /// 按 pid 去重：该 pid 已经有监控在守时 `MonitorGuard::claim` 返回 `None`，
+         apps/desktop/src/commands/core.rs:1562: let Some(guard) = MonitorGuard::claim(pid) else {
+         apps/desktop/src/commands/core.rs:1613: pub(crate) fn spawn_tunnel_watchdog(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
+         apps/desktop/src/commands/core.rs:1993: pub(crate) fn spawn_connectivity_check(app: &AppHandle, pid: Option<u32>, _guard: MonitorGuard) {
+         apps/desktop/src/commands/core.rs:2192: _guard: MonitorGuard,
+         apps/desktop/src/commands/core.rs:2851: pub(crate) struct MonitorGuard(std::sync::Arc<u32>);
+  [PASS] slept_for 仍在（睡眠唤醒判定）
+         apps/desktop/src/commands/core.rs:1174: pub(crate) fn slept_for(monotonic_elapsed: Duration, wall_elapsed: Duration) -> Duration {
+  [PASS] 连续失败阈值仍在（重建/提示判据）
+         apps/desktop/src/node_health.rs:25: /// 同一个节点连续失败多少次后，提示「重拉订阅」。
+         apps/desktop/src/node_health.rs:29: pub(crate) const CONSECUTIVE_FAILURES_BEFORE_SUB_REFRESH: u32 = 3;
+         apps/desktop/src/node_health.rs:493: /// 达到 [`CONSECUTIVE_FAILURES_BEFORE_SUB_REFRESH`] 次才提示：低于它只是抖动。
+         apps/desktop/src/node_health.rs:500: if consecutive_failures < CONSECUTIVE_FAILURES_BEFORE_SUB_REFRESH {
+
+== 明确不做 4：was_connected（意图）与 runtime.running（观测）分离 ==
+  [PASS] was_connected（意图）仍在
+  [PASS] runtime.running（观测）仍在
+         apps/desktop/src/lib.rs:184: // （`there is no reactor running, must be called from the context of a
+         apps/desktop/src/lib.rs:441: if !state.with(|i| i.runtime.running).unwrap_or(false) {
+         apps/desktop/src/lib.rs:978: /// 会 panic：`there is no reactor running, must be called from the context of a
+         apps/desktop/src/lib.rs:1026: `there is no reactor running…` ⇒ release 下 SIGABRT ⇒ 双击即崩。\
+
+== 明确不做 5：设置页「只渲染当前分类」而非 CSS 隐藏 ==
+  [PASS] Settings.tsx 仍有「当前分类」条件渲染
+         apps/ui/src/pages/Settings.tsx:573: aria-selected={cat === c.id}
+         apps/ui/src/pages/Settings.tsx:576: tabIndex={cat === c.id ? 0 : -1}
+         apps/ui/src/pages/Settings.tsx:577: className={`set__tab${cat === c.id ? " is-active" : ""}`}
+  [PASS] 没有把分类面板改成 CSS display:none 隐藏
+
+== 明确不做 6：跟随滚动的「往上翻暂停」规则 ==
+  [PASS] useFollowScroll 仍是往上翻暂停的实现（非 CSS 贴底）
+         apps/ui/src/useFollowScroll.ts:8: * 「根本滚不动」。实测（CDP 量 scrollTop）：跟随开时手动滚到 50，
+         apps/ui/src/useFollowScroll.ts:13: * * 用户往上滚（离开底部）→ 自动暂停跟随，开关同步变成关闭；
+         apps/ui/src/useFollowScroll.ts:30: scrollTop: number;
+         apps/ui/src/useFollowScroll.ts:32: return el.scrollHeight - el.clientHeight - el.scrollTop <= BOTTOM_SLACK_PX;
+         apps/ui/src/useFollowScroll.ts:35: /** 把元素滚到底。jsdom 里没有 `scrollIntoView` 的实现，所以用 scrollTop。 */
+         apps/ui/src/useFollowScroll.ts:37: el.scrollTop = el.scrollHeight;
+  [PASS] 行为级测试文件仍在
+         apps/ui/src/useFollowScroll.test.tsx
+
+== 明确不做 7：确定性步进（不要 CSS 动画） —— Lead 主责，这里只记录 ==
+  [PASS] Flow.tsx 仍用 requestAnimationFrame 步进（不是 CSS 动画）
+         apps/ui/src/topology/Flow.tsx:557: raf = requestAnimationFrame(step);
+         apps/ui/src/topology/Flow.tsx:559: raf = requestAnimationFrame(step);
+  [PASS] 没有新增「拓扑车」CSS keyframes
+
+== 明确不做 8：canvas 地球仪 / getPointAtLength / --status-off / 五档状态色 ==
+  [PASS] canvas 地球仪仍在
+         apps/ui/src/pages/Globe.tsx:410: const canvasRef = useRef<HTMLCanvasElement | null>(null);
+         apps/ui/src/pages/Globe.tsx:434: const canvas = canvasRef.current;
+         apps/ui/src/pages/Globe.tsx:435: if (!canvas) return;
+         apps/ui/src/pages/Globe.tsx:436: const ctx = canvas.getContext("2d");
+         apps/ui/src/pages/Globe.tsx:446: drawScene(ctx, canvas, land, data, view.current.lon, view.current.lat, view.current.zoom, t);
+         apps/ui/src/pages/Globe.tsx:472: const canvas = canvasRef.current;
+  [PASS] getPointAtLength 采样仍在
+         apps/ui/src/topology/Flow.tsx:60: const p = path.getPointAtLength(s);
+         apps/ui/src/topology/Flow.tsx:326: // 沿路径行走：用 `getPointAtLength` 把货车摆到路上。
+         apps/ui/src/topology/Flow.tsx:362: // `getPointAtLength(dist)` 给出，单位是弧长；用弦长会在段边界错位。
+         apps/ui/src/topology/Flow.tsx:487: // 用引擎量的真实弧长，所以落点与 `getPointAtLength` 一致。
+         apps/ui/src/topology/Flow.tsx:489: const target = path.getPointAtLength(arc);
+  [PASS] --status-off / --status-on 仍在
+         apps/ui/src/styles.css:24: --status-on: var(--ok); /* 整机受保护：TUN 在跑 */
+         apps/ui/src/styles.css:26: --status-off: #566a88; /* 没有代理覆盖：直连 / 未运行。新值：既要在 --bg 上
+  [PASS] 五档状态色注释/变量仍在（>=5 处 --status-）
+         --status- 出现 19 次
+  [PASS] 「绿色只属于 on」的约束仍在
+         apps/ui/src/styles.css:160: * 现在默认值是 `--status-off`（中性灰 = 没有代理覆盖），**不是绿**：
+         apps/ui/src/styles.css:174: *   --off     没有代理覆盖（直连/未运行）   --status-off 中性灰
+         apps/ui/src/styles.css:179: * WCAG 1.4.11 要求 ≥3:1）：绿 9.57 · 蓝 5.73 · 琥珀 11.02 · 红 6.65 · 中性灰 3.34。
+         apps/ui/src/styles.css:180: * 中性灰刻意是最暗的一档：明度顺序本身也带信息（暗 = 没有覆盖）。
+
+== 明确不做 9：诚实三做不到 ==
+  [PASS] ① 内部通道不假装有字节/连线（分开列 + 连接数，而不是编造流量）
+         apps/ui/src/pages/Topology.tsx:116: * 所以流向图与内部通道要**分开列**（内部通道没有连线，匹配到也不能画线）。
+         apps/ui/src/pages/Topology.tsx:216: {/* task-126：内部通道**画不出线**，前缀却写着「高亮」—— 一句话自相矛盾。
+  [PASS] ② 字节不可用显示「不可用」
+         apps/ui/src/pages/Dashboard.tsx:278: 后端明确保留「不可用但量得到距离」这一态
+         apps/ui/src/pages/Dashboard.tsx:295: {rtt !== null ? `${rtt} ms · 不可用` : "不可用"}
+         apps/ui/src/pages/Dashboard.tsx:658: 低于该版本时核心只会创建网卡，不会配置地址与路由，TUN 模式不可用。
+  [PASS] ③ 域名 `*` 语义仍在（规则页星号说明）
+         apps/ui/src/pages/Routing.tsx:1: /**
+         apps/ui/src/pages/Routing.tsx:2: * 规则页。
+         apps/ui/src/pages/Routing.tsx:3: *
+         apps/ui/src/pages/Routing.tsx:4: * # 这一版改了什么
+         apps/ui/src/pages/Routing.tsx:5: *
+         apps/ui/src/pages/Routing.tsx:6: * 1. **预设变成真正的单选控件。** 原来四行都是普通列表行，靠一个绿点表示
+
+== 明确不做 10：破坏性 = 二次确认（不是假撤销）；高频动作不加确认 ==
+  [PASS] InlineConfirm 组件仍在
+         apps/ui/src/InlineConfirm.tsx:2: * 内联二次确认（破坏性操作用）。
+         apps/ui/src/InlineConfirm.tsx:10: * # 为什么是内联确认，不是 `window.confirm`
+         apps/ui/src/InlineConfirm.tsx:15: *    紧挨被操作对象的位置给出确认；
+         apps/ui/src/InlineConfirm.tsx:16: * 3. **样式与语义可控**：深色界面里弹一块系统灰框是断裂的；内联确认用站内的
+         apps/ui/src/InlineConfirm.tsx:25: * 等于把确认退化成一道仪式。这里第二次点击的目标是**另一颗按钮**（「确认删除」/
+         apps/ui/src/InlineConfirm.tsx:26: * 「确认清空」），并且确认态里**必须先显示后果**（问句里写明删什么、能否恢复），
+  [PASS] Settings 的破坏性操作仍走 InlineConfirm
+         apps/ui/src/pages/Settings.tsx:4: import { InlineConfirm } from "../InlineConfirm";
+         apps/ui/src/pages/Settings.tsx:1241: {/* 破坏性操作先确认（task-65）：用既有的 `InlineConfirm`，不引 window.confirm。
+         apps/ui/src/pages/Settings.tsx:1248: <InlineConfirm
+         apps/ui/src/pages/Settings.tsx:1272: <InlineConfirm
+         apps/ui/src/pages/Settings.tsx:1530: <InlineConfirm
+  [PASS] Subscriptions 的破坏性操作仍走 InlineConfirm
+         apps/ui/src/pages/Subscriptions.tsx:18: import { InlineConfirm } from "../InlineConfirm";
+         apps/ui/src/pages/Subscriptions.tsx:233: <InlineConfirm
+  [PASS] Nodes 的破坏性操作仍走 InlineConfirm
+         apps/ui/src/pages/Nodes.tsx:23: import { InlineConfirm } from "../InlineConfirm";
+         apps/ui/src/pages/Nodes.tsx:66: * 只在打开时挂、关掉就摘 —— 避免和 `InlineConfirm` 抢 `Esc`（它已占用这个键）。
+         apps/ui/src/pages/Nodes.tsx:529: <InlineConfirm
+  [PASS] Logs 的破坏性操作仍走 InlineConfirm
+         apps/ui/src/pages/Logs.tsx:24: import { InlineConfirm } from "../InlineConfirm";
+         apps/ui/src/pages/Logs.tsx:104: * 只在面板**确实打开**时才挂 —— 没有面板时 `Esc` 不属于本页（`InlineConfirm`
+         apps/ui/src/pages/Logs.tsx:219: <InlineConfirm
+  [PASS] 换节点（高频）没有被加上二次确认
+         Nodes.tsx switch fn at 124
+
+== P0·E1r：残留冗余 gap:8（判据：宿主确为 .row 才算冗余） ==
+  [PASS] 没有「宿主已是 .row 还再写 gap:8」的冗余
+         （0 处：唯一残留的 gap:8 在 Routing.tsx:515 的普通 flex div 上，不属 .row）
+
+== 回归项 11 条（只核「未被破坏」） ==
+  [PASS] R1 回滚不撒谎：core.rs 仍有 !…「网络可用」断言
+         apps/desktop/src/commands/core.rs:811: /// 失败时**不许**出现「网络可用」这类未经验证的断言 —— 只报我们确实知道的事：
+         apps/desktop/src/commands/core.rs:893: /// **全程不出现「网络可用」**：回滚成功只证明配置已还原，不证明能上网；
+         apps/desktop/src/commands/core.rs:1956: // 失败被丢掉，紧接着无条件写「网络可用」—— 那是在断言我们没验证过的事。
+         apps/desktop/src/commands/core.rs:1962: // 失败时 notice **保留**，并说清下一步能做什么（诚实版：不声称网络可用）。
+  [PASS] R2 snapshot spawn 去重注释/实现仍在
+         apps/desktop/src/commands/snapshot.rs:652: /// `xray version` 进程 spawn（`build_snapshot` 原来算两遍）。
+  [PASS] R3 分流重连提示仍在
+         apps/ui/src/pages/Routing.tsx:294: * 立即重连 = **先停再起**（task-70）。
+         apps/ui/src/pages/Routing.tsx:416: 要让新规则生效需要重新连接；重连会短暂中断流量。
+         apps/ui/src/pages/Routing.tsx:419: {busy === "reconnect" ? "正在重连…" : "立即重连"}
+  [PASS] R5 CopyButton 仍给 role=status/alert
+         apps/ui/src/pages/Logs.tsx:160: * 成功给 `role="status"`、失败给 `role="alert"` + 可手动选中的 textarea。
+         apps/ui/src/pages/Logs.tsx:233: <div className="banner banner--error logs__banner" role="alert">
+         apps/ui/src/pages/Logs.tsx:277: `CopyButton`：失败给 `role="alert"` + 可手动选中的 textarea 兜底。 */}
+  [PASS] R6 auto_reconnect 开关仍在
+         apps/ui/src/pages/Settings.tsx:665: checked={settings.auto_reconnect}
+         apps/ui/src/pages/Settings.tsx:666: onChange={(e) => patch({ auto_reconnect: e.target.checked }, "自动连回来")}
+         apps/ui/src/pages/Settings.tsx:677: `should_auto_reconnect`（`commands/core.rs:503-516`）=
+         apps/ui/src/pages/Settings.tsx:678: `was_connected && auto_reconnect && mode != Direct && !running`。
+         apps/ui/src/pages/Settings.tsx:690: `was_connected`（`core.rs:1263` / `:1656`），没有 `auto_reconnect` 这一项。
+         apps/ui/src/pages/Settings.tsx:694: {settings.auto_reconnect ? (
+  [PASS] R7 TUN 高级折叠仍在
+         apps/ui/src/pages/Settings.tsx:801: {/* ── 高级参数收进折叠（task-78）────────────────────────────────
+         apps/ui/src/pages/Settings.tsx:818: <summary>高级：隧道网段 / MTU / IPv6 / 出站绑定接口</summary>
+         apps/ui/src/pages/Settings.tsx:902: {/* ⚠️ 这条**刻意留在明面**（不随上面几项一起收进「高级」）：它的说明是
+         apps/ui/src/pages/Settings.tsx:994: 但**移进「高级」折叠** —— 它不该占 DNS 的默认首屏。
+         apps/ui/src/pages/Settings.tsx:998: <summary>高级：流量嗅探（按 SNI / Host 分流）</summary>
+  [PASS] R8 顶栏唯一主操作测试仍在
+         apps/ui/src/singleRunButton.test.tsx
+  [PASS] R9 styles.css 没有被引用但未定义的 token（独立重算，忽略带兜底的 var）
+         defined tokens=23, undefined-used=0
+  [OBS] styles.css 行数 = 2562
+  [PASS] R10 styles.css 无 40 行逐字节重复窗口（独立重算）
+         重复窗口组数=0
+  [PASS] R11 prefers-reduced-motion 仍在且覆盖三个动画名
+         prefers-reduced-motion=true
+         animations found=spin,set-target-flash,conn-dash
+
+---- regression_guard: PASS=44 FAIL=0 ----

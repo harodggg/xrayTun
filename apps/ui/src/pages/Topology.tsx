@@ -6,13 +6,24 @@
  * 「我的流量从哪儿进、经过哪些规则、从哪儿出」。用公路来类比：入口是匝道口、
  * 规则链是一排依次判断的收费站、出口是不同去向的车道；车上的货物是字节。
  *
+ * # 0.9.0 的两处结构改动（PRD P0-2 / P1-1）
+ *
+ * 1. **真实数据优先（P0-2）**：「最近连接」（真实发生的连接）提到车流图**之前**。
+ *    改前第一行 `.conn-row` 在 1193px（约 1.9 屏）处 —— 用户要滚将近两屏才看到
+ *    事实，而首屏 2/3 是结构示意图。图**不删**（`MemoHighway` 仍在、车仍由
+ *    最后一次可信读数驱动）、口径说明也不删，只是把顺序倒过来。
+ * 2. **判定能力搬走（P1-1）**：「某个地址会走哪条路」（`DestChecker`）与
+ *    「生效规则链」搬到「分流」页（那里成为判定的唯一入口）；这里只留一个
+ *    **去那里的入口**（`onNavigate("routing", "judge")`，URL 契约
+ *    `?view=routing#judge`）。
+ *
  * # 一处必须如实说清的边界
  *
  * 车流画在入口 ↔ 出口之间，因为那一段有实测依据（Xray 的
  * `inbound>>>` / `outbound>>>` 计数器）。但**「每辆车实际走了哪条规则」拿不到** ——
- * Xray 的统计里没有 per-rule 计数器。所以规则链以「真实的判定顺序」展示，
- * 由下面的「目的地判定」用真实数据算出**某个地址会走哪条规则**；
- * 我们不会把车流硬画在某条规则上，那会是编的。
+ * Xray 的统计里没有 per-rule 计数器。所以规则链按「真实判定顺序」展示在分流页，
+ * 判定器用真实数据算出**某个地址会走哪条规则**；我们不会把车流硬画在某条规则上，
+ * 那会是编的。
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -23,7 +34,6 @@ import { matchConnectionToTopology } from "../topology/connections";
 import type { TopologyTags } from "../topology/connections";
 import { INTERNAL_KINDS } from "../topology/flowGeometry";
 import { RecentConnections as RecentConnectionsPanel } from "../topology/ConnectionsPanel";
-import { DestChecker } from "../topology/DestChecker";
 import { MemoHighway } from "../topology/Highway";
 
 // `connections.test.ts`（**不在**本次重构的写入范围内）直接从本模块 import
@@ -37,7 +47,19 @@ export {
 } from "../topology/connections";
 export type { ConnectionFilter, ConnectionMatch, TopologyTags } from "../topology/connections";
 
-export default function Topology() {
+export interface TopologyProps {
+  /**
+   * 跨页导航（P1-1）。判定器与生效规则链搬到「分流」页后，拓扑页只留一个入口：
+   * `onNavigate("routing", "judge")` ⇒ `?view=routing#judge`。
+   *
+   * **可选**是刻意的：这个组件在 `topologyAnimation.test.ts` 里以
+   * `createElement(Topology)` 渲染（不传 props），新增必填 prop 会打断那条
+   * 25 条的回归测试。
+   */
+  onNavigate?: (view: string, target?: string) => void;
+}
+
+export default function Topology({ onNavigate }: TopologyProps = {}) {
   const [topo, setTopo] = useState<Topology | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -109,6 +131,26 @@ export default function Topology() {
     [selected, tags],
   );
 
+  /**
+   * F3（0.9.0）：`Esc` 关闭拓扑页的连接详情面板。
+   *
+   * 详情面板（`.conn-detail`）归 `topology/ConnectionsPanel.tsx`，但「关闭」这个
+   * 动作的数据源（`selected`）在本页 —— 选中项是 `Topology` 的 state，面板只是
+   * 受控渲染。所以「Esc 关闭」放在这里：不用碰邻居的文件，也不会出现两个
+   * 各自维护 opened 状态的真源。
+   *
+   * 只在**确实有选中的连接**时挂监听：没有面板时 Esc 不属于本页（别的组件，
+   * 如 `InlineConfirm`，也处理 Esc）。
+   */
+  useEffect(() => {
+    if (!selected) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected]);
+
   if (loadError) {
     return (
       <div className="page">
@@ -124,10 +166,62 @@ export default function Topology() {
 
   return (
     <div className="page">
+      {/*
+        P1-1（0.9.0）：段落数 4 → 2（PRD P1-1「拓扑页段落由此从 4 段降到 2 段」）。
+        改前：① 网络流动 + 车流图 ②「某个地址会走哪条路」判定器 ③ 最近连接 ④ 生效规则链。
+        现在：① 本节（说明 + 去「分流」页的入口 + 最近连接 + 口径说明 + 车流图）
+              ② 最近连接面板自己那一段（`topology/ConnectionsPanel.tsx` 渲染的 `page__sec`）。
+        判定器与生效规则链两段搬到「分流」页，这里只留一个入口按钮。
+
+        面板**嵌在本节内部**是刻意的：只有这样才能既满足「最近连接提到车流图之前」
+        （P0-2），又不新增一段（P1-1）。`<section>` 里放 `<section>` 是合法的，
+        且两个 `.page__sec` 不再是兄弟 ⇒ 面板不会吃到段间那条分隔线的 24px padding。
+      */}
       <section className="page__sec">
         <h2 className="page__title">网络流动</h2>
         <p className="page__desc">
-          入口是流量进来的地方，规则链按真实顺序决定去哪，出口是最终去向。
+          入口是流量进来的地方，出口是最终去向。往下依次是：真实发生的连接列表
+          （先看事实），然后是车流示意图（结构上可能的路，不是逐条归属）。
+        </p>
+        {/*
+          P1-1：判定能力的**唯一入口**。疑问往往是在看图时产生的，所以这里保留一个
+          链接（PRD P1-1 明确要求），但不再把判定器与规则链搬回来。
+        */}
+        <p className="page__desc">
+          想知道某个网站走哪条路？判定器与<strong>生效规则链</strong>都在「分流」页 ——
+          那里是这类问题的唯一入口，判定结果与规则链在同一屏。
+        </p>
+        <div className="row row--wrap">
+          <button className="btn btn--ghost" onClick={() => onNavigate?.("routing", "judge")}>
+            去「分流」页判定某个域名
+          </button>
+        </div>
+
+        {/*
+          P0-2：**真实数据优先**。改前「最近连接」在流图 + 判定器 + 规则链之后，
+          第一行 `.conn-row` 在 1193px（约 1.9 屏）—— 用户在图上找「我这条连接在哪」
+          却要滚将近两屏才能看到真实发生的连接。这里把面板提到车流图**之前**：
+          图的解释权仍在，只是不再抢首屏。
+        */}
+        <RecentConnectionsPanel
+          payload={conns}
+          error={connErr}
+          tags={tags}
+          selected={selected}
+          onSelect={setSelected}
+        />
+
+        {selectedMatch?.note && (
+          <div className="note">
+            {/* task-126：内部通道**画不出线**，前缀却写着「高亮」—— 一句话自相矛盾。
+                前缀跟着 `inFlow`（那个字段就是「能不能画线」）走。
+                P0-2：这条说明紧挨着**它解释的那张图**（下面那张），放在图之前。 */}
+            单连接{selectedMatch.inFlow ? "高亮" : ""}：{selectedMatch.note}
+          </div>
+        )}
+
+        <h2 className="page__title">车流图</h2>
+        <p className="page__desc">
           车上的货物是字节；车辆数量由累计流量决定（<strong>本次会话内</strong>
           累计值只增不减，不代表当前速率）。
         </p>
@@ -148,14 +242,11 @@ export default function Topology() {
           核心当时的原始计数（核心也一起重启了就会看到数字掉回 0），而下面那条
           「核心重启过 N 次」只统计<strong>本次运行期间</strong>观察到的归零。两件事都不隐瞒。
         </p>
-        <MemoHighway topo={topo} match={selectedMatch} />
-        {selectedMatch?.note && (
-          <div className="note">
-            {/* task-126：内部通道**画不出线**，前缀却写着「高亮」—— 一句话自相矛盾。
-                前缀跟着 `inFlow`（那个字段就是「能不能画线」）走。 */}
-            单连接{selectedMatch.inFlow ? "高亮" : ""}：{selectedMatch.note}
-          </div>
-        )}
+        {/*
+          P0-2：会影响判读的口径说明必须在**它解释的那个东西之前**（PRD S5）。
+          流量不可用的说明改前在图下方（`Topology.tsx:265-271`），用户是「先看图、
+          后被告知图不可信」；现在它在图之前。
+        */}
         {topo.traffic_error && (
           <div className="note">
             取不到实时流量：{topo.traffic_error}
@@ -169,37 +260,7 @@ export default function Topology() {
             核心重启过 {topo.counter_resets} 次，累计流量已续接（所以数字没有掉回 0）。
           </div>
         )}
-      </section>
-
-      <DestChecker geoAvailable={topo.geo_available} />
-
-      <RecentConnectionsPanel
-        payload={conns}
-        error={connErr}
-        tags={tags}
-        selected={selected}
-        onSelect={setSelected}
-      />
-
-      <section className="page__sec">
-        <h2 className="page__title">规则链（{topo.rule.length} 条，自上而下判定）</h2>
-        <p className="page__desc">
-          Xray 自上而下取第一条命中的规则，所以顺序本身是语义的一部分：
-          「广告拦截」排在「大陆直连」之前才有意义。
-        </p>
-        <div className="chain">
-          {topo.rule.map((r) => (
-            <div className="chain__row" key={r.index}>
-              <span className="chain__idx">{r.index}</span>
-              <span className="chain__tag">{r.tag}</span>
-              <span className="chain__conds">
-                {r.conditions.length ? r.conditions.join(" · ") : "（无显式条件）"}
-              </span>
-              <span className="chain__arrow">→</span>
-              <span className="chain__out">{r.outbound}</span>
-            </div>
-          ))}
-        </div>
+        <MemoHighway topo={topo} match={selectedMatch} />
       </section>
     </div>
   );

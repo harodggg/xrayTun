@@ -582,7 +582,33 @@ input[type="checkbox"] {
   box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.15);
 }
 
-/* ---------------------------------------------------------------- 提示条 */
+/* ---------------------------------------------------------------- 提示条
+ *
+ * # E4 结论：`.banner*` 与 `.note` **不是同一件事的两套写法，不要合并**
+ *
+ * 先把「语义差别是否真实存在」按调用点数了一遍（VISUAL-AND-UI #9 要求先确认再动）：
+ *
+ *   · `.banner*`：**42** 处、**11** 个文件；其中 **20** 处带 `role=`
+ *     （`alert` / `status`），**10** 处内嵌 `banner__reason`、**7** 处 `banner__steps`、
+ *     **1** 处 `banner__actions`；三个语义变体 `--warn` / `--error` / `--info`
+ *     都定义在本文件。
+ *   · `.note`：**37** 处、**8** 个文件；带 `role=` 的 **0** 处，也没有任何一处
+ *     内嵌动作按钮 —— 多数直接写成 `<p className="note">`。
+ *
+ * ⇒ 差别是真的，而且不是外观差别，是**句子的角色**：`.banner*` 是「要你处理/知道的
+ *   告警」（块级、打断阅读流、可带原因与动作、要进 live region），`.note` 是
+ *   「一段解释」（留在阅读流里、读完就算、不需要播报）。
+ *   所以 Globe / Nodes 同页混用不是重复，而是「首屏告警 + 行内说明」。
+ *
+ * 因此**保留两套**，只把差别钉在这里。真要收敛，前提是先拿出「同一角色」的证据链，
+ * 而不是名字看起来像 —— 本文件已经因为「看着冗余就合并」付过一次代价（见 `.kv`）。
+ *
+ * ⚠️ 已知空操作（**不在本轮范围，只如实记录，不顺手改**）：`Intent.tsx` 有 4 处
+ * `className="note note--warn"`、1 处 `banner--muted`，而这两个修饰类**本文件都没有
+ * 定义** ⇒ 渲染结果与基类逐字段相同（与 `--border-interactive` 同族：引用了一个
+ * 不存在的名字）。给它们补样式会**改变 Intent 页的像素**（该页经 `App.tsx:392` 可达），
+ * 而 0.9.0 的 P0 里没有这一项 ⇒ 留给后续裁决。
+ */
 
 .banner {
   display: flex;
@@ -1531,7 +1557,9 @@ input[type="checkbox"] {
   margin-top: 12px;
 }
 
-/* 中性提示块：内容比 .empty 具体，但不需要整块留白 */
+/* 中性提示块：内容比 .empty 具体，但不需要整块留白。
+   ⚠️ 它与 `.banner*` 的**分工**（谁该用哪个）写在文件上方「提示条」一节的 E4 注释里：
+   `.note` = 留在阅读流里的**解释**，`.banner*` = 要处理/要知道的**告警**。**不要合并**。 */
 .note {
   font-size: 12px;
   line-height: 1.75;
@@ -1541,6 +1569,22 @@ input[type="checkbox"] {
   background: var(--bg-elevated);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   max-width: 68ch;
+}
+
+/* 0.9.0：`note--warn`（`Intent.tsx` 4 处）与 `banner--muted`（1 处）此前**都没有定义** ⇒
+   class 写了等于没写，作者想要的"这条要当心"静默消失了 —— 与 `--border-interactive`、
+   `--line`、`xattr -dr` 同族（本项目最恨的一类：机制看起来在、实际是空操作）。
+   这里补**最小实现**：不新增 token，只用既有 `--warn` / `--border` / `--bg-elevated` / `--text-dim`；
+   只改"语气"，不改 padding / 字号 / 圆角等尺寸（避免影响既有布局断言）。 */
+.note--warn {
+  border-left-color: var(--warn);
+  color: var(--text);
+}
+
+.banner--muted {
+  border-color: var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
 }
 
 /* 可复制的命令块 */
@@ -1987,10 +2031,13 @@ input[type="checkbox"] {
   align-items: center;
 }
 
-.highway__legend-dot {
-  width: 9px;
-  height: 5px;
-  border-radius: 1px;
+/* 图例里的「真实线段的缩影」（D1）。尺寸由 `<svg width/height/viewBox>` 决定；
+   描边参数（颜色 / 线宽 / 透明度 / 线型）在 `Highway.tsx` 的 `LegendLine` 里
+   **逐项对齐 `.flow__route` 的彩色分支**，由 `d1LineEncoding` 测试锁住。
+   这里只管布局：不参与 flex 收缩，与图例文字垂直居中。 */
+.highway__legend-line {
+  flex: none;
+  display: block;
 }
 
 /* ---------------------------------------------------------------- 流动

@@ -43,7 +43,11 @@ const NAV: Array<{ id: View; label: string }> = [
   { id: "dashboard", label: "仪表盘" },
   { id: "nodes", label: "节点" },
   { id: "subscriptions", label: "订阅" },
-  { id: "routing", label: "规则" },
+  // C1（0.9.0 / UX C7）：侧栏项与页内主标题同词。这一页的主标题是「分流预设」，
+  // 而「规则」在行业里通常指**自定义规则列表**（clash/xray 的 rules）—— 用户想换
+  // 分流方式时会在侧栏找「规则」，点进来看到的却是预设。改成「分流」消除这次错配；
+  // 「自定义规则」这个词**保留**（那是用户会搜的词，页内仍然这么写）。
+  { id: "routing", label: "分流" },
   { id: "intent", label: "意图过滤" },
   { id: "topology", label: "拓扑" },
   { id: "globe", label: "地球仪" },
@@ -87,11 +91,29 @@ function initialSectionFromHash(): string | null {
   return id && categoryOfSection(id) ? id : null;
 }
 
+/**
+ * 「分流」页认得的锚点（PRD P1-1：`?view=routing#judge`）。
+ *
+ * 判定器（`DestChecker`）从拓扑页搬到分流页后，用户在图上产生「这个网站走哪条路」
+ * 的疑问时需要一个**直达判定区**的入口。白名单是刻意的：只有确实存在的分节才认，
+ * 未知 `#foo` 不会被当成「要滚到某处」。
+ */
+const ROUTING_ANCHORS = new Set(["judge"]);
+
+function initialRoutingTarget(): string | null {
+  const id = location.hash.replace(/^#/, "");
+  return ROUTING_ANCHORS.has(id) ? id : null;
+}
+
 function Shell({ initialView }: { initialView?: View }) {
   const [view, setView] = useState<View>(initialView ?? "dashboard");
   // 要跳到的设置分节。只有「从别处带着目标进设置」时才非空（深链、或状态卡片
   // 上的按钮）；用户自己点侧栏进设置时是 null，设置页就按记忆/默认分类走。
   const [settingsTarget, setSettingsTarget] = useState<string | null>(() => initialSectionFromHash());
+  /** 要滚到的「分流」页锚点（`#judge`）；同上，只有带意图进来时才非空。 */
+  const [routingTarget, setRoutingTarget] = useState<string | null>(() =>
+    initialView === "routing" ? initialRoutingTarget() : null,
+  );
   /**
    * 一次「有未保存改动时想离开」的待确认导航（task-23 F1）。
    *
@@ -119,6 +141,7 @@ function Shell({ initialView }: { initialView?: View }) {
     (next: View, target: string | null = null) => {
       if (next === view) {
         setSettingsTarget(target);
+        setRoutingTarget(next === "routing" ? target : null);
         return;
       }
       if (hasUnsavedEdits) {
@@ -127,6 +150,7 @@ function Shell({ initialView }: { initialView?: View }) {
       }
       setView(next);
       setSettingsTarget(target);
+      setRoutingTarget(next === "routing" ? target : null);
     },
     [view, hasUnsavedEdits],
   );
@@ -142,6 +166,28 @@ function Shell({ initialView }: { initialView?: View }) {
   // 离开设置页就把目标丢掉：否则下次进来会莫名其妙跳到上一回那个分节。
   useEffect(() => {
     if (view !== "settings") setSettingsTarget(null);
+  }, [view]);
+
+  /**
+   * 把「分流」页的锚点落成真正的 URL 片段并滚过去（PRD P1-1 的 `?view=routing#judge`）。
+   *
+   * 为什么不用 `<a href="?view=routing#judge">`：`?view=` 只在本仓库的**预览**里生效
+   * （`initialViewFromUrl` 由 `import.meta.env.DEV` 守着），正式版点它只会刷新回仪表盘。
+   * 所以用**应用内导航**（`onNavigate("routing", "judge")`）+ 这里补 hash：
+   * URL 契约由 `#judge` 承担，滚动是尽力而为（元素在别页时 `getElementById` 为 null）。
+   *
+   * `snapshot` 进依赖是必要的：首次挂载时路由页可能还在 `SnapshotFallback`，
+   * 判定区尚未渲染 ⇒ 这一次找不到元素，等快照落地后再落一次。
+   */
+  useEffect(() => {
+    if (view !== "routing" || !routingTarget) return;
+    if (location.hash !== `#${routingTarget}`) location.hash = routingTarget;
+    document.getElementById(routingTarget)?.scrollIntoView?.({ block: "start" });
+  }, [view, routingTarget, snapshot]);
+
+  // 离开分流页也把锚点丢掉（与设置页目标同一条纪律）。
+  useEffect(() => {
+    if (view !== "routing") setRoutingTarget(null);
   }, [view]);
 
   const running = snapshot?.runtime.running ?? false;
@@ -260,7 +306,7 @@ function Shell({ initialView }: { initialView?: View }) {
             <div className="banner banner--warn" role="alert">
               <span>⚠︎</span>
               <div style={{ flex: 1 }}>
-                有<strong>未保存的规则改动</strong>，离开「规则」页会丢失这些改动。
+                有<strong>未保存的规则改动</strong>，离开「分流」页会丢失这些改动。
               </div>
               <button className="btn" onClick={() => setPendingNav(null)}>
                 留在本页
@@ -272,6 +318,7 @@ function Shell({ initialView }: { initialView?: View }) {
                   setHasUnsavedEdits(false);
                   setView(pendingNav.view);
                   setSettingsTarget(pendingNav.target);
+                  setRoutingTarget(pendingNav.view === "routing" ? pendingNav.target : null);
                   setPendingNav(null);
                 }}
               >
@@ -343,7 +390,7 @@ function Shell({ initialView }: { initialView?: View }) {
           {view === "subscriptions" && <Subscriptions />}
           {view === "routing" && <Routing />}
           {view === "intent" && <Intent />}
-        {view === "topology" && <Topology />}
+        {view === "topology" && <Topology onNavigate={onNavigate} />}
         {view === "globe" && <Globe />}
           {view === "logs" && <Logs />}
           {view === "settings" && <Settings focusSection={settingsTarget} />}
@@ -489,7 +536,10 @@ export function TopBar({ view }: { view: View }) {
               anyBusy
                 ? `有操作正在进行（${busyLabel ?? "请稍候"}），完成后再切换模式`
                 : m === "tun"
-                  ? "通过 utun 虚拟网卡接管全部流量（需要已安装 helper）"
+                  ? // C8（0.9.0）：`helper` 是内部词，用户第一次在这里遇到它。按 UX C8
+                    // 的要求，首次出现处必须带上中文解释 —— 否则用户不确定
+                    // 「helper 是不是自己要装的东西」。
+                    "通过 utun 虚拟网卡接管全部流量（需要已安装 helper —— 特权助手，安装时需要管理员密码）"
                   : m === "system_proxy"
                     ? // task-120：**这句原来是「只设置系统 HTTP/SOCKS 代理」，而实现从来
                       // 没有设置过系统代理**（全仓 `setwebproxy`/`scutil`/`SCDynamicStore`

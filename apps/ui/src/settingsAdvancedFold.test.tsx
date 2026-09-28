@@ -21,7 +21,7 @@
  *
  * 1. 默认收起、展开后同一批 DOM 节点仍在（没有卸载重建）；
  * 2. **反例**：判定「留明面」的项**不在任何折叠里** ⇒ 展开/收起两种状态下都可见（防一刀切）；
- * 3. **值不丢**：展开 → 改 MTU → 保存 → 收起 → 重新展开，值仍是改后的；
+ * 3. **值不丢**：展开 → 改 MTU（0.9 B1 之后是自动保存）→ 收起 → 重新展开，值仍是改后的；
  * 4. 三个分节都还在（没有把整节折没了）。
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -115,12 +115,13 @@ describe("TUN 高级参数收进折叠（task-78）", () => {
   it("反例：判定「留明面」的项**不在任何折叠里** ⇒ 展开/收起两种状态下都可见", async () => {
     await renderSettings();
 
-    // 这些是刻意留在明面的：哨兵 DNS（它的说明是「隧道没了 DNS 还指着它 ⇒ 全网断」的唯一解释）、
-    // bypass_private（决定家里 NAS / 局域网还能不能直连，属于网络出问题时最先要确认的项）、
-    // 以及本节标题与「当前模式」上下文。
+    // 这些是刻意留在明面的：隧道内 DNS 地址（哨兵）（它的说明是「隧道没了 DNS 还指着它
+    // ⇒ 全网断」的唯一解释）、bypass_private（决定家里 NAS / 局域网还能不能直连，
+    // 属于网络出问题时最先要确认的项），以及本节标题与「当前模式」上下文。
     const mustStayVisible = [
       screen.getByText(/把内网 \/ 链路本地 \/ 多播地址排除在隧道之外/),
-      screen.getByText("哨兵 DNS"),
+      // 0.9 C1：标签词改成人话（技术词「哨兵」留在括号里），所以这里跟着改断言。
+      screen.getByText("隧道内 DNS 地址（哨兵）"),
       screen.getByText(/写入系统的「假」解析器/),
       screen.getByText(/当前模式：/),
     ];
@@ -136,7 +137,7 @@ describe("TUN 高级参数收进折叠（task-78）", () => {
     }
   });
 
-  it("**值不丢**：展开 → 改 MTU → 保存 → 收起 → 重新展开，值仍是改后的", async () => {
+  it("**值不丢**：展开 → 改 MTU（自动保存）→ 收起 → 重新展开，值仍是改后的", async () => {
     await renderSettings();
 
     toggle(); // 展开
@@ -147,9 +148,8 @@ describe("TUN 高级参数收进折叠（task-78）", () => {
     fireEvent.change(input, { target: { value: "1400" } });
     expect(input.value).toBe("1400");
 
-    // 保存（出现「有未保存的改动」条）
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
+    // 0.9 B1：不再有「保存」按钮 —— 文本框改完在静默窗口（400ms）后自动保存。
+    await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1), { timeout: 3000 });
     const payload = mocks.saveSettings.mock.calls[0]![0] as { tun: { mtu: number } };
     expect(payload.tun.mtu, "载荷里必须带着改后的 MTU").toBe(1400);
 

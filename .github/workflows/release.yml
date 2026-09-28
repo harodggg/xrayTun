@@ -42,6 +42,9 @@ jobs:
     # macos-14 是 Apple Silicon。包是 universal 的，所以用哪个架构的 runner
     # 都行，选 arm64 只是因为它更快。
     runs-on: macos-14
+    # 默认上限是 360 分钟；发版实测约 30 分钟（run 36325395852：1791s）。
+    # 给个上限，避免"发布卡死"时白烧 6 小时 runner 且没人收到明确失败。
+    timeout-minutes: 90
     steps:
       # `fetch-depth: 0` 是**必需的**，不是优化：下面的 `scripts/check.sh` 会跑
       # `scripts/bump-release.py self-test`，夹具是**真实历史树**（`git archive <commit>`）。

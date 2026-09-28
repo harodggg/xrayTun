@@ -1,0 +1,70 @@
+snapshot_at=2026-09-27T21:56:33Z
+--- key file hashes ---
+31590cdcf8e7d874b1cc730b26da297624782bd4811d6cd7a428fba6910aa4e4  apps/ui/src/styles.css
+e899af95edf6acc1e6396e5c0c1b0fc6e680551b17e79fdcd8ad5bca50806d47  apps/ui/src/App.tsx
+f84a0ecaad2c5eb9b3000d539fa7dbe9668f34007b9bf2c56a9d1dbcd7e63b79  apps/ui/src/store.tsx
+8507f7abf25f22e0081d798b8bf3e35453335c98756696f60c020df9dc37878e  apps/ui/src/pages/Settings.tsx
+3bc220aaba0975f0e9fe4d86e053089f0090b40c70916969b23b5b991effc083  apps/ui/src/pages/Nodes.tsx
+77b510cea434f5b37fab5b3c90170e551d7729048fca13c9859046a3fed143e1  apps/ui/src/pages/Dashboard.tsx
+021f466f655cf27eb0aaf195a25057e1898984d9771d723525fa3d84235e1d20  apps/ui/src/pages/Topology.tsx
+e94575021867acfb7658f7e30517eeb25966e73af6ae1ed82aec927347015a69  apps/ui/src/pages/Logs.tsx
+6521a3b62d10cf092f0e4b763032f4420f8fe845930dd592781ec28a83844bf6  apps/ui/src/pages/Routing.tsx
+9bb6d561f296a4befca37ad22dacc10668d2e7d2ee124af1c76a449655f53cc0  apps/ui/src/topology/Flow.tsx
+38f9d9e55c201ed4f119ecf0c75002c4b6ebdaf2c70d9282f246f3459c061833  apps/ui/src/topology/Highway.tsx
+4f25576ee280f17d2db0ca0a46ae0ff6841239cf0683cb7fbe3835448047d42e  apps/ui/tsconfig.json
+--- git diff hash ---
+fa9b4ebc79dd61d1a23a4bd73e978d5f5e9182b632cebf4924f05443e5065445  -
+--- status ---
+ M .github/workflows/ci.yml
+ M .github/workflows/release.yml
+ M CHANGELOG.md
+ M apps/ui/src/App.tsx
+ M apps/ui/src/autoReconnectSetting.test.tsx
+ M apps/ui/src/logsState.test.tsx
+ M apps/ui/src/pages/Dashboard.tsx
+ M apps/ui/src/pages/Globe.tsx
+ M apps/ui/src/pages/Logs.tsx
+ M apps/ui/src/pages/Nodes.tsx
+ M apps/ui/src/pages/Routing.tsx
+ M apps/ui/src/pages/Settings.tsx
+ M apps/ui/src/pages/Topology.tsx
+ M apps/ui/src/routingDraftGuard.test.tsx
+ M apps/ui/src/settingsAdvancedFold.test.tsx
+ M apps/ui/src/speedDisplayStatement.test.tsx
+ M apps/ui/src/store.tsx
+ M apps/ui/src/styles.css
+ M apps/ui/src/topology/ConnectionsPanel.tsx
+ M apps/ui/src/topology/Flow.tsx
+ M apps/ui/src/topology/Highway.tsx
+ M apps/ui/src/topology/flowGeometry.ts
+ M apps/ui/src/topologyAnimation.test.ts
+ M apps/ui/src/topologyStatements.test.tsx
+ M apps/ui/tsconfig.json
+?? apps/ui/src/__verify09__/
+?? apps/ui/src/globeDataFirst.test.tsx
+?? apps/ui/src/ia090Onboarding.test.tsx
+?? apps/ui/src/ia090Topology.test.tsx
+?? apps/ui/src/journeys09.test.tsx
+?? apps/ui/src/nodeSwitchFeedback.test.tsx
+?? apps/ui/src/settingsAutosave.test.tsx
+?? apps/ui/src/storeFailureRefetch.test.tsx
+?? docs/product/0.9-PLAN.md
+?? docs/product/0.9-USER-TEST.md
+?? docs/verification/0.9-REVISION-SNAPSHOT.txt
+?? docs/verification/0.9-VERIFY.md
+
+=== FINAL REVISION（Lead 在 21:56 后改了 styles.css：note--warn/banner--muted 定义）===
+recheck_at=2026-09-27T22:10:05Z
+da36b1f692c88e11e5894dcf9a12e8282cc14fb7ec600e8bc8d509f3e72d394d  apps/ui/src/styles.css
+e899af95edf6acc1e6396e5c0c1b0fc6e680551b17e79fdcd8ad5bca50806d47  apps/ui/src/App.tsx
+f84a0ecaad2c5eb9b3000d539fa7dbe9668f34007b9bf2c56a9d1dbcd7e63b79  apps/ui/src/store.tsx
+8507f7abf25f22e0081d798b8bf3e35453335c98756696f60c020df9dc37878e  apps/ui/src/pages/Settings.tsx
+3bc220aaba0975f0e9fe4d86e053089f0090b40c70916969b23b5b991effc083  apps/ui/src/pages/Nodes.tsx
+77b510cea434f5b37fab5b3c90170e551d7729048fca13c9859046a3fed143e1  apps/ui/src/pages/Dashboard.tsx
+021f466f655cf27eb0aaf195a25057e1898984d9771d723525fa3d84235e1d20  apps/ui/src/pages/Topology.tsx
+e94575021867acfb7658f7e30517eeb25966e73af6ae1ed82aec927347015a69  apps/ui/src/pages/Logs.tsx
+6521a3b62d10cf092f0e4b763032f4420f8fe845930dd592781ec28a83844bf6  apps/ui/src/pages/Routing.tsx
+9bb6d561f296a4befca37ad22dacc10668d2e7d2ee124af1c76a449655f53cc0  apps/ui/src/topology/Flow.tsx
+38f9d9e55c201ed4f119ecf0c75002c4b6ebdaf2c70d9282f246f3459c061833  apps/ui/src/topology/Highway.tsx
+4f25576ee280f17d2db0ca0a46ae0ff6841239cf0683cb7fbe3835448047d42e  apps/ui/tsconfig.json
+git_diff_sha=34fd50825e4fe195a0a9ba157d13b03267162ca06374a38f6075384c112ae559

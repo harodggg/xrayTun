@@ -111,7 +111,7 @@ export default function Globe() {
             <h2 className="page__title">地球仪</h2>
             <p className="page__desc">
               从本机到出口节点的大圆弧航线。飞机数量由这条航线的<strong>累计流量</strong>决定
-              （累计值，不代表当前速率）；飞行快慢是视觉节奏，与数据无关。
+              （累计值；飞行快慢是视觉节奏，与当前网速无关）。
               大陆轮廓是 2° 分辨率的粗略示意，不是导航级海岸线。
             </p>
           </div>
@@ -128,8 +128,12 @@ export default function Globe() {
           </div>
         )}
 
-        <GlobeCanvas data={data} />
-
+        {/* PRD P0-3③（0.9.0 裁决）：**真实数据优先**。
+            原来顺序是 `画布 → note → RouteFacts`，实测事实面板 top=672、操作提示 top=641，
+            两个都在首屏 636px 之外 —— 用户先看到一张大图，要滚动才看到「起点/出口/流量」。
+            现在把 note 与 RouteFacts 提到画布**之前**，首屏即可读到可行动的数据。
+            **刻意不缩画布**：把 560px 的地球仪压到 ~300px 只为让右下角那行操作提示挤进首屏，
+            代价（页面主角变小）大于收益；提示仍在画布上作为可发现的操作入口。 */}
         {data?.error && (
           <div className="note">
             {data.error}
@@ -138,6 +142,8 @@ export default function Globe() {
           </div>
         )}
         {data?.route && <RouteFacts data={data} />}
+
+        <GlobeCanvas data={data} />
       </section>
     </div>
   );
@@ -181,15 +187,14 @@ function RouteFacts({ data }: { data: GlobeData }) {
     <div className="facts">
       <Fact label={originLabel(self)} loc={r.from} caveat={originCaveat(self)} />
       <div className="facts__mid">
-        <div className="facts__km">{Math.round(km).toLocaleString()} km</div>
-        <div className="facts__hint">大圆距离</div>
-        {/* task-179 / A20（本卡 task-181）：数字的**归属**决定它能不能显示、该挂在谁名下。
-            `verified === false` ⇒ `bytes` 是占位、且不知道来自哪个出站 ⇒ **不显示数字**，
-            只展示后端给的原因。`verified && !is_node_outbound` ⇒ 数字是那个出站（例如
-            `direct`）的，**不许**算到节点头上。 */}
+        {/* PRD P0-3②（0.9.0 裁决）：**主数字换成累计流量，距离降级**。
+            理由：全应用只有这一处把「大圆距离」当主数字，而距离是最不可行动的字段
+            （用户看它做不了任何决定）；能行动的是「这条航线走了多少量」。
+            诚实口径不变：`traffic.verified === false` ⇒ 主数字仍是 `—` + 后端给的原因，
+            绝不拿一个不知道归属的数字当头条。 */}
         {r.traffic.verified ? (
           <>
-            <div className="facts__km facts__km--small">{formatBytes(r.bytes)}</div>
+            <div className="facts__km">{formatBytes(r.bytes)}</div>
             <div className="facts__hint">
               {trafficLabel(r.traffic)}
               {r.counter_resets > 0 ? ` · 核心重启过 ${r.counter_resets} 次，累计值已续接` : ""}
@@ -197,11 +202,13 @@ function RouteFacts({ data }: { data: GlobeData }) {
           </>
         ) : (
           <>
-            <div className="facts__km facts__km--small">—</div>
+            <div className="facts__km">—</div>
             <div className="facts__hint">{trafficLabel(r.traffic)}</div>
             {r.traffic.reason && <div className="fact__warn">{r.traffic.reason}</div>}
           </>
         )}
+        <div className="facts__km facts__km--small">{Math.round(km).toLocaleString()} km</div>
+        <div className="facts__hint">大圆距离</div>
       </div>
       {/* 这一端说的是**航线指向的节点**（几何），不是上面那个数字的归属 ——
           task-181 把标签从「出口 · <节点名>」改成「出口节点 · <节点名>」，

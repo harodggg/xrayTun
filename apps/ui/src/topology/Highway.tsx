@@ -11,8 +11,70 @@ import { formatBytes } from "../types";
 import type { Topology } from "../types";
 import type { ConnectionMatch } from "./connections";
 import { shortTag } from "./connections";
-import { INTERNAL_KINDS, NEUTRAL, OUTBOUND_COLOR } from "./flowGeometry";
+import {
+  FLOW_ROUTE_OPACITY,
+  FLOW_ROUTE_STROKE_WIDTH,
+  INTERNAL_KINDS,
+  NEUTRAL,
+  OUTBOUND_COLOR,
+  OUTBOUND_DASH,
+} from "./flowGeometry";
 import { Flow } from "./Flow";
+
+/**
+ * 图例里的三个去向。**顺序即显示顺序**，与 `Highway` 里出口标签的类别一一对应。
+ */
+const LEGEND_KINDS = [
+  { kind: "node", label: "经节点" },
+  { kind: "direct", label: "直连" },
+  { kind: "block", label: "已拦截" },
+] as const;
+
+/**
+ * 图例里的一条线 —— 这一段画的就是**图上那条线的缩影**（原来是 9×5 的纯色块）。
+ *
+ * # 原来错在哪
+ *
+ * 原来这里是 9×5px、`border-radius: 1px`、**100% 不透明**的色块。而画面上真正的线是
+ * `stroke-width: 1.2` + `opacity: 0.22/0.3` 的暗线（实测合成后对比度只有 1.15–1.93:1）。
+ * 于是图例承诺的四种颜色**在图上根本不存在**：CDP 实测图例/线的亮度比是 3.36–4.97 倍。
+ * 这是「界面陈述了不实事实」，与 `--border-interactive`、`xattr -dr` 同一族。
+ *
+ * # 现在为什么是真的
+ *
+ * 这里画的就是一条 `<line>`，`stroke`/`stroke-width`/`opacity`/`stroke-dasharray`
+ * **与 `.flow__route` 的彩色分支逐项相同**（线宽/透明度取自 `flowGeometry.ts` 的常量，
+ * 由 `d1LineEncoding` 测试对着 `styles.css` 的声明值锁住；线型取自 `OUTBOUND_DASH`）。
+ * 想看这条线在图上长什么样，看这一小段就够了。
+ *
+ * 形状是**短线段**而不是色块：色块只能表达「有这么一种颜色」，而线型（虚线/点线）
+ * 是颜色之外的第二编码，只有线段才画得出来。
+ *
+ * 内部通道（dns / api）**不在这里**：它们在画面上不是线，见下面的 `.highway__legend-bar`。
+ */
+function LegendLine({ kind }: { kind: string }) {
+  return (
+    <svg
+      className="highway__legend-line"
+      width={18}
+      height={6}
+      viewBox="0 0 18 6"
+      aria-hidden="true"
+      data-legend-kind={kind}
+    >
+      <line
+        x1={1}
+        y1={3}
+        x2={17}
+        y2={3}
+        stroke={OUTBOUND_COLOR[kind]}
+        strokeWidth={FLOW_ROUTE_STROKE_WIDTH}
+        opacity={FLOW_ROUTE_OPACITY}
+        strokeDasharray={OUTBOUND_DASH[kind]}
+      />
+    </svg>
+  );
+}
 
 /** 入口 ↔ 出口之间的车流。 */
 function Highway({ topo, match }: { topo: Topology; match: ConnectionMatch | null }) {
@@ -52,18 +114,12 @@ function Highway({ topo, match }: { topo: Topology; match: ConnectionMatch | nul
       data-focused={match && (match.inlet || match.outlet) ? "1" : undefined}
     >
       <div className="highway__legend">
-        <span className="highway__legend-item">
-          <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.node }} />
-          经节点
-        </span>
-        <span className="highway__legend-item">
-          <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.direct }} />
-          直连
-        </span>
-        <span className="highway__legend-item">
-          <span className="highway__legend-dot" style={{ background: OUTBOUND_COLOR.block }} />
-          已拦截
-        </span>
+        {LEGEND_KINDS.map(({ kind, label }) => (
+          <span className="highway__legend-item" key={kind}>
+            <LegendLine kind={kind} />
+            {label}
+          </span>
+        ))}
         <span className="highway__legend-note">货车沿连线从入口开到出口</span>
       </div>
 

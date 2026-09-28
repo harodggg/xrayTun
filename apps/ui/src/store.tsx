@@ -175,6 +175,22 @@ interface StoreValue {
    * 要么说「操作未生效 + 原因见顶部提示」，要么只在**本地就能确定**的原因上断言。
    */
   run: (name: string, action: () => Promise<AppSnapshot>) => Promise<boolean>;
+  /**
+   * 与 `run` 同语义，但**排队而不是丢弃**（0.9 B1：设置页的逐项自动保存）。
+   *
+   * # 为什么需要一个新出口
+   *
+   * `run()` 在 `busy` 非空时**直接返回 false 并且什么都不做**。对「点一下就好」的按钮，
+   * 这是对的（防连点）；但对**自动保存**，它是**静默吞掉用户的改动**：连改两项、或保存时
+   * 正好有别的操作在跑，后一次改动就永远不落盘，而界面还显示着新值 —— 正是本项目
+   * 零容忍的「界面说的与事实不符」。
+   *
+   * 这里给「必须执行」的写操作一条路：
+   * * 依次排队（同一时刻仍只有一个命令在跑，不打乱后端）；
+   * * 轮到它时若 `busy` 被别的操作占着，**等它让出**再跑（不是丢弃）；
+   * * 失败照旧走 `fail()`（错误横幅 + 下一步），返回值语义与 `run()` 相同。
+   */
+  runQueued: (name: string, action: () => Promise<AppSnapshot>) => Promise<boolean>;
   /** 执行一个不返回快照的操作。 */
   runVoid: (name: string, action: () => Promise<void>) => Promise<boolean>;
   clearError: () => void;
@@ -352,6 +368,45 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, [acceptSnapshot, fail, succeed]);
 
+  /**
+   * 命令失败之后**再取一次快照**（0.9 A1 收口）。
+   *
+   * # 为什么
+   *
+   * 后端在 `stop_proxy` 回滚失败时会往状态里写一条**持久** `last_notice`
+   * （「未能确认网络已恢复（helper 上的会话可能仍在…）」）。而命令失败只走
+   * `fail()`：它写的是**命令错误**，**不会**触发快照重取 —— 于是那句持久陈述
+   * 要等下一次别的刷新才渲染出来，失败当下用户看不到它。
+   * 「机制活着但界面看不见」正是本项目最恨的那种状态，所以这里补一次重取。
+   *
+   * # 三条纪律
+   *
+   * ① **原错误优先**：重取失败**不许**改写 `error`。所以不能直接用 `refresh()`
+   *    —— 它失败时会 `fail(e, "snapshot")`，把用户刚收到的命令错误换成「快照读不到」。
+   *    这里失败只 `rejectPayload`（console 留痕、按键去重），不碰任何界面状态。
+   * ② **不新增机制**：命令成功后的刷新仍然只有那几条既有通路（事件 / 各调用方自己
+   *    `refresh`）；这里只在**失败**这一条路补一次，`last_notice` 的渲染口径不变。
+   * ③ **不 await**：失败路径要立刻把 `false` 交给调用方（例如 `restart` 要靠它决定
+   *    不重启），重取是后台补一拍。
+   */
+  const refreshAfterCommandFailure = useCallback(async () => {
+    try {
+      const next = await api.snapshot();
+      if (isObject(next) && isObject(next.settings) && isObject(next.runtime)) {
+        setSnapshot(next as unknown as AppSnapshot);
+      } else {
+        // 形状坏 = 没读到：不改界面状态，只留痕（原错误优先）。
+        rejectPayload(
+          "快照(命令失败后重取)",
+          next,
+          "形状异常：缺 settings / runtime —— 已忽略这次重取（原错误优先）",
+        );
+      }
+    } catch {
+      /* 重取失败不改错误状态：原来那条命令错误优先 */
+    }
+  }, []);
+
   const run = useCallback(
     async (name: string, action: () => Promise<AppSnapshot>): Promise<boolean> => {
       if (busyRef.current) return false;
@@ -362,10 +417,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return acceptSnapshot(next, "command");
       } catch (e) {
         fail(e, "command");
+        // 后端可能刚写下持久 `last_notice`（例如回滚失败）⇒ 补取一次让它当轮可见。
+        void refreshAfterCommandFailure();
         return false;
       } finally {
         setBusy(null);
       }
+    },
+    [acceptSnapshot, fail, succeed, refreshAfterCommandFailure],
+  );
+
+  /**
+   * 排队执行（见接口里 `runQueued` 的注释）：忙时**等**，不丢。
+   *
+   * 队列尾用 ref 而不是 state：它只是「上一个任务」的把手，不该驱动渲染。
+   * `queueTailRef` 永不 reject（`.then(() => undefined, () => undefined)`）——
+   * 一次失败不能把后面的改动全堵死。
+   */
+  const queueTailRef = useRef<Promise<void>>(Promise.resolve());
+  const runQueued = useCallback(
+    (name: string, action: () => Promise<AppSnapshot>): Promise<boolean> => {
+      const task = queueTailRef.current.then(async () => {
+        // 等其它操作让出 busy —— **等**，而不是丢。
+        while (busyRef.current !== null) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        setBusy(name);
+        succeed();
+        try {
+          return acceptSnapshot(await action(), "command");
+        } catch (e) {
+          fail(e, "command");
+          return false;
+        } finally {
+          setBusy(null);
+        }
+      });
+      queueTailRef.current = task.then(
+        () => undefined,
+        () => undefined,
+      );
+      return task;
     },
     [acceptSnapshot, fail, succeed],
   );
@@ -586,6 +678,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       dismissRecovered,
       refresh,
       run,
+      runQueued,
       runVoid,
       clearError: () => {
         setError(null);
@@ -613,6 +706,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       dismissRecovered,
       refresh,
       run,
+      runQueued,
       runVoid,
       clearLogs,
       loadLogs,

@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 
-import type { TopoInbound, TopoOutbound } from "../types";
+import type { TopoInbound, TopoOutbound } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/types.ts";
 import {
   NEUTRAL,
   OUTBOUND_COLOR,
@@ -24,8 +24,8 @@ import {
   clampMid,
   routeToD,
   trucksOnLane,
-} from "./flowGeometry";
-import type { Rel, Route, Seg, TruckState } from "./flowGeometry";
+} from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/topology/flowGeometry.ts";
+import type { Rel, Route, Seg, TruckState } from "/Users/xbtg-/deepseek-harness/xray-tun/apps/ui/src/topology/flowGeometry.ts";
 
 /**
  * 回绕（「这趟送到了」）之后货车淡入的时长。
@@ -621,7 +621,7 @@ export function Flow({
               d={routeToD([sg])}
               stroke={sg.color ?? "rgba(120,160,210,0.45)"}
               // D1：分支的第二编码（线型）。主干/回程没有 `outKind` ⇒ 属性不写 ⇒ 实线。
-              strokeDasharray={sg.outKind ? OUTBOUND_DASH[sg.outKind] : undefined}
+              strokeDasharray={undefined} // VERIFY09 MUTANT: 去掉渲染路径线型
             />
           ))}
         </g>

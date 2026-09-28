@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   snapshot: vi.fn(),
   tailLogs: vi.fn(),
   clearLogs: vi.fn(),
+  diagnostics: vi.fn(),
 }));
 
 vi.mock("./ipc", () => ({
@@ -31,6 +32,7 @@ vi.mock("./ipc", () => ({
     snapshot: mocks.snapshot,
     tailLogs: mocks.tailLogs,
     clearLogs: mocks.clearLogs,
+    diagnostics: mocks.diagnostics,
   },
   errorText: (e: unknown) =>
     typeof e === "string" ? e : e instanceof Error ? e.message : String(e),
@@ -69,6 +71,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.snapshot.mockResolvedValue(snap(true));
   mocks.clearLogs.mockResolvedValue(undefined);
+  mocks.diagnostics.mockResolvedValue("（诊断报告正文）");
 });
 
 describe("日志页：读取失败不许说成「没有日志」（task-23 A）", () => {
@@ -153,5 +156,135 @@ describe("日志页：读取失败不许说成「没有日志」（task-23 A）"
     await waitFor(() => expect(mocks.clearLogs).toHaveBeenCalledTimes(1));
     // 失败 → 不能清空界面：那条日志必须还在
     expect(screen.getByText("既有日志")).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2：等级的一个字符标记（E/W/I/D）—— 颜色之外的第二编码
+//
+// 原来等级只有「消息文字颜色 + 2px 左色条」，两者都是颜色 ⇒ 色觉障碍用户（以及灰度
+// 截图、低质量投影）四个等级读起来一样。这几条钉住「第二编码真的在 DOM 里」，
+// 并且钉住它**没有**顺手改版式（不新增列、不新增 DOM 节点）。
+// ---------------------------------------------------------------------------
+
+describe("D2：日志等级有一个字符的第二编码（不靠颜色）", () => {
+  /** 四个等级各一行；`helper` 是最长的来源名（`.log-line__src` 定宽 44px 就是为它定的）。 */
+  const fourLevels = [
+    { ts_unix: 1, source: "core", level: "error", message: "出错了" },
+    { ts_unix: 2, source: "app", level: "warn", message: "注意" },
+    { ts_unix: 3, source: "helper", level: "info", message: "正常" },
+    { ts_unix: 4, source: "core", level: "debug", message: "细节" },
+  ];
+
+  /** 行首的等级字符：从 DOM 的文本读，不 import 实现的常量。 */
+  const markerOf = (row: Element): string =>
+    (row.querySelector(".log-line__ts")?.textContent ?? "").trimStart().charAt(0);
+
+  it("每一行都有一个与等级对应的字符，四个等级四个不同字符", async () => {
+    mocks.tailLogs.mockResolvedValue(fourLevels);
+    const { container } = renderLogs();
+    await screen.findByText("出错了");
+
+    const rows = [...container.querySelectorAll(".log-line")];
+    expect(rows.length, "四行应当都渲染出来").toBe(4);
+    expect(rows.map(markerOf)).toEqual(["E", "W", "I", "D"]);
+    // 「第二编码」的本义：即使只剩灰度，四个等级仍然互不相同
+    expect(new Set(rows.map(markerOf)).size).toBe(4);
+  });
+
+  it("未知等级给「·」，不按颜色猜一个等级出来", async () => {
+    mocks.tailLogs.mockResolvedValue([
+      { ts_unix: 9, source: "core", level: "trace", message: "未知等级" },
+    ]);
+    const { container } = renderLogs();
+    await screen.findByText("未知等级");
+
+    const row = container.querySelector(".log-line")!;
+    expect(markerOf(row)).toBe("·");
+  });
+
+  it("不加列、不加节点：行仍是 ts/src/msg 三个子元素，字符挂在定宽时间戳列里", async () => {
+    mocks.tailLogs.mockResolvedValue(fourLevels);
+    const { container } = renderLogs();
+    await screen.findByText("出错了");
+
+    const rows = [...container.querySelectorAll<HTMLElement>(".log-line")];
+    expect(rows.length).toBe(4);
+    for (const row of rows) {
+      // ① 子元素数不变（等级字符不是第四个 flex 子项 ⇒ 列宽与列间距都没变）
+      expect([...row.children].map((c) => c.className)).toEqual([
+        "log-line__ts",
+        "log-line__src",
+        "log-line__msg",
+      ]);
+      // ② 字符在时间戳列内部；来源列仍完整保留（helper 不许被挤掉）
+      expect(row.querySelector(".log-line__ts")!.textContent).toMatch(/^[EWID·] \d\d:\d\d:\d\d$/);
+      // ③ **文本节点数也不许变**：加了等级字符之后，时间戳列仍然只有 1 个文本节点
+      //   （原来 `{formatClock(...)}` 就是 1 个）。写成分成两个表达式会让它变成 3 个，
+      //   而这页是 1500 行、`logsDomStability.test.tsx` 会逐行重建整棵树 ——
+      //   逐行开销会被放大，所以这条是「零额外开销」的结构判据。
+      expect(row.querySelector(".log-line__ts")!.childNodes.length).toBe(1);
+      expect(row.querySelector(".log-line__src")!.textContent).toBe(
+        fourLevels[rows.indexOf(row)]!.source,
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F3：日志诊断面板的 `Esc` 关闭（与拓扑页同一个键盘约定，dev-ia task-8 请求）
+// ---------------------------------------------------------------------------
+describe("F3：诊断面板按 Esc 关闭", () => {
+  it("面板打开时 Esc 关闭它；面板没打开时 Esc 不产生副作用", async () => {
+    mocks.tailLogs.mockResolvedValue([
+      { ts_unix: 1, source: "core", level: "info", message: "既有日志" },
+    ]);
+    renderLogs();
+    await screen.findByText("既有日志");
+
+    // 面板没打开：Esc 不该变出什么（别的组件，如 InlineConfirm，也要处理 Esc）
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByText("诊断报告")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "诊断" }));
+    expect(await screen.findByText("诊断报告")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByText("诊断报告")).toBeNull());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B5：日志页复制成功必须给 `role="status"` 反馈（用户可感知）
+//
+// 0.9-PLAN §3 B5 的判据是「复制成功给 role=status 反馈」。实现走的是共用
+// `CopyButton`（task-124）；失败那一半由 `a11yQuickFixes.test.tsx` 钉着（剪贴板被拒
+// ⇒ `role=alert` + 可手动选中的 textarea），这里补上**成功**那一半：用户必须能看出
+// 「刚才那一下成了」，而不是重复点。
+//
+// ⚠️ 诚实边界：这条钉的是**有反馈**，不是审计原文里的「2 秒 / 已复制 N 行」措辞。
+// 后者要改 `IncidentReport.tsx` 的 `CopyButton`（不在本卡写范围），见交给 lead 的说明。
+// ---------------------------------------------------------------------------
+
+describe("B5：日志页复制成功有 role=status 反馈", () => {
+  it("剪贴板成功 ⇒ 播报「已复制」，且不出现失败块；写进去的就是筛选后的日志原文", async () => {
+    const line = { seq: 1, ts_unix: 1, source: "core", level: "info", message: "既有日志" };
+    mocks.tailLogs.mockResolvedValue([line]);
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+    renderLogs();
+    await screen.findByText("既有日志");
+    fireEvent.click(await screen.findByRole("button", { name: "复制" }));
+
+    const status = await screen.findByText(/已复制/);
+    expect(status.getAttribute("role"), "成功反馈必须进 live region（role=status）").toBe("status");
+    expect(screen.queryByText(/没有复制成功/)).toBeNull();
+    // 复制的内容与界面同源：不是空的、也不是别的什么东西
+    expect(writeText).toHaveBeenCalledWith(
+      `[${new Date(line.ts_unix * 1000).toISOString()}] ${line.source}/${line.level} ${line.message}`,
+    );
+
+    Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
   });
 });

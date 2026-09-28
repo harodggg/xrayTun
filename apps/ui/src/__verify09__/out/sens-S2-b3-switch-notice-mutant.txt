@@ -1,0 +1,698 @@
+
+ RUN  v2.1.9 /Users/xbtg-/deepseek-harness/xray-tun/apps/ui
+
+ ❯ src/__verify09__/p0_probe.test.tsx (11 tests | 1 failed | 10 skipped) 1329ms
+   × B3 换节点：进行中提示带目标节点名，且不加确认 > 点另一台节点 ⇒ 出现「正在切换到「<名字>」」 1327ms
+     → expected '4 个节点测试全部延迟手动添加香港 · REALITY 01已选中vles…' to contain '正在切换到「日本 · 大阪 BGP」'
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"page"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"nodes-bar"[39m
+        [36m>[39m
+          [36m<input[39m
+            [33maria-label[39m=[32m"搜索节点"[39m
+            [33mplaceholder[39m=[32m"搜索名称、地址或协议"[39m
+            [33mtype[39m=[32m"text"[39m
+            [33mvalue[39m=[32m""[39m
+          [36m/>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"nodes-bar__count"[39m
+          [36m>[39m
+            [0m4 个节点[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"spacer"[39m
+          [36m/>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn"[39m
+            [33mdisabled[39m=[32m""[39m
+          [36m>[39m
+            [0m测试[0m
+            [0m全部[0m
+            [0m延迟[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m手动添加[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-label[39m=[32m"节点"[39m
+          [33mclass[39m=[32m"list"[39m
+          [33mrole[39m=[32m"radiogroup"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"true"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row is-selected"[39m
+            [33mdata-node-id[39m=[32m"n-hk-1"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m香港 · REALITY 01[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"node-row__tag"[39m
+                [36m>[39m
+                  [0m已选中[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mvless + tcp + reality[0m
+                [0m · [0m
+                [0m45.207.197.185[0m
+                [0m:[0m
+                [0m443[0m
+                [0m · 手动添加[0m
+                [0m · SNI www.amazon.com[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m53 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"经该节点取到了数据（HTTP 204），经节点耗时 183 ms · 测于 2026/9/27 22:09:17"[39m
+            [36m>[39m
+              [0m可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"false"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row"[39m
+            [33mdata-node-id[39m=[32m"n-jp-2"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m日本 · 大阪 BGP[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mvless + ws + tls[0m
+                [0m · [0m
+                [0m203.0.113.24[0m
+                [0m:[0m
+                [0m8443[0m
+                [0m · SNI cdn.example.com[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m88 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"经该节点取到了数据（HTTP 204），经节点耗时 218 ms · 测于 2026/9/27 22:09:17"[39m
+            [36m>[39m
+              [0m可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"false"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row"[39m
+            [33mdata-node-id[39m=[32m"n-us-3"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m美国 · 洛杉矶 CN2[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mtrojan + grpc + tls[0m
+                [0m · [0m
+                [0m198.51.100.7[0m
+                [0m:[0m
+                [0m2053[0m
+                [0m · SNI us.example.net[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--ok node-row__metric"[39m
+              [33mtitle[39m=[32m"本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m167 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"经该节点取到了数据（HTTP 204），经节点耗时 297 ms · 测于 2026/9/27 22:09:17"[39m
+            [36m>[39m
+              [0m可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"false"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row"[39m
+            [33mdata-node-id[39m=[32m"n-sg-4"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m新加坡 · 直连[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mtrojan + tcp + tls[0m
+                [0m · [0m
+                [0m192.0.2.55[0m
+                [0m:[0m
+                [0m443[0m
+                [0m · SNI sg.example.net[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--unknown node-row__metric"[39m
+              [33mtitle[39m=[32m"到服务器的距离 61 ms —— 但这个节点转发不了流量，这个数字不代表能用"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m61 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--slow node-row__metric"[39m
+              [33mtitle[39m=[32m"探针失败: 等待首字节超时（总预算 5s）"[39m
+            [36m>[39m
+              [0m不可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 10 skipped (11)
+   Start at  22:09:14
+   Duration  4.68s (transform 1.38s, setup 87ms, collect 1.87s, tests 1.33s, environment 872ms, prepare 182ms)
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/__verify09__/p0_probe.test.tsx > B3 换节点：进行中提示带目标节点名，且不加确认 > 点另一台节点 ⇒ 出现「正在切换到「<名字>」」
+AssertionError: expected '4 个节点测试全部延迟手动添加香港 · REALITY 01已选中vles…' to contain '正在切换到「日本 · 大阪 BGP」'
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"page"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"nodes-bar"[39m
+        [36m>[39m
+          [36m<input[39m
+            [33maria-label[39m=[32m"搜索节点"[39m
+            [33mplaceholder[39m=[32m"搜索名称、地址或协议"[39m
+            [33mtype[39m=[32m"text"[39m
+            [33mvalue[39m=[32m""[39m
+          [36m/>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"nodes-bar__count"[39m
+          [36m>[39m
+            [0m4 个节点[0m
+          [36m</span>[39m
+          [36m<span[39m
+            [33mclass[39m=[32m"spacer"[39m
+          [36m/>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn"[39m
+            [33mdisabled[39m=[32m""[39m
+          [36m>[39m
+            [0m测试[0m
+            [0m全部[0m
+            [0m延迟[0m
+          [36m</button>[39m
+          [36m<button[39m
+            [33mclass[39m=[32m"btn btn--ghost"[39m
+          [36m>[39m
+            [0m手动添加[0m
+          [36m</button>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-label[39m=[32m"节点"[39m
+          [33mclass[39m=[32m"list"[39m
+          [33mrole[39m=[32m"radiogroup"[39m
+        [36m>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"true"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row is-selected"[39m
+            [33mdata-node-id[39m=[32m"n-hk-1"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m香港 · REALITY 01[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"node-row__tag"[39m
+                [36m>[39m
+                  [0m已选中[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mvless + tcp + reality[0m
+                [0m · [0m
+                [0m45.207.197.185[0m
+                [0m:[0m
+                [0m443[0m
+                [0m · 手动添加[0m
+                [0m · SNI www.amazon.com[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m53 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"经该节点取到了数据（HTTP 204），经节点耗时 183 ms · 测于 2026/9/27 22:09:17"[39m
+            [36m>[39m
+              [0m可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"false"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row"[39m
+            [33mdata-node-id[39m=[32m"n-jp-2"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m日本 · 大阪 BGP[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mvless + ws + tls[0m
+                [0m · [0m
+                [0m203.0.113.24[0m
+                [0m:[0m
+                [0m8443[0m
+                [0m · SNI cdn.example.com[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m88 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"经该节点取到了数据（HTTP 204），经节点耗时 218 ms · 测于 2026/9/27 22:09:17"[39m
+            [36m>[39m
+              [0m可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"false"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row"[39m
+            [33mdata-node-id[39m=[32m"n-us-3"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m美国 · 洛杉矶 CN2[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mtrojan + grpc + tls[0m
+                [0m · [0m
+                [0m198.51.100.7[0m
+                [0m:[0m
+                [0m2053[0m
+                [0m · SNI us.example.net[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--ok node-row__metric"[39m
+              [33mtitle[39m=[32m"本地到服务器的 TCP 往返中位数：只表示距离，经节点有没有数据要看右边那个徽章"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m167 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--fast node-row__metric"[39m
+              [33mtitle[39m=[32m"经该节点取到了数据（HTTP 204），经节点耗时 297 ms · 测于 2026/9/27 22:09:17"[39m
+            [36m>[39m
+              [0m可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+          [36m<div[39m
+            [33maria-checked[39m=[32m"false"[39m
+            [33maria-disabled[39m=[32m"true"[39m
+            [33mclass[39m=[32m"list__row node-row"[39m
+            [33mdata-node-id[39m=[32m"n-sg-4"[39m
+            [33mrole[39m=[32m"radio"[39m
+            [33mtabindex[39m=[32m"-1"[39m
+            [33mtitle[39m=[32m"操作进行中，暂时不能切换节点"[39m
+          [36m>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"list__main"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"node-row__head"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"list__name"[39m
+                [36m>[39m
+                  [0m新加坡 · 直连[0m
+                [36m</span>[39m
+              [36m</div>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"list__meta"[39m
+              [36m>[39m
+                [0mtrojan + tcp + tls[0m
+                [0m · [0m
+                [0m192.0.2.55[0m
+                [0m:[0m
+                [0m443[0m
+                [0m · SNI sg.example.net[0m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--unknown node-row__metric"[39m
+              [33mtitle[39m=[32m"到服务器的距离 61 ms —— 但这个节点转发不了流量，这个数字不代表能用"[39m
+            [36m>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"node-row__metric-key"[39m
+              [36m>[39m
+                [0m距离[0m
+              [36m</span>[39m
+              [0m61 ms[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"badge badge--slow node-row__metric"[39m
+              [33mtitle[39m=[32m"探针失败: 等待首字节超时（总预算 5s）"[39m
+            [36m>[39m
+              [0m不可用[0m
+            [36m</span>[39m
+            [36m<span[39m
+              [33mclass[39m=[32m"node-row__actions"[39m
+            [36m>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"导出为二维码 / 分享链接"[39m
+              [36m>[39m
+                [0m二维码[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"btn btn--ghost btn--danger"[39m
+                [33mdisabled[39m=[32m""[39m
+                [33mtitle[39m=[32m"删除该节点"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m删除[0m
+              [36m</button>[39m
+            [36m</span>[39m
+          [36m</div>[39m
+        [36m</div>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+
+Expected: "正在切换到「日本 · 大阪 BGP」"
+Received: "4 个节点测试全部延迟手动添加香港 · REALITY 01已选中vless + tcp + reality · 45.207.197.185:443 · 手动添加 · SNI www.amazon.com距离53 ms可用二维码删除日本 · 大阪 BGPvless + ws + tls · 203.0.113.24:8443 · SNI cdn.example.com距离88 ms可用二维码删除美国 · 洛杉矶 CN2trojan + grpc + tls · 198.51.100.7:2053 · SNI us.example.net距离167 ms可用二维码删除新加坡 · 直连trojan + tcp + tls · 192.0.2.55:443 · SNI sg.example.net距离61 ms不可用二维码删除"
+
+ ❯ src/__verify09__/p0_probe.test.tsx:178:41
+    176| 
+    177|     await waitFor(() => {
+    178|       expect(document.body.textContent).toContain(`正在切换到「${targe…
+       |                                         ^
+    179|     });
+    180|     // 高频动作：不许弹二次确认
+ ❯ runWithExpensiveErrorDiagnosticsDisabled node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+

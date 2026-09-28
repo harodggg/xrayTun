@@ -17,5 +17,8 @@
     "allowImportingTsExtensions": false,
     "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/__verify09__"
+  ]
 }

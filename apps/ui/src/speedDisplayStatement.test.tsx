@@ -14,7 +14,7 @@
  * 另外它用现在时描述「顶栏显示 ↓…」，而 `show_speed_in_title` 关着时顶栏根本不渲染速率
  * （`App.tsx:224`）、菜单栏也被清空（`traffic.rs:130-135`）。
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -122,5 +122,7 @@ describe("task-140 · 开关关着：不许再用现在时说「顶栏显示 ↓
     expect(box.checked).toBe(false);
     fireEvent.click(box);
     expect((box as HTMLInputElement).checked).toBe(true);
+    // 0.9 B1：勾选即自动保存 —— 等它落盘再结束，否则测试收尾后还有一次异步状态更新。
+    await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
   });
 });

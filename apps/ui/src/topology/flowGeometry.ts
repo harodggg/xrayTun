@@ -37,6 +37,45 @@ export const OUTBOUND_COLOR: Record<string, string> = {
   internal: "#64748b",
 };
 
+/**
+ * 出口类别 → **线型**（SVG `stroke-dasharray`）：颜色之外的第二编码（D1）。
+ *
+ * # 为什么需要它
+ *
+ * 拓扑上的线原来只有**色相**一个编码。对红绿色盲用户（以及灰度截图、低质量投影），
+ * 三彩色分支彼此几乎不可分（DEUTERANOPIA 下 `direct` 绿 ↔ 内部灰只差 12/255）。
+ * 加了线型后，「经节点 = 长虚线 / 直连 = 点线 / 已拦截 = 稀疏点线」即使完全看不见
+ * 颜色也能读出来。
+ *
+ * # 第 4 种线型是**实线**，它属于主干而不是某个出口类别
+ *
+ * 主干（入口 → 分叉）与各分支的回程段是所有去向**共用**的路，没有目的类别，
+ * 所以保持实线（不写 `stroke-dasharray`）。于是四条线型合起来是：
+ * 实线（主干）/ `5 3`（经节点）/ `1.5 3`（直连）/ `1 4`（已拦截）。
+ *
+ * ⚠️ 内部通道（`dns` / `internal`）**不在这里**：它们根本不画线
+ * （`Flow` 只画 `userOutbound`），在画面上只以出口卡片右缘的**色条**出现。
+ * 给一个不存在于画面上的对象承诺线型，正是上一轮修掉的「图例说谎」。见 `Highway.tsx`。
+ *
+ * 取值只影响描边样式：**不参与 `d` 与任何动画**（几何由 `routeToD` 单独负责）。
+ */
+export const OUTBOUND_DASH: Record<string, string> = {
+  node: "5 3",
+  direct: "1.5 3",
+  block: "1 4",
+};
+
+/**
+ * 连线的描边参数。**唯一来源是 `styles.css` 的 `.flow__route`** ——
+ * 这里导出是为了让拓扑图例画出「真实线段的缩影」时用**同一个值**，
+ * 而不是再抄一个「看起来差不多」的数。两边一旦漂移，`d1LineEncoding` 测试会红。
+ */
+export const FLOW_ROUTE_STROKE_WIDTH = 1.2;
+/** 彩色分支的不透明度（`styles.css` 的 `.flow__route { opacity }`）。 */
+export const FLOW_ROUTE_OPACITY = 0.3;
+/** 中性主干/回程的不透明度（`styles.css` 的 `.flow__route--trunk { opacity }`）。 */
+export const FLOW_TRUNK_OPACITY = 0.22;
+
 /** 中性灰：内部通道（dns / api）的颜色。 */
 export const NEUTRAL = "#64748b";
 
@@ -78,6 +117,13 @@ export interface Seg {
   cx?: number;
   /** 这一段的颜色：扇出分支按目的地的出口类别着色。 */
   color?: string;
+  /**
+   * 这一段**目的出口的类别**（`node` / `direct` / `block`）：只用来取**线型**
+   * （`OUTBOUND_DASH`），与 `Seg.kind`（几何上是曲线还是直线）无关。
+   *
+   * 只有「扇出去」那一段带它 —— 主干与回程是共用道路，保持实线。见 `OUTBOUND_DASH`。
+   */
+  outKind?: string;
 }
 
 /** 一条完整的货运路线：入口 → 车道 → 扇出 → 出口。 */
