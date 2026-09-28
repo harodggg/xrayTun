@@ -10,6 +10,10 @@ import { isObject } from "./eventGuards";
 import { humanError } from "./failure";
 import type { IncidentPreview, IncidentUpload } from "./incident";
 import type {
+  AuditSyncPreview,
+  AuditSyncRevoke,
+  AuditSyncRun,
+  AuditSyncStatus,
   GlobeData,
   IntentAllowAction,
   IntentAuditRecord,
@@ -65,6 +69,36 @@ export const api = {
     invoke<IntentSummary>("intent_allow", { host, action }),
   intentClearCache: () => invoke<number>("intent_clear_cache"),
   intentApply: () => invoke<IntentSummary>("intent_apply"),
+
+  // ---- 审计自动同步（契约由 Lead 冻结：`docs/design/AUDIT-SYNC.md` §5–§8）----
+  //
+  // 与「意图过滤」同一族数据，但**状态在另一条命令上**：这几条只读写本机的同步
+  // 状态与一次可选的上传，不经过 `settings.json`（所以不走 `save_settings`）。
+  //
+  // ⚠️ **返回字段**是 snake_case 且与 Rust 逐字一致；而 `invoke` 的**入参名**
+  // 沿用本仓库既有写法（camelCase，Tauri 宏默认转 snake_case）—— 与
+  // `incidentUpload` 传 `bundlePath` 对应 Rust 的 `bundle_path` 是同一条约定。
+  /** 读本机同步状态。**不联网**（不构造任何请求）。 */
+  auditSyncStatus: () => invoke<AuditSyncStatus>("audit_sync_status"),
+  /** 开/关自动同步。关闭时后端**零网络请求**；已上传的数据不因此被删。 */
+  auditSyncSetEnabled: (enabled: boolean) =>
+    invoke<AuditSyncStatus>("audit_sync_set_enabled", { enabled }),
+  /** 改上传目标；传**空串 = 恢复默认**（`https://xraytun.top`）。 */
+  auditSyncSetBaseUrl: (baseUrl: string) =>
+    invoke<AuditSyncStatus>("audit_sync_set_base_url", { baseUrl }),
+  /** 设置上传 token；传**空串 = 清除**。写入 Keychain，读回时不回显。 */
+  auditSyncSetToken: (token: string) =>
+    invoke<AuditSyncStatus>("audit_sync_set_token", { token }),
+  /** 立即同步一次（只传 `day < 今天(UTC)` 的完整天）。会真的联网。 */
+  auditSyncNow: () => invoke<AuditSyncRun>("audit_sync_now"),
+  /**
+   * 预览将要上传的内容（选一天；不传 = 后端挑一天）。
+   * **只读本机数据，不联网** —— 明文 bundle 不会离开这台机器。
+   */
+  auditSyncPreview: (day?: string | null) =>
+    invoke<AuditSyncPreview>("audit_sync_preview", { day: day ?? null }),
+  /** 撤回全部已上传（服务端删除）；`deleted` 是**服务端确认**的对象数。 */
+  auditSyncRevoke: () => invoke<AuditSyncRevoke>("audit_sync_revoke"),
 
   // ---- MITM（可选的内容级判定）------------------------------------------
   //

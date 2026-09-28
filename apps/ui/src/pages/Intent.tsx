@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, errorText } from "../ipc";
+import { auditSyncStatusLine, useAuditSyncStatus } from "../auditSync";
 import { nextSteps } from "../failure";
 import { useStore } from "../store";
 import type {
@@ -424,6 +425,15 @@ export default function Intent() {
   const [savedObserveErr, setSavedObserveErr] = useState<string | null>(null);
   /** 编辑中的观察落盘目录（绝对路径）。 */
   const [observeDirText, setObserveDirText] = useState<string | null>(null);
+
+  /**
+   * 审计自动同步的那一行状态。
+   *
+   * **与设置页那张卡片共用同一个数据源**（`useAuditSyncStatus`）：请求逻辑只有一份，
+   * 两处不会各说各话。这一行是只读的 —— 开关/预览/撤回都在设置页，这里给关闭态
+   * 摆一个「去设置里开」的按钮就是点击诱饵（点了也只是跳页，不是本页的动作）。
+   */
+  const auditSync = useAuditSyncStatus({ pollMs: 5000 });
 
   const refresh = useCallback(async () => {
     try {
@@ -1423,6 +1433,20 @@ export default function Intent() {
           拦截判决里的「会」= 它会成为一条拦截规则；演练模式下一律是
           <strong>不会</strong>（只记录）。<strong>「会」不代表规则已经下发到核心</strong>
           —— 规则只在核心启动时下发，所以还要看上面的「应用（会重连一次）」。
+        </p>
+        {/*
+          审计同步那一行（`docs/design/AUDIT-SYNC.md` §8）。判据全在
+          `auditSyncStatusLine` 里：关闭 / 已上传到某天 / 从未成功上传过 / 待传 N 天。
+          `last_ok_unix === null` 只说「从未成功上传过」——**没有证据就不许说正常**。
+        */}
+        <div className="kv">
+          <span>每天自动上传</span>
+          <strong>
+            {auditSyncStatusLine(auditSync.status, auditSync.statusError ?? "读取中…")}
+          </strong>
+        </div>
+        <p className="field__hint">
+          开关 / 明文预览 / 撤回都在「设置 → 系统与助手 → 审计同步」；这一行只是状态。
         </p>
         {audit.length === 0 ? (
           <p className="empty">还没有判决记录。</p>

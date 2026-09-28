@@ -785,23 +785,37 @@ mod tests {
     #[test]
     fn p95_uses_nearest_rank_and_never_panics_on_tiny_samples() {
         let t = 20_720 * 86_400;
-        let mut recs = Vec::new();
         // 1 天 1 个新域
-        recs.push(rec(t, "a.example", "allow", false));
+        let recs = vec![rec(t, "a.example", "allow", false)];
         let r = AuditReport::build(&recs);
         assert_eq!(r.p95_new_hosts_per_day(), 1);
         assert!((r.mean_new_hosts_per_day() - 1.0).abs() < 1e-9);
 
-        // 20 天，每天 1..20 个新域 ⇒ p95 应该是第 19 个（nearest-rank）
+        // 20 天，每天**新增** 1..20 个从没见过的域 ⇒ p95 应该是第 19 个（nearest-rank）
+        //
+        // ⚠️ 域名里必须带上「天」：第一版用 `h{i}.example`，于是同名的域在更早的天
+        // 就已经出现过，"新域/天"恒为 1、p95 也恒为 1 —— 测试自己写错了夹具，
+        // 是远端真的跑出来（left: 1, right: 19）才发现的。
         let mut recs = Vec::new();
         for d in 0..20u64 {
             for i in 0..=d {
-                recs.push(rec((20_720 + d) * 86_400, &format!("h{i}.example"), "allow", false));
+                recs.push(rec(
+                    (20_720 + d) * 86_400,
+                    &format!("d{d}h{i}.example"),
+                    "allow",
+                    false,
+                ));
             }
         }
         let r = AuditReport::build(&recs);
         assert_eq!(r.new_hosts_per_day.len(), 20);
+        assert_eq!(
+            r.new_hosts_per_day.iter().map(|(_, n)| *n).collect::<Vec<_>>(),
+            (1..=20).collect::<Vec<usize>>(),
+            "每天新增的域数应当正好是 1..20"
+        );
         assert_eq!(r.p95_new_hosts_per_day(), 19);
+        assert!((r.mean_new_hosts_per_day() - 10.5).abs() < 1e-9);
     }
 
     #[test]

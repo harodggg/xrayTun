@@ -44,6 +44,7 @@ import { topologyScenario } from "./previewTopology";
 import { connectionsScenario } from "./previewConnections";
 import { MOCK_LOGS } from "./previewLogs";
 import { installTopologyProbe } from "./previewProbe";
+import type { AuditSyncStatus } from "./types";
 
 // 对外接口保持不变：`main.tsx` 只取 `installPreviewBridge`；
 // 其余原先从这里导出的名字**原样再导出**，免得任何消费者被迫改路径。
@@ -60,6 +61,129 @@ export type {
 /** 预览参数。失败态场景靠它选（只读 URL，不改任何真实状态）。 */
 function previewParam(key: string): string | null {
   return new URLSearchParams(location.search).get(key);
+}
+
+// ---------------------------------------------------------------------------
+// 审计自动同步的假状态（`audit_sync_*`）
+// ---------------------------------------------------------------------------
+
+/**
+ * 契约里**最保守**的一组值：关闭、未初始化、没有任何待传天数。
+ *
+ * 它就是「浏览器里没有 Tauri」时的兜底 —— 页面拿到的是这份对象而不是 `undefined`
+ * （拿到 `undefined` 会在渲染 `pending_days.length` 时把整棵树打崩）。
+ *
+ * `?preview=1&audit=ready|pending|error` 可以换成另外三种可截图的状态
+ * （与 `?state=` / `?logs=` 同一套做法）；不做场景参数时就是上面这份默认值。
+ */
+function auditSyncDefault(): AuditSyncStatus {
+  return {
+    enabled: false,
+    device: "",
+    key_present: false,
+    token_present: false,
+    base_url: "https://xraytun.top",
+    last_uploaded_day: null,
+    last_ok_unix: null,
+    last_attempt_unix: null,
+    last_error: null,
+    pending_days: [],
+    skipped_days: [],
+    next_retry_unix: null,
+  };
+}
+
+/** 预览里的可变状态：开关/地址/token 点了要看得见变化（与真实后端同语义）。 */
+let previewAuditSync: AuditSyncStatus | null = null;
+
+function auditSyncScenario(): AuditSyncStatus {
+  if (previewAuditSync) return structuredClone(previewAuditSync);
+  const nowS = Math.floor(Date.now() / 1000);
+  const s = auditSyncDefault();
+  switch (previewParam("audit")) {
+    case "ready":
+      s.enabled = true;
+      s.device = "3f2a91c4d0be7715";
+      s.key_present = true;
+      s.token_present = true;
+      s.last_uploaded_day = "2026-09-23";
+      s.last_ok_unix = nowS - 3600;
+      s.last_attempt_unix = nowS - 3600;
+      s.pending_days = ["2026-09-24", "2026-09-25"];
+      break;
+    case "pending":
+      // 开着但**从未成功过** —— 这句话必须能在预览里看到（不许显示成「正常」）。
+      s.enabled = true;
+      s.device = "3f2a91c4d0be7715";
+      s.key_present = true;
+      s.token_present = true;
+      s.last_attempt_unix = nowS - 600;
+      s.pending_days = ["2026-09-22", "2026-09-23", "2026-09-24"];
+      break;
+    case "error":
+      s.enabled = true;
+      s.device = "3f2a91c4d0be7715";
+      s.key_present = true;
+      s.token_present = true;
+      s.last_uploaded_day = "2026-09-20";
+      s.last_ok_unix = nowS - 86_400;
+      s.last_attempt_unix = nowS - 300;
+      s.last_error = "上传失败：HTTP 401（上传 token 不对）";
+      s.pending_days = ["2026-09-21", "2026-09-22"];
+      s.skipped_days = ["2026-06-01"];
+      s.next_retry_unix = nowS + 1800;
+      break;
+    default:
+      break;
+  }
+  previewAuditSync = s;
+  return structuredClone(s);
+}
+
+/** 预览用的示例 bundle（本机明文，与 §2 的形状一致）。 */
+function auditSyncPreviewBody(s: AuditSyncStatus, day: string) {
+  const plaintext = JSON.stringify(
+    {
+      v: 1,
+      kind: "xraytun.intent.audit.day",
+      day,
+      device: s.device || "preview-device",
+      app: { name: "XrayTun", version: "0.9.2（预览数据）" },
+      counts: { rows: 3, block: 1, allow: 2, deferred: 0, cache_hit: 2, applied: 1 },
+      rows: [
+        {
+          ts_unix: 1_790_000_000,
+          host: "promoted.example",
+          outcome: "block",
+          reason: "命中 geosite:category-ads-all",
+          applied: true,
+          cache_hit: true,
+          context_sent: null,
+        },
+        {
+          ts_unix: 1_790_000_060,
+          host: "cdn.news.example",
+          outcome: "allow",
+          reason: "放行纠正（用户指定）",
+          applied: false,
+          cache_hit: true,
+          context_sent: null,
+        },
+        {
+          ts_unix: 1_790_000_120,
+          host: "api.weather.example",
+          outcome: "allow",
+          reason: "类别不是可拦类别",
+          applied: false,
+          cache_hit: false,
+          context_sent: null,
+        },
+      ],
+    },
+    null,
+    2,
+  );
+  return { day, rows: 3, bytes: plaintext.length, plaintext, note: null as string | null };
 }
 
 /** 安装桥接。返回 uninstall，便于热更新时清理。 */
@@ -202,6 +326,66 @@ export function installPreviewBridge(): () => void {
           return connectionsScenario();
         case "diagnostics":
           return "XrayTun 0.8.0（预览数据）\nmacOS 26.6.2\n核心 26.9.9\nhelper: 未安装";
+        // ---- 审计自动同步：让开关/预览/撤回在浏览器里也真的"有反应" ----
+        case "audit_sync_status":
+          return auditSyncScenario();
+        case "audit_sync_set_enabled": {
+          const s = auditSyncScenario();
+          s.enabled = Boolean((_args as { enabled?: boolean } | undefined)?.enabled);
+          // 首次开启才生成 device 与密钥（与 §5.1 一致：不是硬件指纹）。
+          if (s.enabled) {
+            if (s.device === "") s.device = "3f2a91c4d0be7715";
+            s.key_present = true;
+          }
+          previewAuditSync = s;
+          return structuredClone(s);
+        }
+        case "audit_sync_set_base_url": {
+          const raw = String((_args as { baseUrl?: string } | undefined)?.baseUrl ?? "").trim();
+          const s = auditSyncScenario();
+          // 空串 = 恢复默认（与 Rust 契约一致）。
+          s.base_url = raw === "" ? "https://xraytun.top" : raw;
+          previewAuditSync = s;
+          return structuredClone(s);
+        }
+        case "audit_sync_set_token": {
+          const token = String((_args as { token?: string } | undefined)?.token ?? "").trim();
+          const s = auditSyncScenario();
+          s.token_present = token !== "";
+          previewAuditSync = s;
+          return structuredClone(s);
+        }
+        case "audit_sync_now": {
+          const s = auditSyncScenario();
+          const nowS = Math.floor(Date.now() / 1000);
+          const uploaded = s.enabled ? [...s.pending_days] : [];
+          s.last_attempt_unix = nowS;
+          if (uploaded.length > 0) {
+            s.pending_days = [];
+            s.last_uploaded_day = uploaded[uploaded.length - 1]!;
+            s.last_ok_unix = nowS;
+            s.last_error = null;
+            s.next_retry_unix = null;
+          }
+          previewAuditSync = s;
+          return { uploaded, error: null, status: structuredClone(s) };
+        }
+        case "audit_sync_preview": {
+          const s = auditSyncScenario();
+          const want = (_args as { day?: string | null } | undefined)?.day ?? null;
+          const day = want ?? s.pending_days[0] ?? s.last_uploaded_day ?? "2026-09-24";
+          return auditSyncPreviewBody(s, day);
+        }
+        case "audit_sync_revoke": {
+          const s = auditSyncScenario();
+          // 预览里"服务端确认删除"的数字：传过的天数（没有就是 0）。
+          const deleted = s.last_uploaded_day ? 7 : 0;
+          s.last_uploaded_day = null;
+          s.last_ok_unix = null;
+          s.pending_days = [];
+          previewAuditSync = s;
+          return { deleted, error: null };
+        }
         default:
           // 其余命令一律返回当前快照：按钮有反馈、状态不跳动。
           return scenarioSnapshot();
@@ -359,5 +543,7 @@ export function installPreviewBridge(): () => void {
     delete (window as unknown as Record<string, unknown>).__recoveryDemo;
     listeners.clear();
     allCallbacks.clear();
+    // 审计同步的假状态也一起清掉：热更新后不该留着上一轮的开关值。
+    previewAuditSync = null;
   };
 }

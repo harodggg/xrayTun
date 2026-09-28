@@ -587,6 +587,81 @@ export interface IntentSettings {
   store_context_in_audit: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// 审计自动同步（`audit_sync_*`，契约见 `docs/design/AUDIT-SYNC.md` §5–§8）
+// ---------------------------------------------------------------------------
+
+/**
+ * 审计自动同步的状态（`audit_sync_status` 与四条写命令的返回）。
+ *
+ * ⚠️ 字段名与 Rust 侧**逐字一致**（snake_case，`audit_sync.rs::AuditSyncStatus`）。
+ * Tauri 的 `invoke` 不校验返回字段名：抄错只会静静地拿到 `undefined`，
+ * 界面于是把「读不到」渲染成一个编出来的默认值 —— 那正是本仓库最怕的假陈述。
+ *
+ * 返回的一切都是**本机事实**：`device` 只在本机生成，`pending_days` 是本机审计文件
+ * 算出来的。`last_ok_unix === null` 表示**从未成功上传过**，不许被说成「正常」。
+ */
+export interface AuditSyncStatus {
+  /** 自动同步开关（默认关闭；关闭时后端零网络请求）。 */
+  enabled: boolean;
+  /** 本机随机设备 id（16 hex）。**未初始化时为 `""`** —— 不是「未知」。 */
+  device: string;
+  /** 加密密钥是否已在 Keychain 里生成（丢了就解不开已上传的密文）。 */
+  key_present: boolean;
+  /** 上传 token 是否已配置（值在 Keychain，**不回显**）。 */
+  token_present: boolean;
+  /** 上传目标（必须是 `https://`；空串在写命令里表示恢复默认）。 */
+  base_url: string;
+  /** 最后一次成功上传的天（`YYYY-MM-DD`）；从未成功为 `null`。 */
+  last_uploaded_day: string | null;
+  /** 最后一次成功上传的时刻（Unix 秒）；**从未成功为 `null`**。 */
+  last_ok_unix: number | null;
+  /** 最后一次尝试的时刻（成功或失败都算）；还没试过为 `null`。 */
+  last_attempt_unix: number | null;
+  /** 最后一次失败的人类可读原因；没有失败为 `null`。 */
+  last_error: string | null;
+  /** 待上传的天（升序，最多 31 天）。没有任何一天可传时为 `[]`。 */
+  pending_days: string[];
+  /** 因为太老被跳过、不再重试的天（**明说跳过，而不是无限重试**）。 */
+  skipped_days: string[];
+  /** 退避中的下次重试时刻（Unix 秒）；不在退避中为 `null`。 */
+  next_retry_unix: number | null;
+}
+
+/** 「立即同步一次」的结果（`audit_sync_now`）。 */
+export interface AuditSyncRun {
+  /** 本次**成功上传**的天（判据只有它；失败时是已经传上去的那几天）。 */
+  uploaded: string[];
+  /** 失败原因（人类可读）；成功为 `null`。 */
+  error: string | null;
+  /** 跑完之后的完整状态（同一次往返，不用再拉一次）。 */
+  status: AuditSyncStatus;
+}
+
+/** 「将要上传的内容」预览（`audit_sync_preview`）。 */
+export interface AuditSyncPreview {
+  /** 被预览的天；没有可预览的天时为 `null`。 */
+  day: string | null;
+  rows: number;
+  /** 明文 bundle 的字节数（只用于人读，不参与认证）。 */
+  bytes: number;
+  /**
+   * 明文 bundle JSON —— **本机数据，不涉及网络**。
+   * 没有内容时为 `null`，此时 `note` 说明为什么。
+   */
+  plaintext: string | null;
+  /** 为什么没有内容（一句人话）；有内容时为 `null`。 */
+  note: string | null;
+}
+
+/** 「撤回全部已上传」的结果（`audit_sync_revoke`）。 */
+export interface AuditSyncRevoke {
+  /** **服务端确认**删掉的对象数。`error` 非空时这个数字不可当作已删除。 */
+  deleted: number;
+  /** 失败原因（人类可读）；成功为 `null`。 */
+  error: string | null;
+}
+
 /** 开机自启动的**真实**状态，来自系统的 SMAppService，不是回显设置字段。 */
 export interface LoginItemState {
   status: "not_registered" | "enabled" | "requires_approval" | "not_found" | "error";

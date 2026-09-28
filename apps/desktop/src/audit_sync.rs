@@ -305,7 +305,9 @@ impl AuditSyncRuntime {
             }
         };
 
-        let (pending, skipped) = match read_audit_files(&self.audit_paths()) {
+        // 算出来的"太老该跳过"的天只有 `sync_once` 会写进状态；这里只展示**已记录**的那份
+        // （`status()` 是只读的，不该顺手改状态）。
+        let (pending, _skipped_now) = match read_audit_files(&self.audit_paths()) {
             Ok(rows) => {
                 let today = utc_day(xt_core::util::now_unix());
                 let last = state.as_ref().and_then(|s| s.last_uploaded_day.clone());
@@ -809,7 +811,7 @@ mod tests {
         // 重新构造一个运行态：设备 id 与密钥必须**不变**
         let rt2 = AuditSyncRuntime::new(dir.clone());
         assert_eq!(rt2.status().device, s.device);
-        assert!(rt2.key_present);
+        assert!(rt2.key_present(), "key_present 是方法");
 
         // 再关一次：不删任何东西
         let s2 = rt.set_enabled(false).unwrap();
@@ -878,7 +880,12 @@ mod tests {
         );
         let s = rt.status();
         assert_eq!(s.pending_days.len(), 2, "{:?}", s.pending_days);
-        assert!(s.pending_days.iter().all(|d| d.as_str() < &utc_day(xt_core::util::now_unix())));
+        let today = utc_day(xt_core::util::now_unix());
+        assert!(
+            s.pending_days.iter().all(|d| d.as_str() < today.as_str()),
+            "待传的天必须都早于今天：{:?} vs {today}",
+            s.pending_days
+        );
     }
 
     /// 关闭状态：**一个请求都不发**，状态也不动。

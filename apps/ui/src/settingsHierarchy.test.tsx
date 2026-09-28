@@ -9,7 +9,7 @@
  *
  * # 这几条测试钉住什么
  *
- * 1. **分类表是唯一真源**：10 个分节一个不漏、不重，且每个都能解析回自己的分类；
+ * 1. **分类表是唯一真源**：11 个分节一个不漏、不重，且每个都能解析回自己的分类；
  * 2. **选中某类 → 其他类的分节不在 DOM 里**（不是 CSS 藏起来：藏起来的东西照样
  *    在 a11y 树里、也可能被 Tab 聚焦，而且没法用 DOM 断言）；
  * 3. **带目标的落地**（跨页意图 / 深链）落在**目标分节所属的分类**，而不是默认分类 ——
@@ -64,11 +64,11 @@ beforeEach(() => {
 });
 
 describe("设置页两级结构（task-48）", () => {
-  it("分类表覆盖全部 10 个分节：不漏、不重，且每个都能解析回自己的分类", () => {
+  it("分类表覆盖全部 11 个分节：不漏、不重，且每个都能解析回自己的分类", () => {
     expect(SETTINGS_CATEGORIES.length).toBe(4);
     const all = SETTINGS_CATEGORIES.flatMap((c) => c.sections.map((s) => s.id));
-    expect(all.length, "应有 10 个分节").toBe(10);
-    expect(new Set(all).size, "分节不得重复归属").toBe(10);
+    expect(all.length, "应有 11 个分节").toBe(11);
+    expect(new Set(all).size, "分节不得重复归属").toBe(11);
     expect(new Set(all)).toEqual(new Set(ALL_SETTINGS_SECTIONS));
 
     for (const c of SETTINGS_CATEGORIES) {

@@ -28,7 +28,7 @@
 //! - 密钥与 token 从**文件**读（这个 CLI 不进 Keychain）：只放在你自己家里，权限 0600。
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use xt_intent::audit_report::{utc_day, AuditReport};
@@ -170,7 +170,7 @@ fn write_out(out: &Option<String>, text: &str) {
     }
 }
 
-fn read_key(path: &PathBuf, allow_create: bool) -> [u8; KEY_LEN] {
+fn read_key(path: &Path, allow_create: bool) -> [u8; KEY_LEN] {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let bytes = match hex_decode(text.trim()) {
@@ -214,14 +214,14 @@ fn read_key(path: &PathBuf, allow_create: bool) -> [u8; KEY_LEN] {
     }
 }
 
-fn read_token(path: &PathBuf) -> String {
+fn read_token(path: &Path) -> String {
     match std::fs::read_to_string(path) {
         Ok(t) => t.trim().to_string(),
         Err(e) => die(&format!("读 {} 失败：{e}", path.display())),
     }
 }
 
-fn load_or_init_state(path: &PathBuf, device_override: Option<&str>) -> SyncState {
+fn load_or_init_state(path: &Path, device_override: Option<&str>) -> SyncState {
     let mut state = match SyncState::load(path) {
         Ok(Some(s)) => s,
         Ok(None) => {

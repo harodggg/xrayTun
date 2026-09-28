@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../ipc";
+import { AuditSyncCard } from "../AuditSyncCard";
 import { CopyButton } from "../IncidentReport";
 import { InlineConfirm } from "../InlineConfirm";
 import SnapshotFallback from "../SnapshotState";
@@ -29,7 +30,7 @@ import {
  * ## 它是**唯一真源**
  *
  * 导航、深链解析（`#set-helper`）、跨页意图（`onNavigate("settings", "set-helper")`）、
- * 分类上的注意力徽标，全部从这张表读。所以「10 个分节一个不漏、不重」只需要在这张表里
+ * 分类上的注意力徽标，全部从这张表读。所以「11 个分节一个不漏、不重」只需要在这张表里
  * 成立一次，并由测试逐项断言（`ALL_SETTINGS_SECTIONS`）。
  */
 export const SETTINGS_CATEGORIES = [
@@ -64,6 +65,10 @@ export const SETTINGS_CATEGORIES = [
     sections: [
       { id: "set-autostart", title: "开机自启动" },
       { id: "set-helper", title: "特权助手" },
+      // 审计自动同步（`docs/design/AUDIT-SYNC.md` §8）：默认关闭，开启后每天把
+      // 加密后的审计密文上传一次。放在「系统与助手」是因为它是**数据离开设备**的
+      // 那类开关（与 helper/自启动同级），而不是一条过滤规则。
+      { id: "set-audit-sync", title: "审计同步" },
       { id: "set-misc", title: "其他" },
     ],
   },
@@ -71,7 +76,7 @@ export const SETTINGS_CATEGORIES = [
 
 export type SettingsCategoryId = (typeof SETTINGS_CATEGORIES)[number]["id"];
 
-/** 全部 10 个分节 id（顺序 = 表里的顺序）。测试用它断言「不漏不重」。 */
+/** 全部 11 个分节 id（顺序 = 表里的顺序）。测试用它断言「不漏不重」。 */
 export const ALL_SETTINGS_SECTIONS: string[] = SETTINGS_CATEGORIES.flatMap((c) =>
   c.sections.map((s) => s.id),
 );
@@ -1688,6 +1693,16 @@ export default function Settings({ focusSection }: { focusSection?: string | nul
             </p>
           </details>
         </div>
+      </Section>
+
+      {/* ------------------------------------------------------- 审计同步 */}
+      {/*
+        卡片本体在 `src/AuditSyncCard.tsx`：它自带独立的数据源
+        （`useAuditSyncStatus`，与意图页那一行**同一份**），且只在切到本节时才挂载 ——
+        别的分类不该为一个看不见的卡片付一次 IPC。
+      */}
+      <Section id="set-audit-sync" active={activeIds.has("set-audit-sync")}>
+        <AuditSyncCard />
       </Section>
 
       {/* ------------------------------------------------------- 杂项 */}
