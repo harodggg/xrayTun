@@ -2,23 +2,38 @@
 //!
 //! # 一个必须说清的边界
 //!
-//! **位置来自 ip-api.com**，不是本地算出来的 —— 项目自带的 `geoip.dat` 只有
-//! 国别与网段，没有经纬度（实测确认）。把节点 IP 发给第三方是个真实的代价，
-//! 所以：结果按 IP 缓存、界面上标注来源、查询失败时如实报错而不是画一个
-//! 坐标 (0,0) 的假点。
+//! **位置来自第三方 IP 库**（`ipwho.is` / `ip-api.com` / `ipapi.co`），不是本地
+//! 算出来的 —— 项目自带的 `geoip.dat` 只有国别与网段，没有经纬度（实测确认）。
+//! 把节点 IP 发给第三方是个真实的代价，所以：结果**按公网 IP 持久缓存**、
+//! 界面上标注来源、查询失败时如实报错而不是画一个坐标 (0,0) 的假点。
 //!
 //! **查询必须绕过隧道**：隧道开着时直接发请求会从节点出去，查到的会是
 //! 「节点自己的位置」—— 错得很像对的。详见 `xt_core::geo_lookup`。
+//!
+//! # 0.9.1：先探 IP，再决定查不查坐标
+//!
+//! 旧实现**每次进页面都真查网络**（用户抱怨的「重新加载」）。现在：
+//!
+//! 1. 先用两个**只取 IP** 的轻量源探当前公网 IP（`api.ipify.org`、
+//!    `1.1.1.1/cdn-cgi/trace`）；
+//! 2. 这个 IP 在 `<数据目录>/location-cache.json` 里已有记录、且这次不是强制刷新
+//!    ⇒ **直接用缓存返回，一个坐标源都不请求**（`from_cache = true`）；
+//! 3. IP 变了 / 没查过 / 强制刷新 ⇒ 三个坐标源并发互校，写回缓存。
+//!
+//! 缓存是**加速层而非事实来源**：坏文件、缺文件、版本不符一律当空缓存（见
+//! `xt_core::store::Store::load_location_cache`），最多导致重查一次。
 
 use std::net::IpAddr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::sync::Mutex;
 
-use xt_core::geo_lookup::{merge_sources, parse_api, parse_who, GeoLocation};
+use xt_core::geo_lookup::{parse_api, parse_who, GeoLocation, CONSISTENT_TOLERANCE_DEG};
+use xt_core::store::{CachedLocation, LocationCache};
+use xt_core::util::now_unix;
 use xt_core::xray::stats::{monotonic_traffic_by_tag, MonotonicCounters, StatEntry};
 
 use super::*;
@@ -146,6 +161,26 @@ impl SelfCheck {
     }
 }
 
+/// 一次 `globe_data` 调用**用了缓存还是真查了**（0.9.1，接口冻结）。
+///
+/// 三个字段各自回答一个用户会问的问题，互不替代：
+/// * 「这次是重新加载吗」→ `from_cache`；
+/// * 「这份数据多久了」→ `fetched_unix`；
+/// * 「为什么又查了一次」→ `ip_changed`。
+///
+/// `from_cache = true` 的**定义**是「本次一个坐标源都没请求」—— 不是「本机位置
+/// 来自缓存」。出口节点位置若被重查，这个字段也必须是 `false`（否则界面会说
+/// 「没有重新加载」，而事实上刚发过查询）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobeCacheInfo {
+    /// true = 直接用了缓存，**没有**重新查询坐标。
+    pub from_cache: bool,
+    /// 缓存条目的抓取时间（Unix 秒）；本次刚查出来时为 None。
+    pub fetched_unix: Option<u64>,
+    /// 本次探测到的公网 IP 与缓存不同 ⇒ 触发了重新查询（首查也算 true）。
+    pub ip_changed: bool,
+}
+
 /// 地球仪数据。
 #[derive(Debug, Clone, Serialize)]
 pub struct GlobeData {
@@ -156,6 +191,8 @@ pub struct GlobeData {
     pub error: Option<String>,
     /// 「本机 · IP」这条陈述的**可验证来源**（task-179 / A21）。
     pub self_check: SelfCheck,
+    /// 这次到底用了缓存还是真查了（0.9.1）。
+    pub cache: GlobeCacheInfo,
 }
 
 /// 取物理网卡名 —— 绑它才能绕过隧道，否则查询会从节点出去、查到节点的位置。
@@ -177,8 +214,10 @@ fn is_private(ip: IpAddr) -> bool {
 }
 
 /// 地球仪：本机 → 出口节点。
+///
+/// `force = true` 表示用户手动点了「刷新」：**跳过缓存**、强制完整查询。
 #[tauri::command]
-pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String> {
+pub async fn globe_data(state: State<'_, AppState>, force: bool) -> Result<GlobeData, String> {
     let iface = physical_interface();
 
     // 当前选中的节点
@@ -199,38 +238,109 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
             .into_iter()
             .find(|ip| !is_private(*ip))
     });
-
-    // 两个数据源**并发**查询、互为校验。用系统的 curl（项目既有做法：
-    // 零依赖、走系统信任链、支持 `--interface` 绑网卡），不引 HTTP 库。
-    //
-    // 绑网卡是必须的：隧道开着时直接请求会从节点出去，查到的是**节点自己的
-    // 位置**（实测过：不绑查到香港、绑了查到本机所在的大理）。
     let exit_ip_str = exit_ip.map(|ip| ip.to_string());
 
-    // **统一走 `tauri::async_runtime::spawn`**：与 `tokio::spawn` 同样可 `.await`
-    // （`tauri::async_runtime::JoinHandle` 实现了 `Future`），但同步/异步上下文都能用。
-    // 裸 `tokio::spawn` 在同步上下文（`setup` 回调）会 panic ⇒ release 下 SIGABRT（0.8.39 事故）。
-    let self_task = tauri::async_runtime::spawn(query_self(iface.clone()));
-    let exit_task = {
-        let ip = exit_ip_str.clone();
-        let iface = iface.clone();
-        tauri::async_runtime::spawn(async move {
-            match ip {
-                Some(ip) => query_ip(&ip, iface.as_deref()).await,
-                None => None,
+    // ---- 1) 持久缓存：**先读一次**，全程共用 ----
+    //
+    // 读失败（坏文件/版本不符）会退回空缓存并 warn，最多导致重查一次，不会让页面打不开。
+    let mut cache = state.store.load_location_cache();
+
+    // ---- 2) 轻量探测：只问「公网 IP 是多少」，不问坐标 ----
+    //
+    // 这一步是本次改动的**判据来源**：它便宜，所以可以每次进页面都做；
+    // 坐标查询贵且对第三方有限流，只在 IP 变了（或强制）时才做。
+    let probed_ip = query_public_ip(iface.as_deref()).await;
+
+    // 「IP 变了没有」必须在**写入本次结果之前**判定，否则这次写进缓存后就永远为 false。
+    let ip_changed = ip_changed(probed_ip.as_deref(), &cache);
+
+    // 缓存里已经有的（`force` 时一律当没有 ⇒ 走完整查询）。
+    let cached_origin = if force {
+        None
+    } else {
+        probed_ip.as_deref().and_then(|ip| cache.get(ip).cloned())
+    };
+    let cached_exit = if force {
+        None
+    } else {
+        exit_ip_str.as_deref().and_then(|ip| cache.get(ip).cloned())
+    };
+    let origin_from_cache = cached_origin.is_some();
+    let need_self = cached_origin.is_none();
+    let need_exit = exit_ip_str.is_some() && cached_exit.is_none();
+
+    // ---- 3) 两个坐标查询**并发**（旧实现同为「一次把两件事问完」）----
+    //
+    // 缓存命中时对应的那个 `None` 分支**一个请求都不发** —— 这正是「IP 没变就不重查」。
+    let (fresh_origin, fresh_exit) = tokio::join!(
+        async {
+            if need_self {
+                query_self(iface.as_deref(), probed_ip.as_deref()).await
+            } else {
+                None
             }
-        })
+        },
+        async {
+            match (need_exit, exit_ip_str.as_deref()) {
+                (true, Some(ip)) => query_ip(ip, iface.as_deref()).await,
+                _ => None,
+            }
+        },
+    );
+
+    let origin = match cached_origin.clone() {
+        Some(entry) => Some(cached_to_location(
+            probed_ip.as_deref().unwrap_or_default(),
+            &entry,
+        )),
+        None => fresh_origin,
+    };
+    // 出口节点位置也按节点 IP 缓存：切回用过的节点是瞬时的。
+    let exit = match cached_exit.clone() {
+        Some(entry) => Some(cached_to_location(
+            exit_ip_str.as_deref().unwrap_or_default(),
+            &entry,
+        )),
+        None => fresh_exit,
     };
 
-    let origin = self_task.await.ok().flatten();
-    let exit = exit_task.await.ok().flatten();
+    // ---- 4) 只有真查到了新东西才写盘 ----
+    let mut dirty = false;
+    if need_self {
+        if let Some(loc) = &origin {
+            // 键用**本次探测到的公网 IP**：它才是「这次的位置键」。
+            // 探不到时才退回源自己报的 IP（至少下回还能命中）。
+            let key = probed_ip.clone().unwrap_or_else(|| loc.ip.clone());
+            cache.put(&key, location_to_cached(loc, now_unix(), iface.as_deref()));
+            dirty = true;
+        }
+    }
+    if need_exit {
+        if let (Some(loc), Some(ip)) = (&exit, exit_ip_str.as_deref()) {
+            cache.put(ip, location_to_cached(loc, now_unix(), iface.as_deref()));
+            dirty = true;
+        }
+    }
+    if dirty {
+        if let Err(e) = state.store.save_location_cache(&cache) {
+            // 写不进去只是「下次还得重查」，不该让本次结果失败。
+            tracing::warn!(error = %e, "位置缓存写盘失败（下次仍会重查；本次结果不受影响）");
+        }
+    }
+
     // task-179 / A21：把「来不来自本机」判出来（纯函数，见 `SelfCheck::judge`）——
     // 读不到物理网卡时查到的是**节点出口**，界面据此降级文案，不许再说「本机」。
-    let self_check = SelfCheck::judge(iface.as_deref(), origin.as_ref());
+    //
+    // **缓存命中时不许拿「本次绑了网卡」给旧记录背书**：可信性属于抓取那一刻，
+    // 所以走 `self_check_from_cache`（读条目里存的 `bound_interface`）。
+    let self_check = match (&origin, cached_origin.as_ref()) {
+        (Some(loc), Some(entry)) if origin_from_cache => self_check_from_cache(entry, loc),
+        (loc, _) => SelfCheck::judge(iface.as_deref(), loc.as_ref()),
+    };
     let error = if origin.is_none() {
-        Some("查本机位置失败（两个数据源都没返回）".to_string())
+        Some("查本机位置失败（三个数据源都没返回）".to_string())
     } else if exit_ip_str.is_some() && exit.is_none() {
-        Some("查节点位置失败（两个数据源都没返回）".to_string())
+        Some("查节点位置失败（三个数据源都没返回）".to_string())
     } else {
         None
     };
@@ -252,11 +362,26 @@ pub async fn globe_data(state: State<'_, AppState>) -> Result<GlobeData, String>
         _ => None,
     };
 
+    // `from_cache` 只认「本次没有发出任何坐标查询」——不是「本机位置来自缓存」。
+    // 出口节点位置若被重查，这里也必须是 false（否则界面会说「没有重新加载」，
+    // 而事实上刚发过查询）。
+    let from_cache = !need_self && !need_exit;
+    let cache_info = GlobeCacheInfo {
+        from_cache,
+        fetched_unix: if from_cache {
+            cached_origin.as_ref().map(|c| c.fetched_unix)
+        } else {
+            None
+        },
+        ip_changed,
+    };
+
     Ok(GlobeData {
         route,
         origin,
         error,
         self_check,
+        cache: cache_info,
     })
 }
 
@@ -285,38 +410,349 @@ async fn curl_get(url: &str, interface: Option<&str>) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// 查一个指定 IP 的位置（双源）。
+// ---------------------------------------------------------------------------
+// 纯逻辑：解析 / 合并 / 缓存判定（无网络，全部可单测）
+// ---------------------------------------------------------------------------
+
+/// 两个小数位：`sources` 摘要里显示坐标用。
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// 从若干候选里挑一个**便民**的字符串：优先非 ASCII（中文），其次第一个非空，
+/// 最后退回 `fallback`。
+///
+/// 「中文优先」用的是**含非 ASCII 字符**这个判据（与具体服务无关），与
+/// `xt_core::geo_lookup::merge_sources` 的口径一致：`ipwho.is` 的坐标更准但只有
+/// 英文，`ip-api.com` 的 `lang=zh-CN` 才有「大理」。三个源里任何一个给出中文都算数。
+fn prefer_chinese<'a>(values: impl Iterator<Item = &'a str>, fallback: &str) -> String {
+    let candidates: Vec<&str> = values.filter(|v| !v.is_empty()).collect();
+    if let Some(v) = candidates.iter().find(|v| !v.is_ascii()) {
+        return (*v).to_string();
+    }
+    candidates
+        .first()
+        .map_or_else(|| fallback.to_string(), |v| (*v).to_string())
+}
+
+/// 坐标是否「一致」：经纬度都在 [`CONSISTENT_TOLERANCE_DEG`] 之内。
+fn coords_agree(a: &GeoLocation, b: &GeoLocation) -> bool {
+    (a.lat - b.lat).abs() <= CONSISTENT_TOLERANCE_DEG
+        && (a.lon - b.lon).abs() <= CONSISTENT_TOLERANCE_DEG
+}
+
+/// 三个坐标源的**并发互校**（纯函数）：**多数一致**才 `consistent = true`。
+///
+/// # 与两源版 `merge_sources` 的关系
+///
+/// 两源版回答的是「两个都返回且坐标接近吗」；三源版必须多回答一个问题：
+/// **只有两个源返回、而这两个互相矛盾**时算不算一致？答案是不算 —— 「多数一致」
+/// 要求至少两家指向同一片坐标。所以这里先按容差聚类，再取最大的那一簇：
+///
+/// | 情况 | `consistent` | 坐标取自 |
+/// | --- | --- | --- |
+/// | 三家两两一致 | `true` | 优先级最高者（`results` 顺序 = 优先级）|
+/// | 两家一致、一家跑偏 | `true`（多数派成立）| 多数派里优先级最高者 |
+/// | 三家互相矛盾 | `false` | 优先级最高者（不假装一致）|
+/// | 只有一家返回 | `false`（**没人印证，不是「一致」**）| 那一家 |
+///
+/// 地名/国家/ISP 从**同一簇**里取，并优先中文（见 [`prefer_chinese`]）；
+/// `sources` **逐个列出三个源**（没返回的写「无结果」），界面据此说明问到了几家。
+fn merge_three(
+    ip: &str,
+    results: [(&'static str, Option<GeoLocation>); 3],
+) -> Option<GeoLocation> {
+    let successes: Vec<(usize, GeoLocation)> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, (_, r))| r.clone().map(|l| (idx, l)))
+        .collect();
+    if successes.is_empty() {
+        return None;
+    }
+
+    // 每个成功源「与几个成功源（含自己）一致」；并列时取优先级更高（下标更小）的那家。
+    let support: Vec<usize> = successes
+        .iter()
+        .map(|(_, a)| successes.iter().filter(|(_, b)| coords_agree(a, b)).count())
+        .collect();
+    let mut best = 0usize;
+    for (i, s) in support.iter().enumerate().skip(1) {
+        if *s > support[best] {
+            best = i;
+        }
+    }
+    let consistent = support[best] >= 2;
+    let base = successes[best].1.clone();
+
+    // 簇 = 与 base 一致的那些源（至少含 base 自己）。
+    let cluster: Vec<&GeoLocation> = successes
+        .iter()
+        .filter(|(_, l)| coords_agree(l, &base))
+        .map(|(_, l)| l)
+        .collect();
+
+    let city = prefer_chinese(cluster.iter().map(|l| l.city.as_str()), &base.city);
+    let country = prefer_chinese(cluster.iter().map(|l| l.country.as_str()), &base.country);
+    let isp = prefer_chinese(cluster.iter().map(|l| l.isp.as_str()), &base.isp);
+
+    let sources: Vec<String> = results
+        .iter()
+        .map(|(name, r)| match r {
+            Some(l) => format!("{name}: {}", round2(l.lat)),
+            None => format!("{name}: 无结果"),
+        })
+        .collect();
+
+    Some(GeoLocation {
+        // 调用方给的 IP（本机那次是**探测到的公网 IP**）优先：它是本次的缓存键。
+        ip: if ip.is_empty() { base.ip.clone() } else { ip.to_string() },
+        country,
+        city,
+        lat: base.lat,
+        lon: base.lon,
+        isp,
+        source: base.source.clone(),
+        consistent,
+        sources,
+    })
+}
+
+/// 解析 `ipapi.co` 的响应（`https://ipapi.co/json/`，无需 token）。
+fn parse_ipapi_co(body: &str) -> Option<GeoLocation> {
+    #[derive(Deserialize)]
+    struct IpApiCo {
+        #[serde(default)]
+        ip: String,
+        #[serde(default)]
+        city: String,
+        #[serde(default)]
+        country_name: String,
+        #[serde(default)]
+        latitude: f64,
+        #[serde(default)]
+        longitude: f64,
+        #[serde(default)]
+        org: String,
+    }
+    let p: IpApiCo = serde_json::from_str(body).ok()?;
+    // 成功响应**一定**带 `ip`；失败响应是 `{"error":true,"reason":...}`。
+    // 缺 `ip` 时若照抄 latitude/longitude，就会凭空造一个 (0,0) 的假点。
+    if p.ip.is_empty() {
+        return None;
+    }
+    Some(GeoLocation {
+        ip: p.ip,
+        country: p.country_name,
+        city: p.city,
+        lat: p.latitude,
+        lon: p.longitude,
+        isp: p.org,
+        source: "ipapi.co".into(),
+        consistent: true,
+        sources: Vec::new(),
+    })
+}
+
+/// `api.ipify.org` 返回**纯文本 IP**。
+fn parse_ipify(body: &str) -> Option<String> {
+    body.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+/// `1.1.1.1/cdn-cgi/trace` 是多行 `k=v`，其中一行是 `ip=<IPv4|IPv6>`。
+fn parse_cf_trace(body: &str) -> Option<String> {
+    let value = body.lines().find_map(|line| line.trim().strip_prefix("ip="))?;
+    value.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+/// 两个 IP-only 源里任一成功即可判定；`ipify` 优先（它就是为「告诉我你的 IP」存在的）。
+fn pick_public_ip(ipify: Option<&str>, cloudflare: Option<&str>) -> Option<String> {
+    ipify
+        .and_then(parse_ipify)
+        .or_else(|| cloudflare.and_then(parse_cf_trace))
+}
+
+/// 「这次的公网 IP 与缓存不同」⇒ 需要重查（首查也算 true）。
+///
+/// `probed == None`（两个 IP 源都没答）时返回 `true`：**不知道有没有变**时，
+/// 唯一诚实的默认是「可能变了」——去查一次，而不是拿旧缓存冒充「没变」。
+fn ip_changed(probed: Option<&str>, cache: &LocationCache) -> bool {
+    match probed {
+        Some(ip) => !cache.has(ip),
+        None => true,
+    }
+}
+
+/// 查到的新结果 → 缓存条目。
+fn location_to_cached(
+    loc: &GeoLocation,
+    fetched_unix: u64,
+    bound_interface: Option<&str>,
+) -> CachedLocation {
+    CachedLocation {
+        country: loc.country.clone(),
+        city: loc.city.clone(),
+        lat: loc.lat,
+        lon: loc.lon,
+        isp: loc.isp.clone(),
+        source: loc.source.clone(),
+        consistent: loc.consistent,
+        sources: loc.sources.clone(),
+        fetched_unix,
+        bound_interface: bound_interface.map(str::to_string),
+    }
+}
+
+/// 缓存条目 → 对外的位置（`ip` 用键；缓存里不存 IP 本身）。
+fn cached_to_location(ip: &str, entry: &CachedLocation) -> GeoLocation {
+    GeoLocation {
+        ip: ip.to_string(),
+        country: entry.country.clone(),
+        city: entry.city.clone(),
+        lat: entry.lat,
+        lon: entry.lon,
+        isp: entry.isp.clone(),
+        source: entry.source.clone(),
+        consistent: entry.consistent,
+        sources: entry.sources.clone(),
+    }
+}
+
+/// 缓存命中时的「本机」可信性判定（task-179 / A21）。
+///
+/// **不许拿「本次绑了网卡」给一条旧记录背书**：可信性属于**抓取那一刻的查询**。
+/// 所以这里读条目里存的 `bound_interface`；当时没绑卡 ⇒ 照旧 `trusted = false`
+/// 并给出**针对缓存**的具体原因（而不是 `SelfCheck::judge` 里那句「读不到物理
+/// 默认路由」——那句话描述的不是这个场景）。
+fn self_check_from_cache(entry: &CachedLocation, origin: &GeoLocation) -> SelfCheck {
+    match entry.bound_interface.as_deref() {
+        Some(iface) => SelfCheck::judge(Some(iface), Some(origin)),
+        None => SelfCheck {
+            ip: Some(origin.ip.clone()),
+            bound_interface: None,
+            trusted: false,
+            reason: Some(
+                "这条位置来自缓存，而缓存它时没绑定物理网卡 ⇒ 无法确认它说的是本机\
+                 （隧道开着时可能是节点出口）。点刷新可重新验证"
+                    .to_string(),
+            ),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 网络：全部走系统 curl（零依赖、走系统信任链、可 `--interface` 绑物理网卡）
+// ---------------------------------------------------------------------------
+
+/// 轻量公网 IP 探测：**只取 IP，不取坐标**。
+///
+/// 两个源并发，任一成功即可（见 [`pick_public_ip`]）。它只回答一个问题 ——
+/// 「公网 IP 变了没有」—— 所以比坐标查询便宜，也不该在 IP 没变时触发坐标查询。
+async fn query_public_ip(interface: Option<&str>) -> Option<String> {
+    let (ipify, cloudflare) = tokio::join!(
+        curl_get("https://api.ipify.org", interface),
+        curl_get("https://1.1.1.1/cdn-cgi/trace", interface),
+    );
+    pick_public_ip(ipify.as_deref(), cloudflare.as_deref())
+}
+
+/// 查一个指定 IP 的位置（三源互校）。
 async fn query_ip(ip: &str, interface: Option<&str>) -> Option<GeoLocation> {
-    let (who_url, api_url) = (
+    let (who_url, api_url, co_url) = (
         format!("https://ipwho.is/{ip}"),
         format!("http://ip-api.com/json/{ip}?fields=status,message,country,city,lat,lon,isp&lang=zh-CN"),
+        format!("https://ipapi.co/{ip}/json/"),
     );
-    let (who, api) = tokio::join!(
+    let (who, api, co) = tokio::join!(
         curl_get(&who_url, interface),
         curl_get(&api_url, interface),
+        curl_get(&co_url, interface),
     );
-    merge_sources(
+    merge_three(
         ip,
-        who.and_then(|b| parse_who(&b, ip)),
-        api.and_then(|b| parse_api(&b, ip)),
+        [
+            ("ipwho.is", who.and_then(|b| parse_who(&b, ip))),
+            ("ip-api.com", api.and_then(|b| parse_api(&b, ip))),
+            ("ipapi.co", co.and_then(|b| parse_ipapi_co(&b))),
+        ],
     )
 }
 
-/// 查**本机**的公网位置（双源）。服务自己看到的是发起请求的出口地址，
-/// 所以 url 里不带 IP。
-async fn query_self(interface: Option<String>) -> Option<GeoLocation> {
-    let (who, api) = tokio::join!(
-        curl_get("https://ipwho.is/", interface.as_deref()),
+/// 查**本机**的公网位置（三源互校）。服务自己看到的是发起请求的出口地址，
+/// 所以 url 里不带 IP；`probed_ip` 只作为「源没给出 IP 时」的兜底与缓存键。
+async fn query_self(
+    interface: Option<&str>,
+    probed_ip: Option<&str>,
+) -> Option<GeoLocation> {
+    let fallback = probed_ip.unwrap_or("");
+    let (who, api, co) = tokio::join!(
+        curl_get("https://ipwho.is/", interface),
         curl_get(
             "http://ip-api.com/json/?fields=status,message,country,city,lat,lon,isp,query&lang=zh-CN",
-            interface.as_deref(),
+            interface,
         ),
+        curl_get("https://ipapi.co/json/", interface),
     );
-    merge_sources(
-        "",
-        who.and_then(|b| parse_who(&b, "")),
-        api.and_then(|b| parse_api(&b, "")),
+    merge_three(
+        fallback,
+        [
+            ("ipwho.is", who.and_then(|b| parse_who(&b, fallback))),
+            ("ip-api.com", api.and_then(|b| parse_api(&b, fallback))),
+            ("ipapi.co", co.and_then(|b| parse_ipapi_co(&b))),
+        ],
     )
+}
+
+/// App 启动时的**后台预热**：把当前公网 IP 的位置提前拉进缓存，
+/// 用户点开「位置」页就是瞬时的。
+///
+/// # 它必须是非阻塞的
+///
+/// 由 `lib.rs` 的 `setup` 用 `tauri::async_runtime::spawn` 调起（**不 await**）——
+/// 用户不该为一次第三方地理查询等启动。失败**只 log**，绝不写 `last_notice`：
+/// 那不是用户此刻做的动作，为它弹错就是「狼来了」。
+///
+/// # 什么时候跳过
+///
+/// 当前 IP 已经有缓存 ⇒ 直接返回。那正是「已经预热好了」的状态；再查一次只是
+/// 白把一个 IP 发给第三方并触发限流。IP 没变却在页面上看到旧时间戳的问题由
+/// **手动刷新（`globe_data(force = true)`）** 解决。
+pub async fn prewarm_location_cache(app: AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        tracing::warn!("位置预热：应用状态不可用，跳过");
+        return;
+    };
+    let iface = physical_interface();
+    let Some(ip) = query_public_ip(iface.as_deref()).await else {
+        tracing::warn!("位置预热：公网 IP 探测失败（两个 IP 源都没答），跳过（不弹错）");
+        return;
+    };
+
+    let mut cache = state.store.load_location_cache();
+    if cache.has(&ip) {
+        tracing::debug!(ip = %ip, interface = ?iface, "位置预热：该 IP 已有缓存，跳过");
+        return;
+    }
+
+    match query_self(iface.as_deref(), Some(&ip)).await {
+        Some(loc) => {
+            cache.put(&ip, location_to_cached(&loc, now_unix(), iface.as_deref()));
+            match state.store.save_location_cache(&cache) {
+                Ok(()) => tracing::info!(
+                    ip = %ip,
+                    city = %loc.city,
+                    interface = ?iface,
+                    "位置预热完成：已把当前公网 IP 的位置写入缓存"
+                ),
+                Err(e) => tracing::warn!(error = %e, ip = %ip, "位置预热：位置已查到但写盘失败"),
+            }
+        }
+        None => tracing::warn!(
+            ip = %ip,
+            interface = ?iface,
+            "位置预热：坐标查询失败（三个源都没返回）；下次进「位置」页会再试"
+        ),
+    }
 }
 
 /// 出口累计字节的读取结果：把「值」与「这次是否查到」分开表达。
@@ -417,7 +853,7 @@ mod tests {
         let iface = physical_interface();
         println!("网卡 = {iface:?}");
 
-        let origin = query_self(iface.clone()).await.expect("本机位置应当查得到");
+        let origin = query_self(iface.as_deref(), None).await.expect("本机位置应当查得到");
         println!(
             "本机: {} {} ({:.4}, {:.4}) 来源={} 一致={} {:?}",
             origin.city, origin.country, origin.lat, origin.lon,
@@ -425,7 +861,14 @@ mod tests {
         );
         assert!(!origin.ip.is_empty(), "应当拿到公网 IP");
         assert!(origin.lat.abs() <= 90.0 && origin.lon.abs() <= 180.0);
-        assert_eq!(origin.sources.len(), 2, "两个源都应当有结果");
+        // 三源都要出现在摘要里；没返回的源写成「无结果」（第三方限流是常态，
+        // 所以这里只断言**三家都被点到**，不断言三家都成功）。
+        assert_eq!(origin.sources.len(), 3, "三个源都要列出来（含「无结果」）");
+        assert!(
+            origin.sources.iter().any(|s| !s.contains("无结果")),
+            "至少一家要真的返回：{:?}",
+            origin.sources
+        );
 
         let node = query_ip("45.207.197.185", iface.as_deref()).await.expect("节点位置应当查得到");
         println!(
@@ -621,5 +1064,242 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.9.1：三源合并 / 公网 IP 探测 / 缓存判定（全部无网络）
+    // -----------------------------------------------------------------------
+
+    /// 造一个指定源与坐标的位置。
+    fn at(source: &str, city: &str, country: &str, lat: f64, lon: f64) -> GeoLocation {
+        GeoLocation {
+            ip: "1.2.3.4".into(),
+            country: country.into(),
+            city: city.into(),
+            lat,
+            lon,
+            isp: "电信".into(),
+            source: source.into(),
+            consistent: true,
+            sources: Vec::new(),
+        }
+    }
+
+    fn entry(bound: Option<&str>) -> CachedLocation {
+        location_to_cached(&at("ipwho.is", "Dali", "China", 25.6, 100.2), 1_790_000_000, bound)
+    }
+
+    /// **多数一致**：两家指向同一片坐标 ⇒ `consistent = true`，
+    /// 坐标取多数派里优先级最高的那家（`results` 顺序即优先级），中文地名优先。
+    #[test]
+    fn three_sources_majority_agrees() {
+        let merged = merge_three(
+            "1.2.3.4",
+            [
+                ("ipwho.is", Some(at("ipwho.is", "Dali Baizu", "China", 25.60, 100.26))),
+                ("ip-api.com", Some(at("ip-api.com", "大理", "中国", 25.69, 100.16))),
+                // 跑偏的第三家（实测里 ip-api 对省级骨干 IP 就会这样）
+                ("ipapi.co", Some(at("ipapi.co", "Guangzhou", "China", 23.13, 113.26))),
+            ],
+        )
+        .expect("至少一家返回");
+
+        assert!(merged.consistent, "两家一致 ⇒ 多数派成立");
+        assert!(
+            (merged.lat - 25.60).abs() < 1e-9,
+            "坐标取多数派里优先级最高的 ipwho.is，实际 {}",
+            merged.lat
+        );
+        assert_eq!(merged.city, "大理", "中文地名优先（ip-api 的 lang=zh-CN）");
+        assert_eq!(merged.country, "中国");
+        assert_eq!(merged.source, "ipwho.is");
+        assert_eq!(merged.sources.len(), 3, "三个源都要列出（界面据此说明问了几家）");
+        assert!(
+            merged.sources.iter().any(|s| s.contains("ipapi.co")),
+            "跑偏那家也要留痕：{:?}",
+            merged.sources
+        );
+    }
+
+    /// **三家互相矛盾** ⇒ 不许说一致；坐标退回优先级最高的那家（不假装一致）。
+    #[test]
+    fn three_sources_all_disagree_is_flagged() {
+        let merged = merge_three(
+            "1.2.3.4",
+            [
+                ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.6, 100.2))),
+                ("ip-api.com", Some(at("ip-api.com", "广州", "中国", 23.1, 113.2))),
+                ("ipapi.co", Some(at("ipapi.co", "Shanghai", "China", 31.2, 121.4))),
+            ],
+        )
+        .expect("三家都返回");
+        assert!(!merged.consistent, "三家互相矛盾 ⇒ 必须标为不一致");
+        assert!((merged.lat - 25.6).abs() < 1e-9, "并列时取优先级最高");
+        assert_eq!(merged.sources.len(), 3);
+    }
+
+    /// **一对一分歧**（第三家没返回）：两家互相矛盾 ⇒ 同样不许说一致。
+    #[test]
+    fn two_disagreeing_sources_are_not_consistent() {
+        let merged = merge_three(
+            "1.2.3.4",
+            [
+                ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.6, 100.2))),
+                ("ip-api.com", Some(at("ip-api.com", "广州", "中国", 23.1, 113.2))),
+                ("ipapi.co", None),
+            ],
+        )
+        .expect("两家返回");
+        assert!(!merged.consistent, "没有第三家能印证 ⇒ 不是「多数一致」");
+        assert_eq!(merged.sources.len(), 3, "没返回的源也要出现");
+        assert_eq!(merged.sources.iter().filter(|s| s.contains("无结果")).count(), 1);
+    }
+
+    /// **只有一家返回** ⇒ 没人印证，同样 `consistent = false`（这是三源版与两源版
+    /// 的重要区别：两源版把「只有一个源」当一致，那其实是乐观假设）。
+    #[test]
+    fn single_source_is_not_consistent_and_lists_missing_ones() {
+        let merged = merge_three(
+            "1.2.3.4",
+            [
+                ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.6, 100.2))),
+                ("ip-api.com", None),
+                ("ipapi.co", None),
+            ],
+        )
+        .expect("一家返回");
+        assert!(!merged.consistent, "只有一家 ⇒ 没人印证");
+        assert_eq!(merged.sources.len(), 3);
+        assert_eq!(merged.sources.iter().filter(|s| s.contains("无结果")).count(), 2);
+        assert_eq!(merged.source, "ipwho.is");
+    }
+
+    /// 三家全挂 ⇒ `None`（界面必须报错，而不是画一个 (0,0) 的假点）。
+    #[test]
+    fn three_sources_none_yields_none() {
+        assert!(merge_three("1.2.3.4", [("a", None), ("b", None), ("c", None)]).is_none());
+    }
+
+    /// **IP 变化判定**：新增 IP ⇒ 重查；同一个 IP ⇒ 不重查；
+    /// 探测失败（`None`）⇒ 按「可能变了」处理（不知道，就不许说没变）。
+    #[test]
+    fn ip_changed_decides_whether_to_requery() {
+        let mut cache = LocationCache::default();
+        assert!(ip_changed(Some("1.2.3.4"), &cache), "首查必须算「变了」（无缓存）");
+
+        cache.put("1.2.3.4", entry(Some("en0")));
+        assert!(!ip_changed(Some("1.2.3.4"), &cache), "IP 没变 ⇒ 直接用缓存");
+        assert!(ip_changed(Some("5.6.7.8"), &cache), "换 IP ⇒ 重查");
+        assert!(ip_changed(None, &cache), "探测不到 IP = 不知道变没变 ⇒ 按「可能变了」");
+    }
+
+    /// IP-only 探测：两个源任一成功即可；`ipify` 优先；垃圾不算「查到了 IP」。
+    #[test]
+    fn ip_only_probes_parse_and_reject_garbage() {
+        assert_eq!(
+            pick_public_ip(Some("  116.53.173.241\n"), None).as_deref(),
+            Some("116.53.173.241")
+        );
+        let trace = "fl=abc\nh=1.1.1.1\nip=2001:db8::1\nts=1700000000\n";
+        assert_eq!(pick_public_ip(None, Some(trace)).as_deref(), Some("2001:db8::1"));
+        assert_eq!(
+            pick_public_ip(Some("1.2.3.4"), Some("ip=5.6.7.8")).as_deref(),
+            Some("1.2.3.4"),
+            "ipify 优先"
+        );
+        // 「没查到」与「查到垃圾」都不许当成一个公网 IP
+        assert_eq!(pick_public_ip(Some("rate limited"), Some("nope")), None);
+        assert_eq!(pick_public_ip(Some("1.2.3.4:80"), None), None, "端口不能混进 IP");
+        assert_eq!(pick_public_ip(None, None), None);
+    }
+
+    /// `ipapi.co`：成功解析；错误响应（没有 `ip` 字段）**不许**造出 (0,0) 的假点。
+    #[test]
+    fn ipapi_co_parses_success_and_rejects_error_bodies() {
+        let body = r#"{"ip":"116.53.173.241","city":"大理","country_name":"中国",
+                       "latitude":25.6886,"longitude":100.159,"org":"CHINANET"}"#;
+        let l = parse_ipapi_co(body).expect("应当解析成功");
+        assert_eq!(l.source, "ipapi.co");
+        assert_eq!(l.city, "大理");
+        assert_eq!(l.country, "中国");
+        assert_eq!(l.isp, "CHINANET");
+        assert!((l.lat - 25.6886).abs() < 1e-6);
+
+        assert!(parse_ipapi_co(r#"{"error":true,"reason":"Rate limited"}"#).is_none());
+        assert!(parse_ipapi_co("not json").is_none());
+    }
+
+    /// 缓存条目 ↔ 对外位置：字段一个不丢；**抓取时绑没绑卡必须留在条目里**
+    /// （A21 靠它决定缓存命中时敢不敢说「本机」）。
+    #[test]
+    fn cache_entry_roundtrips_through_the_globe_helpers() {
+        let original = at("ipapi.co", "大理", "中国", 25.6, 100.2);
+        let cached_entry = location_to_cached(&original, 1_790_000_000, Some("en0"));
+        assert_eq!(cached_entry.fetched_unix, 1_790_000_000);
+        assert_eq!(cached_entry.bound_interface.as_deref(), Some("en0"));
+
+        let back = cached_to_location("116.53.173.241", &cached_entry);
+        assert_eq!(back.ip, "116.53.173.241", "IP 是键，不进条目");
+        assert_eq!(back.city, "大理");
+        assert_eq!(back.country, "中国");
+        assert_eq!(back.lat, original.lat);
+        assert_eq!(back.lon, original.lon);
+        assert_eq!(back.isp, original.isp);
+        assert_eq!(back.source, "ipapi.co");
+        assert_eq!(back.sources, original.sources);
+
+        assert_eq!(
+            location_to_cached(&original, 1, None).bound_interface,
+            None,
+            "没绑卡那次抓取要如实留下 None"
+        );
+    }
+
+    /// **A21 在缓存命中时也不许松口**：缓存那次没绑卡 ⇒ 命中时仍 `trusted = false`，
+    /// 且原因要说得对（是「缓存时没绑卡」，不是 `judge` 里那句「读不到物理默认路由」）。
+    #[test]
+    fn cached_location_never_upgrades_an_unbound_fetch_to_trusted() {
+        let origin = cached_to_location("1.2.3.4", &entry(Some("en0")));
+
+        let bound = self_check_from_cache(&entry(Some("en0")), &origin);
+        assert!(bound.trusted, "当时绑了网卡且拿到了位置 ⇒ 与在线查询同口径");
+        assert_eq!(bound.bound_interface.as_deref(), Some("en0"));
+        assert!(bound.reason.is_none());
+
+        let unbound = self_check_from_cache(&entry(None), &origin);
+        assert!(!unbound.trusted, "当时没绑卡 ⇒ 缓存命中也不许说「本机」");
+        assert!(
+            unbound.reason.as_deref().is_some_and(|r| r.contains("缓存")),
+            "原因要针对「缓存」这个场景：{:?}",
+            unbound.reason
+        );
+    }
+
+    /// 接口冻结：字段名逐字对齐 UI 的 `types.ts`（改名字前端就读不到，且**不报错**）。
+    #[test]
+    fn globe_cache_info_uses_the_frozen_field_names() {
+        let json = serde_json::to_string(&GlobeCacheInfo {
+            from_cache: true,
+            fetched_unix: Some(7),
+            ip_changed: false,
+        })
+        .unwrap();
+        assert!(json.contains("\"from_cache\":true"), "实际：{json}");
+        assert!(json.contains("\"fetched_unix\":7"), "实际：{json}");
+        assert!(json.contains("\"ip_changed\":false"), "实际：{json}");
+
+        let data = GlobeData {
+            route: None,
+            origin: None,
+            error: Some("x".into()),
+            self_check: SelfCheck::judge(None, None),
+            cache: GlobeCacheInfo {
+                from_cache: false,
+                fetched_unix: None,
+                ip_changed: true,
+            },
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("\"cache\":{"), "`GlobeData` 必须带 cache 字段：{json}");
     }
 }

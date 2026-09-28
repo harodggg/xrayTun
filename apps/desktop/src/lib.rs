@@ -204,6 +204,18 @@ pub fn run() {
                 bootstrap(handle).await;
             });
 
+            // 位置查询预热（0.9.1）：**后台**探一次公网 IP 并把位置写进缓存，
+            // 用户点开「位置」页就是瞬时的（没有这一步，第一次进页面仍要等三源查询）。
+            //
+            // **刻意不 await**：启动不该为一次第三方地理查询多等一毫秒；
+            // 失败只 log、不写提示条（见 `commands::globe::prewarm_location_cache`）。
+            // 必须走 `tauri::async_runtime::spawn`：`setup` 回调**不在** tokio runtime
+            // context 里，裸 `tokio::spawn` 会 panic（0.8.39 的 SIGABRT 事故）。
+            let prewarm_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                commands::prewarm_location_cache(prewarm_handle).await;
+            });
+
             // 客户端版本自动检测（task-188）：**排在 `bootstrap` 之后**，
             // 并且自己再延迟 20 秒才联网（`version_check::INITIAL_DELAY`）——
             // 它最不急，不该和「找核心 / 探 helper / 回滚遗留 / 探 DNS」抢启动窗口与网络。

@@ -10,14 +10,100 @@
 //! 敏感信息（订阅 URL 里的 token）**不进这里** —— 它们存在 Keychain，
 //! 落盘的是 `keychain:<service>/<account>` 形式的引用，见 `docs/07-roadmap-and-risks.md`。
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::model::{AppSettings, Node, Subscription};
 use crate::util::now_unix;
+
+/// 位置缓存文件的 schema 版本。
+///
+/// **版本不符一律当作空缓存**：格式变了之后拿旧字段硬解析，宁可重查一次，
+/// 也不许把「读不懂」当成「没有这条」。文件里完全没有 `version` 字段（= 0）
+/// 同样算不符。
+pub const LOCATION_CACHE_VERSION: u32 = 1;
+
+/// 一条按**公网 IP** 缓存的位置。
+///
+/// 字段与 `crate::geo_lookup::GeoLocation` 对齐（少一个 `ip` —— 它是键）。
+/// 每个字段都 `#[serde(default)]`：**缺一个字段不该让整份缓存作废**
+/// （真实世界会出现写了一半的 JSON）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CachedLocation {
+    #[serde(default)]
+    pub country: String,
+    #[serde(default)]
+    pub city: String,
+    #[serde(default)]
+    pub lat: f64,
+    #[serde(default)]
+    pub lon: f64,
+    #[serde(default)]
+    pub isp: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub consistent: bool,
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// 这条记录是什么时候抓到的（Unix 秒）——界面据此说「多久以前的读数」。
+    #[serde(default)]
+    pub fetched_unix: u64,
+    /// 抓这条记录时**实际绑定的物理网卡**（task-179 / A21）。
+    ///
+    /// 为什么要存它：可信性属于**抓取那一刻的查询**，不属于「读缓存这一刻」。
+    /// 不存的话，一条「当时没绑卡、查到的是节点出口」的记录，会在下次绑卡命中
+    /// 缓存时被说成「已验证的本机位置」—— 那是把没验证的事说成已验证。
+    #[serde(default)]
+    pub bound_interface: Option<String>,
+}
+
+/// `location-cache.json` 的全部内容：**按公网 IP 为键**。
+///
+/// 按 IP 而不是「只有一个 `__self__`」：公网 IP 会变（实测
+/// `45.207.197.185` → `39.130.21.95` → `116.53.173.241`），按 IP 存才能
+/// 同时表达「本机各个历史 IP」与「各个出口节点的 IP」，并且**天然回答**
+/// 「这个 IP 我查过没有」。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LocationCache {
+    /// schema 版本。
+    ///
+    /// `#[serde(default)]` ⇒ 文件里**完全没有**这个字段时反序列化成 0（而不是整份
+    /// 解析失败），再按「版本不符」处理 —— 这样文件不会被当坏文件隔离，下次能正常写回。
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub entries: BTreeMap<String, CachedLocation>,
+}
+
+impl Default for LocationCache {
+    fn default() -> Self {
+        Self { version: LOCATION_CACHE_VERSION, entries: BTreeMap::new() }
+    }
+}
+
+impl LocationCache {
+    /// 取某个 IP 的缓存条目。
+    pub fn get(&self, ip: &str) -> Option<&CachedLocation> {
+        self.entries.get(ip)
+    }
+
+    /// 这个 IP 是否已经有缓存（「IP 没变」的判据就是它）。
+    pub fn has(&self, ip: &str) -> bool {
+        self.entries.contains_key(ip)
+    }
+
+    /// 写一条（同一个 IP 覆盖旧记录）。
+    pub fn put(&mut self, ip: &str, entry: CachedLocation) {
+        self.entries.insert(ip.to_string(), entry);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -132,6 +218,43 @@ impl Store {
 
     pub fn save_nodes(&self, nodes: &[Node]) -> Result<()> {
         self.write_json(&self.nodes_path(), nodes)
+    }
+
+    // -----------------------------------------------------------------------
+    // 位置缓存（0.9.1）
+    // -----------------------------------------------------------------------
+
+    /// `location-cache.json` 的路径（与 `settings.json` / `nodes.json` 同级）。
+    pub fn location_cache_path(&self) -> PathBuf {
+        self.root.join("location-cache.json")
+    }
+
+    /// 读位置缓存。
+    ///
+    /// # 这一层的**全部**错误都只意味着「重查一次」
+    ///
+    /// 它是纯加速层，不是事实来源（事实每次都还能再查）。所以缺文件、坏 JSON、
+    /// 解析失败、schema 版本不符**一律当空缓存**：不许崩，也不许因此让「位置」页
+    /// 打不开。坏文件的 warn + 隔离由 [`Store::read_json`] 统一处理。
+    pub fn load_location_cache(&self) -> LocationCache {
+        match self.read_json::<LocationCache>(&self.location_cache_path()) {
+            Some(cache) if cache.version == LOCATION_CACHE_VERSION => cache,
+            Some(cache) => {
+                tracing::warn!(
+                    version = cache.version,
+                    expected = LOCATION_CACHE_VERSION,
+                    "位置缓存版本不符，按空缓存处理（下次会重查）"
+                );
+                LocationCache::default()
+            }
+            // 缺文件（首次启动）是正常状态，不打 warn。
+            None => LocationCache::default(),
+        }
+    }
+
+    /// 写位置缓存（原子替换 + 0600，与其它状态文件同一手法）。
+    pub fn save_location_cache(&self, cache: &LocationCache) -> Result<()> {
+        self.write_json(&self.location_cache_path(), cache)
     }
 
     // -----------------------------------------------------------------------
@@ -852,6 +975,130 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().contains("corrupt"));
         assert!(quarantined, "坏文件应被改名隔离");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    // -----------------------------------------------------------------------
+    // 位置缓存（0.9.1）
+    // -----------------------------------------------------------------------
+
+    fn cached(country: &str, city: &str, lat: f64, lon: f64, fetched_unix: u64) -> CachedLocation {
+        CachedLocation {
+            country: country.into(),
+            city: city.into(),
+            lat,
+            lon,
+            isp: "电信".into(),
+            source: "ipapi.co".into(),
+            consistent: true,
+            sources: vec!["ipwho.is: 25.61".into(), "ipapi.co: 25.61".into()],
+            fetched_unix,
+            bound_interface: Some("en0".into()),
+        }
+    }
+
+    /// 按 IP 为键往返：**字段一个都不能丢**（丢一个就会让界面显示错的读数）。
+    #[test]
+    fn location_cache_roundtrips_keyed_by_ip() {
+        let store = temp_store("loc-roundtrip");
+        let mut cache = LocationCache::default();
+        cache.put("116.53.173.241", cached("中国", "大理", 25.6, 100.2, 1_790_000_000));
+        cache.put("45.207.197.185", cached("中国", "香港", 22.3, 114.1, 1_790_000_100));
+        store.save_location_cache(&cache).unwrap();
+
+        let back = store.load_location_cache();
+        assert_eq!(back, cache, "逐字段一致（含 schema 版本与两个键）");
+        assert_eq!(back.version, LOCATION_CACHE_VERSION);
+        assert!(back.has("116.53.173.241"));
+        assert!(!back.has("1.2.3.4"), "没查过的 IP 必须算「没缓存」");
+        let entry = back.get("45.207.197.185").unwrap();
+        assert_eq!(entry.city, "香港");
+        assert_eq!(entry.fetched_unix, 1_790_000_100);
+        assert_eq!(entry.bound_interface.as_deref(), Some("en0"), "A21 的抓取来源要留住");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 缺文件 = 首次启动：**空缓存，不是错误**。
+    #[test]
+    fn missing_location_cache_is_empty() {
+        let store = temp_store("loc-missing");
+        let cache = store.load_location_cache();
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.version, LOCATION_CACHE_VERSION, "空缓存也要带当前版本，写回去才合法");
+        assert!(!store.location_cache_path().exists());
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// 坏 JSON：当空缓存 + 隔离坏文件（复用 `read_json` 的既有手法），**不许崩**。
+    #[test]
+    fn corrupt_location_cache_is_empty_and_quarantined() {
+        let store = temp_store("loc-corrupt");
+        store.ensure_dirs().unwrap();
+        std::fs::write(store.location_cache_path(), "{ not json at all").unwrap();
+
+        let cache = store.load_location_cache();
+        assert!(cache.entries.is_empty(), "坏文件必须当空缓存");
+        let quarantined = std::fs::read_dir(store.root())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("corrupt"));
+        assert!(quarantined, "坏文件应被改名隔离，否则永远写不回去");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// schema 版本不符：当空缓存（宁可重查，也不拿旧格式硬解释新含义）。
+    #[test]
+    fn location_cache_version_mismatch_is_empty() {
+        let store = temp_store("loc-version");
+        store.ensure_dirs().unwrap();
+        std::fs::write(
+            store.location_cache_path(),
+            r#"{"version":999,"entries":{"1.2.3.4":{"country":"中国","city":"大理"}}}"#,
+        )
+        .unwrap();
+
+        let cache = store.load_location_cache();
+        assert!(cache.entries.is_empty(), "版本不符必须当空缓存");
+        assert_eq!(cache.version, LOCATION_CACHE_VERSION, "返回的应是可写回的当前版本");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// **完全没有 `version` 字段**（= 0）同样算不符 —— 手工编辑/旧版写出的文件走这条。
+    #[test]
+    fn location_cache_without_version_field_is_empty() {
+        let store = temp_store("loc-noversion");
+        store.ensure_dirs().unwrap();
+        std::fs::write(
+            store.location_cache_path(),
+            r#"{"entries":{"1.2.3.4":{"country":"中国","city":"大理"}}}"#,
+        )
+        .unwrap();
+        assert!(store.load_location_cache().entries.is_empty(), "缺 version 视为版本不符");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// **缺字段**：条目里缺的字段各自退回默认值，**其余字段仍然可用**。
+    ///
+    /// 与「版本不符」的区别：后者是整份文件不可信；这里只是这一条记录不完整，
+    /// 已知的 country/city 仍然值得用（比整份丢掉更诚实）。
+    #[test]
+    fn location_cache_entry_missing_fields_falls_back_per_field() {
+        let store = temp_store("loc-partial");
+        store.ensure_dirs().unwrap();
+        std::fs::write(
+            store.location_cache_path(),
+            r#"{"version":1,"entries":{"1.2.3.4":{"country":"中国","city":"大理"}}}"#,
+        )
+        .unwrap();
+
+        let cache = store.load_location_cache();
+        let entry = cache.get("1.2.3.4").expect("缺字段不该让条目消失");
+        assert_eq!(entry.city, "大理");
+        assert_eq!(entry.lat, 0.0);
+        assert_eq!(entry.isp, "");
+        assert!(!entry.consistent);
+        assert_eq!(entry.fetched_unix, 0);
+        assert_eq!(entry.bound_interface, None);
         let _ = std::fs::remove_dir_all(store.root());
     }
 
