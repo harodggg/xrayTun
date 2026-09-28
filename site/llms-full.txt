@@ -144,7 +144,7 @@ v0.9.0（2026-09-27 发布）· 仅 macOS · 通用包（arm64 + x86_64）· dmg
 
 - **拓扑页**：按运行中的真实配置画出入口 → 规则链 → 出口的结构关系。 连线表达的是**配置上的结构关系**，不是「某条流量实际走了哪条线」——Xray 只有按入口、按出口的聚合计数器，没有逐条规则的计数器。
 
-- **地球仪**：画出本机公网出口到出口节点的大圆航线，两端标出城市。位置查询来自第三方（`ipwho.is` 与 `ip-api.com`），查询会把被查的 IP 发给这些服务；大陆轮廓是 2° 分辨率的粗略示意，不是导航级海岸线。
+- **位置**：画出本机公网出口到出口节点的大圆航线，两端标出城市。位置查询来自多家第三方服务 （`ipwho.is`、`ip-api.com`、`ipinfo.io`、`ifconfig.co`，互相比对后取一致的结果）， 查询会把被查的 IP 发给这些服务；结果按**公网 IP 缓存**，IP 没变就不会重复查询 （界面会写出「来自缓存 + 多久前」，也可点「重新定位」强制重查）。大陆轮廓是 2° 分辨率的粗略示意，不是导航级海岸线。
 
 - **最近连接**：从 Xray 访问日志里取每条连接的时间、来源、目标、`[入站 → 出站]`、域名， 点一条就在拓扑上高亮它经过的路径。域名来自日志的**时序配对**（`sniffed` 行与 `accepted` 行按时间就近配对），**可能配错**：界面用 `*` 标注并显示精确到微秒的配对时延；约一半连接本来就没有域名。
 
@@ -827,7 +827,7 @@ Every statement below can be checked against the documents in the GitHub reposit
 
 - **Topology page**: draws the structure of inbounds → rule chain → outbounds from the live configuration. The lines describe **configured structure**, not which line a particular flow actually took: Xray only exposes per-inbound and per-outbound aggregate counters, with no per-rule counters.
 
-- **Globe page**: draws the great-circle route from your public egress to the exit node and labels both ends with a city. Location lookup uses third parties (`ipwho.is` and `ip-api.com`), and the queried IP addresses are sent to those services. The continent outlines are a rough 2° raster, not navigational coastlines.
+- **Location page**: draws the great-circle route from your public egress to the exit node and labels both ends with a city. Location lookup uses several third parties (`ipwho.is`, `ip-api.com`, `ipinfo.io`, `ifconfig.co` — compared with each other, and only a value they agree on is shown), and the queried IP addresses are sent to those services. Results are **cached per public IP**: if your IP has not changed, no lookup is repeated (the page says how old the cached result is, and "Relocate" forces a fresh lookup). The continent outlines are a rough 2° raster, not navigational coastlines.
 
 - **Recent connections**: lists time, source, target, `[inbound → outbound]` and domain from the Xray access log; selecting a row highlights that path on the topology. Domains come from **time-ordered pairing** of `sniffed` lines with `accepted` lines and **can be wrong**: the UI marks paired domains with `*` and shows the pairing delta in microseconds. About half of all connections have no domain at all.
 
