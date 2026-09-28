@@ -115,6 +115,15 @@ secret `AUDIT_TOKEN`）。
 R2 `list` 分页到底，`truncated=true` 却没给 cursor、或 cursor 不前进 ⇒ **抛错 500**，
 绝不把不完整的结果当成完整。
 
+⚠️ **两个线上事实（部署后实测，不是猜测）**
+
+1. **请求必须带 `User-Agent`。** 空 UA 会被 Cloudflare 的 Browser Integrity Check 在**到达 Worker
+   之前**挡掉：`403` + body 是 `error code: 1010`（不是我们的 401）。客户端固定发
+   `xraytun-audit-sync/<version>`，而且 `transport::build_request` 在调用方没给 UA 时也会补一个
+   默认 UA —— 但"哪天有人把那行删了"的后果是一个与 Worker 毫无关系的 403，所以写进契约。
+2. **`wrangler secret put` 有几十秒传播延迟。** 轮换当天实测：改完立刻请求仍被**旧** token 接受，
+   约 45 秒后才切换。⇒「轮换后立刻测出 401 没生效」不能当成轮换失败，等一分钟再断言。
+
 服务端校验（**只验形状，绝不解密**）：
 
 - `v == 1`、`alg == "chacha20poly1305"`；

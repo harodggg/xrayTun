@@ -9,10 +9,13 @@
 
 ## 0. 结论（一句话）
 
-**代码层面：三边（Rust 内核 + CLI / 桌面定时 + 命令 / Worker / 界面）全部落地，
-Linux 聚焦检查 6 步全绿、macOS CI 绿、界面 675 项测试绿、Worker 38 项测试绿。**
-**但"每天真的传上去"这件事还没被端到端验证过** —— Worker 没部署（本机没有 CF 凭据）。
-要它真的开始工作，需要一次部署 + 一次配置，见 §5。
+**代码 + 线上端点都通了。** 四边（Rust 内核 / CLI / 桌面定时 + 命令 / Worker / 界面）全部落地；
+Linux 聚焦检查 6 步全绿、macOS CI 绿、界面 675 项测试绿、Worker 38 项测试绿；
+**Worker 已于 2026-09-28 部署上线，并用真实客户端跑过一次端到端**：
+密文落进 R2、从 R2 取回的对象**没有任何明文残留**、撤回把测试数据清干净。
+
+**仍未验证的只剩一件**：没有 macOS 机器 ⇒ 定时器在真实 App 生命周期（休眠 / 退出 / 升级）
+里的行为没跑过。要让它真的开始传，见 §5（两步，其中一步是**吊销你贴出来的那个 CF token**）。
 
 ---
 
@@ -25,6 +28,9 @@ Linux 聚焦检查 6 步全绿、macOS CI 绿、界面 675 项测试绿、Worker
 | `a4492b0` | 桌面运行态 + 7 条命令 + 进程内定时 |
 | `ba17588` | Rust 内核（离线报告 + 加密同步）+ CLI |
 | `db79837`/`5a04442`/`e8c5b67` | 契约与 §11.5（离线审计）等文档 |
+
+> `8af96bc` **之后**的提交都只改文档（本文件、契约的线上事实、Worker README 的部署记录），
+> 不再动代码 —— 所以代码层面的验证对象始终是 `8af96bc`。
 
 > 中间的 `a4492b0` … `7298043` 在 CI 上是**红**的（我自己写出来的编译/测试问题，见 §3）。
 > 绿的是最终提交 `8af96bc` 及其后代（文档提交）。
@@ -81,6 +87,29 @@ device **两道**正则（入口 + `auditKey()` self-guard，防 `../` 前缀穿
 R2 `list` 分页到底、`truncated` 却没 cursor 或 cursor 不前进 ⇒ 抛错 500；
 先看 `Content-Length` 再读 body；响应**不回显 `ct`**；`routes` 在任何表头之前。
 
+### 2.5 线上端点（2026-09-28 部署 + 真实请求实测）
+
+| 项 | 结果 |
+| --- | --- |
+| Worker | `xraytun-audit-collector` 已部署；version id `90526093-42e3-40c8-b35e-5c9eeddddf59` |
+| 路由 | `xraytun.top/api/audit` 与 `xraytun.top/api/audit/*` —— **用 CF API 读回确认**（不是看部署日志说成功） |
+| 桶 + 保留期 | `xraytun-audit` 已建；400 天 lifecycle **读回复核**：`maxAge=34560000, enabled=true, prefix=""` |
+| 鉴权 | `AUDIT_TOKEN` 已设；**没设 token 时一律 401（fail closed 实测）** |
+| 收单实测 9 项 | 无 token→401；错 token→401；正确→200 且 key 正好是 `audit/<device>/<day>.json`；同日重传→`replaced:true` 且 key 不变（幂等）；`device` 前缀穿越→400；`ct` 非 hex→400；list→元数据正确；revoke→`deleted:1`；revoke 后 list 为空 |
+| 真实客户端 E2E | GCP Cloud Run runid `20260928T083233Z-818629`（3 步全 rc=0）：`intent_audit bundle` → `upload` → `list`。上传 1 天（2026-09-27）、1 个请求；服务端清单显示 `audit/5d607edaed17b57c/2026-09-27.json`，527 字节、1 行 |
+| 组包时的隐私断言 | 明文 bundle 里 day=2026-09-27、1 行、754 字节（pretty）；`E2E-PRIVACY-CANARY` 命中 **0**、`context_sent` key 命中 **0** ⇒ 本地开了"记录外发内容"也不会跟着传 |
+| 从 R2 取回检查 | 合法信封（v=1、alg=chacha20poly1305、rows=1、nonce 24 hex、ct 1086 hex = 543 字节 = 527 明文 + 16 tag）；明文残留检查 `e2e-canary.example` / `E2E-PRIVACY-CANARY` / `context_sent` / `ads_intent` / `jev-1.13-free` **全部 0 命中** |
+| token 轮换 | 一次性 token 用完即换：旧 token→**401**、新 token→**200**（⚠️ secret 传播约 45 秒，别立刻断言失败） |
+| 清理 | 测试产生的 3 个对象**已全部 revoke**，桶里只留你自己的数据（现在为空） |
+
+另外两条线上事实（已写进契约 §4 与 Worker README）：
+
+* **空 `User-Agent` 会被 CF 的 Browser Integrity Check 挡在 Worker 之前**：`403` + `error code: 1010`。
+  我们客户端固定发 `xraytun-audit-sync/<version>`，实测能到 Worker（拿到的是 Worker 的 401）。
+* 部署只创建/更新了 `xraytun-audit-collector` 与 `xraytun-audit` 两个资源；
+  账号里其它 8 个 Worker（`eth-arb-scout` / `vless` / `xraytun-incident-collector` …）与
+  另外两个桶（`mymutlicloud` / `xraytun-incidents`）**一律没动**。
+
 ---
 
 ## 3. 被实验推翻的判断（这个仓库的文化：写下来）
@@ -104,33 +133,45 @@ R2 `list` 分页到底、`truncated` 却没 cursor 或 cursor 不前进 ⇒ 抛�
 
 ## 4. **没有**验证的（不许当成已验证）
 
-1. **Worker 未部署**：本机没有 CF 凭据 ⇒「密文真的写进 R2」「路由真的注册」**没跑过**。
-2. **没有 macOS 机器** ⇒ 定时器在真实 App 生命周期里的行为（休眠、退出、升级、多实例）
+1. **没有 macOS 机器** ⇒ 定时器在真实 App 生命周期里的行为（休眠、退出、升级、多实例）
    **没跑过**；"启动 60 秒后 / 每 30 分钟一次 / 按天补齐"目前只有单测与代码级证据。
-3. **R2 lifecycle 命令**没在真 R2 上执行过（参数与读回复核步骤写在 Worker README §3.2）。
-4. **限流是多 isolate 尽力而为**，不是全局精确限流、也**不是授权判据**（授权是 token）。
-5. **服务端无法校验密文内容**（E2E 的直接后果）：拿到 token 的人可以覆盖某一天的对象（污染）。
+   （`xraytun.top` 本身在大陆的可达性由既有的 `/api/incident` 长期使用佐证，但**我在这里没法实测大陆网络**。）
+2. **限流是多 isolate 尽力而为**，不是全局精确限流、也**不是授权判据**（授权是 token）。
+3. **服务端无法校验密文内容**（E2E 的直接后果）：拿到 token 的人可以覆盖某一天的对象（污染）。
    缓解：token 是用户自己的 secret、按天分键、`list` 会返回每天的行数与大小 ⇒ 不一致看得出来。
-6. 界面上所有文案都是按冻结契约写的，**"真的连上 Worker 之后的观感"没看过**；
+4. 界面上所有文案都按契约写了，但**"真机上连上端点之后的观感"没看过**；
    浏览器预览兜底（`?audit=ready|pending|error`）有单测实跑。
+5. **`real_core*` 集成测试**在 Linux 容器里没跑（缺真实 xray 二进制）；由 macOS CI 覆盖。
 
----
+## 5. 现在让它真的开始每天上传：你要做两件事
 
-## 5. 要让它真的开始每天上传，还差一步（需要你的 CF 凭据）
+### 5.1 把上传 token 填进 App
 
-1. 部署 Worker（`infra/audit-collector/README.md` §3 有逐条命令）：
+token 文件在 **`<workspace>/.secrets/audit-upload-token`**（0600，不在仓库里）。
+
+1. 装这一版 App（或直接用 CLI 验证）：
+
    ```bash
-   npx wrangler deploy --config infra/audit-collector/wrangler.toml
-   npx wrangler secret put AUDIT_TOKEN --config infra/audit-collector/wrangler.toml
+   cargo run -p xt-intent --example intent_audit -- report          # 先看数据长什么样（不联网）
+   cargo run -p xt-intent --example intent_audit -- list \
+     --state ~/.xraytun-audit-sync.json --token-file .secrets/audit-upload-token
    ```
-2. 按 README §3.2 给 R2 桶 `xraytun-audit` 加 400 天 lifecycle，并**读回复核**。
-3. 按 README §3.4 做部署后自测（路由真的注册 + `POST` 真的 200）。
-4. 本机：装上这一版 App → 设置 → 系统与助手 → **审计同步** → 打开开关、填 token。
-   开关只改意图；**token 与密钥齐备前，界面会说"还差什么"，而不会有任何请求发出去**。
+2. App：设置 → 系统与助手 → **审计同步** → 打开开关 + 粘贴 token。
+   （开关只改意图；token 与密钥齐备前，界面会说"还差什么"，而不会有任何请求发出去。）
 
-或者完全不部署，用命令行先看数据长什么样（**不联网**）：
+### 5.2 ⚠️ 吊销你在聊天里贴出来的那个 CF API token
 
-```bash
-cargo run -p xt-intent --example intent_audit -- report
-cargo run -p xt-intent --example intent_audit -- bundle --day 2026-09-27
-```
+它已经**明文出现在对话里**，而它对这个账号有 Workers / R2 / Zone 的读写权限。
+去 Cloudflare Dashboard → My Profile → API Tokens → **Roll/Delete** 掉它，需要时再建一个新的。
+
+它现在只存在两处：你发出的那条消息，以及本机 `.secrets/cf-audit-token`（0600、不在仓库里；
+本仓库是公开仓库，我已确认 `.secrets/` 不会被提交）。
+
+**部署用的上传 token（`AUDIT_TOKEN`）是另一回事** —— 那是我新生成的随机值，
+只存在 Worker secret 与本机 `.secrets/audit-upload-token` 里，不随上面那个 token 一起失效。
+
+### 5.3 想撤回这条链路
+
+* App 里「撤回全部已上传」⇒ 服务端删掉本设备的全部密文；
+* 关掉开关 ⇒ 不再有任何请求；
+* 彻底不要了：删 Worker + 桶即可（README 里给了资源边界，别误删别的）。

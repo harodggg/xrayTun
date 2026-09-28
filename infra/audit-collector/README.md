@@ -101,6 +101,16 @@ curl -sS -X POST http://127.0.0.1:8787/api/audit \
 
 ## 3. 部署（维护者执行；用户可随时吊销授权）
 
+> **部署记录（2026-09-28）**：`xraytun-audit-collector` 已上线 ——
+> version id `90526093-42e3-40c8-b35e-5c9eeddddf59`；两条路由经 CF API **读回确认**；
+> 桶 `xraytun-audit` 已建，lifecycle（400 天）经 API 读回确认；
+> `AUDIT_TOKEN` 已设为**用户自己的** token。
+> 上线后做过一次真实客户端 → 真实 Worker 的端到端（密文落盘、R2 取回检查、撤回清理），
+> 证据在 `docs/verification/AUDIT-SYNC-VERIFY.md`。
+>
+> ⚠️ **空 `User-Agent` 会被 CF 的 Browser Integrity Check 在到达 Worker 前挡掉
+> （403 + `error code: 1010`）** —— curl 冒烟时请带上 `-A`。
+
 > ### ⛔ 只会创建/更新这两个名字，别的一律不动
 >
 > * Worker：**`xraytun-audit-collector`**
