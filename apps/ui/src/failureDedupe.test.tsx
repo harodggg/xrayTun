@@ -10,9 +10,8 @@
  *   `runtime.last_error` 是同一句话。
  * * **D2（读屏）**：全局失败横幅**没有** `role`，所以读屏用户点「连接」失败后
  *   **什么都听不到**；而日志页/规则页的横幅早就有 `role="alert"`（同一产品两套标准）。
- *   「已自动恢复连接」也没有 `role="status"`。
  */
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -65,16 +64,10 @@ beforeEach(() => {
   mocks.stop.mockResolvedValue(scenarioSnapshot());
 });
 
-/**
- * 事件载荷里的 `traffic` 必须是**完整形状**：仪表盘会读 `rx_rate` / `rx_bytes`
- * （缺字段会在渲染时炸在 `.toFixed()` 上，而不是静默降级）。
- */
-const ZERO_TRAFFIC = { rx_bytes: 0, tx_bytes: 0, rx_rate: 0, tx_rate: 0 };
-
 describe("D1：命令失败就是 `runtime.last_error` 时，两处只留一处", () => {
   it("同一条失败 ⇒ `.banner--error .banner__reason` 恰好 1 条、`role=alert` 不超过 1 条", async () => {
     mocks.snapshot.mockResolvedValue(
-      snapWithRuntime({ running: false, last_error: GATE, recovery: null }),
+      snapWithRuntime({ running: false, last_error: GATE }),
     );
     mocks.start.mockRejectedValue(GATE);
     render(<App />);
@@ -98,7 +91,7 @@ describe("D1：命令失败就是 `runtime.last_error` 时，两处只留一处"
 
   it("反例：命令错误与 `last_error` 不是同一句 ⇒ 两条都要留着（不许一律吞掉）", async () => {
     mocks.snapshot.mockResolvedValue(
-      snapWithRuntime({ running: false, last_error: "上次运行出错：另一条历史错误", recovery: null }),
+      snapWithRuntime({ running: false, last_error: "上次运行出错：另一条历史错误" }),
     );
     mocks.start.mockRejectedValue(GATE);
     render(<App />);
@@ -116,7 +109,7 @@ describe("D1：命令失败就是 `runtime.last_error` 时，两处只留一处"
   });
 });
 
-describe("D2：失败是 alert、完成是 status", () => {
+describe("D2：失败横幅必须是 live region", () => {
   it("全局失败横幅带 `role=\"alert\"`", async () => {
     mocks.snapshot.mockResolvedValue(snapWithRuntime({ running: false, last_error: null }));
     mocks.start.mockRejectedValue("节点连接超时：拿不到响应");
@@ -124,42 +117,5 @@ describe("D2：失败是 alert、完成是 status", () => {
     fireEvent.click(await screen.findByRole("button", { name: "连接" }));
     const reason = await screen.findByText(/节点连接超时/);
     expect(reason.closest(".banner")?.getAttribute("role")).toBe("alert");
-  });
-
-  it("「已自动恢复连接」带 `role=\"status\"`（原来完全没有 role，读屏听不到）", async () => {
-    mocks.snapshot.mockResolvedValue(scenarioSnapshot());
-    render(<App />);
-    await waitFor(() => expect(sub.handlers?.onRuntime).toBeTruthy());
-
-    // 事件载荷里的 `runtime` 与 `traffic` 同理，也必须是**完整形状**：store 会
-    // **整体替换** `snapshot.runtime`（`store.tsx` 的 `onRuntime`），而仪表盘/顶栏
-    // 随后会读 `last_error`、`running` 等字段 —— 缺字段会在渲染时炸
-    // （`stripMarkup(undefined)`），不是静默降级。这里以真实快照的 runtime 为底，
-    // 只覆盖这一条要验的 `recovery`。
-    const baseRuntime = scenarioSnapshot().runtime;
-    const runtime = (recovering: boolean, lastOutcome: string | null) => ({
-      runtime: {
-        ...baseRuntime,
-        recovery: {
-          recovering,
-          attempt: 2,
-          probe_failures: 0,
-          started_unix: 1,
-          last_outcome: lastOutcome,
-          finished_unix: null,
-        },
-      },
-      traffic: ZERO_TRAFFIC,
-    });
-
-    act(() => {
-      sub.handlers!.onRuntime!(runtime(true, null));
-    });
-    act(() => {
-      sub.handlers!.onRuntime!(runtime(false, "recovered"));
-    });
-
-    const banner = await screen.findByText(/已自动恢复连接/);
-    expect(banner.closest(".banner")?.getAttribute("role")).toBe("status");
   });
 });

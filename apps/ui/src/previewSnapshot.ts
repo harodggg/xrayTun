@@ -328,15 +328,6 @@ const BASE_SNAPSHOT: AppSnapshot = {
     routes_committed: false,
     last_error: null,
     last_good_node: "n-hk-1",
-    // `CoreRuntime` 还有 `recovery`（task-87 补）：空闲态
-    recovery: {
-      recovering: false,
-      attempt: 0,
-      probe_failures: 0,
-      started_unix: null,
-      last_outcome: null,
-      finished_unix: null,
-    },
   },
   latency: {
     "n-hk-1": probe("n-hk-1", 53, true, null),

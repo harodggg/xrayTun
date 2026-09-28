@@ -22,7 +22,7 @@
 
 import { useState } from "react";
 
-import { api, recoveryView } from "../ipc";
+import { api } from "../ipc";
 import { buttonNameNote, failureActions, nextSteps, stripMarkup, sameFailureText } from "../failure";
 import SnapshotFallback from "../SnapshotState";
 import { InlineConfirm } from "../InlineConfirm";
@@ -187,7 +187,7 @@ export default function Dashboard({
   /** `target` 是目标分节（如 `set-helper`）：设置页是两级结构，带目标才会落到正确的分类。 */
   onNavigate: (view: string, target?: string) => void;
 }) {
-  const { snapshot, busy, run, probing, recovery, error: storeError, errorSource } = useStore();
+  const { snapshot, busy, run, probing, error: storeError, errorSource } = useStore();
   const [showAllNotices, setShowAllNotices] = useState(false);
   // task-23 A1：读不到快照时**不再**说「正在加载…」（那会永远停在那里）。
   if (!snapshot) return <SnapshotFallback />;
@@ -207,12 +207,6 @@ export default function Dashboard({
   const shownLatency = shownId ? latency[shownId] : undefined;
   const rtt = shownLatency?.server_rtt_ms ?? null;
   const connected = runtime.running;
-  /**
-   * 自动恢复（task-22）：看门狗在自愈时**不能说成「未连接」** —— 那会让用户以为
-   * 网络断了、去点「连接」，正好和看门狗抢。三态由结构化状态（`runtime.recovery`）
-   * 驱动，**不解析 notice 文案**。
-   */
-  const rv = recoveryView(recovery, connected);
 
   // ---- 状态词：**唯一真源**（task-47）----
   //
@@ -229,7 +223,6 @@ export default function Dashboard({
     routesCommitted: runtime.routes_committed,
     lastError: runtime.last_error,
     corePath: core.path,
-    recovery: rv,
     // 端口只用于「系统代理」模式的文案（那半句要说清指向哪个端口）。
     socksPort: settings.socks_port,
     httpPort: settings.http_port,
@@ -383,8 +376,7 @@ export default function Dashboard({
             调的是同一个命令（顶栏 `toggleRun` → `run("stop"|"start", api.stop|api.start)`，
             与这里删掉的那颗逐字相同），所以它不是「另一条路径」，只是重复。
             保留顶栏那颗：它是全局控件，任何页面都在。
-            恢复期间「不得可点」这条不变量搬到了 `runButtonDisabled`（有单测），
-            没有随按钮一起消失。 */}
+            「什么时候不可点」的判据在 `topbarStatus.runButtonDisabled()`，没有随按钮一起消失。 */}
         {/*
           F1（0.9.0 / UX T1）：**空态引导**。
           改前无论有没有节点都渲染「选择节点 / 切换节点」→ `onNavigate("nodes")`；
@@ -698,11 +690,10 @@ function elapsed(startedAtUnix: number): string {
 }
 
 /*
- * 这里原来有 `connectControl()`：仪表盘那颗「连接/断开」按钮的呈现（含
- * 「恢复期间必须禁用」）。
+ * 这里原来有 `connectControl()`：仪表盘那颗「连接/断开」按钮的呈现。
  *
  * task-72 把那颗按钮收敛掉了 —— 它与顶栏那颗是**同一个命令**的等价按钮
  * （两处都是 `run("stop"|"start", api.stop|api.start)`），同屏出现两个「断开」
- * 只是重复。该不变量没有随之消失，而是搬到了 `topbarStatus.runButtonDisabled()`
- * （顶栏唯一的那个按钮），并保持有单测。
+ * 只是重复。现在「什么时候不可点」的判据在 `topbarStatus.runButtonDisabled()`，
+ * 驱动顶栏唯一的那颗按钮。
  */

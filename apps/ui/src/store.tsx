@@ -21,9 +21,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, errorText, parseRecovery, subscribe } from "./ipc";
+import { api, errorText, subscribe } from "./ipc";
 import { nextSteps } from "./failure";
-import type { RecoveryState } from "./types";
 import { isCount, isObject, isText, rejectPayload } from "./eventGuards";
 import type { AppSnapshot, ProbeResult, UiLogEntry } from "./types";
 
@@ -34,11 +33,6 @@ import type { AppSnapshot, ProbeResult, UiLogEntry } from "./types";
  * 都会重建整个列表（见 `LogEntry.seq` 的注释与 `pages/Logs.tsx`）。
  */
 export const MAX_UI_LOGS = 1500;
-
-/** 「已自动恢复」提示展示多久（可感知的结束，但不长期占位）。 */
-const RECOVERED_NOTICE_MS = 8000;
-
-
 
 /**
  * 日志**读取**状态（区别于「读到了，但是空的」）。
@@ -149,16 +143,6 @@ interface StoreValue {
   /** 延迟测量是否正在进行。 */
   probing: boolean;
   probeProgress: { done: number; total: number } | null;
-  /**
-   * 看门狗自愈状态（结构化，来自后端 `runtime.recovery`；没有就是 null）。
-   *
-   * 界面**只据它**判断「是否正在恢复」，绝不解析 notice 文案、也不按时间猜 ——
-   * 见 `ipc.ts` 的 `recoveryView` 与 task-22。
-   */
-  recovery: RecoveryState | null;
-  /** 刚自动恢复成功（第几次）；8 秒后自动清空。用于「可感知的结束」。 */
-  recoveredAttempt: number | null;
-  dismissRecovered: () => void;
   refresh: () => Promise<void>;
   /**
    * 执行一个会返回新快照的操作。
@@ -249,29 +233,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // 但它不应该成为 useCallback 的依赖（否则会重建所有回调）。
   const busyRef = useRef<string | null>(null);
   busyRef.current = busy;
-
-  // ---- 自动恢复（task-22）------------------------------------------------
-  //
-  // 恢复状态本身**不单独存状态**：后端把它放在 `runtime.recovery` 里，而
-  // `onRuntime` 与 `refresh()` 两条路都会整体更新 `snapshot.runtime` ——
-  // 所以从 snapshot 派生即可，事件与快照天然一致、刷新也不会丢。
-  // 这里只额外维护两件 snapshot 表达不了的事：
-  //   只有一件：「刚恢复成功」的一次性提示（可感知的结束，8 秒后自己消失）。
-  //   曾经还有一条「载荷里没有 recovery 就补拉快照读 notice」的兼容兜底 ——
-  //   后端已下发 `runtime.recovery`，那条**已删除**（它会让每次 running 跳变都多拉一次完整快照）。
-  const [recoveredAttempt, setRecoveredAttempt] = useState<number | null>(null);
-  const prevRecovering = useRef<boolean | null>(null);
-  const recoveredTimer = useRef<number | null>(null);
-
-  const dismissRecovered = useCallback(() => {
-    if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current);
-    recoveredTimer.current = null;
-    setRecoveredAttempt(null);
-  }, []);
-
-  useEffect(() => () => {
-    if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current);
-  }, []);
 
   /**
    * 命令返回值的**形状守卫**（task-146）。
@@ -489,28 +450,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (!isObject(payload) || !isObject(payload.runtime) || !isObject(payload.traffic)) {
           return rejectPayload("runtime://changed", payload, "缺少 runtime/traffic 对象");
         }
-        // 恢复状态是**结构化**的（在 runtime.recovery 里）。畸形就当作没有 —— 不猜。
-        const rec = parseRecovery(payload.runtime);
-
-        // 结束必须「可感知」：从「正在恢复」变成「不在恢复」且结局是成功时，
-        // 给一次性提示。没有它，用户只会看到界面悄悄变回「已连接」。
-        const wasRecovering = prevRecovering.current;
-        prevRecovering.current = rec ? rec.recovering : null;
-        if (wasRecovering === true && rec && !rec.recovering && rec.last_outcome === "recovered") {
-          setRecoveredAttempt(rec.attempt);
-          if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current);
-          recoveredTimer.current = window.setTimeout(() => {
-            recoveredTimer.current = null;
-            setRecoveredAttempt(null);
-          }, RECOVERED_NOTICE_MS);
-        } else if (rec && (rec.recovering || rec.last_outcome === "direct_fallback")) {
-          // **不能出现自相矛盾的同屏**：又开始了新一次恢复、或这次失败了，
-          // 上一次那条「已自动恢复」就必须立刻收掉 —— 否则「已恢复」会和
-          // 「正在恢复」/「恢复失败」同时挂着（实测复现过）。
-          if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current);
-          recoveredTimer.current = null;
-          setRecoveredAttempt(null);
-        }
 
         // 增量更新运行时与流量：这两个字段高频变化，全量刷新会很浪费。
         setSnapshot((prev) =>
@@ -657,9 +596,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  /** 从快照派生：恢复状态是 `runtime` 的一部分，事件与刷新两条路都会更新它。 */
-  const recovery = useMemo(() => parseRecovery(snapshot?.runtime), [snapshot]);
-
   const value = useMemo<StoreValue>(
     () => ({
       snapshot,
@@ -673,9 +609,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       errorSource,
       probing,
       probeProgress,
-      recovery,
-      recoveredAttempt,
-      dismissRecovered,
       refresh,
       run,
       runQueued,
@@ -701,9 +634,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       errorSource,
       probing,
       probeProgress,
-      recovery,
-      recoveredAttempt,
-      dismissRecovered,
       refresh,
       run,
       runQueued,

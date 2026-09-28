@@ -11,7 +11,7 @@
  * * `tun` 块用的是**另一套字段名**（`capture_ipv6`/`ipv6_mode`/`bypass_hosts`/…）⇒
  *   预览里「隧道网段 / 哨兵 DNS」输入**是空的**、「绕过局域网」复选框与真实默认值**相反**；
  * * `helper` 块没有 `version_check` ⇒ 预览态下「助手版本不一致」的提示**永不出现**；
- * * `runtime` 缺 `recovery`、订阅缺 `enabled`/`update_interval_hours`、
+ * * `runtime` 缺字段、订阅缺 `enabled`/`update_interval_hours`、
  *   `dns.probes` 的 `kind: "direct"`（真实取值只有 `domestic`/`foreign`）与 `error`（应为 `note`）。
  *
  * # 这条断言在测什么
@@ -45,7 +45,6 @@ const BLOCKS: Array<{ iface: string; path: string }> = [
   { iface: "DnsSettings", path: "settings.dns" },
   { iface: "FakeDnsSettings", path: "settings.fakedns" },
   { iface: "CoreRuntime", path: "runtime" },
-  { iface: "RecoveryState", path: "runtime.recovery" },
   { iface: "HelperAvailability", path: "helper" },
   { iface: "Node", path: "nodes[0]" },
   { iface: "Subscription", path: "subscriptions[0]" },
@@ -94,11 +93,11 @@ describe("预览快照的保真度（task-87）", () => {
     const problems: string[] = [];
 
     // 防空壳：字段提取如果真的失效（全 0 个字段），下面的比较会**恒真**。
-    // 当前精确值是 **131**；新增字段时**同步上调**，
+    // 当前精确值是 **133**；新增字段时**同步上调**，
     // 这样「解析器失效」与「字段被误缩进」都会先在这里暴露。
     const extracted = BLOCKS.map((b) => fieldsOf(src, b.iface));
     const total = extracted.reduce((n, f) => n + f.length, 0);
-    expect(total, "从 types.ts 抽出的字段总数太少 —— 这条断言基本成了空壳").toBeGreaterThan(130);
+    expect(total, "从 types.ts 抽出的字段总数太少 —— 这条断言基本成了空壳").toBeGreaterThan(132);
     expect(
       fieldsOf(src, "HelperAvailability"),
       "抽查：HelperAvailability 必须含 version_check（否则是解析器没跟上）",
@@ -133,7 +132,6 @@ describe("预览快照的保真度（task-87）", () => {
     expect(s.settings.tun.bypass_private, "绕过局域网（真实默认 true）").toBe(true);
     expect(s.settings.tun.bind_outbound_to, "出站绑定（null = 自动）").toBeNull();
     expect(s.settings.tun.ipv6, "IPv6 处理").toBe("passthrough");
-    expect(s.runtime.recovery.recovering, "recovery 空闲态").toBe(false);
     expect(s.subscriptions[0]!.enabled, "订阅 enabled").toBe(true);
     expect(s.subscriptions[0]!.update_interval_hours, "订阅间隔（Rust 默认 24）").toBe(24);
     expect(s.dns.probes[0]!.kind, "探测分组取值域").toBe("domestic");

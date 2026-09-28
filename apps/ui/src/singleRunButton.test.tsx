@@ -70,14 +70,6 @@ function snap(over: Record<string, unknown> = {}) {
       config_path: null,
       last_error: null,
       last_good_node: null,
-      recovery: {
-        recovering: false,
-        attempt: 0,
-        probe_failures: 0,
-        started_unix: null,
-        last_outcome: null,
-        finished_unix: null,
-      },
     },
     core: {
       path: "/xray",

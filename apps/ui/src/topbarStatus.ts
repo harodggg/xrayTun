@@ -10,7 +10,7 @@
  * 这个缺陷发生过两次，根因是同一个：**同一件事在两处各写一份判断**。
  *
  * 1. **task-45**：顶栏底边那条 2px 的线被写死成 `var(--ok)`，于是直连 / 系统代理 /
- *    未连接 / 恢复中 / 已退回直连**全都是绿的**。而绿色在这套配色里 = 已受保护 ——
+ *    未连接**全都是绿的**。而绿色在这套配色里 = 已受保护 ——
  *    直连模式下等于谎报「你受保护了」（实际毫无代理）。
  * 2. **task-47**：线修好之后，`Dashboard` 的状态词**仍然不看 `mode`** ——
  *    系统代理模式下它走的是 `!routes_committed` 分支，写出「**隧道已建立**」
@@ -23,11 +23,9 @@
  * # 判据只来自后端真实字段
  *
  * `settings.mode` / `runtime.running` / `runtime.routes_committed` /
- * `runtime.last_error` / `core.path` / `runtime.recovery`（经既有的纯函数
- * `recoveryView` 翻译成三段）。**不允许前端按时间、次数或 notice 文案猜。**
+ * `runtime.last_error` / `core.path`。**不允许前端按时间、次数或 notice 文案猜。**
  */
 
-import type { RecoveryView } from "./ipc";
 import { nextSteps, plainOneLine } from "./failure";
 import type { ProxyMode } from "./types";
 
@@ -39,7 +37,7 @@ import type { ProxyMode } from "./types";
  * | `on`      | 整机受保护（TUN 在跑）           | `--ok` 绿      |
  * | `partial` | 本地入口就绪但**系统代理未设置** | `--accent` 蓝  |
  * | `off`     | 没有代理覆盖（直连 / 未运行）    | `--status-off` |
- * | `busy`    | 正在自愈 / 隧道建好但路由没接管  | `--warn` 琥珀  |
+ * | `busy`    | 隧道建好但路由还没接管           | `--warn` 琥珀  |
  * | `failed`  | 代理承诺已破（退回直连 / 报错）  | `--danger` 红  |
  */
 export type StatusTone = "on" | "partial" | "off" | "busy" | "failed";
@@ -83,8 +81,6 @@ export interface StatusInput {
   lastError: string | null;
   /** `core.path`：为 `null` 表示找不到核心可执行文件。 */
   corePath: string | null;
-  /** 由 `recoveryView(recovery, running)` 得到，**不要**在这里重新解释原始字段。 */
-  recovery: RecoveryView;
   /**
    * 本地 SOCKS 入站端口（`settings.socks_port`）。
    *
@@ -124,14 +120,10 @@ export interface AppStatus {
  * 优先级（顺序即语义，改动前先想清楚）：
  *
  * 1. **找不到核心** —— 连启动都做不到，最靠前（原 `Dashboard` 的顺序）。
- * 2. **正在自愈** —— 此刻既不是「受保护」也不是「未连接」，说成任一个都会
- *    让用户去点「连接」和看门狗抢。
- * 3. **已退回直连** —— `mode` 此时**仍然是 `"tun"`**，所以必须排在所有按
- *    `mode` 判断的分支之前；否则「流量已在裸奔」会被画成受保护。
- * 4. **直连模式** —— 用户**主动选的**，中性报告。**不能说成「未连接」**：
+ * 2. **直连模式** —— 用户**主动选的**，中性报告。**不能说成「未连接」**：
  *    那会让人以为出了问题，而直连本来就是「有意不接管」。
- * 5. **核心没在跑**（有错 → 故障；无错 → 空闲）。
- * 6. 之后才是「在跑」的三种：TUN 未接管路由 → 中间态；TUN → 受保护；
+ * 3. **核心没在跑**（有错 → 故障；无错 → 空闲）。
+ * 4. 之后才是「在跑」的两种：TUN 未接管路由 → 中间态；TUN → 受保护；
  *    系统代理 → 部分覆盖。
  *
  * `routes_committed` **只对 TUN 生效**：它是 TUN 两阶段启动的闸门
@@ -139,33 +131,7 @@ export interface AppStatus {
  * 路由，拿它压系统代理会把「部分覆盖正常工作中」误报成「流量还没走代理」。
  */
 export function appStatus(input: StatusInput): AppStatus {
-  const base = baseStatus(input);
-  const { recovery } = input;
-  /**
-   * task-68：`degraded`（探测失败、但看门狗还没开始重建）**不改状态词、不改色调** ——
-   * 这就是 task-60 的 tone 决定：`running` 仍为真、隧道仍在，「1 次失败」不是状态变化，
-   * 把它渲染成 `busy`/`failed` 等于把**设计内**的过程说成故障（另一种假陈述）。
-   *
-   * 这里只做一件事：把 `recoveryView` 已经写好的自救句接进 `sub` 与 `detail`。
-   * **`detail` 是顶栏 `.sr-only` + `role="status"` 的文本** —— 不接进来，
-   * 读屏用户就收不到「整机断网时先点『断开』」这句话，而那正是这次修复的全部内容。
-   *
-   * 例外：基础状态是 `failed`（例如根本没找到核心）时**不覆盖** ——
-   * 自救提示不能把一个更严重的结论盖成轻的。
-   */
-  if (recovery.phase === "degraded" && recovery.hint && base.tone !== "failed") {
-    return {
-      ...base,
-      sub: base.sub ? `${base.sub}；${recovery.hint}` : recovery.hint,
-      detail: `${base.detail} —— ${recovery.hint}`,
-    };
-  }
-  return base;
-}
-
-function baseStatus(input: StatusInput): AppStatus {
-  const { mode, running, routesCommitted, lastError, corePath, recovery, socksPort, httpPort } =
-    input;
+  const { mode, running, routesCommitted, lastError, corePath, socksPort, httpPort } = input;
 
   // 0) 快照还没到 ⇒ **什么都不知道**。既不能说「未找到核心」（那是故障），
   //    更不能是绿色（那是「已受保护」）。「不知道」只能显示成「不知道」。
@@ -188,29 +154,7 @@ function baseStatus(input: StatusInput): AppStatus {
     };
   }
 
-  // 2) 看门狗正在重建隧道。文案永远带「恢复」，不退化成「未连接」。
-  if (recovery.phase === "recovering") {
-    const label = recovery.text ?? "正在自动恢复";
-    return {
-      tone: "busy",
-      label,
-      sub: "看门狗正在重建隧道，不需要手动点「连接」（点了会打断它）",
-      detail: `${label} —— 看门狗在重建隧道，不需要手动连接`,
-    };
-  }
-
-  // 3) 自动恢复失败、已退回直连。**`mode` 此时仍是 `"tun"`** ——
-  //    按模式判断会把它当成绿/蓝，而那正是最严重的一种假陈述。
-  if (recovery.phase === "failed") {
-    return {
-      tone: "failed",
-      label: "自动恢复失败",
-      sub: "已退回直连：网络可用，但流量不再走代理 —— 可手动重连，或换一个节点",
-      detail: "自动恢复失败 —— 已退回直连，流量不再走代理",
-    };
-  }
-
-  // 4) 直连是**有意为之**，不是故障。说「未连接」会让人以为坏了。
+  // 2) 直连是**有意为之**，不是故障。说「未连接」会让人以为坏了。
   if (mode === "direct") {
     return {
       tone: "off",
@@ -220,7 +164,7 @@ function baseStatus(input: StatusInput): AppStatus {
     };
   }
 
-  // 5a) 上次运行出错且现在没在跑 —— 如实说故障，不装成普通的「未连接」。
+  // 3a) 上次运行出错且现在没在跑 —— 如实说故障，不装成普通的「未连接」。
   //
   //     并且**同屏给出下一步**：连接失败时用户看到的不该只是一个错误码。
   //     动作由 `failure.ts::nextSteps` 按后端自己的文案推（换节点 / 重装助手 /
@@ -244,7 +188,7 @@ function baseStatus(input: StatusInput): AppStatus {
     };
   }
 
-  // 5b) 核心没在跑（用户还没点连接）→ 空闲，中性。
+  // 3b) 核心没在跑（用户还没点连接）→ 空闲，中性。
   if (!running) {
     return {
       tone: "off",
@@ -254,7 +198,7 @@ function baseStatus(input: StatusInput): AppStatus {
     };
   }
 
-  // 6) 以下都是「核心在跑」。TUN 的承诺是「接管全部流量」，
+  // 4) 以下都是「核心在跑」。TUN 的承诺是「接管全部流量」，
   //    两阶段启动里隧道先建好、默认路由还没接管 —— 此时不能说「已连接」。
   if (mode === "tun") {
     if (!routesCommitted) {
@@ -274,7 +218,7 @@ function baseStatus(input: StatusInput): AppStatus {
     };
   }
 
-  // 7) 「系统代理」模式：**应用只提供本地入站入口，从不修改系统代理设置。**
+  // 5) 「系统代理」模式：**应用只提供本地入站入口，从不修改系统代理设置。**
   //
   //    这里原来写的是「系统代理已启用」+「只有读取系统代理设置的应用走代理」。
   //    后一句是真的，**前一句比事实强**：`docs/07-roadmap-and-risks.md` 里
@@ -316,7 +260,7 @@ function baseStatus(input: StatusInput): AppStatus {
  *
  * 注意区分：**徽章是按条件出现的载体，信息本身不随条件消失** ——
  * 仪表盘的 `sub` 与 live region 里的同一句话不受此函数影响（它们有自己的显示条件，
- * 见 `appStatus` 的第 7 个分支）。
+ * 见 `appStatus` 的第 5 个分支）。
  */
 export function systemProxyBadge(
   mode: ProxyMode,
@@ -332,14 +276,10 @@ export function systemProxyBadge(
 /**
  * 顶栏「连接/断开」是否禁用。
  *
- * 抽出来是为了让「**恢复期间不得可点**」这条不变量有单测。task-60 ② 把它钉在
- * 仪表盘那颗按钮上；task-72 把仪表盘那颗按钮收敛掉了（它与顶栏是同一个命令的
- * 等价按钮），**不变量必须跟着搬到顶栏，不能随按钮一起删掉** ——
- * 否则用户又能在看门狗重建时点「连接」把它打断。
+ * 抽出来是为了让这条判据只有一处：直连模式下不需要启动核心，任何其它操作在跑时
+ * 也不该再发第二条命令（`store.run()` 会把并发的请求直接丢掉 —— 点了没反应，
+ * 用户会以为按钮坏了）。
  */
-export function runButtonDisabled(
-  rv: RecoveryView,
-  opts: { runBusy: boolean; mode: ProxyMode },
-): boolean {
-  return opts.runBusy || opts.mode === "direct" || rv.button === "recovering";
+export function runButtonDisabled(opts: { runBusy: boolean; mode: ProxyMode }): boolean {
+  return opts.runBusy || opts.mode === "direct";
 }

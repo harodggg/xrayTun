@@ -434,11 +434,12 @@ export function installPreviewBridge(): () => void {
     }
   };
 
-  // 开发用：推一次 `runtime://changed`（task-22 的自动恢复要验证「界面看得见自愈」）。
+  // 开发用：推一次 `runtime://changed`（给截图 / 手工验收用）。
   //
-  // 为什么必须有它：恢复状态**只在事件里**出现（后端把它放进 `runtime_changed`
-  // 载荷），光刷新页面复现不出来 —— 那正是原缺陷的一部分（前端只在少数事件时拉快照，
-  // 于是看不到看门狗正在自愈）。
+  // 为什么必须有它：真实事件由 Rust 侧 `emit`，浏览器里没有那条通路；而 store 对
+  // `runtime://changed` 走的是**增量更新** `snapshot.runtime` / `traffic`，光刷新
+  // 页面复现不出「事件改写了界面」这条路。载荷按真实事件形状拼（整个 `runtime` +
+  // 整个 `traffic`），所以它验的就是真路径。
   (window as unknown as Record<string, unknown>).__emitRuntimeChanged = (
     patch: { runtime?: Record<string, unknown>; traffic?: Record<string, unknown> } = {},
   ) => {
@@ -453,94 +454,12 @@ export function installPreviewBridge(): () => void {
     return true;
   };
 
-  /**
-   * 三种自愈状态的一键复现（给 lead / 设计同学复现用，省得每次手写载荷）。
-   *
-   * ```js
-   * __recoveryDemo("recovering", 2)  // 正在第 2 次重建
-   * __recoveryDemo("recovered", 2)   // 第 2 次重建成功（可感知的结束）
-   * __recoveryDemo("failed", 3)      // 第 3 次失败 → 退回直连
-   * __recoveryDemo("idle")           // 回到普通状态
-   * ```
-   */
-  (window as unknown as Record<string, unknown>).__recoveryDemo = (
-    phase: "recovering" | "recovered" | "failed" | "idle",
-    attempt = 1,
-  ) => {
-    const nowS = Math.floor(Date.now() / 1000);
-    const emit = (window as unknown as Record<string, unknown>).__emitRuntimeChanged as (
-      p: { runtime?: Record<string, unknown> },
-    ) => boolean;
-    if (phase === "recovering") {
-      return emit({
-        runtime: {
-          running: false,
-          recovery: {
-            recovering: true,
-            attempt,
-            probe_failures: 2,
-            started_unix: nowS,
-            last_outcome: null,
-            finished_unix: null,
-          },
-        },
-      });
-    }
-    if (phase === "recovered") {
-      return emit({
-        runtime: {
-          running: true,
-          recovery: {
-            recovering: false,
-            attempt,
-            probe_failures: 0,
-            started_unix: nowS - 4,
-            last_outcome: "recovered",
-            finished_unix: nowS,
-          },
-        },
-      });
-    }
-    if (phase === "failed") {
-      return emit({
-        runtime: {
-          running: false,
-          recovery: {
-            recovering: false,
-            attempt,
-            probe_failures: 3,
-            started_unix: nowS - 4,
-            last_outcome: "direct_fallback",
-            finished_unix: nowS,
-          },
-        },
-      });
-    }
-    return emit({ runtime: { running: true, recovery: null } });
-  };
-
-  // `?recovery=recovering|recovered|failed` —— 挂载后自动推一次，方便截图与回归
-  // （不必每次手写 CDP 注入）。等监听者注册好再推，最多等 5 秒。
-  const wantRecovery = new URLSearchParams(location.search).get("recovery");
-  if (wantRecovery === "recovering" || wantRecovery === "recovered" || wantRecovery === "failed") {
-    let tries = 0;
-    const push = () => {
-      const fn = (window as unknown as Record<string, unknown>).__recoveryDemo as
-        | ((p: string, a?: number) => boolean)
-        | undefined;
-      const ok = fn?.(wantRecovery, 2);
-      if (ok !== true && tries++ < 25) window.setTimeout(push, 200);
-    };
-    window.setTimeout(push, 200);
-  }
-
   return () => {
     uninstallProbe();
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
     delete (window as unknown as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__;
     delete (window as unknown as Record<string, unknown>).__emitCoreLog;
     delete (window as unknown as Record<string, unknown>).__emitRuntimeChanged;
-    delete (window as unknown as Record<string, unknown>).__recoveryDemo;
     listeners.clear();
     allCallbacks.clear();
     // 审计同步的假状态也一起清掉：热更新后不该留着上一轮的开关值。

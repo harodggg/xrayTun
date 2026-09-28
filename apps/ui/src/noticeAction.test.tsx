@@ -102,7 +102,7 @@ describe("NoticeAction：带 confirm 的动作走内联二次确认", () => {
 /** 只造 `collectNotices` 真正会读的字段。 */
 function snap(extra: Record<string, unknown>) {
   return {
-    runtime: { running: true, last_error: null, recovery: null },
+    runtime: { running: true, last_error: null },
     core: { path: "/xray", supports_native_tun: true, min_native_tun_version: "26.1.18" },
     helper: { stale_session: null, socket_present: true },
     notice: null,

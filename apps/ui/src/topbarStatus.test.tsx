@@ -4,20 +4,20 @@
  * # 这条缺陷发生过两次，根因相同：**同一件事在两处各写一份判断**
  *
  * 1. **task-45**：顶栏底边那条 2px 的线写死成 `var(--ok)` —— 全项目 `topbar--`
- *    0 命中，那条线从来没跟状态变过。直连 / 系统代理 / 未连接 / 恢复中 /
- *    已退回直连**全都是绿的**，而绿色在这套配色里 = 已受保护。
+ *    0 命中，那条线从来没跟状态变过。直连 / 系统代理 / 未连接**全都是绿的**，
+ *    而绿色在这套配色里 = 已受保护。
  * 2. **task-47**：线修好之后，`Dashboard` 的状态词**仍然不看 `mode`** ——
  *    系统代理模式下走 `!routes_committed` 分支，写出「**隧道已建立**」
  *    「默认路由尚未接管」。系统代理根本没有隧道。同一屏里**蓝线 + 「隧道已建立」**。
  *
  * # 这些测试钉住什么
  *
- * 1. 九种状态各自的 `tone / label / sub / detail` 正确，判据只来自真实后端字段；
+ * 1. 各种状态各自的 `tone / label / sub / detail` 正确，判据只来自真实后端字段；
  * 2. **系统代理与 TUN 的状态词必须不同**（task-47 的核心），且系统代理**不得**
  *    出现「隧道」字样；
  * 3. **直连不能说成「未连接」** —— 那是有意为之，不是故障；
  * 4. **反例**：绿色只允许出现在「整机受保护」这一种状态（CSS 层面也断言）；
- * 5. **优先级**：故障压过模式（`direct_fallback` 时 `mode` 仍是 `tun`）；
+ * 5. **优先级**：故障压过模式（找不到核心时说什么都多余）；
  * 6. **同源**：状态词的字面量只允许出现在 `topbarStatus.ts` ——
  *    `App.tsx` / `Dashboard.tsx` 里再出现一次就是把同一族缺陷种回去；
  * 7. CSS 里 tone → 颜色的映射正确，且每种颜色在 `--bg` 上 **≥3:1**
@@ -68,36 +68,13 @@ import {
 
 const CSS = () => readSrc("styles.css");
 
-const IDLE_RECOVERY = {
-  phase: "idle" as const,
-  text: null,
-  hint: null,
-  button: "connect" as const,
-  justRecovered: false,
-};
-const RECOVERING = {
-  phase: "recovering" as const,
-  text: "正在自动恢复（第 2 次）",
-  hint: null,
-  button: "recovering" as const,
-  justRecovered: false,
-};
-const FAILED = {
-  phase: "failed" as const,
-  text: "自动恢复失败（第 2 次），已退回直连 —— 流量不再走代理",
-  hint: null,
-  button: "connect" as const,
-  justRecovered: false,
-};
-
-/** 默认输入 = 「核心在、在跑、路由已接管、无错误、不在恢复流程」。 */
+/** 默认输入 = 「核心在、在跑、路由已接管、无错误」。 */
 const base = {
   mode: "tun" as const,
   running: true,
   routesCommitted: true,
   lastError: null as string | null,
   corePath: "/Applications/XrayTun.app/Contents/Resources/xray",
-  recovery: IDLE_RECOVERY,
   socksPort: 10808,
   httpPort: 10809,
 };
@@ -155,21 +132,6 @@ describe("appStatus：九种状态的 tone / label / sub / detail", () => {
     expect(r.tone).toBe("off");
     expect(r.label).toBe("未连接");
     expect(r.sub).toBe("核心没有运行");
-  });
-
-  it("看门狗正在自动恢复 → busy，文案带「恢复」二字（不退化成「未连接」）", () => {
-    const r = s({ recovery: RECOVERING });
-    expect(r.tone).toBe("busy");
-    expect(r.label).toBe("正在自动恢复（第 2 次）");
-    expect(r.label).toContain("恢复");
-    expect(r.detail).toContain("重建隧道");
-  });
-
-  it("已退回直连（direct_fallback）→ failed", () => {
-    const r = s({ recovery: FAILED });
-    expect(r.tone).toBe("failed");
-    expect(r.label).toBe("自动恢复失败");
-    expect(r.detail).toContain("流量不再走代理");
   });
 
   it("核心没跑 + 上次报错 → failed（如实说故障，不装成普通的「未连接」）", () => {
@@ -249,20 +211,8 @@ describe("反例：绿色只允许出现在「整机受保护」这一种状态"
 });
 
 describe("优先级：故障必须压过模式", () => {
-  it("mode 仍是 tun + direct_fallback → failed，而不是 on", () => {
-    const r = s({ mode: "tun", running: false, recovery: FAILED });
-    expect(r.tone).toBe("failed");
-    expect(r.tone).not.toBe("on");
-  });
-
-  it("recovering 压过「在跑 + 路由已接管」→ busy，而不是 on", () => {
-    const r = s({ mode: "tun", running: true, routesCommitted: true, recovery: RECOVERING });
-    expect(r.tone).toBe("busy");
-    expect(r.tone).not.toBe("on");
-  });
-
-  it("找不到核心压过一切（包括 recovering）", () => {
-    const r = s({ corePath: null, recovery: RECOVERING });
+  it("找不到核心压过一切（连启动都做不到）", () => {
+    const r = s({ corePath: null });
     expect(r.tone).toBe("failed");
     expect(r.label).toBe("未找到核心");
   });
@@ -435,11 +385,8 @@ describe("真渲染：顶栏与仪表盘在同一份快照下必须一致", () =
     history.replaceState({}, "", `/?state=${state}`);
     return scenarioSnapshot();
   };
-  const recoveryOf = (snap: unknown) =>
-    (snap as { runtime: { recovery: unknown } }).runtime.recovery;
-
   const mountTopBar = (snap: unknown) => {
-    storeMock.value = { snapshot: snap, busy: null, run: vi.fn(), recovery: recoveryOf(snap) };
+    storeMock.value = { snapshot: snap, busy: null, run: vi.fn() };
     return render(<TopBar view="dashboard" />);
   };
   const mountDashboard = (snap: unknown) => {
@@ -448,7 +395,6 @@ describe("真渲染：顶栏与仪表盘在同一份快照下必须一致", () =
       busy: null,
       run: vi.fn(),
       probing: null,
-      recovery: recoveryOf(snap),
     };
     return render(<Dashboard onNavigate={() => {}} />);
   };
@@ -495,7 +441,6 @@ describe("真渲染：顶栏与仪表盘在同一份快照下必须一致", () =
       routesCommitted: snap.runtime.routes_committed,
       lastError: snap.runtime.last_error,
       corePath: snap.core.path,
-      recovery: { phase: "idle", text: null, hint: null, button: "connect", justRecovered: false },
       socksPort: snap.settings.socks_port,
       httpPort: snap.settings.http_port,
     });

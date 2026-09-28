@@ -16,42 +16,6 @@ use serde::{Deserialize, Serialize};
 use xt_core::model::{AppSettings, Node, ProxyMode, Subscription};
 use xt_core::store::Store;
 
-impl RecoveryState {
-    /// 同步「连续探测失败次数」。返回 `true` 表示状态变了
-    /// （调用方据此决定要不要发事件，避免每 10 秒无谓地推一次）。
-    pub fn set_probe_failures(&mut self, failures: u32) -> bool {
-        if self.probe_failures == failures {
-            return false;
-        }
-        self.probe_failures = failures;
-        true
-    }
-
-    /// 开始一次自动重建。返回本次的序号（第 N 次，从 1 开始）。
-    pub fn begin(&mut self, now_unix: u64) -> u32 {
-        self.attempt = self.attempt.saturating_add(1);
-        self.recovering = true;
-        self.started_unix = Some(now_unix);
-        self.attempt
-    }
-
-    /// 重建成功：隧道已恢复。
-    pub fn succeeded(&mut self, now_unix: u64) {
-        self.recovering = false;
-        self.probe_failures = 0;
-        self.last_outcome = Some(RecoveryOutcome::Recovered);
-        self.finished_unix = Some(now_unix);
-    }
-
-    /// 重建失败：已退回直连。
-    pub fn fell_back_to_direct(&mut self, now_unix: u64) {
-        self.recovering = false;
-        self.probe_failures = 0;
-        self.last_outcome = Some(RecoveryOutcome::DirectFallback);
-        self.finished_unix = Some(now_unix);
-    }
-}
-
 /// 自动恢复期间写进 `last_notice` 的文案（快照顶部的提示条）。
 pub const RECOVERING_NOTICE: &str = "网络中断，正在自动恢复…";
 

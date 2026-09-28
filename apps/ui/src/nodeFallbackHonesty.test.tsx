@@ -83,14 +83,6 @@ const HEALTH = {
   detail: "经它发出的真实请求拿不到响应（000）。**已在接管默认路由之前中止**，系统网络未被改动。",
 };
 
-const IDLE_RECOVERY = {
-  phase: "idle" as const,
-  text: null,
-  hint: null,
-  button: "connect" as const,
-  justRecovered: false,
-};
-
 /**
  * 造快照。
  *
@@ -127,7 +119,6 @@ function mount(ui: React.ReactElement, snapshot: AppSnapshot) {
     busy: null,
     run: vi.fn(),
     probing: false,
-    recovery: IDLE_RECOVERY,
   };
   return render(ui);
 }

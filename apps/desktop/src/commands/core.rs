@@ -51,8 +51,7 @@ impl CoreStartTrigger {
 
     /// **全集**（有测试断言：每个调用点用的变体都在这里，且标签互不相同）。
     ///
-    /// 只有测试用它，所以生产构建里允许 dead_code —— 与 `FailureExit::ALL`
-    /// 同一手法（那个也是被守卫测试用的全集）。
+    /// 只有测试用它，所以生产构建里允许 dead_code。
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const ALL: &'static [Self] = &[
         Self::UserConnect,
@@ -116,12 +115,6 @@ pub async fn stop_proxy(app: AppHandle, state: State<'_, AppState>) -> Result<Ap
         // **Err 契约不变**：仍然返回 Err，载荷仍是原始错误文本。
         return Err(result.err().unwrap_or_default());
     }
-    // **用户主动停止** —— 意图作废，而且**必须落盘**：重启后读到的就是 false，
-    // 所以「断开」是**跨进程有效**的逃生路（task-64 (c) 钉的就是这条）。
-    //
-    // 其它调用 `stop_core` 的路径（切换节点、看门狗重建）**不走这里**：
-    // 它们只是过程，不是意图 —— 换了节点之后还是要连着的。
-    invalidate_connect_intent(&state, IntentDrop::UserStop, "用户主动断开");
     state.with(|i| {
         i.runtime = CoreRuntime::default();
     });
@@ -861,32 +854,6 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
 /// `000`；进程根本没起来时是空串。两种都算不通，别只认其中一种。
 pub(crate) fn tunnel_is_dead(http_code: &str) -> bool {
     http_code.is_empty() || http_code == "000"
-}
-
-impl FailureExit {
-    /// 全部退场点。**新增变体必须登记在这里**；`ALL` 与生产调用点的一致性
-    /// 由源码守卫测试保证。
-    ///
-    /// 只有测试读它（生产代码不需要遍历退场点），所以非测试构建里显式关掉
-    /// `dead_code`。但**它必须留在生产模块里**：它就是「清单」本身 —— 守卫测试
-    /// 靠它知道该检查哪些变体；挪进测试模块，新增变体就能悄悄溜过守卫。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) const ALL: [FailureExit; 4] = [
-        Self::WatchdogRebuild,
-        Self::NetworkWatchRebuild,
-        Self::ReconnectExhausted,
-        Self::NodeSwitchFailed,
-    ];
-
-    /// 给人看的「发生了什么」。**只陈述事实**，不猜原因（不许写「节点被封了」这种）。
-    pub(crate) fn what_happened(self) -> &'static str {
-        match self {
-            Self::WatchdogRebuild => "看门狗重建隧道失败，已退回直连",
-            Self::NetworkWatchRebuild => "换网后重建隧道失败，已退回直连",
-            Self::ReconnectExhausted => "自动重连多次仍未成功（门禁未过）",
-            Self::NodeSwitchFailed => "切换到该节点失败（隧道已还原，你选的节点保留）",
-        }
-    }
 }
 
 /// 探针目标属于哪一侧 —— **真源在 `supervisor.rs` 的那张表**（task-106）。

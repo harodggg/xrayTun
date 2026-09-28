@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, recoveryView } from "./ipc";
+import { api } from "./ipc";
 import {
   buttonNameNote,
   failureActions,
@@ -126,8 +126,6 @@ function Shell({ initialView }: { initialView?: View }) {
     error,
     errorSteps,
     clearError,
-    recoveredAttempt,
-    dismissRecovered,
     hasUnsavedEdits,
     setHasUnsavedEdits,
   } = useStore();
@@ -370,21 +368,6 @@ function Shell({ initialView }: { initialView?: View }) {
               </button>
             </div>
           )}
-          {/* 「可感知的结束」：自动恢复成功后不能悄悄变回「已连接」——
-              给一次明确的完成提示，8 秒后自己消失（也可手动关掉）。
-              只在**恢复真的发生过**时出现（后端 `last_outcome === "recovered"`）。 */}
-          {recoveredAttempt !== null && (
-            // task-23 D2：完成提示是信息类 ⇒ `role="status"`（不打断，但会被播报）。
-            <div className="banner banner--info" role="status">
-              <span>✓</span>
-              <div style={{ flex: 1 }}>
-                已自动恢复连接（第 {recoveredAttempt} 次自动重建成功）—— 隧道已重建，无需手动操作。
-              </div>
-              <button className="btn btn--ghost" onClick={dismissRecovered}>
-                知道了
-              </button>
-            </div>
-          )}
           {view === "dashboard" && <Dashboard onNavigate={onNavigate} />}
           {view === "nodes" && <Nodes />}
           {view === "subscriptions" && <Subscriptions />}
@@ -401,18 +384,12 @@ function Shell({ initialView }: { initialView?: View }) {
 }
 
 export function TopBar({ view }: { view: View }) {
-  const { snapshot, busy, busyLabel, run, recovery } = useStore();
+  const { snapshot, busy, busyLabel, run } = useStore();
   const [pending, setPending] = useState<ProxyMode | null>(null);
 
   const title = NAV.find((n) => n.id === view)?.label ?? "";
   const mode = snapshot?.settings.mode ?? "system_proxy";
   const running = snapshot?.runtime.running ?? false;
-  /**
-   * 自动恢复（task-22）：看门狗在自愈时，顶栏**不能**看起来像「没连接、快来点」——
-   * 点了就是和看门狗抢（`core.rs` 注释提过启动会被多处并发调用）。
-   * 三态由 `recoveryView` 这个纯函数决定（有单测锁着「恢复中不得显示为未连接」）。
-   */
-  const rv = recoveryView(recovery, running);
   /**
    * 状态语义（task-45；task-47 起与仪表盘状态区**同一个真源**）。
    * 顶栏底边那条 2px 的线和右边那个小圆点都用这个 tone —— 两处相距几像素、
@@ -427,7 +404,6 @@ export function TopBar({ view }: { view: View }) {
     routesCommitted: snapshot?.runtime.routes_committed ?? false,
     lastError: snapshot?.runtime.last_error ?? null,
     corePath: snapshot?.core.path ?? null,
-    recovery: rv,
     // 端口只用于「系统代理」模式的文案；快照缺席时给 null（那就一个数字都不写）。
     socksPort: snapshot?.settings.socks_port ?? null,
     httpPort: snapshot?.settings.http_port ?? null,
@@ -498,9 +474,8 @@ export function TopBar({ view }: { view: View }) {
      */
     <header
       className={`topbar ${TOPBAR_TONE_CLASS[status.tone]}`}
-      // task-68：自救提示（`rv.hint`）现在由 `appStatus` 折进 `detail` —— 同一份
-      // 文本既进 `title`（悬停可读），也进下面那个 `role="status"` 的 live region
-      // （**读屏用户必须听到它**，否则那句自救指令只有看得见的人才收得到）。
+      // `detail` 是顶栏 `title`（悬停可读）与下面那个 `role="status"` live region
+      // 的共同来源 —— 两者必须逐字相同，否则读屏用户收到的结论会和看得见的人不同。
       title={status.detail}
     >
       <span className="sr-only" role="status">
@@ -582,12 +557,8 @@ export function TopBar({ view }: { view: View }) {
 
       {/* 行为变更提示：**模式只是一个偏好**。未连接时点它不再隐式连接核心
           （以前会，代价是一次完整连接）。这条提示由状态直接推导，不是一次性
-          flag —— 所以不会留下过期的「点连接开始」。
-
-          `rv.phase === "idle"` 是必须的：自动恢复中与已退回直连时，界面刚刚
-          告诉用户「不要点连接 / 已退回直连」，这条「点右侧「连接」开始」会
-          当场把话反过来说（实测：恢复中曾与「正在自动恢复（第 2 次）」同屏）。 */}
-      {!running && mode !== "direct" && !modeBusy && rv.phase === "idle" && (
+          flag —— 所以不会留下过期的「点连接开始」。 */}
+      {!running && mode !== "direct" && !modeBusy && (
         <span className="badge badge--unknown" title="模式已保存；真正开始连接的是「连接」按钮">
           已选「{MODE_LABEL[mode]}」，点右侧「连接」开始
         </span>
@@ -620,32 +591,11 @@ export function TopBar({ view }: { view: View }) {
         </span>
       )}
 
-      {/* 自动恢复中的状态：必须是**可读的一句话**，而不是一个沉默的灰点 */}
-      {rv.phase === "recovering" && (
-        <span className="badge badge--ok" title="看门狗正在自动重建隧道，不需要手动点「连接」">
-          {rv.text}
-        </span>
-      )}
-      {rv.phase === "failed" && (
-        <span className="badge badge--unknown" title={rv.text ?? undefined}>
-          自动恢复失败
-        </span>
-      )}
-      {/* 「可能正在变坏」（task-60）：第 1 次探测失败之后、看门狗重建之前的窗口。
-          刻意用**中性**徽章而不是黄色/红色 —— 看门狗本来就是「连续 2 次才重建」，
-          这一段是**设计内**的过程，染成告警色等于把正常过程说成故障（那是另一种
-          假陈述）。真正要传达的是「你有一个已知有效的自救动作」，见 `hint`。 */}
-      {rv.phase === "degraded" && (
-        <span className="badge badge--unknown" title={rv.hint ?? undefined}>
-          {rv.text}
-        </span>
-      )}
-
       <span className={`dot ${DOT_TONE_CLASS[status.tone]}`} />
       <button
-        className={`btn ${rv.button === "connect" ? "btn--primary" : ""}`}
+        className={`btn ${!running && mode !== "direct" ? "btn--primary" : ""}`}
         // C1：任何操作在进行中都禁用 —— 否则点击会被 `store.run()` 静默吞掉。
-        disabled={runButtonDisabled(rv, { runBusy: anyBusy, mode })}
+        disabled={runButtonDisabled({ runBusy: anyBusy, mode })}
         onClick={() => void toggleRun()}
         title={
           // 别的操作在跑时，优先说清「为什么现在点不动」（否则空 title 让用户猜）。
@@ -653,15 +603,11 @@ export function TopBar({ view }: { view: View }) {
             ? `有操作正在进行（${busyLabel ?? "请稍候"}），完成后再试`
             : mode === "direct"
               ? "直连模式下无需启动核心"
-              : rv.button === "recovering"
-                ? "正在自动恢复 —— 现在点「连接」会打断看门狗的重建，所以先禁用；恢复会自动完成"
-                : rv.phase === "failed"
-                  ? "自动恢复失败，已退回直连；点这里可手动重连"
-                  : ""
+              : ""
         }
       >
         {runBusy ? <span className="spin" /> : null}
-        {rv.button === "recovering" ? "正在恢复…" : running ? "断开" : "连接"}
+        {running ? "断开" : "连接"}
       </button>
     </header>
   );
