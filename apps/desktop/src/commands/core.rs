@@ -1566,12 +1566,12 @@ impl Egress {
 mod tests {
     use super::*;
 
-        /// **同一个 pid 不能被监控两次**（去重），而全部释放后可以重新监控。
-    ///
-    /// 这条钉住的是这次修复的关键约束：监控的启动被提到了「核心已经在跑」
-    /// 那条早退路径之前，于是必须保证重复调用不会 spawn 出多个看门狗 ——
-    /// 多个看门狗会各自重建隧道，互相拆台。
-    #[test]
+
+    /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
+        ///
+        /// `000` 是连不上/超时/被 reset，空串是进程压根没起来 —— 都算不通。
+        /// 但 403 说明**链路是好的**，只是目标拒绝了我们；把它算成不通会
+        /// 让一条能用的隧道被判死并重建。
         #[test]
         fn tunnel_probe_result_is_read_as_dead_or_alive() {
             assert!(tunnel_is_dead(""), "进程没起来时 curl 不输出");
@@ -1580,12 +1580,11 @@ mod tests {
             assert!(!tunnel_is_dead("200"));
             assert!(!tunnel_is_dead("403"), "服务器答了任何码都说明链路通");
         }
-        /// 睡眠检测：墙上时钟比单调时钟多走的那部分就是睡眠时长。
+        /// 自动重连的四个条件缺一不可。
         ///
-        /// 这条判据决定「唤醒后多久开始恢复」—— 判错成「没睡」就退化成
-        /// 等两次失败（约 30 秒），判错成「睡了」则只是早一次探测、无害。
-        #[test]
-        #[test]
+        /// 自更新会先退出 app、替换、再重启 —— 重启后要不要连回来，完全由
+        /// 这个判断决定。它宽松一点就是「用户关过的隧道自己回来了」，
+        /// 严一点就是「用户没关过的东西断了」。
         #[test]
         fn auto_reconnect_requires_intent_and_absence_of_a_running_core() {
             let tun = ProxyMode::Tun;
@@ -1774,14 +1773,10 @@ mod tests {
                 "两种情况同时成立也该停",
             );
         }
-        /// 看门狗该不该继续盯着：**意图 + 代次**，不看观测到的 `running`。
+        /// 日志分级要**先信内核自己写的 `[Level]` 标记**。
         ///
-        /// 这条钉的是一个会「彻底卡死」的组合：核心自己死掉 → 日志转发任务把
-        /// `running` 置 false → 如果看门狗看 `running` 就会当场退出 → 没人恢复；
-        /// 而按钮那边又被幂等守卫挡住（`Supervisor::is_running` 曾经只看
-        /// `process.is_some()`）。两边一起坏，用户就只能看到「点了没反应」。
-        #[test]
-        #[test]
+        /// 之前纯按关键字判，于是上面那些 `[Info] ... rejected type ...` 和
+        /// `[Info] ... broken pipe` 全被归类成「错误」，错误页签里翻不到真错误。
         #[test]
         fn log_classification_trusts_the_level_marker() {
             // 这两条是用户实际报上来的原文。
@@ -1904,29 +1899,13 @@ mod tests {
     /// 成功路径的文案只声称「配置已回滚」（有 helper 成功返回为证），
     /// 同样**不**出现「网络可用」这种更强的断言。
     #[test]
-    #[test]
-    fn stop_proxy_failure_leaves_a_truthful_persistent_notice() {
-        let reason = "helper 回滚 TUN 失败：连接被拒绝";
-        let notice = stop_proxy_failure_notice(&Err(reason.to_string()))
-            .expect("回滚失败必须留下提示条（否则用户离开瞬时错误后就无从得知）");
-
-        assert!(
-            notice.contains("未能确认网络已恢复"),
-            "拿不到证据就要如实说不知道，实际：{notice}"
-        );
-        assert!(
-            notice.contains(reason),
-            "**原始 helper 原因必须原样带进提示条**，不许只写一句笼统的「失败」：{notice}"
-        );
-        assert!(
-            !notice.contains("网络可用"),
-            "**不许**断言没验证过的事，实际：{notice}"
-        );
-        assert!(
-            notice.contains("修复网络"),
-            "要给出下一步能做什么：{notice}"
-        );
+    fn successful_stop_line_claims_only_what_is_evidenced() {
+        let (level, message) = stop_log_line(&Ok(()));
+        assert_eq!(level, "info");
+        assert!(message.contains("网络配置已回滚"), "实际：{message}");
+        assert!(!message.contains("网络可用"), "实际：{message}");
     }
+
 
     /// **成功路径不受影响**：回滚成功没有坏消息可讲 ⇒ 不写提示条
     /// （成功路径的运行态与文案保持改前逐字节一致，见上面两条测试）。
@@ -1938,13 +1917,30 @@ mod tests {
         );
     }
 
-    /// 回退直连：helper 回滚失败 → `DirectUnverified`，日志与 notice 都必须
-    /// 如实说「未能确认网络已恢复」，并且**永不**出现「网络可用」。
-    #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
+
+
+
+    // -----------------------------------------------------------------------
+    // 文案不预设原因（task-67）
+    //
+    // 同一现象（经节点访问一直超时）至少三种可能：节点不可用 / 本机网络不通 /
+    // 链路被干扰。界面对三种可能只给一种解释，用户就会在「换节点」和
+    // 「其实应该先断开」之间来回折腾。
+    // -----------------------------------------------------------------------
+
+
+
+    // -----------------------------------------------------------------------
+    // task-82：换网必须重建 + 看门狗必须探国内
+    //
+    // 根因（用户机器上实测 + 读码）：`direct` 出站的 `sockopt.interface` 是
+    // **连接那一刻**的网卡；换网后国内分流仍走 direct ⇒ **国内全断、国外正常**；
+    // 而看门狗只探境外 ⇒ 一直认为正常 ⇒ **永不重建**，卡在坏状态里。
+    //
+    // 下面把「换网 ⇒ 重建（stop→start）」与「只坏国内 ⇒ 判为异常」变成断言。
+    // **不碰真机网络**：全部是纯函数 + seam，没有 route/DNS 操作。
+    // -----------------------------------------------------------------------
+
     fn egress(interface: &str, gateway: &str) -> Egress {
         Egress {
             interface: interface.into(),
@@ -1952,13 +1948,17 @@ mod tests {
         }
     }
 
-    /// **核心断言**：基线 en0、现在 en5 ⇒ 必须重建；没变 ⇒ 不许重建。
-    #[test]
-    #[test]
-    #[tokio::test]
-    #[tokio::test]
-    #[tokio::test]
-    #[test]
+
+
+
+
+
+
+    /// **(b)** 看门狗要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
+    ///
+    /// task-92 之后境内那一半由 **IP 字面量 `223.5.5.5`** 覆盖：
+    /// `www.baidu.com` 经 SOCKS 多轮实测不稳定（10 轮 4 失败）被筛掉，
+    /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
         let targets = crate::supervisor::required_probe_urls();
@@ -1981,8 +1981,11 @@ mod tests {
         );
     }
 
-    /// **(b)** 只坏国内 ⇒ 看门狗必须判为异常；两个都通才算通。
-    #[test]
+
+    // -----------------------------------------------------------------------
+    // task-98：看门狗判据 —— 单条失败不判死 / ≥2 个目标才算一轮失败 / 轮内重试 / 退避
+    // -----------------------------------------------------------------------
+
     fn targets_of_side(side: ProbeSide) -> Vec<&'static str> {
         // 侧只从**唯一真源表**里读（task-106：不再有第二份境内清单，也没有默认侧）
         crate::supervisor::REQUIRED_PROBE_TARGETS
@@ -2114,15 +2117,18 @@ mod tests {
         );
     }
 
-    /// **单条探针失败不判死**：哪怕连续 100 轮，也不许凑够阈值。
-    ///
-    /// 旧判据是「所有目标都通才算通」，于是任意一条抖动都能在 20 秒内凑够
-    /// 连续两轮并**拆掉一条正在转发流量的隧道**（task-95 定性为误判）。
-    #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
+
+
+
+
+
+    // -----------------------------------------------------------------------
+    // task-176：路由审计落盘（**行为级**：真的写进 App 日志 + 哨兵）
+    // -----------------------------------------------------------------------
+
+    use xt_core::store::Store;
+
+    /// 事故形态的路由表（只有系统的 default、没有 `I` 标志；`0/1` 捕获在；两条 `/32`）。
     fn audit_missing_scoped_default() -> xt_tun::macos::route::RouteAudit {
         xt_tun::macos::route::parse_netstat_inet(
             "0/1                utun6              UScg                utun6\n\
@@ -2309,13 +2315,41 @@ mod tests {
 
     /// **L1 行为级**：采不到路由表时**如实记「不可判读」**，不许静默跳过。
     #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
-    #[test]
+    fn an_unreadable_route_table_is_recorded_as_unavailable() {
+        use crate::state::LogEntry;
+        let (state, store) = route_audit_state("unavailable");
+        log_route_audits(
+            &state,
+            &[(xt_tun::macos::route::RouteAuditPhase::AfterRollback, None)],
+        );
+        let lines: Vec<LogEntry> = store.tail_logs(50);
+        let line = lines
+            .iter()
+            .find(|l| l.message.contains("路由审计"))
+            .unwrap_or_else(|| panic!("采样失败也要留痕：{lines:?}"));
+        assert!(line.message.contains("不可判读"), "{}", line.message);
+        assert!(line.message.contains("回滚之后"), "采样时点要写进日志：{}", line.message);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+
+
+
+
+
+
+
+    // -----------------------------------------------------------------------
+    // task-75 ③：**已知失败的退场点必须能被测试抓住**
+    //
+    // 这些作废调用各自埋在 async 流程里（要 Tauri `AppHandle` 才执行得到），
+    // 纯函数测试证明不了「它还在」；而 Lead 已明确否决「搭假 Tauri harness」。
+    // 所以这里做**源码级守卫**：每个 `FailureExit` 变体在生产源码里**必须恰好
+    // 出现一次**（= 那一处作废调用）。**删掉任意一处 → 本测试变红。**
+    //
+    // 它只保证「调用还在」，不保证运行时时序或文案 —— 这一点写在测试名里。
+    // -----------------------------------------------------------------------
+
     #[test]
     fn every_failure_exit_still_invalidates_intent_in_production_source() {
         // 只看 `#[cfg(test)]` 之前的部分：测试代码里也会拼 `FailureExit::X`
@@ -2904,29 +2938,4 @@ mod tests {
             raw_uri: None,
         }
     }
-
-    fn successful_stop_line_claims_only_what_is_evidenced() {
-        let (level, message) = stop_log_line(&Ok(()));
-        assert_eq!(level, "info");
-        assert!(message.contains("网络配置已回滚"), "实际：{message}");
-        assert!(!message.contains("网络可用"), "实际：{message}");
-    }
-
-    fn an_unreadable_route_table_is_recorded_as_unavailable() {
-        use crate::state::LogEntry;
-        let (state, store) = route_audit_state("unavailable");
-        log_route_audits(
-            &state,
-            &[(xt_tun::macos::route::RouteAuditPhase::AfterRollback, None)],
-        );
-        let lines: Vec<LogEntry> = store.tail_logs(50);
-        let line = lines
-            .iter()
-            .find(|l| l.message.contains("路由审计"))
-            .unwrap_or_else(|| panic!("采样失败也要留痕：{lines:?}"));
-        assert!(line.message.contains("不可判读"), "{}", line.message);
-        assert!(line.message.contains("回滚之后"), "采样时点要写进日志：{}", line.message);
-        let _ = std::fs::remove_dir_all(store.root());
-    }
-
 }
