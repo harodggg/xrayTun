@@ -194,17 +194,49 @@ def classify_line(line: str, version: str) -> str:
     return "prose"
 
 
+def lock_packages_without_source(text: str) -> set:
+    """→ Cargo.lock 里**没有 `source =` 的包名**（= 本地 / 路径包，也就是我们自己的）。
+
+    为什么需要它（0.9.1 发版时被卡住的真实原因）：`version = "X"` 这条判据会把
+    **第三方 crate 恰好同版本**一起抓进来 —— 那次真实有 11 个（`schemars` / `ndk` /
+    `string_cache` / `unic-*` / `untrusted` / `libappindicator*`），发版因此直接红。
+
+    crates.io 上的包**一定有** `source =`（registry 或 git），而工作区成员、以及
+    "删掉 crate 后 lock 没重算"留下的残留条目**一定没有**。用这一个区别把两者分开：
+    既不放过我们自己漏改的条目（T8 那条反例仍然红），也不被别人的版本号卡死发版。
+    """
+    out: set = set()
+    cur, has_src = None, False
+    for line in text.splitlines():
+        if line.startswith("[[package]]"):
+            if cur and not has_src:
+                out.add(cur)
+            cur, has_src = None, False
+        elif cur is None and line.startswith('name = "'):
+            cur = line[len('name = "'):-1]
+        elif line.startswith("source = "):
+            has_src = True
+    if cur and not has_src:
+        out.add(cur)
+    return out
+
+
 def field_leftovers(root: Path, state: dict, version: str):
     """→ [(相对路径, 行号, 行内容, 所属包名或 None)]：模拟后的文本里**真版本字段**仍是旧版本。
 
     行号是给人指路用的：报错必须能直接跳过去，而不是让人全文搜。
     包名只在 `Cargo.lock` 上解析（"哪个 crate 漏了"是那次事故的核心问题）；
     其它文件里的 `name = "…"` 与版本无关，报出来只会误导。
+
+    ⚠️ `Cargo.lock` 上**只报没有 `source =` 的包**（见 [`lock_packages_without_source`]）：
+    有 source 的是 crates.io 上的第三方，它恰好版本号等于我们的旧版本**与我们无关**，
+    报出来只会把发版卡死（0.9.1 发版时真实卡过 11 条）。
     """
     out = []
     for f, text in state.items():
         rel = str(f.relative_to(root))
         is_lock = rel == "Cargo.lock"
+        local = lock_packages_without_source(text) if is_lock else set()
         lines = text.splitlines()
         pkg = None
         for i, line in enumerate(lines, 1):
@@ -215,6 +247,8 @@ def field_leftovers(root: Path, state: dict, version: str):
             if version not in line:
                 continue
             if classify_line(line, version) == "field":
+                if is_lock and pkg not in local:
+                    continue
                 out.append((rel, i, line.strip(), pkg if is_lock else None))
     return out
 
@@ -1149,6 +1183,28 @@ def cmd_self_test(a) -> int:
             print(f"  ✓ T8 两条残留**一次列全**（{len(hits)} 行，各带 crate 名与行号）：")
             for h in hits:
                 print(f"      {h}")
+
+        # ---- T8b 绿（T8 的反面）：**第三方 crate 恰好同版本**不许阻塞 ----
+        # 真实形态：0.9.0 → 0.9.1 时 Cargo.lock 里有 11 个 crates.io 依赖的 version
+        # 正好是 "0.9.0"（schemars / ndk / string_cache / unic-* / untrusted / libappindicator*）。
+        # 判别依据：crates.io 的包**一定有** `source =`，我们的（含残留条目）一定没有。
+        print("\n--- T8b 绿：第三方 crate（有 source=）恰好同版本 ⇒ 不阻塞 ---")
+        fx8b = tmp / "fixture-t8b"
+        shutil.copytree(fx, fx8b)
+        subprocess.run(["git", "-C", str(fx8b), "checkout", "--", "."], check=True)
+        subprocess.run(["git", "-C", str(fx8b), "clean", "-qfd"], check=True)
+        lk8b = read(fx8b / "Cargo.lock")
+        (fx8b / "Cargo.lock").write_text(
+            lk8b + (f'\n[[package]]\nname = "selftest-third-party"\nversion = "{old}"\n'
+                    'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
+                    'checksum = "0000000000000000000000000000000000000000000000000000000000000000"\n'),
+            encoding="utf-8")
+        rc8b, _o8b, e8b = _run_raw(Path(__file__).resolve(), "phase1", "--repo", str(fx8b),
+                                   "--new", new, "--date", "2026-09-23", "--dry-run")
+        if rc8b != 0:
+            fails.append(f"T8b 第三方 crate 同版本被当成残留而卡住：{e8b.strip()[:220]}")
+        else:
+            print("  ✓ T8b 第三方 crate（有 source=）的 version 与旧版本号相同 ⇒ 仍然退出 0")
 
         # ---- T9 classify_line 的正反例（纯函数，快）----
         print("\n--- T9 classify_line：真版本字段 vs 注释/说明 ---")

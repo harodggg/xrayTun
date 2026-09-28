@@ -1,6 +1,68 @@
 # 更新记录
 
-## 未发布（v0.9.0）
+## 未发布（v0.9.1）
+
+> **一条主线**：**少查、少算、少藏** —— 「位置」只在公网 IP 变的时候才查；判决在父域已经判过时
+> 不再重复问模型；审计既能离线出报告，也能每天自动**加密**送出去。
+>
+> **用户动作见 `docs/release-notes/v0.9.1.md`**：换新 App、**不需要重装特权助手**
+> （`PROTOCOL_VERSION` 仍是 4，helper 侧三个 crate 零改动）、审计同步**默认关闭**、想用要自己开。
+>
+> 契约与证据：`docs/design/AUDIT-SYNC.md`、`docs/verification/AUDIT-SYNC-VERIFY.md`。
+
+### 位置：改名 + 按公网 IP 缓存
+
+* 侧栏与文档统一改叫 **「位置」**（「地球仪」是视觉名，而这一页回答的是「我在哪、出口在哪」；
+  页面 id 仍是 `globe`，老链接不受影响）。（`apps/ui/src/App.tsx`、`docs/05-ui-spec.md:163`）
+* **位置缓存以公网 IP 为键**（IPv6 按 `/64` 归一）：`LOCATION_CACHE_VERSION=2`、TTL 120s、
+  失败冷却 60s、LRU 24 条 ⇒ 同一个 IP 不重复查。`crates/xt-core/src/store.rs`
+* **探测失败时给标注过的旧数据**（`stale`），文案是「暂时无法确认公网 IP 是否变化」——
+  绝不把「没测到」写成「没变化」。`apps/ui/src/pages/Globe.tsx`（`LocationFreshness`）
+* 坐标源 4 → **8 个**（`ipwho.is` / `ip-api.com` / `ipinfo.io` / `ifconfig.co` / `ipwhois.app` /
+  `geoiplookup.io` / `freeipapi.com` / `api.ipquery.io`），另有 4 个 IP-only 源；多数一致才采信。
+* 界面标注来源 —— 查位置意味着**把被查的 IP 发给第三方**，这一点必须写在明面上。
+
+### 判决缓存：父域继承 + 命中率
+
+* `registrable_domain()` + 自包含多级后缀表（`MULTI_LABEL_SUFFIXES`）⇒ `a.b.example.com`
+  可以复用 `example.com` 的判决，**不再重复问模型**。`crates/xt-intent/src/rules.rs`
+* 继承有自己的上限（`INHERIT_TTL_CAP_SECS` = 7 天）与来源标记（`inherited_from`）；
+  网关失败 60 秒冷却（`GATEWAY_ERROR_COOLDOWN_SECS`），冷却期内不重复打坏掉的网关，**也不伪造判决**。
+* 引擎新增计数 `cache_misses` / `cache_inherited` / `cooldown_skipped`；界面「判决缓存」行显示命中率。
+* ⚠️ 命中率 = `hits / (hits + misses)`；`cache_inherited` 是 hits 的**子集**，不能加两次
+  （第一版加错、把 44% 显示成 56%，已修并配了反例测试 `apps/ui/src/cacheHitRate.test.ts`）。
+
+### 审计：离线报告 + 每天自动加密上传（默认关闭）
+
+* **离线报告 CLI**：`cargo run -p xt-intent --example intent_audit -- report`
+  —— 每天 / 每域 / 每模型汇总、缓存命中率、演练比例、**新域/天 的均值与 p95**、
+  「该固化成静态规则」的候选、阈值校准候选、Token 与 Neuron 成本账。**不联网、不需要密钥**。
+* **自动同步**：按 UTC 天组明文 bundle → 在设备上加密（ChaCha20-Poly1305，
+  `device/day/rows` 进 AAD，改一个字节就解不开）→ `POST xraytun.top/api/audit`。
+  R2 key = `audit/<device>/<day>.json` ⇒ 重传只覆盖（**幂等**）；只传**已结束**的天；
+  关机错过的天按次补齐（退避 30min→6h 封顶）；**关闭时零请求**（测试断言 `calls == 0`）；
+  偏好文件坏掉按**关闭**处理（fail-closed）；`context_sent` 一律剥掉（有测试）。
+* **接收端**：Cloudflare Worker + R2（`infra/audit-collector/`，38 条 `node --test` + 真 workerd 冒烟），
+  **只存密文、绝不解密**；`AUDIT_TOKEN` 没配就一律 401（fail closed）；R2 保留 400 天。
+* **界面**：设置 →「系统与助手 → 审计同步」（开关 / 端点 / token / 状态 / **明文预览** /
+  二次确认撤回）；意图页审计区一行只读状态。**没有假按钮**：没有成功证据就只写「从未成功上传过」。
+
+### 顺手修掉的
+
+* 判定缓存命中率重复计数（见上）。
+* 命令契约哨兵 50 → 57（新增的 7 条 `audit_sync_*` 命令与 `ipc.ts` 双向相等）。
+* `docs/design/INTENT-ON-CF.md` §11.5 里「今天缺一个读审计文件的离线聚合」已不成立 ⇒ 改成如实更新。
+
+### 验证
+
+* 界面 **69 个测试文件 / 675 条通过**（上一版基线 630）、`npm run build` ✓。
+* Rust（云端 Cloud Run 通道）：`xt-intent --lib` 230 passed、`xraytun-desktop --lib` 410 passed、
+  `type_contract` 8 passed、`clippy -D warnings` 全绿。
+* 审计端点**已部署**，并做过一次真实客户端 → 真实端点 → R2 取回的端到端
+  （密文落盘、取回检查**无任何明文残留**、撤回清理干净）。
+* ⚠️ **真机 macOS 行为未验证**（开发机不是 macOS）。
+
+## v0.9.0（2026-09-28）
 
 > **一条主线**：0.8.x 已经把内核层的诚实做硬了（会话快照、崩溃回滚、两阶段启动、五档状态色、
 > 假按钮清零）。0.9.0 不做那些，而是把它们**推到界面上**：
