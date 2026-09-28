@@ -10,14 +10,21 @@
 
 | 问题 | 结论 |
 | --- | --- |
-| 判决（问大模型）该不该搬到 CF？ | **该搬，而且这是本轮最大的一块收益** —— 但收益主要不来自"换模型"，来自**全局共享缓存 + 服务端可迭代 + 客户端不再存 key** |
+| 判决（问大模型）该不该搬到 CF？ | **方向正确**，但收益大小**取决于一件还没量的事**：每台机器每天新增多少域名（§8.5）。可确定的三条收益是：**默认路径不再需要用户 key**（fallback 仍要 key，见下）、服务端可迭代提示词/模型、AI Gateway 可观测 |
 | 域名清洗该不该放 CF？ | **该做，但清洗不能是第一跳**。清洗要**两层都做、同一套规范与夹具**：App 本地先清洗 → 命中本地缓存就**零联网**；没命中才带规范化域名去 CF |
 | 该不该换成 Workers AI？ | **先评测再决定**。仓库已有离线评测夹具（`crates/xt-intent/src/eval.rs` + PRD P1.5 门禁）。Workers AI 的开放模型在这类「广告/追踪意图」判断上的**校准质量未知**，没跑过评测就切 = 拿用户的误杀率做实验 |
-| 会更好吗？ | **会，但有前提**：① 本地缓存/预算/fail-open 必须保留；② 共享缓存**不落明文域名**；③ 换模型必须过离线评测；④ 服务端的提示词/模型版本必须回传给 App，否则本地缓存指纹会错 |
+| 会更好吗？ | **可能更好，但不是在今天**。三个前提：① 本地缓存/预算/fail-open 必须保留；② 共享缓存**不落明文域名**；③ 换模型必须过离线评测；④ 服务端版本必须回传进本地指纹。⚠️ **在 P0 量出新域名分布之前，保持现状（App 直连 + 本地缓存）是更稳的默认** |
+| 现在这一档免费吗？ | **单台机器**基本免费（≈316 次/天的额度 > 默认 200 次/天/台）；⚠️ **但 10,000 Neurons/天是账号级** —— 按默认预算，**第 2 台机器就超**（见 §8.1 的算式）。共享缓存能省多少 = 未测 |
 
-**一句话**：把「判决层」搬到 CF 是**架构上正确**的一步（共享缓存 + 无 key + 服务端迭代），
+**一句话**：把「判决层」搬到 CF 是**架构上正确**的一步（共享缓存 + 服务端迭代 + 默认路径无 key），
 把「模型」换成 Workers AI 是**另一个独立决定**，必须被评测门禁卡住，
 而「域名清洗」是两层的共同底座、不是某一层的专属职责。
+**顺序**：先做 P0（清洗规范 + 量出今日命中率与新域名分布）→ 再决定 P1 是否立项。
+
+> ⚠️ **两个被独立评审纠正的说法（原稿写错过，留痕）**：
+> 1. 原稿写「客户端**不再存 key**」——只要保留"用户自选网关"，CF 挂掉时它就是唯一路径，
+>    **App 必须继续持 key 与网关调用**。正确说法是「**默认路径**不再需要用户 key」。
+> 2. 原稿把「共享缓存」称为**最大的一块收益** —— 那依赖一个尚未测量的分布，属**结论先于证据**。
 
 ---
 
@@ -27,14 +34,14 @@
 | --- | --- |
 | 四层漏斗：L0 静态名单（0 成本）/ **L1 域名意图（大模型）** / L2 流量形状（本地加权）/ L3 MITM（opt-in） | `docs/design/INTENT-FILTER.md` §2 |
 | **计费单位 = 一条新域名**，不是一条连接；同域名第 2..n 条连接零成本 | 同上 §7.3 |
-| 判决缓存：`domain → Verdict + 证据 + 过期时间`，落盘原子写 + 版本号；Allow 30d / Block 90d / Deferred 1h | `crates/xt-intent/src/cache.rs`、`engine.rs:31-37` |
+| 判决缓存：`domain → Verdict + 证据 + 过期时间`，落盘原子写 + 版本号；Allow 30d / Block 90d / Deferred 1h | `crates/xt-intent/src/cache.rs`、`engine.rs:32-35`（`:32 Block 90d` / `:33 Allow 30d` / `:35 Deferred 1h`） |
 | 缓存指纹 = 模型 id + 网关 baseURL + **问题措辞版本** + 阈值 → 任一变化**整库作废** | `cache.rs:40`、`engine.rs:90` |
-| 提示词写死在客户端（`question.rs`），改一句 ⇒ `QUESTIONS_REVISION +1` ⇒ **整库作废 + 必须发版** | `cache.rs:26`、`question.rs` |
-| 网关**可插拔**：typesafe(Jev) / zen(免key) / openrouter / vercel | `gateway.rs`、`INTENT-FILTER.md` §7.6 |
-| 预算：每小时/每天上限（默认 ≤200/天），超额只放行 + 审计记 `budget_exhausted` | `engine.rs` `Budget` |
+| 提示词写死在客户端（`question.rs`），改一句 ⇒ `QUESTIONS_REVISION +1` ⇒ **整库作废 + 必须发版** | `cache.rs:25`（`pub const QUESTIONS_REVISION`）、`question.rs` |
+| 网关**可插拔**：typesafe(Jev) / zen(免key) / openrouter / vercel / custom | 预设清单在 `apps/ui/src/types.ts:531`（`IntentPreset`）与 `crates/xt-core/src/model.rs:740-763`（各预设 base URL）；UI 文案 `apps/ui/src/pages/Intent.tsx:82-83`；协议见 `INTENT-FILTER.md` §7.6。⚠️ `gateway.rs` 里只有 HTTP 客户端，**没有**预设表 |
+| 预算：每小时/每天上限（默认 `per_minute: 10`、`per_day: 200`），超额只放行 + 审计记 `budget_exhausted` | 默认值在 `crates/xt-intent/src/engine.rs:77-78`；配置映射 `settings.rs:60`；`Budget` 实现在 `budget.rs` |
 | 审计：每次判决写一行 JSONL，界面要能展示**模型的原话与分数**（不许黑盒） | `INTENT-FILTER.md` §7.4 |
-| 失败一律 **fail-open**（网关错 → 放行 + requeue），缓存坏 → 当空库 | `cache.rs`、`engine.rs:356-358` |
-| **刚加的能力**（0.9.1）：父域（eTLD+1）继承、`cache_misses`/`cache_inherited` 计数、网关失败 60s 冷却 | `rules.rs:246+`、`cache.rs`、`engine.rs` |
+| 失败一律 **fail-open**（网关错 → 放行 + requeue），缓存坏 → 当空库 | fail-open 在 `engine.rs:11`（模块文档「fail-open 是默认路径」）+ `:331/:389-390/:405-406/:435-436`（`observer.requeue`）+ `:442`（`Deferred(GatewayUnavailable)`）；缓存坏=空库在 `cache.rs`。⚠️ `engine.rs:356-358` **不是** fail-open，那是 `classify_pending` 的 cache lookup |
+| **刚加的能力**（0.9.1）：父域（eTLD+1）继承、`cache_misses`/`cache_inherited` 计数、网关失败 60s 冷却 | `rules.rs:246`（`normalize`）、`rules.rs:278+`（`registrable_domain`）、`cache.rs`（`INHERIT_TTL_CAP_SECS`=7 天、`inherited_from`）、`engine.rs`（`cache_misses`/`cache_inherited`/`cooldown_skipped`） |
 | 仓库**已有 CF Worker**：`xraytun-incident-collector`（Worker + R2），同 zone 路由 | `infra/incident-collector/` |
 | ⚠️ **`*.workers.dev` 在中国大陆经常不可达**，所以既有 Worker 走 `xraytun.top/api/incident` 同 zone 路由（Workers Route 优先于 Pages） | `infra/incident-collector/wrangler.toml` 头部注释 |
 | 既有 Worker 的隐私口径：不存客户端 IP（限流用**加盐哈希**做键、只在内存）、不采集请求日志、R2 只存 zip 与 manifest | `infra/incident-collector/PRIVACY.md`、`worker.mjs` 头部 |
@@ -214,11 +221,15 @@ Worker 侧可 `wrangler deployments rollback`。**默认关闭**，符合本项�
 
 * 计价单位是 **Neuron**：**$0.011 / 1,000 Neurons**。
 * 免费额度 **10,000 Neurons/天**（Free 与 Paid 计划相同），**每天 00:00 UTC 重置**；
-  超出免费额度的用量**需要 Workers Paid**（$5/月起）才能继续。
+  超出免费额度的用量**需要升级到 Workers Paid 计划**才能继续。
+  （⚠️ 原稿这里写了"$5/月起" —— **该数字不在 pricing 页上**，已删；引用价格需另给出处。）
 * ⚠️ **超出任一限额后，后续请求直接报错**（"further operations will fail with an error"）
   ⇒ Worker 必须把它当成一种**明确失败**处理（defer + 通告），不能当成"模型说不是广告"。
-* ⚠️ 部分模型（`@cf/moonshotai/kimi-k2.6/2.7`、`@cf/zai-org/glm-5.2/5.3`、
-  `@cf/deepseek-ai/deepseek-v4-*`）**必须绑付费**。
+* ⚠️ 部分模型**必须绑付费**，官方 pricing 页的完整清单是：
+  `@cf/moonshotai/kimi-k2.6`、`@cf/moonshotai/kimi-k2.7-code`、`@cf/zai-org/glm-5.2`、
+  `@cf/zai-org/glm-5.3`、`@cf/zai-org/glm-5.3-flash`、`@cf/deepseek-ai/deepseek-v4-flash-0731`、
+  `@cf/deepseek-ai/deepseek-v4-pro-0813`。
+  （⚠️ 原稿简写成"kimi-k2.6/2.7" —— **不存在 `kimi-k2.7`**，且漏了 `glm-5.3-flash`，已按原文改全。）
 * 个别模型有 **cached input 折扣**（例：`deepseek-v4-flash` 缓存输入 $0.014/M）。
 
 **本用例的成本估算**（假设每次判定 ≈ 1,000 输入 token + 80 输出 token；
@@ -231,6 +242,8 @@ Neurons/次 = 1000×in_per_M/1e6 + 80×out_per_M/1e6；每次 $ = Neurons × $0.
 | `@cf/meta/llama-3.1-8b-instruct`（**支持 JSON 模式**） | $0.282 / $0.827 | ≈ **31.6** | ≈ **$0.00035** | ≈ **316 次/天** |
 | `@cf/qwen/qwen3-30b-a3b-fp8`（不支持 JSON 模式，但便宜） | $0.051 / $0.335 | ≈ **7.06** | ≈ **$0.000078** | ≈ **1,416 次/天** |
 | `@cf/openai/gpt-oss-20b`（不支持 JSON 模式） | $0.200 / $0.300 | ≈ **20.4** | ≈ **$0.00022** | ≈ **491 次/天** |
+| `@cf/meta/llama-3.1-8b-instruct-fp8-fast`（**不支持 JSON**，同族更便宜） | $0.045 / $0.384 | ≈ **6.91** | ≈ **$0.000076** | ≈ **1,447 次/天** |
+| `@cf/meta/llama-3.2-1b-instruct`（**不支持 JSON**，全表最便宜） | $0.027 / $0.201 | ≈ **3.92** | ≈ **$0.000043** | ≈ **2,553 次/天** |
 
 > ⚠️ **本表第一版我把 `qwen3-30b-a3b-fp8` 那一行算错了**（写成 5.0 neurons / $0.000055 / 1,990 次，
 > 实际是 7.06 / $0.000078 / 1,416 —— 输出 token 的神经元没算进去）。已按官方表逐格重算修正。
@@ -240,8 +253,19 @@ Neurons/次 = 1000×in_per_M/1e6 + 80×out_per_M/1e6；每次 $ = Neurons × $0.
 ⇒ 用**便宜的 8B 级模型**时，**免费额度就够一台机器用**（316 > 200，granite 更是 4,250 > 200）。
 
 ⚠️ **但这是"一台机器"的口径**：10,000 Neurons/天是**账号级**的。
-如果 Worker 服务 N 台机器，免费额度被 N 台共享（全局共享缓存能大幅降低每台的增量，
-但**没有共享缓存之前**不能假设免费）。⇒ 这正是 §6 把「全局共享缓存」放在 P1 的原因。
+按默认预算 200 次/天/台 与 **JSON 可用的 8B（31.62 neurons/次）** 算：
+
+```
+单台：200 × 31.62 = 6,324 neurons/天   → 免费额度内（余 37%）
+两台：12,648                            → 超 26%
+五台：31,620                            → 超 216%
+可支撑台数（无共享缓存） ≈ 10,000 / (200 × 31.62) ≈ 1.58 台
+```
+
+⇒ **第 2 台机器就超免费额度**。换便宜模型或改走"提示词约束 JSON"能把这条线推后
+（granite 2.35 neurons ⇒ ≈21 台；llama-3.2-1b 3.92 ⇒ ≈12 台），
+而**共享缓存能省多少取决于一个尚未测量的分布**（§8.5）。
+这正是 §6 把「全局共享缓存」放在 P1 的原因，也是 §9 不再写"基本免费"的原因。
 
 ### 8.2 结构化输出：JSON Mode 【官方】
 
@@ -258,16 +282,24 @@ Neurons/次 = 1000×in_per_M/1e6 + 80×out_per_M/1e6；每次 $ = Neurons × $0.
 * ⇒ 设计含义：**必须有"schema 不合法 ⇒ deferred"的路径**（仓库里已有
   `Verdict::Deferred(SchemaInvalid)` + 10 分钟 TTL，正好接上），
   并且要把「便宜模型 + 提示词约束 JSON + 本地严格解析」作为**不用 JSON Mode 的备选**。
+* ⚠️ 两个限定（独立评审指出）：
+  1. 「便宜又支持 JSON 的只有 8B」**仅限"有公布定价的"模型** —— 名单里的
+     `@hf/nousresearch/hermes-2-pro-mistral-7b` 与 `@hf/thebloke/deepseek-coder-6.7b-instruct-awq`
+     在当前 pricing 表里**查不到价**（标未验证）。
+  2. **JSON Mode 不是唯一路径**：走"提示词约束 JSON"时，同族
+     `llama-3.1-8b-instruct-fp8-fast` 只要 **6.91 neurons**（是 JSON 版 8B 的 1/4.6）。
+     ⇒ P2 评测应**同时评两条路**（JSON Mode vs 提示词约束），
+     否则会变成"要么贵 4.6 倍、要么换个陌生模型"的伪二选一。
 
 ### 8.3 数据与隐私 【官方】
 
 来源：[Workers AI Data usage](https://developers.cloudflare.com/workers-ai/platform/data-usage/)（Last updated 2026-04-21）
 
-原文关键句（逐条）：
+原文关键句（逐条；⚠️ 下面前两句是**要点转述**，逐字原文见上方链接——独立评审指出原稿把转述标成了「原文」）：
 
-* **不训练**：Cloudflare does not use your Customer Content to train any AI models made available
-  on Workers AI or improve any Cloudflare or third-party services, and would not do so unless
-  it received your explicit consent.
+* **不训练**（官方分 (1) 训练模型 / (2) 改进服务 两条）：Cloudflare does not use your Customer Content
+  to (1) train any AI models made available on Workers AI or (2) improve any Cloudflare or third-party
+  services, and would not do so unless **we** received your explicit consent.
 * **不跨客户**：Cloudflare does not make your Customer Content available to any other Cloudflare customer.
 * 内容归你所有；**仅当你同时使用 R2/KV/DO/Vectorize 等存储**时，内容才可能被存储。
 
@@ -295,6 +327,16 @@ Neurons/次 = 1000×in_per_M/1e6 + 80×out_per_M/1e6；每次 $ = Neurons × $0.
 AI Gateway 的正确用途是**观测 / 限速 / 多供应商 fallback / 统一计费**，
 以及"完全相同的请求"这一层的顺带缓存。
 
+### 8.4b 速率限制（官方 Limits 页，Lead 自查）
+
+来源：[Workers AI Limits](https://developers.cloudflare.com/workers-ai/platform/limits/)（2026-09-17）
+
+* **Text Generation：300 请求/分钟**（除非该模型要求 Workers Paid）。
+* 要求付费的模型：**标准计费 20 RPM / 预付费 AI Gateway credits 50 RPM**。
+* 超出任何限额后「further operations will fail with an error」⇒ **既是天然熔断，也是全站降级**
+  （Worker 必须把它当明确失败：defer + 上报，不能当成"模型说不是广告"）。
+* 对我们的规模：默认 200 次/天/台 ⇒ 单机远低于 300 RPM，**瓶颈是免费 Neuron 额度**（§8.1）。
+
 ### 8.5 仍待核实
 
 * Workers / KV / D1 / Durable Objects 的免费额度与 CPU 时间上限（本方案用 KV，量很小）。
@@ -314,7 +356,7 @@ AI Gateway 的正确用途是**观测 / 限速 / 多供应商 fallback / 统一�
 | 判决层搬到 CF Worker | **是，收益最大** | ① App 不再持模型 key ② **全局共享缓存**（热门域名全 user 一次）③ 提示词/模型**服务端可迭代**（今天改一句要升 `QUESTIONS_REVISION` ⇒ 整库作废 + 发版）④ AI Gateway 给观测/限速/fallback |
 | 域名清洗 | **是，但两层都做** | 单放 CF ⇒ 每次多一跳；单放本地 ⇒ 共享键分裂。规范与夹具只有一份 |
 | 模型换 Workers AI | **先评测** | JSON Mode 只有短名单且**不保证 schema**；开放模型在"广告意图"上的校准未知。仓库已有离线评测夹具 ⇒ 过门禁才切 |
-| 成本 | **现在这一档基本免费** | 便宜 8B 模型免费额度 ≈316 次/天 > App 默认 200 次/天/台；但**账号级**共享，多机要算总账 |
+| 成本 | ⚠️ **只能说"单台机器这一档基本免费"，不能说"基本免费"** | 官方额度是**账号级** 10,000 Neurons/天；按默认 200 次/天/台 + JSON 可用的 8B（31.62 neurons/次）⇒ **第 2 台就超**（§8.1 算式）。可支撑台数 ≈ `316 / N`（N=每台每天次数÷200）。**共享缓存能省多少 = 未测（P0）** |
 | 隐私 | **条款上更好，但责任转移** | CF 明文承诺**不训练、不跨客户**；同时"你用了 KV"意味着**你要负责内容** ⇒ 只存 HMAC 键 |
 
 **什么时候不该做**：如果目标是"零运营负担"，那么自建 Worker = 多一个要维护、
@@ -325,6 +367,60 @@ AI Gateway 的正确用途是**观测 / 限速 / 多供应商 fallback / 统一�
 
 **最小可行版本（如果只做一件事）**：先做 **P0 + P1 的"代理模式"**
 （Worker 只做清洗 + 共享 KV 缓存 + 代理到**现有 Jev**），**先不换模型**。
-这一步就能拿到 ①无 key ②全局命中率 ③服务端迭代 ④可观测，
+这一步就能拿到 ①**默认路径**无 key（fallback 仍要 key）②全局命中率 ③服务端迭代 ④可观测，
 而把"换模型"这个高风险决定留到评测之后。
+
+### 9.1 独立评审的校准（**本稿因此被下调**）
+
+`docs/verification/INTENT-ON-CF-REVIEW.md` 对我这份方案做了对抗性评审，结论是
+**方向正确但整体偏乐观**，并给出三条必须收紧的地方（我已按它改了 §0/§8.1/§8.2/§9）：
+
+| 编号 | 评审指出的问题 | 我的处理 |
+| --- | --- | --- |
+| S1 | §9「成本基本免费」与 §8.1 自己的「账号级」警告矛盾（第 2 台就超） | §9 成本行改成条件句 `316/N`；§8.1 补了台数算式 |
+| S2 | 「客户端不再持 key」**不成立** —— 保留自选网关 fallback ⇒ App 仍要处理 key | §0 明确改成「**默认路径**不再需要用户 key；fallback 仍保留 key 处理」 |
+| S3 | §1 的 fail-open 代码引用**是错的**（`:356-358` 其实是 cache lookup） | 已改引 `engine.rs:11` + `:331/:389/:405/:435` + `:442` |
+
+评审还纠正了 4 处代码引用（`cache.rs:26→:25`；网关预设不在 `gateway.rs` 而在
+`types.ts:531`/`xt-core/model.rs:740-763`；`per_day` 默认在 `engine.rs:78`；TTL 精确区间 `:32-35`），
+以及 2 处引文/清单错误（付费模型清单漏 `glm-5.3-flash`、误写 `kimi-k2.7`；pricing 页没有"$5/月"）。
+**这些都已在上面的章节里修正。**
+
+评审的**一句话版**（我认同）：**先做 P0，P1 立项以「P0 测出的新域名分布 + p95 延迟 +
+一个可验证的吊销机制」为前提；在 P0 出数之前，保持现状（App 直连 + 本地缓存）是更稳的默认。**
+
+---
+
+## 10. 反方论证与漏掉的风险（来自独立评审，摘要）
+
+完整版见 `docs/verification/INTENT-ON-CF-REVIEW.md`。这里只留最该记住的：
+
+**反方（为什么"不搬"可能是对的）**
+
+1. **新增一个线上服务的真实代价**：既有 `infra/incident-collector` 已经 **10 个文件 / 2048 行**
+   （Worker + R2 + 隐私文档 + 加盐哈希限流 + 扫描 + 测试 + 部署/冒烟/校验脚本）。
+   判决 Worker 只会更大，而且**因为要保留自选网关 fallback，"无 key"只对默认路径成立** ——
+   复杂度是**新增**一套而不是**替换**一套。
+2. **爆炸半径**：单机缓存错了只影响一台；共享缓存错了影响所有用户。
+3. **隐私是转移而不是消失**：HMAC 只挡住"事后枚举"，**挡不住运营方在流量上做模式分析**
+   （某段时间哪些键被问过、频率多高）。
+4. **可用性**：CF 路径挂掉时，fallback 必须是"完全不需要运营方在场"的本地路径。
+5. **自由**：默认路径侵蚀用户自选网关的自由（默认值比选项更有力量）。
+
+**评审补的漏项（本稿原本没写）**
+
+| 风险 | 影响 | 缓解 |
+| --- | --- | --- |
+| Workers AI 速率限制（官方：Text Generation 300 RPM；付费模型 20/50 RPM） | 高峰被限流 → 全部 defer | 本地缓存 + 预算 + 退避；把它当明确失败而非"不是广告" |
+| 超额后**直接报错** | 全站降级（不是慢慢变慢） | 同上；并把 Neuron 用量做成可观测告警 |
+| Worker 冷启动 / 首字节延迟 | 首次判决变慢 | 预热 + 本地缓存兜底；P1 要量 p95 |
+| KV 最终一致性 | 刚写的判决可能读不到（重复花钱） | 进程内单飞 + 接受偶发重复；**官方一致性口径未核实** |
+| 域名 = 浏览画像 | 集中到一处更敏感 | 只存 HMAC、不落 IP、不开请求日志、显式同意 |
+| 被刷导致账单 | 直接花钱 | App token + 服务端限速/配额 + 额度告警 |
+| 提示注入（域名里塞指令） | 模型判错 | 域名**只作为数据**、不拼进指令；严格 schema + 本地校验 |
+| `xraytun.top` 被墙 | 判决不可用 | 本地缓存 + fail-open；不把拦截能力绑在这条路上 |
+| 集中判决的合规含义 | 成为"数据处理者" | 写清隐私政策；只存必要字段；可关可退 |
+
+**评审结论（我接受）**：这份方案**方向对、顺序对**（先 P0、先评测、本地兜底不上移），
+但**不能拿"免费/共享缓存收益最大"当立项理由** —— 那两件事都还没量。
 
