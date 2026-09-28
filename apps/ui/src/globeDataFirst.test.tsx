@@ -237,3 +237,88 @@ describe("0.9.1 · 「重新定位」是强制刷新；进页面走缓存", () =
     await waitFor(() => expect(mocks.globeData).toHaveBeenCalledWith(true));
   });
 });
+
+// ---------------------------------------------------------------------------
+// 0.9.1 · 缓存命中率优化带来的三种「非新鲜」情形必须分开说
+// ---------------------------------------------------------------------------
+
+describe("0.9.1 · 命中率优化后的文案（stale / node-last / ipv6-prefix）", () => {
+  it("stale（探测失败/刚失败过）⇒ 说「暂时无法确认公网 IP 是否变化」，**不许**说成「未变化」", () => {
+    const text = locationFreshnessText(
+      {
+        from_cache: true,
+        fetched_unix: 1_000_000,
+        ip_changed: false,
+        stale: true,
+        probe_cached: false,
+        key_kind: "ip",
+        age_s: 300,
+      },
+      1_000_000,
+    );
+    expect(text).toContain("暂时无法确认公网 IP 是否变化");
+    expect(text).not.toContain("公网 IP 未变化");
+  });
+
+  it("node-last（节点 IP 变了、用的是该节点上次位置）⇒ 必须点名", () => {
+    const text = locationFreshnessText(
+      {
+        from_cache: true,
+        fetched_unix: 1_000_000,
+        ip_changed: true,
+        stale: false,
+        key_kind: "node-last",
+        age_s: 7200,
+      },
+      1_000_000,
+    );
+    expect(text).toContain("该节点的上次已知位置");
+    expect(text).toContain("2 小时前");
+  });
+
+  it("ipv6-prefix ⇒ 说清粒度是「网段」，不是那一台主机", () => {
+    const text = locationFreshnessText(
+      {
+        from_cache: true,
+        fetched_unix: 1_000_000,
+        ip_changed: false,
+        key_kind: "ipv6-prefix",
+        age_s: 30,
+      },
+      1_000_000,
+    );
+    expect(text).toContain("按 IPv6 前缀匹配");
+  });
+
+  it("age_s 优先于自算：后端给了年龄就不再看 fetched_unix", () => {
+    const text = locationFreshnessText(
+      { from_cache: true, fetched_unix: 0, ip_changed: false, age_s: 3 * 86400 },
+      0,
+    );
+    expect(text).toContain("3 天前");
+  });
+
+  it("缺 stale / key_kind（旧后端）⇒ 按旧口径，不编造告警", () => {
+    const text = locationFreshnessText(
+      { from_cache: true, fetched_unix: 1_000_000, ip_changed: false },
+      1_000_000,
+    );
+    expect(text).toContain("公网 IP 未变化");
+    expect(text).not.toContain("暂时无法确认");
+  });
+
+  it("probe_cached 不写进可见文案，但放进 title（排障可见「本次零网络请求」）", async () => {
+    await renderGlobe(
+      globeData(true, {
+        from_cache: true,
+        fetched_unix: 1_790_000_000,
+        ip_changed: false,
+        probe_cached: true,
+        age_s: 60,
+      }),
+    );
+    const line = screen.getByTestId("location-freshness");
+    expect(line.textContent).not.toContain("探测");
+    expect(line.getAttribute("title")).toContain("没有联网探测");
+  });
+});

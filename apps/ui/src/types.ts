@@ -432,6 +432,21 @@ export interface IntentSummary {
   gateway_calls: number;
   gateway_errors: number;
   cache_hits: number;
+  /**
+   * 未命中缓存的次数（0.9.1 新增。**可缺省**：旧后端没有这个字段）。
+   *
+   * 为什么需要它：只有 `cache_hits` 时**算不出命中率**（分母都不知道），
+   * 于是「缓存命中率是多少」只能靠嘴说。加上它之后
+   * `命中率 = (cache_hits + cache_inherited) / (hits + inherited + misses)`。
+   */
+  cache_misses?: number;
+  /**
+   * 通过**父域继承**命中的次数（0.9.1 新增，可缺省）。
+   *
+   * 单独计数而不是并进 `cache_hits`：继承来的判决是「同一站点另一个子域」的结果，
+   * 与精确命中不是一回事，混在一起会让"缓存有多准"变得不可读。
+   */
+  cache_inherited?: number;
   /** 缓存里判为"拦"的域名数。 */
   blocked: number;
   /** 当前状态的一句话说明（未开启 / 缺密钥 / 待生效…）。 */
@@ -1190,6 +1205,23 @@ export interface GlobeCacheInfo {
   fetched_unix: number | null;
   /** 本次探测到的公网 IP 与缓存不同 ⇒ 触发了重新查询（首查也算 true）。 */
   ip_changed: boolean;
+  /**
+   * true = 用了缓存，但**无法确认**公网 IP 是否变化
+   * （IP 探测失败，或上一次完整查询刚失败、还在冷却里）。
+   *
+   * 这是 0.9.1 缓存命中率优化的核心新增：宁可给一条**标注过**的旧数据，
+   * 也不空手而归 —— 但必须让用户看见「这条不确定还准不准」。
+   *
+   * 可缺省：旧后端 / 预览快照可能没有 ⇒ 缺省时**不声称**「暂时无法确认」，
+   * 按旧口径（`公网 IP 未变化`）渲染，不编造也没有的告警。
+   */
+  stale?: boolean;
+  /** true = 本次连 IP 都没探测（短时间内已确认过，直接复用）。 */
+  probe_cached?: boolean;
+  /** 命中依据：`ip`（IPv4）/ `ipv6-prefix`（IPv6 前 64 位）/ `node-last`（出口节点的上次位置）。 */
+  key_kind?: string;
+  /** 命中条目的年龄（秒），后端算好；缺省时界面回退到用 `fetched_unix` 自算。 */
+  age_s?: number | null;
 }
 
 export interface GlobeData {

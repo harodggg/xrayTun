@@ -301,6 +301,43 @@ export function formatMarkerHits(markers: Array<{ marker: string; count: number 
 }
 
 /**
+ * 判决缓存的命中率（0.9.1：优化命中率之后，**必须先让它可测量**）。
+ *
+ * # 为什么需要这一行
+ *
+ * 缓存的意义只有一个：**少问几次大模型**（每次都是一次真实的调用与花费）。
+ * 但旧界面只显示 `cache_hits`，没有分母 —— 「命中率是多少」只能靠嘴说。
+ * 这里把三个数摆出来并算出百分比，用的完全是本地计数（本仓库没有遥测）。
+ *
+ * # 三种如实处理
+ *
+ * * **缺 `cache_misses`**（旧后端）⇒ 返回 `null`，整行不渲染：没有分母就不编造百分比。
+ * * **一次查询都没有**（hits+inherited+misses = 0）⇒ 说「还没有可统计的判定」，不写 0%。
+ * * **继承命中单独列**：继承是「同一站点另一个子域」的结果，与精确命中不是一回事，
+ *   混在一起会让「缓存有多准」不可读。
+ */
+export function cacheHitRateText(s: {
+  cache_hits: number;
+  cache_inherited?: number;
+  cache_misses?: number;
+}): string | null {
+  const misses = s.cache_misses;
+  if (misses == null) return null;
+  const hits = Math.max(0, s.cache_hits);
+  const inherited = Math.max(0, s.cache_inherited ?? 0);
+  const total = hits + inherited + misses;
+  if (total === 0) return "缓存命中率：还没有可统计的判定";
+  const hitLike = hits + inherited;
+  const pct = Math.round((hitLike / total) * 100);
+  // 为 0 的明细不列（「精确 0」是噪音；用户要读的是"省了多少次"）。
+  const parts: string[] = [];
+  if (hits > 0) parts.push(`精确 ${hits}`);
+  if (inherited > 0) parts.push(`继承父域 ${inherited}`);
+  parts.push(`未命中 ${misses}`);
+  return `缓存命中率 ${pct}%：${total} 次里 ${hitLike} 次没问大模型（${parts.join(" · ")}）`;
+}
+
+/**
  * 后端读不到时，词表编辑框与说明的**展示兜底**。
  *
  * 真值来自 `observe.rs::effective_markers`（`report.markers`）；这个常量只在
@@ -673,6 +710,14 @@ export default function Intent() {
               : summaryUnknown}
           </strong>
         </div>
+        {/* 命中率：只在后端给了 miss 计数时渲染 —— 没有分母就不编造百分比
+            （旧后端缺 `cache_misses` 时 `cacheHitRateText` 返回 null）。 */}
+        {summary && cacheHitRateText(summary) && (
+          <div className="kv">
+            <span>判决缓存</span>
+            <strong>{cacheHitRateText(summary)}</strong>
+          </div>
+        )}
         {summary?.note && <p className="note">{summary.note}</p>}
 
         {summary?.rules_pending_apply && (

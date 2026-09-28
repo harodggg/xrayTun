@@ -91,7 +91,13 @@ function angularDistance(
 /** 相对时间（「3 天前」）。纯函数，便于单测；`nowSec` 由调用方给，避免测试依赖真实时钟。 */
 export function relativeAge(unixSec: number, nowSec: number): string | null {
   if (!Number.isFinite(unixSec)) return null;
-  const d = Math.max(0, Math.floor(nowSec - unixSec));
+  return relativeAgeSeconds(Math.max(0, Math.floor(nowSec - unixSec)));
+}
+
+/** 同上，但入参直接是**年龄（秒）** —— 后端会算好 `age_s`，UI 不必自己减。 */
+export function relativeAgeSeconds(ageS: number): string | null {
+  if (!Number.isFinite(ageS) || ageS < 0) return null;
+  const d = Math.floor(ageS);
   if (d < 60) return "刚刚";
   if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
   if (d < 86400) return `${Math.floor(d / 3600)} 小时前`;
@@ -99,7 +105,7 @@ export function relativeAge(unixSec: number, nowSec: number): string | null {
 }
 
 /**
- * 「这条位置有多新」的如实陈述（0.9.1：定位按公网 IP 缓存）。
+ * 「这条位置有多新」的如实陈述（0.9.1：定位按公网 IP 缓存 + 命中率优化）。
  *
  * # 为什么必须写出来
  *
@@ -107,22 +113,41 @@ export function relativeAge(unixSec: number, nowSec: number): string | null {
  * 不说清楚，用户会把三天前的定位当成刚测的 —— 这正是本项目反复在防的一类假陈述
  * （同族的还有「流量不可用」不许显示 0、域名带 `*` 必须标注配对）。
  *
+ * # 三种必须分开说的「非新鲜」情形
+ *
+ * | 情形 | 文案 |
+ * | --- | --- |
+ * | `stale` | 用了缓存，但**探测失败/刚失败过** ⇒ 「暂时无法确认公网 IP 是否变化」 |
+ * | `key_kind=node-last` | 出口节点 IP 变了，用的是该节点的上次位置 ⇒ 必须点名 |
+ * | `key_kind=ipv6-prefix` | IPv6 按前 64 位命中 ⇒ 位置粒度是**网段**，不是那一台主机 |
+ *
+ * 三者都不能被写成「公网 IP 未变化」——那是把不确定说成了确定。
+ *
  * # 缺字段怎么办
  *
- * `cache` 是 0.9.1 新增的可选字段（旧后端、预览快照可能没有）。缺字段时
- * **整行不渲染**：不编造「来自缓存」，也不编造「刚查过」。
+ * `cache` 与它新增的几个可选字段都可能缺（旧后端、预览快照）。缺 `stale` 时**不声称**
+ * 「暂时无法确认」（没有证据的告警也是假陈述）；缺 `key_kind` 时按普通 IP 命中渲染。
  */
 export function locationFreshnessText(
   cache: GlobeCacheInfo | undefined,
   nowSec: number,
 ): string | null {
   if (!cache) return null;
+  const age =
+    cache.age_s != null
+      ? relativeAgeSeconds(cache.age_s)
+      : cache.fetched_unix === null
+        ? null
+        : relativeAge(cache.fetched_unix, nowSec);
+
   if (cache.from_cache) {
-    const age =
-      cache.fetched_unix === null ? null : relativeAge(cache.fetched_unix, nowSec);
-    return age
-      ? `位置来自缓存（${age}查询），公网 IP 未变化`
-      : "位置来自缓存，公网 IP 未变化";
+    const base = age ? `位置来自缓存（${age}查询）` : "位置来自缓存";
+    if (cache.stale === true) return `${base}；暂时无法确认公网 IP 是否变化`;
+    if (cache.key_kind === "node-last") {
+      return `${base}；该节点的上次已知位置（IP 已变化）`;
+    }
+    if (cache.key_kind === "ipv6-prefix") return `${base}，按 IPv6 前缀匹配`;
+    return `${base}，公网 IP 未变化`;
   }
   return cache.ip_changed ? "已按新的公网 IP 重新查询" : "已重新查询（手动触发）";
 }
@@ -130,9 +155,20 @@ export function locationFreshnessText(
 function LocationFreshness({ cache }: { cache: GlobeCacheInfo | undefined }) {
   const text = locationFreshnessText(cache, Math.floor(Date.now() / 1000));
   if (!text) return null;
+  // `probe_cached` 不进可见文案（用户不需要知道「这次连探测都省了」），
+  // 但放在 title 里 —— 排障时能看到「本次零网络请求」。
+  const title =
+    cache?.probe_cached === true
+      ? "本次没有联网探测（短时间内已确认过公网 IP）"
+      : undefined;
   // role=status：点「重新定位」后这一行会变，读屏用户需要听到变化。
   return (
-    <p className="page__desc" role="status" data-testid="location-freshness">
+    <p
+      className="page__desc"
+      role="status"
+      data-testid="location-freshness"
+      title={title}
+    >
       {text}
     </p>
   );

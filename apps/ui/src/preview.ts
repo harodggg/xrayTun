@@ -116,6 +116,8 @@ export function installPreviewBridge(): () => void {
         case "globe_data": {
           // 「重新定位」按钮会带 force=true —— 预览里也照它切换缓存状态。
           const force = Boolean((_args as { force?: boolean } | undefined)?.force);
+          // `?location=stale|node-last|ipv6`：把三条「不确定/降级」文案也做成可截图的。
+          const locationMode = previewParam("location") ?? "";
           // 用与 Rust 侧一致的形状；坐标取自实测（本机=大理，节点=香港）
           return {
             route: {
@@ -140,13 +142,24 @@ export function installPreviewBridge(): () => void {
               trusted: true,
               reason: null,
             },
-            // 0.9.1 缓存：预览里按 `globe_data(force)` 的入参给出两种状态，
-            // 这样「来自缓存」与「刚重新定位」两条文案都能在预览里被核对到
-            // （与 task-179 让降级分支可截图是同一套理由）。
+            // 0.9.1 缓存：预览里按 `globe_data(force)` 的入参给状态，并用
+            // `?preview=1&location=stale|node-last|ipv6` 把三条**降级/不确定**文案也做出来 ——
+            // 「暂时无法确认公网 IP 是否变化」「该节点的上次已知位置」「按 IPv6 前缀匹配」
+            // 这三句只有在这里才看得见，否则它们永远没人核对过
+            // （与 task-179 让「未验证/未归属」可截图是同一套理由）。
             cache: {
               from_cache: !force,
               fetched_unix: force ? null : 1_790_000_000,
               ip_changed: force,
+              stale: !force && locationMode === "stale",
+              probe_cached: !force,
+              key_kind:
+                locationMode === "node-last"
+                  ? "node-last"
+                  : locationMode === "ipv6"
+                    ? "ipv6-prefix"
+                    : "ip",
+              age_s: force ? null : 3 * 86400,
             },
           };
         }
