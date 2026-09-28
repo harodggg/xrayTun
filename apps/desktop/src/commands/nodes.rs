@@ -471,26 +471,27 @@ mod tests {
             (state, dir)
         }
 
-        /// **切换失败、隧道没起来 ⇒ 意图作废**（四个出口各验一遍）。
+        /// **切换失败、隧道没起来 ⇒ 意图作废。**
+        ///
+        /// 删掉回落之后只剩**一个**出口了：`NodeSwitchFailed`。旧实现有四个
+        /// （另外三个是"回退也失败"），随回落逻辑一起删掉 —— 所以这里也从一个
+        /// 四元数组收敛成一次直接调用（`FailureExit::ALL` 同步 7 → 4）。
         #[test]
         fn failed_switch_drops_intent_on_disk() {
-            // 删掉回落之后只剩一个出口：「切到该节点失败」。旧实现的三个
-            // "回退也失败"出口随回落逻辑一起删掉了（`FailureExit::ALL` 里已无它们）。
-            for exit in [FailureExit::NodeSwitchFailed] {
-                let (state, dir) = connected_state("switch-fail");
-                settle_switch(&state, SwitchEnd::NoTunnel(exit));
-                // **从盘上读回来**：这就是「重启后」看到的东西。
-                let after = xt_core::store::Store::new(&dir).load_settings();
-                assert!(
-                    !after.was_connected,
-                    "切换失败（{exit:?}）后盘上必须是 false —— 否则下次启动会用这个坏节点自动重连",
-                );
-                assert!(
-                    !should_auto_reconnect(after.was_connected, true, &ProxyMode::Tun, false),
-                    "切换失败后不该自动重连",
-                );
-                let _ = std::fs::remove_dir_all(&dir);
-            }
+            let exit = FailureExit::NodeSwitchFailed;
+            let (state, dir) = connected_state("switch-fail");
+            settle_switch(&state, SwitchEnd::NoTunnel(exit));
+            // **从盘上读回来**：这就是「重启后」看到的东西。
+            let after = xt_core::store::Store::new(&dir).load_settings();
+            assert!(
+                !after.was_connected,
+                "切换失败（{exit:?}）后盘上必须是 false —— 否则下次启动会用这个坏节点自动重连",
+            );
+            assert!(
+                !should_auto_reconnect(after.was_connected, true, &ProxyMode::Tun, false),
+                "切换失败后不该自动重连",
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         /// **独立反例：切换成功 ⇒ 意图必须原样留着。**
@@ -498,20 +499,19 @@ mod tests {
         /// 这条不许被上面那条吃掉：它证明「我们不是见切换就作废」。
         #[test]
         fn successful_switch_keeps_intent_on_disk() {
-            for end in [SwitchEnd::TargetUp] {
-                let (state, dir) = connected_state("switch-ok");
-                settle_switch(&state, end);
-                let after = xt_core::store::Store::new(&dir).load_settings();
-                assert!(
-                    after.was_connected,
-                    "{end:?} 不是失败 —— 那正是用户想要的状态，意图不许被写掉",
-                );
-                assert!(
-                    should_auto_reconnect(after.was_connected, true, &ProxyMode::Tun, false),
-                    "{end:?} 之后重启仍应自动连回来",
-                );
-                let _ = std::fs::remove_dir_all(&dir);
-            }
+            let end = SwitchEnd::TargetUp;
+            let (state, dir) = connected_state("switch-ok");
+            settle_switch(&state, end);
+            let after = xt_core::store::Store::new(&dir).load_settings();
+            assert!(
+                after.was_connected,
+                "{end:?} 不是失败 —— 那正是用户想要的状态，意图不许被写掉",
+            );
+            assert!(
+                should_auto_reconnect(after.was_connected, true, &ProxyMode::Tun, false),
+                "{end:?} 之后重启仍应自动连回来",
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         /// 拆隧道就失败 = 状态未知 ⇒ **不动意图**（理由见 `switch_end_keeps_intent`）。
