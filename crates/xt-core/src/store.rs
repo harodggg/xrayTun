@@ -27,7 +27,108 @@ use crate::util::now_unix;
 /// **版本不符一律当作空缓存**：格式变了之后拿旧字段硬解析，宁可重查一次，
 /// 也不许把「读不懂」当成「没有这条」。文件里完全没有 `version` 字段（= 0）
 /// 同样算不符。
-pub const LOCATION_CACHE_VERSION: u32 = 1;
+///
+/// v2（0.9.1-C）：新增 `last_probe` / `last_failure` / `stats`，并把键规范化为
+/// 「IPv4 原样、IPv6 取 /64 前缀」（v1 的完整 IPv6 键在 v2 里是另一个粒度，
+/// 所以整份当空缓存重查，不混着用）。
+pub const LOCATION_CACHE_VERSION: u32 = 2;
+
+/// 探测结果的**短 TTL**（秒）：这段时间内反复进「位置」页**连 IP 探测都不发**。
+///
+/// 120s 的取舍：它是「同一个公网 IP」的时间尺度 —— 换网/重拨远慢于此，
+/// 而用户反复进出页面的间隔远快于此。过期后只多发两个**只取 IP**的轻量请求。
+pub const LOCATION_PROBE_TTL_S: u64 = 120;
+
+/// 一次完整坐标查询**全部失败**后的冷却（秒）：这段时间内不再打网络。
+///
+/// 目的很具体：离线时用户每进一次「位置」页都要干等四个源的超时（最坏 8s），
+/// 而离线状态在 60 秒内几乎不会变。
+pub const LOCATION_FAIL_COOLDOWN_S: u64 = 60;
+
+/// 位置缓存条目上限：超出按 `fetched_unix` **最旧**淘汰（近似 LRU）。
+///
+/// `last_probe` / `last_failure` / `stats` **不计入**这个上限 —— 它们是「元数据」，
+/// 各只有一份，淘汰它们等于把刚学到的时效信息扔掉。
+pub const LOCATION_CACHE_MAX_ENTRIES: usize = 24;
+
+/// 缓存键的粒度（要如实告诉界面，见 `GlobeCacheInfo::key_kind`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationKeyKind {
+    /// 一个具体 IP（IPv4，或归一化后的 IPv4-mapped IPv6）。
+    Ip,
+    /// 一个 IPv6 的 **/64 前缀**：隐私地址/UIA 轮换后位置不变，仍能命中。
+    Ipv6Prefix,
+}
+
+impl LocationKeyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ip => "ip",
+            Self::Ipv6Prefix => "ipv6-prefix",
+        }
+    }
+}
+
+/// 把 IP 规范化成缓存键（0.9.1-C / L5）。
+///
+/// * IPv4 原样（`1.2.3.4`）；
+/// * IPv4-mapped IPv6（`::ffff:1.2.3.4`）归一成 IPv4 —— 同一个地址不该有两种键；
+/// * 其余 IPv6 取**前 64 位**写成 `2001:db8:1:2::/64`：隐私扩展（RFC 4941）会让
+///   接口标识每天换一次，但 /64 前缀不变，位置也就没变。
+///
+/// 解析不出来（不是 IP）⇒ `None`，由调用方决定怎么兜底。
+pub fn location_key(ip: &str) -> Option<(String, LocationKeyKind)> {
+    let addr: std::net::IpAddr = ip.trim().parse().ok()?;
+    match addr {
+        std::net::IpAddr::V4(v4) => Some((v4.to_string(), LocationKeyKind::Ip)),
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return Some((v4.to_string(), LocationKeyKind::Ip));
+            }
+            let s = v6.segments();
+            let net = std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+            Some((format!("{net}/64"), LocationKeyKind::Ipv6Prefix))
+        }
+    }
+}
+
+/// 上一次公网 IP 探测的结果（0.9.1-C / L2）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationProbe {
+    pub ip: String,
+    pub checked_unix: u64,
+}
+
+/// 上一次**完全失败**的坐标查询（0.9.1-C / L4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationFailure {
+    /// 失败时针对的键/IP（未知时为空串）。
+    #[serde(default)]
+    pub ip: String,
+    pub failed_unix: u64,
+    pub reason: String,
+}
+
+/// 命中率计数（0.9.1-C / L8）。**只在本机文件里**，不外传。
+///
+/// 本仓库没有遥测，这是用户唯一能自己算命中率的地方：
+/// 打开「位置」页 5 次后看 `hits / calls`，就是这台的缓存命中率。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocationStats {
+    /// `globe_data` 被调用的次数（含预热）。
+    pub calls: u64,
+    /// 直接用缓存返回、**没发坐标查询**的次数。
+    pub hits: u64,
+    /// 其中「无法确认公网 IP 是否变化」的次数（探测失败 / 失败冷却）。
+    pub stale_hits: u64,
+    /// 真的发了四源坐标查询的次数（**本机位置**那条；出口节点不计）。
+    pub lookups: u64,
+    /// 真的发了公网 IP 探测的次数。
+    pub probe_calls: u64,
+    /// 因为短 TTL 记忆而**省掉**探测的次数。
+    pub probe_cached: u64,
+    pub last_call_unix: u64,
+}
 
 /// 一条按**公网 IP** 缓存的位置。
 ///
@@ -80,28 +181,65 @@ pub struct LocationCache {
     pub version: u32,
     #[serde(default)]
     pub entries: BTreeMap<String, CachedLocation>,
+    /// 上一次公网 IP 探测（0.9.1-C / L2 的短 TTL 记忆）。
+    #[serde(default)]
+    pub last_probe: Option<LocationProbe>,
+    /// 上一次完全失败的坐标查询（0.9.1-C / L4 的冷却）。
+    #[serde(default)]
+    pub last_failure: Option<LocationFailure>,
+    /// 命中率计数（0.9.1-C / L8）；只在本机文件里，不外传。
+    #[serde(default)]
+    pub stats: LocationStats,
 }
 
 impl Default for LocationCache {
     fn default() -> Self {
-        Self { version: LOCATION_CACHE_VERSION, entries: BTreeMap::new() }
+        Self {
+            version: LOCATION_CACHE_VERSION,
+            entries: BTreeMap::new(),
+            last_probe: None,
+            last_failure: None,
+            stats: LocationStats::default(),
+        }
     }
 }
 
 impl LocationCache {
-    /// 取某个 IP 的缓存条目。
-    pub fn get(&self, ip: &str) -> Option<&CachedLocation> {
-        self.entries.get(ip)
+    /// 取某个键的缓存条目。
+    pub fn get(&self, key: &str) -> Option<&CachedLocation> {
+        self.entries.get(key)
     }
 
-    /// 这个 IP 是否已经有缓存（「IP 没变」的判据就是它）。
-    pub fn has(&self, ip: &str) -> bool {
-        self.entries.contains_key(ip)
+    /// 这个键是否已经有缓存（「IP 没变」的判据就是它）。
+    pub fn has(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
     }
 
-    /// 写一条（同一个 IP 覆盖旧记录）。
-    pub fn put(&mut self, ip: &str, entry: CachedLocation) {
-        self.entries.insert(ip.to_string(), entry);
+    /// 写一条（同一个键覆盖旧记录）。
+    pub fn put(&mut self, key: &str, entry: CachedLocation) {
+        self.entries.insert(key.to_string(), entry);
+    }
+
+    /// 超出上限就按 `fetched_unix` **最旧**淘汰，返回淘汰条数。
+    ///
+    /// `fetched_unix` 是「这条记录多新」的唯一依据（也是界面上 `age_s` 的依据），
+    /// 所以它同时充当 LRU 的时间戳 —— 不需要另存一个 last_used 字段。
+    /// 并列时 `min_by_key` 取 BTreeMap 迭代序的第一个键，结果确定。
+    pub fn evict_oldest_beyond(&mut self, max: usize) -> usize {
+        let mut evicted = 0;
+        while self.entries.len() > max {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.fetched_unix)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+            evicted += 1;
+        }
+        evicted
     }
 }
 
@@ -1087,7 +1225,7 @@ mod tests {
         store.ensure_dirs().unwrap();
         std::fs::write(
             store.location_cache_path(),
-            r#"{"version":1,"entries":{"1.2.3.4":{"country":"中国","city":"大理"}}}"#,
+            r#"{"version":2,"entries":{"1.2.3.4":{"country":"中国","city":"大理"}}}"#,
         )
         .unwrap();
 
@@ -1099,6 +1237,109 @@ mod tests {
         assert!(!entry.consistent);
         assert_eq!(entry.fetched_unix, 0);
         assert_eq!(entry.bound_interface, None);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.9.1-C：键规范化 / 上限 / 元数据（last_probe、last_failure、stats）
+    // -----------------------------------------------------------------------
+
+    /// IPv6 按 **/64 前缀**聚合：同一前缀下轮换接口标识（隐私扩展）仍命中同一个键。
+    #[test]
+    fn location_key_uses_the_64_bit_prefix_for_ipv6() {
+        let (a, kind_a) = location_key("2001:db8:1:2:aaaa:bbbb:cccc:dddd").unwrap();
+        let (b, kind_b) = location_key("2001:db8:1:2:1111:2222:3333:4444").unwrap();
+        assert_eq!(a, b, "同一个 /64 前缀必须映射到同一个键");
+        assert_eq!(a, "2001:db8:1:2::/64");
+        assert_eq!(kind_a, LocationKeyKind::Ipv6Prefix);
+        assert_eq!(kind_b, LocationKeyKind::Ipv6Prefix);
+
+        // 不同 /64 ⇒ 不同键（别把整个 /48 都算成一处）
+        assert_ne!(location_key("2001:db8:1:3::1").unwrap().0, a);
+    }
+
+    /// IPv4 原样；**IPv4-mapped IPv6 归一成 v4**（同一个地址不该有两种键）。
+    #[test]
+    fn location_key_normalizes_v4_and_mapped_v6() {
+        assert_eq!(
+            location_key("1.2.3.4"),
+            Some(("1.2.3.4".to_string(), LocationKeyKind::Ip))
+        );
+        assert_eq!(
+            location_key("::ffff:1.2.3.4"),
+            Some(("1.2.3.4".to_string(), LocationKeyKind::Ip)),
+            "mapped v6 必须落到同一个键上"
+        );
+        assert_eq!(location_key("not-an-ip"), None);
+    }
+
+    /// 超过上限按 `fetched_unix` **最旧**淘汰；元数据（last_probe/stats）不受影响。
+    #[test]
+    fn location_cache_evicts_the_oldest_beyond_the_limit() {
+        let mut cache = LocationCache::default();
+        for i in 0..30u64 {
+            cache.put(&format!("10.0.0.{i}"), cached("中国", "大理", 25.6, 100.2, i));
+        }
+        assert_eq!(cache.entries.len(), 30, "put 本身不淘汰（淘汰是显式一步）");
+
+        let evicted = cache.evict_oldest_beyond(24);
+        assert_eq!(evicted, 6);
+        assert_eq!(cache.entries.len(), 24);
+        assert!(!cache.has("10.0.0.0"), "最旧的先走");
+        assert!(cache.has("10.0.0.29"), "最新的必须还在");
+
+        cache.last_probe = Some(LocationProbe { ip: "1.2.3.4".into(), checked_unix: 1 });
+        cache.stats.calls = 7;
+        cache.evict_oldest_beyond(1);
+        assert!(cache.last_probe.is_some(), "元数据不计入上限");
+        assert_eq!(cache.stats.calls, 7);
+    }
+
+    /// `last_probe` / `last_failure` / `stats` 要**跨进程**留住（否则 TTL 与冷却重启即失效）。
+    #[test]
+    fn location_cache_roundtrips_probe_failure_and_stats() {
+        let store = temp_store("loc-meta");
+        let mut cache = LocationCache::default();
+        cache.put("1.2.3.4", cached("中国", "大理", 25.6, 100.2, 1_790_000_000));
+        cache.last_probe = Some(LocationProbe { ip: "1.2.3.4".into(), checked_unix: 1_790_000_123 });
+        cache.last_failure = Some(LocationFailure {
+            ip: "1.2.3.4".into(),
+            failed_unix: 1_790_000_200,
+            reason: "四个源都没返回".into(),
+        });
+        cache.stats = LocationStats {
+            calls: 9,
+            hits: 6,
+            stale_hits: 2,
+            lookups: 3,
+            probe_calls: 2,
+            probe_cached: 7,
+            last_call_unix: 1_790_000_300,
+        };
+        store.save_location_cache(&cache).unwrap();
+
+        let back = store.load_location_cache();
+        assert_eq!(back, cache, "元数据必须逐字段往返");
+        assert_eq!(back.stats.hits, 6);
+        assert_eq!(back.stats.probe_cached, 7);
+        assert_eq!(back.last_probe.unwrap().checked_unix, 1_790_000_123);
+        assert_eq!(back.last_failure.unwrap().reason, "四个源都没返回");
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
+    /// **v1 文件按版本不符处理**（键粒度变了，不混用）：整份当空缓存。
+    #[test]
+    fn v1_location_cache_is_treated_as_empty() {
+        let store = temp_store("loc-v1");
+        store.ensure_dirs().unwrap();
+        std::fs::write(
+            store.location_cache_path(),
+            r#"{"version":1,"entries":{"2001:db8::1":{"country":"中国","city":"大理"}}}"#,
+        )
+        .unwrap();
+        let cache = store.load_location_cache();
+        assert!(cache.entries.is_empty(), "v1 的键可能是完整 IPv6 ⇒ 整份重查");
+        assert_eq!(cache.version, LOCATION_CACHE_VERSION);
         let _ = std::fs::remove_dir_all(store.root());
     }
 

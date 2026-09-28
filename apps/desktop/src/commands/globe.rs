@@ -37,6 +37,7 @@
 //! （两者都实测返回 JSON，见 task-11 证据）。加新源前请先 `curl` 一次确认是 JSON。
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -45,7 +46,10 @@ use tauri::State;
 use tokio::sync::Mutex;
 
 use xt_core::geo_lookup::{parse_api, parse_who, GeoLocation, CONSISTENT_TOLERANCE_DEG};
-use xt_core::store::{CachedLocation, LocationCache};
+use xt_core::store::{
+    location_key, CachedLocation, LocationCache, LocationFailure, LocationKeyKind, LocationProbe,
+    LocationStats, LOCATION_CACHE_MAX_ENTRIES, LOCATION_FAIL_COOLDOWN_S, LOCATION_PROBE_TTL_S,
+};
 use xt_core::util::now_unix;
 use xt_core::xray::stats::{monotonic_traffic_by_tag, MonotonicCounters, StatEntry};
 
@@ -176,10 +180,11 @@ impl SelfCheck {
 
 /// 一次 `globe_data` 调用**用了缓存还是真查了**（0.9.1，接口冻结）。
 ///
-/// 三个字段各自回答一个用户会问的问题，互不替代：
+/// 字段各自回答一个用户会问的问题，互不替代：
 /// * 「这次是重新加载吗」→ `from_cache`；
-/// * 「这份数据多久了」→ `fetched_unix`；
-/// * 「为什么又查了一次」→ `ip_changed`。
+/// * 「这份数据多久了」→ `fetched_unix` / `age_s`；
+/// * 「为什么又查了一次」→ `ip_changed`；
+/// * 「这份数据可信到什么程度」→ `stale` / `probe_cached` / `key_kind`。
 ///
 /// `from_cache = true` 的**定义**是「本次一个坐标源都没请求」—— 不是「本机位置
 /// 来自缓存」。出口节点位置若被重查，这个字段也必须是 `false`（否则界面会说
@@ -191,7 +196,24 @@ pub struct GlobeCacheInfo {
     /// 缓存条目的抓取时间（Unix 秒）；本次刚查出来时为 None。
     pub fetched_unix: Option<u64>,
     /// 本次探测到的公网 IP 与缓存不同 ⇒ 触发了重新查询（首查也算 true）。
+    ///
+    /// 只在**探测成功**时才有意义：探测失败时这里一律 `false`，由 [`Self::stale`]
+    /// 表达「无法确认」（把「没测到」说成「变了」是在断言没验证过的事）。
     pub ip_changed: bool,
+    /// **无法确认**公网 IP 是否变化（探测失败 / 失败冷却），返回的是上一次的可用结果。
+    ///
+    /// 界面据此写「暂时无法确认公网 IP 是否变化」，而不是假装这是刚验证的读数。
+    pub stale: bool,
+    /// 本次**没有真探测**（短 TTL 记忆命中 ⇒ 连两个 IP-only 源都没发）。
+    pub probe_cached: bool,
+    /// 缓存键的粒度：`"ip"`（IPv4 / 归一化后的 mapped v6）或 `"ipv6-prefix"`（/64）。
+    ///
+    /// IPv6 时界面必须说明「位置粒度是 /64 前缀」—— 那个位置是给一个网段定的，
+    /// 不是某一台设备。第三个取值 `"node-last"` 本轮**没有实现**（见 P2 的理由）。
+    pub key_kind: String,
+    /// 命中条目的年龄（秒）：**后端算好**，UI 不再自己减时钟（两台机器的时钟可能不同）。
+    /// 本次是新查询时为 `None`。
+    pub age_s: Option<u64>,
 }
 
 /// 地球仪数据。
@@ -226,9 +248,426 @@ fn is_private(ip: IpAddr) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 单飞闸门 + 可注入的网络动作（0.9.1-C）
+// ---------------------------------------------------------------------------
+
+/// 进程内**单飞**闸门：同一时刻只有一个「本机位置查询」在飞。
+///
+/// 为什么需要：App 启动预热与用户点开「位置」页可能**同时**发生；没有闸门时
+/// 两边会各跑一次四源查询（各把同一个 IP 发给四个第三方）。有了闸门，第二个
+/// 调用会等第一个结束，然后**重新读缓存** ⇒ 短 TTL 记忆已经写好 ⇒ 一个请求都不发。
+///
+/// 用 `tokio::sync::Mutex` 而不是 `std`：它要跨 `.await` 持有。
+async fn single_flight<F, Fut, T>(f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+    let gate = GATE.get_or_init(|| Mutex::new(()));
+    let _guard = gate.lock().await;
+    f().await
+}
+
+/// 盒装 future（带 `Send`）：让 [`LocationNet`] 作为 `&N` 注入，并让 Tauri 命令的
+/// future 保持 `Send`。
+type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// 「位置」查询要用的**全部网络动作**。
+///
+/// 抽成 trait 只为一件事：**让整条决策序列可测** —— TTL 记忆、单飞、serve-stale、
+/// 失败冷却都是**序列**行为，单测某个纯函数证明不了「打开 5 次只查 1 次」。
+/// 与 `supervisor::TunUpOps` 同一手法（那里抽 trait 也只为了可测）。
+/// 生产实现是 [`CurlNet`]，测试用计数替身。
+trait LocationNet {
+    fn probe(&self) -> BoxFut<'_, Option<String>>;
+    fn lookup_self(&self, probed: Option<String>) -> BoxFut<'_, Option<GeoLocation>>;
+    fn lookup_ip(&self, ip: String) -> BoxFut<'_, Option<GeoLocation>>;
+}
+
+/// 真实网络：系统 `curl`（`--max-time`）+ **物理网卡已知时一律绑卡**（A21 的根因）。
+///
+/// 绑卡这一条**一个字都不能改**：隧道开着时不绑卡，查到的会是节点自己的位置。
+struct CurlNet {
+    interface: Option<String>,
+}
+
+impl LocationNet for CurlNet {
+    fn probe(&self) -> BoxFut<'_, Option<String>> {
+        let iface = self.interface.clone();
+        Box::pin(async move { query_public_ip(iface.as_deref()).await })
+    }
+
+    fn lookup_self(&self, probed: Option<String>) -> BoxFut<'_, Option<GeoLocation>> {
+        let iface = self.interface.clone();
+        Box::pin(async move { query_self(iface.as_deref(), probed.as_deref()).await })
+    }
+
+    fn lookup_ip(&self, ip: String) -> BoxFut<'_, Option<GeoLocation>> {
+        let iface = self.interface.clone();
+        Box::pin(async move { query_ip(&ip, iface.as_deref()).await })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 纯决策：key 规范化 / 探测 TTL / 失败冷却
+// ---------------------------------------------------------------------------
+
+/// 把 IP 规范成缓存键（IPv4 原样、IPv6 /64、mapped v6 → v4）。
+/// 解析不出来时退回原始字符串：至少下回还是同一个键。
+fn key_or_raw(ip: &str) -> (String, LocationKeyKind) {
+    location_key(ip).unwrap_or_else(|| (ip.to_string(), LocationKeyKind::Ip))
+}
+
+/// `last_probe` 是否仍在**短 TTL** 内（L2）。
+fn probe_memory_fresh(probe: Option<&LocationProbe>, now: u64) -> Option<&LocationProbe> {
+    let p = probe?;
+    (now.saturating_sub(p.checked_unix) <= LOCATION_PROBE_TTL_S).then_some(p)
+}
+
+/// `last_failure` 是否仍在**冷却**内（L4）。
+fn in_failure_cooldown(failure: Option<&LocationFailure>, now: u64) -> Option<&LocationFailure> {
+    let f = failure?;
+    (now.saturating_sub(f.failed_unix) <= LOCATION_FAIL_COOLDOWN_S).then_some(f)
+}
+
+/// 从「本机位置来自缓存」的路径组装结果（探测记忆 / serve-stale / 失败冷却）。
+///
+/// `fetched_unix` / `age_s` 描述**本机位置那条缓存**：只要它是缓存来的就给时间；
+/// `from_cache` 另外按「本次有没有发出坐标查询」算（出口节点位置可能被重查）。
+fn served_from_cache(
+    key: &str,
+    kind: LocationKeyKind,
+    entry: &CachedLocation,
+    now: u64,
+    stale: bool,
+    probe_cached: bool,
+    lookups_sent: u32,
+) -> (GlobeCacheInfo, GeoLocation, SelfCheck) {
+    let origin = cached_to_location(key, entry);
+    let self_check = self_check_from_cache(entry, &origin);
+    let info = GlobeCacheInfo {
+        from_cache: lookups_sent == 0,
+        fetched_unix: Some(entry.fetched_unix),
+        ip_changed: false,
+        stale,
+        probe_cached,
+        key_kind: kind.as_str().to_string(),
+        age_s: Some(now.saturating_sub(entry.fetched_unix)),
+    };
+    (info, origin, self_check)
+}
+
+/// 出口节点位置：命中缓存就用缓存；`allow_network` 时才真查一次。
+///
+/// 出口查询**不参与**失败冷却：冷却记的是「本机位置那条四源全挂」，而节点位置
+/// 跟着选中的节点走 —— 换节点就该重查，不该被上一台的失败挡住。
+async fn resolve_exit<N: LocationNet + Sync>(
+    net: &N,
+    cache: &mut LocationCache,
+    force: bool,
+    exit_ip: Option<&str>,
+    allow_network: bool,
+    now: u64,
+    lookups: &AtomicU32,
+) -> Option<GeoLocation> {
+    let ip = exit_ip?;
+    let (key, _) = key_or_raw(ip);
+    if !force {
+        if let Some(entry) = cache.get(&key) {
+            return Some(cached_to_location(&key, entry));
+        }
+    }
+    if !allow_network {
+        return None;
+    }
+    lookups.fetch_add(1, Ordering::Relaxed);
+    let loc = net.lookup_ip(ip.to_string()).await?;
+    cache.put(&key, location_to_cached(&loc, now, None));
+    cache.evict_oldest_beyond(LOCATION_CACHE_MAX_ENTRIES);
+    Some(loc)
+}
+
+/// 一次调用的结果（**决策层**：不含 route/traffic 组装与落盘）。
+#[derive(Debug)]
+struct CallOutcome {
+    origin: Option<GeoLocation>,
+    exit: Option<GeoLocation>,
+    self_check: SelfCheck,
+    cache: GlobeCacheInfo,
+    error: Option<String>,
+    /// 本次真的发了几次 IP 探测 / 几次坐标查询（给单测与统计用）。
+    probe_sent: u32,
+    lookups_sent: u32,
+}
+
+/// 一次调用的**完整决策序列**（可注入网络 ⇒ 可测）。
+///
+/// 顺序（每一步都有独立测试）：
+/// A. 失败冷却（L4）→ 不再打网络，有上次结果就 stale 返回；
+/// B. 探测短 TTL 记忆（L2）→ 连探测都不发；
+/// C. 真探测 → 命中缓存直接返回；探测失败则 serve-stale（L3）；
+/// D. 真查四源（出口查询与本机查询**并发**）。
+async fn run_call<N: LocationNet + Sync>(
+    net: &N,
+    cache: &mut LocationCache,
+    now: u64,
+    force: bool,
+    exit_ip: Option<&str>,
+    iface: Option<&str>,
+) -> CallOutcome {
+    cache.stats.calls += 1;
+    cache.stats.last_call_unix = now;
+    let lookups = AtomicU32::new(0);
+    let mut probe_sent = 0u32;
+
+    // ---- A) 失败冷却 ----
+    // `force` 是用户明确点的「重新定位」⇒ 绕过冷却：那是他的意图，不该被 60 秒挡住。
+    if !force {
+        if let Some(failure) = in_failure_cooldown(cache.last_failure.as_ref(), now).cloned() {
+            cache.stats.probe_cached += 1;
+            let exit = resolve_exit(net, cache, force, exit_ip, true, now, &lookups).await;
+            let key_hit = if failure.ip.is_empty() {
+                None
+            } else {
+                let (key, kind) = key_or_raw(&failure.ip);
+                cache.get(&key).map(|e| (key, kind, e.clone()))
+            };
+            let lookups_sent = lookups.load(Ordering::Relaxed);
+            return match key_hit {
+                Some((key, kind, entry)) => {
+                    cache.stats.hits += 1;
+                    cache.stats.stale_hits += 1;
+                    let (cache_info, origin, self_check) =
+                        served_from_cache(&key, kind, &entry, now, true, true, lookups_sent);
+                    CallOutcome {
+                        origin: Some(origin),
+                        exit,
+                        self_check,
+                        cache: cache_info,
+                        error: None,
+                        probe_sent,
+                        lookups_sent,
+                    }
+                }
+                None => CallOutcome {
+                    origin: None,
+                    exit,
+                    self_check: SelfCheck::judge(iface, None),
+                    cache: GlobeCacheInfo {
+                        from_cache: lookups_sent == 0,
+                        fetched_unix: None,
+                        ip_changed: false,
+                        stale: true,
+                        probe_cached: true,
+                        key_kind: "ip".to_string(),
+                        age_s: None,
+                    },
+                    error: Some(format!(
+                        "位置查询刚刚失败过（{reason}），{LOCATION_FAIL_COOLDOWN_S} 秒内不再重试",
+                        reason = failure.reason
+                    )),
+                    probe_sent,
+                    lookups_sent,
+                },
+            };
+        }
+    }
+
+    // ---- B) 探测短 TTL 记忆 ----
+    if !force {
+        if let Some(probe) = probe_memory_fresh(cache.last_probe.as_ref(), now) {
+            let (key, kind) = key_or_raw(&probe.ip);
+            if let Some(entry) = cache.get(&key).cloned() {
+                cache.stats.probe_cached += 1;
+                cache.stats.hits += 1;
+                let exit = resolve_exit(net, cache, force, exit_ip, true, now, &lookups).await;
+                let lookups_sent = lookups.load(Ordering::Relaxed);
+                let (cache_info, origin, self_check) =
+                    served_from_cache(&key, kind, &entry, now, false, true, lookups_sent);
+                return CallOutcome {
+                    origin: Some(origin),
+                    exit,
+                    self_check,
+                    cache: cache_info,
+                    error: None,
+                    probe_sent,
+                    lookups_sent,
+                };
+            }
+            // 记忆里的 IP 没有条目（被淘汰了）⇒ 继续走真探测，不装懂。
+        }
+    }
+
+    // ---- C) 真探测 ----
+    let probed = net.probe().await;
+    probe_sent += 1;
+    cache.stats.probe_calls += 1;
+    if let Some(ip) = probed.as_deref() {
+        cache.last_probe = Some(LocationProbe { ip: ip.to_string(), checked_unix: now });
+    }
+
+    // C1) 探测成功且命中 ⇒ 直接用缓存（一个坐标查询都不发）
+    if let Some(ip) = probed.as_deref() {
+        let (key, kind) = key_or_raw(ip);
+        if !force {
+            if let Some(entry) = cache.get(&key).cloned() {
+                cache.stats.hits += 1;
+                let exit = resolve_exit(net, cache, force, exit_ip, true, now, &lookups).await;
+                let lookups_sent = lookups.load(Ordering::Relaxed);
+                let (cache_info, origin, self_check) =
+                    served_from_cache(&key, kind, &entry, now, false, false, lookups_sent);
+                return CallOutcome {
+                    origin: Some(origin),
+                    exit,
+                    self_check,
+                    cache: cache_info,
+                    error: None,
+                    probe_sent,
+                    lookups_sent,
+                };
+            }
+        }
+    } else if !force {
+        // C2) serve-stale（L3）：探测失败，但上次探测到的 IP 有条目 ⇒ 返回它并标 stale，
+        //     不发坐标查询 —— 别再让离线用户干等四个源。
+        if let Some(last) = cache.last_probe.clone() {
+            if !last.ip.is_empty() {
+                let (key, kind) = key_or_raw(&last.ip);
+                if let Some(entry) = cache.get(&key).cloned() {
+                    cache.stats.stale_hits += 1;
+                    cache.stats.hits += 1;
+                    let exit = resolve_exit(net, cache, force, exit_ip, true, now, &lookups).await;
+                    let lookups_sent = lookups.load(Ordering::Relaxed);
+                    let (cache_info, origin, self_check) =
+                        served_from_cache(&key, kind, &entry, now, true, false, lookups_sent);
+                    return CallOutcome {
+                        origin: Some(origin),
+                        exit,
+                        self_check,
+                        cache: cache_info,
+                        error: None,
+                        probe_sent,
+                        lookups_sent,
+                    };
+                }
+            }
+        }
+    }
+
+    // ---- D) 真查：出口查询与本机查询**并发**（与改前一样一次问完）----
+    let exit_fut = resolve_exit(net, cache, force, exit_ip, true, now, &lookups);
+    let self_fut = async {
+        lookups.fetch_add(1, Ordering::Relaxed);
+        net.lookup_self(probed.clone()).await
+    };
+    let (exit, fresh_origin) = tokio::join!(exit_fut, self_fut);
+    let lookups_sent = lookups.load(Ordering::Relaxed);
+    cache.stats.lookups += u64::from(lookups_sent);
+
+    let (origin, origin_key_kind, ip_changed, error) = match fresh_origin {
+        Some(loc) => {
+            let raw_key = probed.clone().unwrap_or_else(|| loc.ip.clone());
+            let (key, kind) = key_or_raw(&raw_key);
+            cache.put(&key, location_to_cached(&loc, now, iface));
+            cache.evict_oldest_beyond(LOCATION_CACHE_MAX_ENTRIES);
+            // `ip_changed` 只在**探测成功**时才有意义（见字段文档）。
+            (Some(loc), kind, probed.is_some(), None)
+        }
+        None => {
+            let raw_key = probed.clone().unwrap_or_default();
+            cache.last_failure = Some(LocationFailure {
+                ip: raw_key.clone(),
+                failed_unix: now,
+                reason: "四个坐标源都没返回".to_string(),
+            });
+            // 有上次可用结果就先给出来（stale），别把用户放空手上。
+            let fallback = if raw_key.is_empty() {
+                None
+            } else {
+                let (key, kind) = key_or_raw(&raw_key);
+                cache.get(&key).map(|e| (key, kind, e.clone()))
+            };
+            match fallback {
+                Some((key, kind, entry)) => {
+                    cache.stats.hits += 1;
+                    cache.stats.stale_hits += 1;
+                    let (info, origin, self_check) =
+                        served_from_cache(&key, kind, &entry, now, true, false, lookups_sent);
+                    return CallOutcome {
+                        origin: Some(origin),
+                        exit,
+                        self_check,
+                        cache: info,
+                        error: None,
+                        probe_sent,
+                        lookups_sent,
+                    };
+                }
+                None => (
+                    None,
+                    LocationKeyKind::Ip,
+                    false,
+                    Some("查本机位置失败（四个数据源都没返回）".to_string()),
+                ),
+            }
+        }
+    };
+
+    let error = if error.is_some() {
+        error
+    } else if exit_ip.is_some() && exit.is_none() {
+        Some("查节点位置失败（四个数据源都没返回）".to_string())
+    } else {
+        None
+    };
+    let self_check = SelfCheck::judge(iface, origin.as_ref());
+    let cache_info = GlobeCacheInfo {
+        from_cache: lookups_sent == 0,
+        fetched_unix: None,
+        ip_changed,
+        stale: false,
+        probe_cached: probe_sent == 0,
+        key_kind: origin_key_kind.as_str().to_string(),
+        age_s: None,
+    };
+
+    CallOutcome { origin, exit, self_check, cache: cache_info, error, probe_sent, lookups_sent }
+}
+
+/// 打一行**用户能 grep 出来自己算命中率**的日志（0.9.1-C / L8）。
+///
+/// 本仓库没有遥测；这一行 + 缓存文件里的 `stats` 是唯一的诚实度量方式。
+/// 形如：
+/// `location cache=hit probe=cached key=ip lookups=1 hits=4 stale_hits=0 calls=5 probe_calls=1`
+fn log_location_cache(info: &GlobeCacheInfo, stats: &LocationStats, note: &str) {
+    let cache = if info.stale {
+        "stale"
+    } else if info.from_cache {
+        "hit"
+    } else {
+        "miss"
+    };
+    let probe = if info.probe_cached { "cached" } else { "fresh" };
+    tracing::info!(
+        cache = %cache,
+        probe = %probe,
+        key = %info.key_kind,
+        lookups = stats.lookups,
+        hits = stats.hits,
+        stale_hits = stats.stale_hits,
+        calls = stats.calls,
+        probe_calls = stats.probe_calls,
+        probe_cached = stats.probe_cached,
+        note = %note,
+        "location"
+    );
+}
+
 /// 地球仪：本机 → 出口节点。
 ///
-/// `force = true` 表示用户手动点了「刷新」：**跳过缓存**、强制完整查询。
+/// `force = true` 表示用户手动点了「刷新」：**跳过缓存与冷却**、强制完整查询。
 #[tauri::command]
 pub async fn globe_data(state: State<'_, AppState>, force: bool) -> Result<GlobeData, String> {
     let iface = physical_interface();
@@ -245,121 +684,55 @@ pub async fn globe_data(state: State<'_, AppState>, force: bool) -> Result<Globe
     });
     let node = node.flatten();
 
+    // **单飞**：与启动预热共用同一道闸门。第二个并发调用会等第一个把缓存写好，
+    // 然后**重新读缓存**（TTL 记忆命中）⇒ 四源查询只跑一次。
+    single_flight(|| globe_data_locked(&state, force, iface, node)).await
+}
+
+async fn globe_data_locked(
+    state: &State<'_, AppState>,
+    force: bool,
+    iface: Option<String>,
+    node: Option<(String, String, String)>,
+) -> Result<GlobeData, String> {
     // 节点地址解析成 IP（域名取第一个）
-    let exit_ip: Option<IpAddr> = node.as_ref().and_then(|(_, addr, _)| {
+    let exit_ip_str = node.as_ref().and_then(|(_, addr, _)| {
         xt_core::net::resolve_host(addr)
             .into_iter()
             .find(|ip| !is_private(*ip))
+            .map(|ip| ip.to_string())
     });
-    let exit_ip_str = exit_ip.map(|ip| ip.to_string());
 
-    // ---- 1) 持久缓存：**先读一次**，全程共用 ----
-    //
     // 读失败（坏文件/版本不符）会退回空缓存并 warn，最多导致重查一次，不会让页面打不开。
     let mut cache = state.store.load_location_cache();
+    let now = now_unix();
+    let net = CurlNet { interface: iface.clone() };
 
-    // ---- 2) 轻量探测：只问「公网 IP 是多少」，不问坐标 ----
-    //
-    // 这一步是本次改动的**判据来源**：它便宜，所以可以每次进页面都做；
-    // 坐标查询贵且对第三方有限流，只在 IP 变了（或强制）时才做。
-    let probed_ip = query_public_ip(iface.as_deref()).await;
+    let outcome = run_call(
+        &net,
+        &mut cache,
+        now,
+        force,
+        exit_ip_str.as_deref(),
+        iface.as_deref(),
+    )
+    .await;
 
-    // 「IP 变了没有」必须在**写入本次结果之前**判定，否则这次写进缓存后就永远为 false。
-    let ip_changed = ip_changed(probed_ip.as_deref(), &cache);
-
-    // 缓存里已经有的（`force` 时一律当没有 ⇒ 走完整查询）。
-    let cached_origin = if force {
-        None
-    } else {
-        probed_ip.as_deref().and_then(|ip| cache.get(ip).cloned())
-    };
-    let cached_exit = if force {
-        None
-    } else {
-        exit_ip_str.as_deref().and_then(|ip| cache.get(ip).cloned())
-    };
-    let origin_from_cache = cached_origin.is_some();
-    let need_self = cached_origin.is_none();
-    let need_exit = exit_ip_str.is_some() && cached_exit.is_none();
-
-    // ---- 3) 两个坐标查询**并发**（旧实现同为「一次把两件事问完」）----
-    //
-    // 缓存命中时对应的那个 `None` 分支**一个请求都不发** —— 这正是「IP 没变就不重查」。
-    let (fresh_origin, fresh_exit) = tokio::join!(
-        async {
-            if need_self {
-                query_self(iface.as_deref(), probed_ip.as_deref()).await
-            } else {
-                None
-            }
-        },
-        async {
-            match (need_exit, exit_ip_str.as_deref()) {
-                (true, Some(ip)) => query_ip(ip, iface.as_deref()).await,
-                _ => None,
-            }
-        },
+    // 统计、last_probe、last_failure 都要跨进程活着 ⇒ **每次调用都写回**
+    // （它们正是「下次能不能省一次网络」的依据，只写在内存里等于没有）。
+    if let Err(e) = state.store.save_location_cache(&cache) {
+        // 写不进去只是「下次还得重查」，不该让本次结果失败。
+        tracing::warn!(error = %e, "位置缓存写盘失败（下次仍会重查；本次结果不受影响）");
+    }
+    log_location_cache(
+        &outcome.cache,
+        &cache.stats,
+        if force { "force" } else { "auto" },
     );
 
-    let origin = match cached_origin.clone() {
-        Some(entry) => Some(cached_to_location(
-            probed_ip.as_deref().unwrap_or_default(),
-            &entry,
-        )),
-        None => fresh_origin,
-    };
-    // 出口节点位置也按节点 IP 缓存：切回用过的节点是瞬时的。
-    let exit = match cached_exit.clone() {
-        Some(entry) => Some(cached_to_location(
-            exit_ip_str.as_deref().unwrap_or_default(),
-            &entry,
-        )),
-        None => fresh_exit,
-    };
-
-    // ---- 4) 只有真查到了新东西才写盘 ----
-    let mut dirty = false;
-    if need_self {
-        if let Some(loc) = &origin {
-            // 键用**本次探测到的公网 IP**：它才是「这次的位置键」。
-            // 探不到时才退回源自己报的 IP（至少下回还能命中）。
-            let key = probed_ip.clone().unwrap_or_else(|| loc.ip.clone());
-            cache.put(&key, location_to_cached(loc, now_unix(), iface.as_deref()));
-            dirty = true;
-        }
-    }
-    if need_exit {
-        if let (Some(loc), Some(ip)) = (&exit, exit_ip_str.as_deref()) {
-            cache.put(ip, location_to_cached(loc, now_unix(), iface.as_deref()));
-            dirty = true;
-        }
-    }
-    if dirty {
-        if let Err(e) = state.store.save_location_cache(&cache) {
-            // 写不进去只是「下次还得重查」，不该让本次结果失败。
-            tracing::warn!(error = %e, "位置缓存写盘失败（下次仍会重查；本次结果不受影响）");
-        }
-    }
-
-    // task-179 / A21：把「来不来自本机」判出来（纯函数，见 `SelfCheck::judge`）——
-    // 读不到物理网卡时查到的是**节点出口**，界面据此降级文案，不许再说「本机」。
-    //
-    // **缓存命中时不许拿「本次绑了网卡」给旧记录背书**：可信性属于抓取那一刻，
-    // 所以走 `self_check_from_cache`（读条目里存的 `bound_interface`）。
-    let self_check = match (&origin, cached_origin.as_ref()) {
-        (Some(loc), Some(entry)) if origin_from_cache => self_check_from_cache(entry, loc),
-        (loc, _) => SelfCheck::judge(iface.as_deref(), loc.as_ref()),
-    };
-    let error = if origin.is_none() {
-        Some("查本机位置失败（三个数据源都没返回）".to_string())
-    } else if exit_ip_str.is_some() && exit.is_none() {
-        Some("查节点位置失败（三个数据源都没返回）".to_string())
-    } else {
-        None
-    };
-    let route = match (origin.clone(), exit) {
+    // 实测流量：**只认该节点的 outbound tag**（task-179 / A20 —— 不再取最大）
+    let route = match (outcome.origin.clone(), outcome.exit) {
         (Some(from), Some(to)) => {
-            // 实测流量：**只认该节点的 outbound tag**（task-179 / A20 —— 不再取最大）
             let node_tag = node.as_ref().map(|(_, _, tag)| tag.clone());
             let traffic = current_exit_traffic(node_tag.as_deref()).await;
             Some(GlobeRoute {
@@ -375,26 +748,12 @@ pub async fn globe_data(state: State<'_, AppState>, force: bool) -> Result<Globe
         _ => None,
     };
 
-    // `from_cache` 只认「本次没有发出任何坐标查询」——不是「本机位置来自缓存」。
-    // 出口节点位置若被重查，这里也必须是 false（否则界面会说「没有重新加载」，
-    // 而事实上刚发过查询）。
-    let from_cache = !need_self && !need_exit;
-    let cache_info = GlobeCacheInfo {
-        from_cache,
-        fetched_unix: if from_cache {
-            cached_origin.as_ref().map(|c| c.fetched_unix)
-        } else {
-            None
-        },
-        ip_changed,
-    };
-
     Ok(GlobeData {
         route,
-        origin,
-        error,
-        self_check,
-        cache: cache_info,
+        origin: outcome.origin,
+        error: outcome.error,
+        self_check: outcome.self_check,
+        cache: outcome.cache,
     })
 }
 
@@ -692,23 +1051,16 @@ fn parse_cf_trace(body: &str) -> Option<String> {
     value.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
 }
 
-/// 两个 IP-only 源里任一成功即可判定；`ipify` 优先（它就是为「告诉我你的 IP」存在的）。
+/// 两个 IP-only 源里任一成功即可判定；`ipify` 优先（它就是为「告诉我你的 IP」存在）。
 fn pick_public_ip(ipify: Option<&str>, cloudflare: Option<&str>) -> Option<String> {
     ipify
         .and_then(parse_ipify)
         .or_else(|| cloudflare.and_then(parse_cf_trace))
 }
 
-/// 「这次的公网 IP 与缓存不同」⇒ 需要重查（首查也算 true）。
-///
-/// `probed == None`（两个 IP 源都没答）时返回 `true`：**不知道有没有变**时，
-/// 唯一诚实的默认是「可能变了」——去查一次，而不是拿旧缓存冒充「没变」。
-fn ip_changed(probed: Option<&str>, cache: &LocationCache) -> bool {
-    match probed {
-        Some(ip) => !cache.has(ip),
-        None => true,
-    }
-}
+// 注：0.9.1-C 起「IP 变了没有」不再是独立函数 —— 它现在是 `run_call` 里
+// 「探测成功但缓存没命中」这一条路径的**结论**（`ip_changed = probed.is_some()`），
+// 而探测失败那一条走的是 `stale=true`（不再把「没测到」说成「变了」）。
 
 /// 查到的新结果 → 缓存条目。
 fn location_to_cached(
@@ -852,45 +1204,39 @@ async fn query_self(
 ///
 /// # 什么时候跳过
 ///
-/// 当前 IP 已经有缓存 ⇒ 直接返回。那正是「已经预热好了」的状态；再查一次只是
-/// 白把一个 IP 发给第三方并触发限流。IP 没变却在页面上看到旧时间戳的问题由
-/// **手动刷新（`globe_data(force = true)`）** 解决。
+/// 走的是与页面**同一套决策**（[`run_call`]）：短 TTL 记忆命中、或失败还在冷却里，
+/// 它一个请求都不发。也就是说「已经预热好了」由缓存状态自己表达，不另设判据。
 pub async fn prewarm_location_cache(app: AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         tracing::warn!("位置预热：应用状态不可用，跳过");
         return;
     };
     let iface = physical_interface();
-    let Some(ip) = query_public_ip(iface.as_deref()).await else {
-        tracing::warn!("位置预热：公网 IP 探测失败（两个 IP 源都没答），跳过（不弹错）");
-        return;
-    };
-
-    let mut cache = state.store.load_location_cache();
-    if cache.has(&ip) {
-        tracing::debug!(ip = %ip, interface = ?iface, "位置预热：该 IP 已有缓存，跳过");
-        return;
-    }
-
-    match query_self(iface.as_deref(), Some(&ip)).await {
-        Some(loc) => {
-            cache.put(&ip, location_to_cached(&loc, now_unix(), iface.as_deref()));
-            match state.store.save_location_cache(&cache) {
-                Ok(()) => tracing::info!(
-                    ip = %ip,
-                    city = %loc.city,
-                    interface = ?iface,
-                    "位置预热完成：已把当前公网 IP 的位置写入缓存"
-                ),
-                Err(e) => tracing::warn!(error = %e, ip = %ip, "位置预热：位置已查到但写盘失败"),
-            }
+    // **与页面调用同一道单飞闸门**：两者同时发生时只跑一次四源查询。
+    single_flight(|| async {
+        let now = now_unix();
+        let mut cache = state.store.load_location_cache();
+        let net = CurlNet { interface: iface.clone() };
+        // 预热只关心**本机位置**（页面的首屏就是它）；出口节点位置不在这里查。
+        let outcome = run_call(&net, &mut cache, now, false, None, iface.as_deref()).await;
+        if let Err(e) = state.store.save_location_cache(&cache) {
+            tracing::warn!(error = %e, "位置预热：缓存写盘失败（下次进页面仍会重查）");
         }
-        None => tracing::warn!(
-            ip = %ip,
-            interface = ?iface,
-            "位置预热：坐标查询失败（三个源都没返回）；下次进「位置」页会再试"
-        ),
-    }
+        log_location_cache(&outcome.cache, &cache.stats, "prewarm");
+        if outcome.origin.is_some() {
+            tracing::info!(
+                probe_sent = outcome.probe_sent,
+                lookups_sent = outcome.lookups_sent,
+                "位置预热完成：点开「位置」页应当是瞬时的"
+            );
+        } else {
+            tracing::warn!(
+                error = ?outcome.error,
+                "位置预热：没能拿到本机位置（只 log、不弹错）；下次进「位置」页会再试"
+            );
+        }
+    })
+    .await;
 }
 
 /// 出口累计字节的读取结果：把「值」与「这次是否查到」分开表达。
@@ -1406,17 +1752,329 @@ mod tests {
         assert_eq!(only_ipinfo.city, "Tung Chung", "城市照常给");
     }
 
-    /// **IP 变化判定**：新增 IP ⇒ 重查；同一个 IP ⇒ 不重查；
-    /// 探测失败（`None`）⇒ 按「可能变了」处理（不知道，就不许说没变）。
-    #[test]
-    fn ip_changed_decides_whether_to_requery() {
-        let mut cache = LocationCache::default();
-        assert!(ip_changed(Some("1.2.3.4"), &cache), "首查必须算「变了」（无缓存）");
+    // -----------------------------------------------------------------------
+    // 0.9.1-C：命中率 —— 探测 TTL / 单飞 / serve-stale / 失败冷却 / /64 / LRU / 度量
+    // -----------------------------------------------------------------------
 
-        cache.put("1.2.3.4", entry(Some("en0")));
-        assert!(!ip_changed(Some("1.2.3.4"), &cache), "IP 没变 ⇒ 直接用缓存");
-        assert!(ip_changed(Some("5.6.7.8"), &cache), "换 IP ⇒ 重查");
-        assert!(ip_changed(None, &cache), "探测不到 IP = 不知道变没变 ⇒ 按「可能变了」");
+    /// 测试替身：按脚本返回结果，并**记下**探测与坐标查询各发了几次。
+    #[derive(Default)]
+    struct FakeNet {
+        probe_result: Option<String>,
+        lookup_result: Option<GeoLocation>,
+        probes: AtomicU32,
+        lookups: AtomicU32,
+    }
+
+    impl FakeNet {
+        fn answering(ip: &str, loc: GeoLocation) -> Self {
+            Self {
+                probe_result: Some(ip.to_string()),
+                lookup_result: Some(loc),
+                ..Default::default()
+            }
+        }
+        fn probe_calls(&self) -> u32 {
+            self.probes.load(Ordering::Relaxed)
+        }
+        fn lookup_calls(&self) -> u32 {
+            self.lookups.load(Ordering::Relaxed)
+        }
+    }
+
+    impl LocationNet for FakeNet {
+        fn probe(&self) -> BoxFut<'_, Option<String>> {
+            self.probes.fetch_add(1, Ordering::Relaxed);
+            let r = self.probe_result.clone();
+            Box::pin(async move { r })
+        }
+        fn lookup_self(&self, _probed: Option<String>) -> BoxFut<'_, Option<GeoLocation>> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            let r = self.lookup_result.clone();
+            Box::pin(async move { r })
+        }
+        fn lookup_ip(&self, _ip: String) -> BoxFut<'_, Option<GeoLocation>> {
+            self.lookups.fetch_add(1, Ordering::Relaxed);
+            let r = self.lookup_result.clone();
+            Box::pin(async move { r })
+        }
+    }
+
+    fn cached_at(loc: &GeoLocation, fetched_unix: u64) -> CachedLocation {
+        location_to_cached(loc, fetched_unix, Some("en0"))
+    }
+
+    /// 一个「该 IP 已有位置缓存」的缓存。
+    fn cache_with(ip: &str, fetched_unix: u64) -> LocationCache {
+        let mut cache = LocationCache::default();
+        let (key, _) = key_or_raw(ip);
+        cache.put(&key, cached_at(&at("ipwho.is", "Dali", "China", 25.6, 100.2), fetched_unix));
+        cache
+    }
+
+    /// **L2**：短 TTL 内反复进页面 ⇒ 连探测都不发（`probe_cached=true`，零网络）。
+    #[tokio::test]
+    async fn probe_ttl_hit_skips_the_probe() {
+        let now = 1_000_000u64;
+        let mut cache = cache_with("1.2.3.4", now - 300);
+        cache.last_probe = Some(LocationProbe { ip: "1.2.3.4".into(), checked_unix: now - 10 });
+        // 这个替身任何网络调用都会让计数 > 0
+        let net = FakeNet::default();
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.probe_calls(), 0, "TTL 内不许发探测");
+        assert_eq!(net.lookup_calls(), 0, "TTL 内不许发坐标查询");
+        assert!(out.cache.probe_cached);
+        assert!(out.cache.from_cache);
+        assert!(!out.cache.stale, "这次是「刚验证过 IP」的正常命中，不是 stale");
+        assert_eq!(out.cache.key_kind, "ip");
+        assert_eq!(out.cache.age_s, Some(300));
+        assert_eq!(cache.stats.hits, 1);
+        assert_eq!(cache.stats.probe_cached, 1);
+    }
+
+    /// **L2 边界**：TTL 一过就重新探测（不能把「省请求」变成「永远不更新」）。
+    #[tokio::test]
+    async fn probe_ttl_expired_probes_again() {
+        let now = 1_000_000u64;
+        let mut cache = cache_with("1.2.3.4", now - 500);
+        cache.last_probe = Some(LocationProbe {
+            ip: "1.2.3.4".into(),
+            checked_unix: now - LOCATION_PROBE_TTL_S - 1,
+        });
+        let net = FakeNet { probe_result: Some("1.2.3.4".into()), ..Default::default() };
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.probe_calls(), 1, "过期后要重新探测");
+        assert_eq!(net.lookup_calls(), 0, "IP 没变 ⇒ 仍不发坐标查询");
+        assert!(out.cache.from_cache);
+        assert!(!out.cache.probe_cached, "这次是真探测");
+        assert_eq!(cache.last_probe.unwrap().checked_unix, now, "探测时间要刷新");
+    }
+
+    /// **L3**：两个 IP-only 源都不答 ⇒ 用 `last_probe.ip` 的条目 serve-stale，
+    /// **不发坐标查询**，并把「无法确认」如实标成 `stale=true`。
+    #[tokio::test]
+    async fn probe_failure_serves_the_last_probe_entry_as_stale() {
+        let now = 1_000_000u64;
+        let mut cache = cache_with("1.2.3.4", now - 900);
+        cache.last_probe = Some(LocationProbe {
+            ip: "1.2.3.4".into(),
+            checked_unix: now - LOCATION_PROBE_TTL_S - 5,
+        });
+        let net = FakeNet::default(); // probe ⇒ None
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.probe_calls(), 1, "探测确实发了（它就是失败的那一步）");
+        assert_eq!(net.lookup_calls(), 0, "serve-stale **不发**坐标查询");
+        assert!(out.cache.stale, "无法确认 IP 是否变化 ⇒ stale");
+        assert!(out.cache.from_cache);
+        assert!(!out.cache.ip_changed, "没测到就不许说「变了」");
+        assert_eq!(out.origin.expect("要给出上次可用结果").city, "Dali", "给的是上次那条缓存");
+        assert_eq!(cache.stats.stale_hits, 1);
+        assert_eq!(cache.stats.lookups, 0, "没有查过坐标");
+    }
+
+    /// **L4**：失败冷却内不再打任何网络；有上次可用结果就 stale 给出来。
+    #[tokio::test]
+    async fn failed_lookup_is_not_retried_within_the_cooldown() {
+        let now = 1_000_000u64;
+        let mut cache = cache_with("1.2.3.4", now - 50);
+        cache.last_failure = Some(LocationFailure {
+            ip: "1.2.3.4".into(),
+            failed_unix: now - 10,
+            reason: "四个坐标源都没返回".into(),
+        });
+        let net = FakeNet::default();
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.probe_calls(), 0, "冷却内连探测都不发");
+        assert_eq!(net.lookup_calls(), 0);
+        assert!(out.cache.stale);
+        assert!(out.cache.probe_cached);
+        assert!(out.origin.is_some(), "有上次可用结果就不许空手而归");
+    }
+
+    /// 冷却内且**没有**可用缓存 ⇒ 如实报出真实原因（仍然一个请求都不发）。
+    #[tokio::test]
+    async fn cooldown_without_a_cached_entry_reports_the_real_reason() {
+        let now = 1_000_000u64;
+        // 用结构体更新而不是「先 Default 再赋字段」：后者会触发 clippy 的
+        // `field_reassign_with_default`（本仓库 clippy 是 `-D warnings`）。
+        let mut cache = LocationCache {
+            last_failure: Some(LocationFailure {
+                ip: String::new(),
+                failed_unix: now - 5,
+                reason: "四个坐标源都没返回".into(),
+            }),
+            ..Default::default()
+        };
+        let net = FakeNet::default();
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.probe_calls() + net.lookup_calls(), 0, "冷却内不打网络");
+        assert!(out.origin.is_none());
+        let err = out.error.expect("要如实报错");
+        assert!(err.contains("四个坐标源都没返回"), "真实原因要带上：{err}");
+        assert!(out.cache.stale);
+    }
+
+    /// **L4 边界**：冷却一过就恢复（否则「省请求」变成「永远不重试」）。
+    #[tokio::test]
+    async fn cooldown_expired_retries() {
+        let now = 1_000_000u64;
+        let mut cache = cache_with("1.2.3.4", now - 5_000);
+        cache.last_probe = Some(LocationProbe {
+            ip: "1.2.3.4".into(),
+            checked_unix: now - LOCATION_PROBE_TTL_S - 1,
+        });
+        cache.last_failure = Some(LocationFailure {
+            ip: "1.2.3.4".into(),
+            failed_unix: now - LOCATION_FAIL_COOLDOWN_S - 1,
+            reason: "上一次失败".into(),
+        });
+        let net = FakeNet::default(); // 探测失败 ⇒ 走 serve-stale
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.probe_calls(), 1, "冷却过期后必须重新探测");
+        assert!(out.origin.is_some());
+        assert!(out.cache.stale);
+    }
+
+    /// **L1**：并发的两次调用（预热 + 用户点开）只跑一次查询 ——
+    /// 第二个在闸门后重新读缓存，TTL 记忆已写好 ⇒ 一个请求都不发。
+    #[tokio::test]
+    async fn concurrent_calls_run_one_lookup() {
+        let cache = std::sync::Arc::new(Mutex::new(LocationCache::default()));
+        let lookups = std::sync::Arc::new(AtomicU32::new(0));
+        let one = |cache: std::sync::Arc<Mutex<LocationCache>>,
+                   lookups: std::sync::Arc<AtomicU32>| async move {
+            single_flight(|| async move {
+                let mut c = cache.lock().await;
+                let key = key_or_raw("1.2.3.4").0;
+                if c.has(&key) {
+                    return; // 第二个调用在这里命中（这就是闸门的意义）
+                }
+                lookups.fetch_add(1, Ordering::Relaxed);
+                c.put(&key, cached_at(&at("ipwho.is", "Dali", "China", 25.6, 100.2), 1));
+            })
+            .await
+        };
+
+        tokio::join!(one(cache.clone(), lookups.clone()), one(cache.clone(), lookups.clone()));
+
+        assert_eq!(lookups.load(Ordering::Relaxed), 1, "并发两次只能查一次");
+    }
+
+    /// 结构守卫：**两个入口都必须经过单飞闸门** —— 否则「预热 + 用户点开」
+    /// 会各跑一次四源查询（那正是 L1 要消掉的重复）。
+    #[test]
+    fn both_entry_points_use_the_single_flight_gate() {
+        let src = include_str!("globe.rs");
+        let body = &src[..src.find("#[cfg(test)]").expect("测试模块")];
+        let gates = body.matches("single_flight(").count();
+        assert_eq!(gates, 2, "globe_data 与 prewarm 各一次，实际 {gates}");
+    }
+
+    /// **L5**：IPv6 按 /64 聚合 —— 接口标识轮换后位置没变，仍命中同一条缓存。
+    #[tokio::test]
+    async fn ipv6_is_keyed_by_64_bit_prefix() {
+        let now = 1_000_000u64;
+        let first = "2001:db8:1:2:aaaa:aaaa:aaaa:aaaa";
+        let rotated = "2001:db8:1:2:bbbb:bbbb:bbbb:bbbb";
+        let mut cache = cache_with(first, now - 100);
+        cache.last_probe = Some(LocationProbe { ip: first.into(), checked_unix: now - 10 });
+        let net = FakeNet { probe_result: Some(rotated.into()), ..Default::default() };
+
+        let out = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+
+        assert_eq!(net.lookup_calls(), 0, "同 /64 前缀 ⇒ 命中缓存，不查坐标");
+        assert!(out.cache.from_cache);
+        assert_eq!(out.cache.key_kind, "ipv6-prefix", "界面要能读出粒度是前缀");
+        assert_eq!(out.origin.expect("应当命中").ip, "2001:db8:1:2::/64");
+    }
+
+    /// **L5**：IPv4-mapped IPv6 归一成 v4（同一个地址不该有两种键）。
+    #[test]
+    fn ipv4_mapped_ipv6_normalizes_to_v4() {
+        assert_eq!(
+            key_or_raw("::ffff:1.2.3.4"),
+            ("1.2.3.4".to_string(), LocationKeyKind::Ip)
+        );
+        assert_eq!(key_or_raw("1.2.3.4").0, "1.2.3.4");
+        assert_eq!(key_or_raw("not-an-ip").0, "not-an-ip", "解析不了就退回原串");
+    }
+
+    /// **L6**：超过上限按最旧淘汰；元数据（last_probe/stats）不受影响。
+    #[test]
+    fn cache_evicts_the_oldest_beyond_the_limit() {
+        // 元数据也用结构体更新初始化，避免 `Default::default()` 之后再赋字段（clippy）。
+        let mut cache = LocationCache {
+            last_probe: Some(LocationProbe { ip: "1.2.3.4".into(), checked_unix: 1 }),
+            ..Default::default()
+        };
+        for i in 0..(LOCATION_CACHE_MAX_ENTRIES as u64 + 5) {
+            let (key, _) = key_or_raw(&format!("10.0.0.{i}"));
+            cache.put(&key, cached_at(&at("ipwho.is", "Dali", "China", 25.6, 100.2), i));
+        }
+        assert_eq!(cache.entries.len(), LOCATION_CACHE_MAX_ENTRIES + 5);
+
+        let evicted = cache.evict_oldest_beyond(LOCATION_CACHE_MAX_ENTRIES);
+
+        assert_eq!(evicted, 5, "多出来的 5 条要淘汰");
+        assert_eq!(cache.entries.len(), LOCATION_CACHE_MAX_ENTRIES);
+        assert!(!cache.has(&key_or_raw("10.0.0.0").0), "最旧的先走");
+        assert!(cache.has(&key_or_raw(&format!("10.0.0.{}", LOCATION_CACHE_MAX_ENTRIES + 4)).0));
+        assert!(cache.last_probe.is_some(), "元数据不计入上限");
+    }
+
+    /// **L8**：`calls / hits / lookups / probe_calls / probe_cached` 分开记 ——
+    /// 没有这组数，命中率只能靠嘴说。
+    #[tokio::test]
+    async fn stats_counts_calls_hits_and_lookups() {
+        let now = 1_000_000u64;
+        let mut cache = LocationCache::default();
+        let net = FakeNet::answering("1.2.3.4", at("ipwho.is", "Dali", "China", 25.6, 100.2));
+
+        let first = run_call(&net, &mut cache, now, false, None, Some("en0")).await;
+        assert_eq!(first.probe_sent, 1, "首查要探测");
+        assert_eq!(first.lookups_sent, 1, "首查要查坐标");
+
+        let second = run_call(&net, &mut cache, now + 5, false, None, Some("en0")).await;
+        assert_eq!(second.probe_sent, 0);
+        assert_eq!(second.lookups_sent, 0);
+
+        assert_eq!(cache.stats.calls, 2);
+        assert_eq!(cache.stats.hits, 1);
+        assert_eq!(cache.stats.lookups, 1, "第二次没有再查坐标");
+        assert_eq!(cache.stats.probe_calls, 1, "第二次没有真探测");
+        assert_eq!(cache.stats.probe_cached, 1);
+        assert_eq!(cache.stats.stale_hits, 0);
+    }
+
+    /// **序列级主证据**：连开 5 次页面 ⇒ **探测 1 次、坐标查询 1 次**。
+    #[tokio::test]
+    async fn repeated_page_opens_do_one_lookup() {
+        let t0 = 1_000_000u64;
+        let mut cache = LocationCache::default();
+        let net = FakeNet::answering("1.2.3.4", at("ipwho.is", "Dali", "China", 25.6, 100.2));
+
+        for i in 0..5u64 {
+            let out = run_call(&net, &mut cache, t0 + i, false, None, Some("en0")).await;
+            assert!(out.origin.is_some(), "每次都应当有位置可显示");
+        }
+
+        assert_eq!(net.probe_calls(), 1, "5 次打开只探测一次（改前是 5 次）");
+        assert_eq!(net.lookup_calls(), 1, "5 次打开只查一次坐标（改前最多 5 次）");
+        assert_eq!(cache.stats.calls, 5);
+        assert_eq!(cache.stats.hits, 4);
+        assert_eq!(cache.stats.lookups, 1);
+        assert_eq!(cache.stats.probe_cached, 4);
     }
 
     /// IP-only 探测：两个源任一成功即可；`ipify` 优先；垃圾不算「查到了 IP」。
@@ -1541,11 +2199,23 @@ mod tests {
             from_cache: true,
             fetched_unix: Some(7),
             ip_changed: false,
+            stale: false,
+            probe_cached: true,
+            key_kind: "ipv6-prefix".into(),
+            age_s: Some(3),
         })
         .unwrap();
-        assert!(json.contains("\"from_cache\":true"), "实际：{json}");
-        assert!(json.contains("\"fetched_unix\":7"), "实际：{json}");
-        assert!(json.contains("\"ip_changed\":false"), "实际：{json}");
+        for needle in [
+            "\"from_cache\":true",
+            "\"fetched_unix\":7",
+            "\"ip_changed\":false",
+            "\"stale\":false",
+            "\"probe_cached\":true",
+            "\"key_kind\":\"ipv6-prefix\"",
+            "\"age_s\":3",
+        ] {
+            assert!(json.contains(needle), "缺少冻结字段 {needle}：{json}");
+        }
 
         let data = GlobeData {
             route: None,
@@ -1556,6 +2226,10 @@ mod tests {
                 from_cache: false,
                 fetched_unix: None,
                 ip_changed: true,
+                stale: true,
+                probe_cached: false,
+                key_kind: "ip".into(),
+                age_s: None,
             },
         };
         let json = serde_json::to_string(&data).unwrap();
