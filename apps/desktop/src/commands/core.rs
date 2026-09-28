@@ -4811,14 +4811,18 @@ mod tests {
     // task-108：核心启动必须**自证**（App 版本 + 触发者）
     // -----------------------------------------------------------------------
 
-    /// 七个触发者各有**互不相同**的名字（合成一个标签会让人没法归因）。
+    /// 六个触发者各有**互不相同**的名字（合成一个标签会让人没法归因）。
+    ///
+    /// ⚠️ 这里原来是 **7** 类：第 7 个是「切换节点（回退）」。节点回落 2026-09-28
+    /// 被整个删掉（用户裁决：选择就使用），触发者也随之收敛成 6 个 ——
+    /// 这个数字变了不是"放宽断言"，而是**那一类触发者真的不存在了**。
     #[test]
     fn every_start_trigger_has_its_own_label() {
         let labels: Vec<&str> = CoreStartTrigger::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(
             labels.len(),
-            7,
-            "全集是 7 类（`grep -rn 'start_core('` 核过所有调用点）：{labels:?}"
+            6,
+            "全集是 6 类（`grep -rn 'start_core('` 核过所有调用点；回退路径已删）：{labels:?}"
         );
         let uniq: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(uniq.len(), labels.len(), "标签不许重复：{labels:?}");
