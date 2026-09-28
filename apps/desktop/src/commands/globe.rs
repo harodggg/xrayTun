@@ -2,10 +2,14 @@
 //!
 //! # 一个必须说清的边界
 //!
-//! **位置来自第三方 IP 库**（`ipwho.is` / `ip-api.com` / `ipinfo.io` / `ifconfig.co`），
-//! 不是本地算出来的 —— 项目自带的 `geoip.dat` 只有国别与网段，没有经纬度（实测确认）。
-//! 把节点 IP 发给第三方是个真实的代价，所以：结果**按公网 IP 持久缓存**、
-//! 界面上标注来源、查询失败时如实报错而不是画一个坐标 (0,0) 的假点。
+//! **位置来自第三方 IP 库**（**8 个**坐标源：`ipwho.is` / `ip-api.com` / `ipinfo.io` /
+//! `ifconfig.co` / `ipwhois.app` / `json.geoiplookup.io` / `freeipapi.com` /
+//! `api.ipquery.io`），不是本地算出来的 —— 项目自带的 `geoip.dat` 只有国别与网段，
+//! 没有经纬度（实测确认）。把节点 IP 发给第三方是个真实的代价，所以：结果**按公网 IP
+//! 持久缓存**、界面上标注来源、查询失败时如实报错而不是画一个坐标 (0,0) 的假点。
+//!
+//! 八个源**并发**（`tokio::join!`），单次上限仍是 `curl_get` 的 `--max-time 8`，
+//! 不叠加；任何一个挂掉都不影响结果（`sources` 里如实写「无结果」），全挂才返回 `None`。
 //!
 //! **查询必须绕过隧道**：隧道开着时直接发请求会从节点出去，查到的会是
 //! 「节点自己的位置」—— 错得很像对的。详见 `xt_core::geo_lookup`。
@@ -850,37 +854,32 @@ fn coords_agree(a: &GeoLocation, b: &GeoLocation) -> bool {
         && (a.lon - b.lon).abs() <= CONSISTENT_TOLERANCE_DEG
 }
 
-/// 四个坐标源的**并发互校**（纯函数）：**多数一致**才 `consistent = true`。
+/// **任意数量**坐标源的并发互校（纯函数）：**多数一致**才 `consistent = true`。
 ///
 /// # 与两源版 `merge_sources` 的关系
 ///
-/// 两源版回答的是「两个都返回且坐标接近吗」；四源版必须多回答两种它没回答的情形：
-/// **只有两个源返回、而这两个互相矛盾**、以及**两两各成一派（2-2 平局）**。
-/// 两种都**不算一致** —— 「多数一致」要求严格多于一派的一半（≥3/4），
-/// 或者至少「有一派比另一派大」：
+/// 两源版回答的是「两个都返回且坐标接近吗」；多源版还必须回答它没回答的情形：
+/// **只有两个源返回、而这两个互相矛盾**、**两两各成一派（2-2 平局）**、
+/// 以及更多源时的「有一派严格过半吗」。前者都不算一致：
 ///
 /// | 情况 | `consistent` | 坐标取自 |
 /// | --- | --- | --- |
-/// | 四家一致 | `true` | 优先级最高者（`results` 顺序 = 优先级）|
-/// | 3-1（三家一派）| `true`（多数派严格过半）| 多数派里优先级最高者 |
-/// | **2-2 平局** | **`false`**（没有多数派，**不默认挑一边**）| 优先级最高者，仅作占位 |
-/// | 2-1-1（两家一派、另两家各一派）| `false`（2 票没过半）| 优先级最高者 |
-/// | 三家返回、2-1 | `true`（2/3 过半）| 多数派里优先级最高者 |
+/// | 全部一致 | `true` | 优先级最高者（`results` 顺序 = 优先级）|
+/// | N-1（一派严格过半，如 5/8、3/4）| `true` | 多数派里优先级最高者 |
+/// | **2-2 平局 / 4-4 平局** | **`false`**（没有多数派，**不默认挑一边**）| 优先级最高者，仅作占位 |
+/// | 2-1-1（票没过半）| `false` | 优先级最高者 |
 /// | 两家互相矛盾（其余没返回）| `false` | 优先级最高者 |
 /// | 只有一家返回 | `false`（**没人印证，不是「一致」**）| 那一家 |
 ///
 /// `consistent` 的判据有两条，缺一不可：
-/// 1. 簇里**至少 2 家**（只有一家返回时没人印证）；
+/// 1. 簇里**至少 2 家**（只有一家返回时「1 > 0」也成立，但没人印证）；
 /// 2. 这簇**严格多于**剩下的源数（`support > total - support`）——
-///    2-2 时两边各 2、2-1-1 时是 2 vs 2，都不成立 ⇒ `false`。
+///    任何平局（2-2 / 4-4 / 2-1-1 的 2 vs 2）都不成立 ⇒ `false`。
 ///
 /// 地名/国家/ISP 从**同一簇**里取：城市/ISP 优先中文（见 [`prefer_chinese`]），
 /// 国家用 [`prefer_country_name`]（**绝不输出两字母代码**）。
-/// `sources` **逐个列出四个源**（没返回的写「无结果」），界面据此说明问到了几家。
-fn merge_four(
-    ip: &str,
-    results: [(&'static str, Option<GeoLocation>); 4],
-) -> Option<GeoLocation> {
+/// `sources` **逐个列出全部源**（没返回的写「无结果」），界面据此说明问到了几家。
+fn merge_many(ip: &str, results: &[(&'static str, Option<GeoLocation>)]) -> Option<GeoLocation> {
     let successes: Vec<(usize, GeoLocation)> = results
         .iter()
         .enumerate()
@@ -901,9 +900,6 @@ fn merge_four(
             best = i;
         }
     }
-    // **严格多数**才算一致：
-    //   * `>= 2`：只有一家返回时「1 > 0」也成立 —— 但没人印证，不许说一致；
-    //   * `> total - support`：2-2 平局两边各 2 ⇒ false（不默认挑一边）。
     let consistent = support[best] >= 2 && support[best] > successes.len() - support[best];
     let base = successes[best].1.clone();
 
@@ -915,7 +911,7 @@ fn merge_four(
         .collect();
 
     let city = prefer_chinese(cluster.iter().map(|l| l.city.as_str()), &base.city);
-    // 国家单独走「不许代码」的那条路（ipinfo.io 给的是 `HK`）。
+    // 国家单独走「不许代码」的那条路（ipinfo.io / geoiplookup.io / freeipapi 都给代码）。
     let country = prefer_country_name(cluster.iter().map(|l| l.country.as_str()), &base.country);
     let isp = prefer_chinese(cluster.iter().map(|l| l.isp.as_str()), &base.isp);
 
@@ -1040,6 +1036,201 @@ fn parse_ifconfig_co(body: &str) -> Option<GeoLocation> {
     })
 }
 
+/// 坐标范围校验：越界一律当**没查到**（不 clamp —— 那会造出一个假点）。
+fn valid_coords(lat: f64, lon: f64) -> Option<(f64, f64)> {
+    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
+}
+
+/// 解析 `ipwhois.app` 的响应（**与 `ipwho.is` 是两家**，字段形状不同）。
+///
+/// 实测形状：`{"ip":…,"success":true,"country":"Hong Kong","city":"Hong Kong",
+/// "latitude":22.2783,"longitude":114.1747,…,"connection":{"isp":"Vapeline Technology"}}`。
+fn parse_ipwhois_app(body: &str) -> Option<GeoLocation> {
+    #[derive(Deserialize)]
+    struct Who {
+        #[serde(default)]
+        success: bool,
+        #[serde(default)]
+        ip: String,
+        #[serde(default)]
+        country: String,
+        #[serde(default)]
+        city: String,
+        #[serde(default)]
+        latitude: Option<f64>,
+        #[serde(default)]
+        longitude: Option<f64>,
+        #[serde(default)]
+        connection: Option<Conn>,
+    }
+    #[derive(Deserialize)]
+    struct Conn {
+        #[serde(default)]
+        isp: String,
+        #[serde(default)]
+        org: String,
+    }
+    let p: Who = serde_json::from_str(body).ok()?;
+    if !p.success || p.ip.is_empty() {
+        return None;
+    }
+    let (lat, lon) = valid_coords(p.latitude?, p.longitude?)?;
+    let isp = p.connection.map_or_else(String::new, |c| {
+        if c.isp.is_empty() {
+            c.org
+        } else {
+            c.isp
+        }
+    });
+    Some(GeoLocation {
+        ip: p.ip,
+        country: p.country,
+        city: p.city,
+        lat,
+        lon,
+        isp,
+        source: "ipwhois.app".into(),
+        consistent: true,
+        sources: Vec::new(),
+    })
+}
+
+/// 解析 `json.geoiplookup.io` 的响应。
+///
+/// 实测形状：`{"ip":…,"isp":"Vapeline Technology","latitude":22.3193,"longitude":114.169,
+/// "city":"Hong Kong","country_code":"HK","country_name":"Hong Kong",…}`。
+/// 用 `country_name`（全名），**不用** `country_code`。
+fn parse_geoiplookup(body: &str) -> Option<GeoLocation> {
+    #[derive(Deserialize)]
+    struct GeoIpLookup {
+        #[serde(default)]
+        ip: String,
+        #[serde(default)]
+        isp: String,
+        #[serde(default)]
+        city: String,
+        #[serde(default)]
+        country_name: String,
+        #[serde(default)]
+        latitude: Option<f64>,
+        #[serde(default)]
+        longitude: Option<f64>,
+    }
+    let p: GeoIpLookup = serde_json::from_str(body).ok()?;
+    if p.ip.is_empty() {
+        return None;
+    }
+    let (lat, lon) = valid_coords(p.latitude?, p.longitude?)?;
+    Some(GeoLocation {
+        ip: p.ip,
+        country: p.country_name,
+        city: p.city,
+        lat,
+        lon,
+        isp: p.isp,
+        source: "geoiplookup.io".into(),
+        consistent: true,
+        sources: Vec::new(),
+    })
+}
+
+/// 解析 `freeipapi.com/api/json` 的响应（**会 307 重定向** ⇒ 必须走带 `--location`
+/// 的 `curl_get`；自己另写请求会拿到 HTML）。
+///
+/// 实测形状：`{"ipAddress":…,"latitude":22.3193,"longitude":114.169,
+/// "countryName":"Hong Kong","countryCode":"HK","cityName":"Hong Kong",…}`。
+fn parse_freeipapi(body: &str) -> Option<GeoLocation> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FreeIpApi {
+        #[serde(default)]
+        ip_address: String,
+        #[serde(default)]
+        city_name: String,
+        #[serde(default)]
+        country_name: String,
+        #[serde(default)]
+        latitude: Option<f64>,
+        #[serde(default)]
+        longitude: Option<f64>,
+    }
+    let p: FreeIpApi = serde_json::from_str(body).ok()?;
+    if p.ip_address.is_empty() {
+        return None;
+    }
+    let (lat, lon) = valid_coords(p.latitude?, p.longitude?)?;
+    Some(GeoLocation {
+        ip: p.ip_address,
+        country: p.country_name,
+        city: p.city_name,
+        lat,
+        lon,
+        isp: String::new(),
+        source: "freeipapi.com".into(),
+        consistent: true,
+        sources: Vec::new(),
+    })
+}
+
+/// 解析 `api.ipquery.io` 的响应。
+///
+/// ⚠️ 坐标在**嵌套的 `location` 里**，不是顶层：
+/// `{"ip":…,"isp":{"isp":…},"location":{"country":"Hong Kong","city":"Hong Kong",
+/// "latitude":22.30,"longitude":114.17,…}}`。
+fn parse_ipquery(body: &str) -> Option<GeoLocation> {
+    #[derive(Deserialize)]
+    struct IpQuery {
+        #[serde(default)]
+        ip: String,
+        #[serde(default)]
+        isp: Option<Isp>,
+        #[serde(default)]
+        location: Option<Loc>,
+    }
+    #[derive(Deserialize)]
+    struct Isp {
+        #[serde(default)]
+        isp: String,
+        #[serde(default)]
+        org: String,
+    }
+    #[derive(Deserialize)]
+    struct Loc {
+        #[serde(default)]
+        country: String,
+        #[serde(default)]
+        city: String,
+        #[serde(default)]
+        latitude: Option<f64>,
+        #[serde(default)]
+        longitude: Option<f64>,
+    }
+    let p: IpQuery = serde_json::from_str(body).ok()?;
+    if p.ip.is_empty() {
+        return None;
+    }
+    let loc = p.location?;
+    let (lat, lon) = valid_coords(loc.latitude?, loc.longitude?)?;
+    let isp = p.isp.map_or_else(String::new, |i| {
+        if i.isp.is_empty() {
+            i.org
+        } else {
+            i.isp
+        }
+    });
+    Some(GeoLocation {
+        ip: p.ip,
+        country: loc.country,
+        city: loc.city,
+        lat,
+        lon,
+        isp,
+        source: "ipquery.io".into(),
+        consistent: true,
+        sources: Vec::new(),
+    })
+}
+
 /// `api.ipify.org` 返回**纯文本 IP**。
 fn parse_ipify(body: &str) -> Option<String> {
     body.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
@@ -1051,11 +1242,46 @@ fn parse_cf_trace(body: &str) -> Option<String> {
     value.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
 }
 
-/// 两个 IP-only 源里任一成功即可判定；`ipify` 优先（它就是为「告诉我你的 IP」存在）。
-fn pick_public_ip(ipify: Option<&str>, cloudflare: Option<&str>) -> Option<String> {
+/// `api.bigdatacloud.net/data/client-ip` → `{"ipString":"1.2.3.4","ipType":"IPv4"}`。
+fn parse_bigdatacloud(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BigDataCloud {
+        #[serde(default)]
+        ip_string: String,
+    }
+    let p: BigDataCloud = serde_json::from_str(body).ok()?;
+    p.ip_string.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+/// `api.country.is/` → `{"ip":"1.2.3.4","country":"HK"}`（只用它的 `ip`）。
+fn parse_country_is(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct CountryIs {
+        #[serde(default)]
+        ip: String,
+    }
+    let p: CountryIs = serde_json::from_str(body).ok()?;
+    p.ip.trim().parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+/// 四个 IP-only 源里任一成功即可判定。
+///
+/// 优先级**按加入顺序**（先有的先用，保持结果确定）：
+/// `ipify` → `1.1.1.1/cdn-cgi/trace` → `bigdatacloud` → `country.is`。
+/// 它们都只回答一件事（"我的公网 IP 是什么"），所以优先级不影响正确性，
+/// 只影响"两个源都答了且不一致时信谁"——信先验更稳的那个。
+fn pick_public_ip(
+    ipify: Option<&str>,
+    cloudflare: Option<&str>,
+    bigdatacloud: Option<&str>,
+    country_is: Option<&str>,
+) -> Option<String> {
     ipify
         .and_then(parse_ipify)
         .or_else(|| cloudflare.and_then(parse_cf_trace))
+        .or_else(|| bigdatacloud.and_then(parse_bigdatacloud))
+        .or_else(|| country_is.and_then(parse_country_is))
 }
 
 // 注：0.9.1-C 起「IP 变了没有」不再是独立函数 —— 它现在是 `run_call` 里
@@ -1125,23 +1351,34 @@ fn self_check_from_cache(entry: &CachedLocation, origin: &GeoLocation) -> SelfCh
 
 /// 轻量公网 IP 探测：**只取 IP，不取坐标**。
 ///
-/// 两个源并发，任一成功即可（见 [`pick_public_ip`]）。它只回答一个问题 ——
-/// 「公网 IP 变了没有」—— 所以比坐标查询便宜，也不该在 IP 没变时触发坐标查询。
+/// **四个**源并发，任一成功即可（优先级见 [`pick_public_ip`]）。它只回答一个问题
+/// ——「公网 IP 变了没有」—— 所以比坐标查询便宜，也不该在 IP 没变时触发坐标查询。
+/// 四路并发**不叠加**延迟：单次上限仍是 `curl_get` 里的 `--max-time 8`。
 async fn query_public_ip(interface: Option<&str>) -> Option<String> {
-    let (ipify, cloudflare) = tokio::join!(
+    let (ipify, cloudflare, bigdatacloud, country_is) = tokio::join!(
         curl_get("https://api.ipify.org", interface),
         curl_get("https://1.1.1.1/cdn-cgi/trace", interface),
+        curl_get("https://api.bigdatacloud.net/data/client-ip", interface),
+        curl_get("https://api.country.is/", interface),
     );
-    pick_public_ip(ipify.as_deref(), cloudflare.as_deref())
+    pick_public_ip(
+        ipify.as_deref(),
+        cloudflare.as_deref(),
+        bigdatacloud.as_deref(),
+        country_is.as_deref(),
+    )
 }
 
-/// 查一个指定 IP 的位置（四源互校）。
+/// 查一个指定 IP 的位置（**八源**互校）。
 ///
 /// ⚠️ 实测：`https://ifconfig.co/json?ip=<ip>` **只给国家与 ASN，不给经纬度/城市**
 /// （`curl -sS 'https://ifconfig.co/json?ip=1.1.1.1'` ⇒ 没有 `latitude`/`longitude`）。
 /// 所以查**节点**时它在 `sources` 里会如实记成「无结果」，且**绝不会**被当成 (0,0)
 /// 参与坐标投票（见 [`parse_ifconfig_co`] 的 `Option` 校验）。仍然问它：上游一旦
 /// 补上坐标就自动生效，而且 `sources` 里必须能看到「这一家问过了」。
+///
+/// 八个源**全部并发**（`tokio::join!`）—— 顺序 await 会让最坏延迟线性叠加。
+/// `tokio::join!` 支持任意数量的 future，8 个不是问题。
 async fn query_ip(ip: &str, interface: Option<&str>) -> Option<GeoLocation> {
     let (who_url, api_url, info_url, ifc_url) = (
         format!("https://ipwho.is/{ip}"),
@@ -1149,31 +1386,45 @@ async fn query_ip(ip: &str, interface: Option<&str>) -> Option<GeoLocation> {
         format!("https://ipinfo.io/{ip}/json"),
         format!("https://ifconfig.co/json?ip={ip}"),
     );
-    let (who, api, info, ifc) = tokio::join!(
+    let (whoisapp_url, geoip_url, freeip_url, ipquery_url) = (
+        format!("https://ipwhois.app/json/{ip}"),
+        format!("https://json.geoiplookup.io/{ip}"),
+        format!("https://freeipapi.com/api/json/{ip}"),
+        format!("https://api.ipquery.io/{ip}?format=json"),
+    );
+    let (who, api, info, ifc, whoisapp, geoip, freeip, ipquery) = tokio::join!(
         curl_get(&who_url, interface),
         curl_get(&api_url, interface),
         curl_get(&info_url, interface),
         curl_get(&ifc_url, interface),
+        curl_get(&whoisapp_url, interface),
+        curl_get(&geoip_url, interface),
+        curl_get(&freeip_url, interface),
+        curl_get(&ipquery_url, interface),
     );
-    merge_four(
+    merge_many(
         ip,
-        [
+        &[
             ("ipwho.is", who.and_then(|b| parse_who(&b, ip))),
             ("ip-api.com", api.and_then(|b| parse_api(&b, ip))),
             ("ipinfo.io", info.and_then(|b| parse_ipinfo(&b))),
             ("ifconfig.co", ifc.and_then(|b| parse_ifconfig_co(&b))),
+            ("ipwhois.app", whoisapp.and_then(|b| parse_ipwhois_app(&b))),
+            ("geoiplookup.io", geoip.and_then(|b| parse_geoiplookup(&b))),
+            ("freeipapi.com", freeip.and_then(|b| parse_freeipapi(&b))),
+            ("ipquery.io", ipquery.and_then(|b| parse_ipquery(&b))),
         ],
     )
 }
 
-/// 查**本机**的公网位置（四源互校）。服务自己看到的是发起请求的出口地址，
+/// 查**本机**的公网位置（**八源**互校）。服务自己看到的是发起请求的出口地址，
 /// 所以 url 里不带 IP；`probed_ip` 只作为「源没给出 IP 时」的兜底与缓存键。
 async fn query_self(
     interface: Option<&str>,
     probed_ip: Option<&str>,
 ) -> Option<GeoLocation> {
     let fallback = probed_ip.unwrap_or("");
-    let (who, api, info, ifc) = tokio::join!(
+    let (who, api, info, ifc, whoisapp, geoip, freeip, ipquery) = tokio::join!(
         curl_get("https://ipwho.is/", interface),
         curl_get(
             "http://ip-api.com/json/?fields=status,message,country,city,lat,lon,isp,query&lang=zh-CN",
@@ -1181,14 +1432,24 @@ async fn query_self(
         ),
         curl_get("https://ipinfo.io/json", interface),
         curl_get("https://ifconfig.co/json", interface),
+        curl_get("https://ipwhois.app/json/", interface),
+        curl_get("https://json.geoiplookup.io/", interface),
+        // ⚠️ freeipapi 会 **307 重定向**：`curl_get` 带 `--location`，所以这里没问题；
+        // 自己另写请求会拿到 HTML（解析器会如实返回 `None`）。
+        curl_get("https://freeipapi.com/api/json", interface),
+        curl_get("https://api.ipquery.io/?format=json", interface),
     );
-    merge_four(
+    merge_many(
         fallback,
-        [
+        &[
             ("ipwho.is", who.and_then(|b| parse_who(&b, fallback))),
             ("ip-api.com", api.and_then(|b| parse_api(&b, fallback))),
             ("ipinfo.io", info.and_then(|b| parse_ipinfo(&b))),
             ("ifconfig.co", ifc.and_then(|b| parse_ifconfig_co(&b))),
+            ("ipwhois.app", whoisapp.and_then(|b| parse_ipwhois_app(&b))),
+            ("geoiplookup.io", geoip.and_then(|b| parse_geoiplookup(&b))),
+            ("freeipapi.com", freeip.and_then(|b| parse_freeipapi(&b))),
+            ("ipquery.io", ipquery.and_then(|b| parse_ipquery(&b))),
         ],
     )
 }
@@ -1577,9 +1838,9 @@ mod tests {
     /// 中文地名/国家名优先（ip-api 的 `lang=zh-CN`），且最终国家不是两字母代码。
     #[test]
     fn four_sources_all_agree() {
-        let merged = merge_four(
+        let merged = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", Some(at("ipwho.is", "Dali Baizu", "China", 25.60, 100.26))),
                 ("ip-api.com", Some(at("ip-api.com", "大理", "中国", 25.69, 100.16))),
                 ("ipinfo.io", Some(at("ipinfo.io", "Dali", "CN", 25.61, 100.25))),
@@ -1603,9 +1864,9 @@ mod tests {
     /// **3-1**：三家一派 ⇒ 多数派成立（3/4 严格过半）；跑偏那家只留痕、不左右结果。
     #[test]
     fn four_sources_three_against_one() {
-        let merged = merge_four(
+        let merged = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.60, 100.20))),
                 ("ip-api.com", Some(at("ip-api.com", "大理", "中国", 25.69, 100.16))),
                 ("ipinfo.io", Some(at("ipinfo.io", "Dali", "CN", 25.61, 100.25))),
@@ -1626,9 +1887,9 @@ mod tests {
     /// **2-2 平局** ⇒ **必须 `consistent = false`**：两派都不是多数，不许默认挑一边。
     #[test]
     fn four_sources_two_two_tie_is_not_consistent() {
-        let merged = merge_four(
+        let merged = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.60, 100.20))),
                 ("ip-api.com", Some(at("ip-api.com", "大理", "中国", 25.61, 100.21))),
                 ("ipinfo.io", Some(at("ipinfo.io", "Guangzhou", "CN", 23.13, 113.26))),
@@ -1650,9 +1911,9 @@ mod tests {
     /// **2-1-1**（四家都返回、只有两家一致）⇒ 2 票没过半 ⇒ 同样不一致。
     #[test]
     fn four_sources_plurality_without_majority_is_not_consistent() {
-        let merged = merge_four(
+        let merged = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.60, 100.20))),
                 ("ip-api.com", Some(at("ip-api.com", "大理", "中国", 25.61, 100.21))),
                 ("ipinfo.io", Some(at("ipinfo.io", "Guangzhou", "CN", 23.13, 113.26))),
@@ -1663,13 +1924,93 @@ mod tests {
         assert!(!merged.consistent, "2/4 不是严格多数");
     }
 
+    // -----------------------------------------------------------------------
+    // 0.9.1-E：8 个坐标源（5 一致 / 4-4 平局 / 只有 2 家 / 全无）
+    // -----------------------------------------------------------------------
+
+    /// 八个源里 **5 家一致** ⇒ 5 > 3 ⇒ 严格过半 ⇒ `consistent = true`。
+    #[test]
+    fn five_of_eight_agree_is_consistent() {
+        let merged = merge_many(
+            "1.2.3.4",
+            &[
+                ("s1", Some(at("s1", "Dali", "China", 25.60, 100.20))),
+                ("s2", Some(at("s2", "大理", "中国", 25.61, 100.21))),
+                ("s3", Some(at("s3", "Dali", "CN", 25.62, 100.22))),
+                ("s4", Some(at("s4", "Dali", "China", 25.59, 100.19))),
+                ("s5", Some(at("s5", "Dali", "China", 25.60, 100.18))),
+                ("s6", Some(at("s6", "Sydney", "Australia", -33.86, 151.20))),
+                ("s7", Some(at("s7", "Tokyo", "Japan", 35.68, 139.69))),
+                ("s8", None),
+            ],
+        )
+        .expect("至少一家返回");
+        assert!(merged.consistent, "5/8 严格过半");
+        assert_eq!(merged.sources.len(), 8, "八个源都要列出（含「无结果」）");
+        assert!((merged.lat - 25.60).abs() < 1e-9, "取多数派里优先级最高的");
+        assert_eq!(merged.country, "中国", "中文全名仍优先（s3 给的是 CN 代码）");
+    }
+
+    /// **4-4 平局** ⇒ 没有多数派 ⇒ `consistent = false`（不许默认挑一边）。
+    #[test]
+    fn four_four_tie_is_not_consistent() {
+        let merged = merge_many(
+            "1.2.3.4",
+            &[
+                ("s1", Some(at("s1", "Dali", "China", 25.60, 100.20))),
+                ("s2", Some(at("s2", "大理", "中国", 25.61, 100.21))),
+                ("s3", Some(at("s3", "Dali", "CN", 25.62, 100.22))),
+                ("s4", Some(at("s4", "Dali", "China", 25.59, 100.19))),
+                ("s5", Some(at("s5", "Sydney", "Australia", -33.86, 151.20))),
+                ("s6", Some(at("s6", "Sydney", "AU", -33.87, 151.21))),
+                ("s7", Some(at("s7", "Sydney", "Australia", -33.85, 151.19))),
+                ("s8", Some(at("s8", "Sydney", "Australia", -33.88, 151.22))),
+            ],
+        )
+        .expect("八家都返回");
+        assert!(!merged.consistent, "4-4 平局必须判不一致");
+        assert_eq!(merged.sources.len(), 8);
+    }
+
+    /// **只有 2 家返回且它们一致**（其余没答）⇒ 2 票就是全部 ⇒ 过半 ⇒ `true`。
+    #[test]
+    fn two_of_eight_agreeing_is_consistent() {
+        let merged = merge_many(
+            "1.2.3.4",
+            &[
+                ("s1", Some(at("s1", "Dali", "China", 25.60, 100.20))),
+                ("s2", Some(at("s2", "大理", "中国", 25.61, 100.21))),
+                ("s3", None),
+                ("s4", None),
+                ("s5", None),
+                ("s6", None),
+                ("s7", None),
+                ("s8", None),
+            ],
+        )
+        .expect("两家返回");
+        assert!(merged.consistent, "2/2 过半，且有人印证");
+        assert_eq!(merged.sources.iter().filter(|s| s.contains("无结果")).count(), 6);
+    }
+
+    /// 八家全挂 ⇒ `None`（诚实路径不变）。
+    #[test]
+    fn all_eight_missing_yields_none() {
+        let none: Option<GeoLocation> = None;
+        let results: Vec<(&'static str, Option<GeoLocation>)> = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]
+            .into_iter()
+            .map(|name| (name, none.clone()))
+            .collect();
+        assert!(merge_many("1.2.3.4", &results).is_none());
+    }
+
 
     /// **两家互相矛盾**（其余没返回）⇒ 不许说一致；没返回的源也要如实列出。
     #[test]
     fn two_disagreeing_sources_are_not_consistent() {
-        let merged = merge_four(
+        let merged = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.6, 100.2))),
                 ("ip-api.com", Some(at("ip-api.com", "广州", "中国", 23.1, 113.2))),
                 ("ipinfo.io", None),
@@ -1686,9 +2027,9 @@ mod tests {
     /// 「1 > 0」看似过半，但一家不可能构成「多数一致」）。
     #[test]
     fn single_source_is_not_consistent_and_lists_missing_ones() {
-        let merged = merge_four(
+        let merged = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", Some(at("ipwho.is", "Dali", "China", 25.6, 100.2))),
                 ("ip-api.com", None),
                 ("ipinfo.io", None),
@@ -1706,9 +2047,9 @@ mod tests {
     #[test]
     fn all_sources_missing_yields_none() {
         let none: Option<GeoLocation> = None;
-        assert!(merge_four(
+        assert!(merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", none.clone()),
                 ("ip-api.com", none.clone()),
                 ("ipinfo.io", none.clone()),
@@ -1737,9 +2078,9 @@ mod tests {
         );
 
         // 端到端：ipinfo 是**唯一返回**的源（坐标基准就是它）⇒ country 也不能是 "HK"
-        let only_ipinfo = merge_four(
+        let only_ipinfo = merge_many(
             "1.2.3.4",
-            [
+            &[
                 ("ipwho.is", None),
                 ("ip-api.com", None),
                 ("ipinfo.io", Some(at("ipinfo.io", "Tung Chung", "HK", 22.2878, 113.9424))),
@@ -2077,24 +2418,58 @@ mod tests {
         assert_eq!(cache.stats.probe_cached, 4);
     }
 
-    /// IP-only 探测：两个源任一成功即可；`ipify` 优先；垃圾不算「查到了 IP」。
+    /// IP-only 探测（**四个**源）：任一成功即可；按加入顺序取优先级；垃圾不算「查到了 IP」。
     #[test]
     fn ip_only_probes_parse_and_reject_garbage() {
+        // 逐个源单独可用
         assert_eq!(
-            pick_public_ip(Some("  116.53.173.241\n"), None).as_deref(),
+            pick_public_ip(Some("  116.53.173.241\n"), None, None, None).as_deref(),
             Some("116.53.173.241")
         );
         let trace = "fl=abc\nh=1.1.1.1\nip=2001:db8::1\nts=1700000000\n";
-        assert_eq!(pick_public_ip(None, Some(trace)).as_deref(), Some("2001:db8::1"));
         assert_eq!(
-            pick_public_ip(Some("1.2.3.4"), Some("ip=5.6.7.8")).as_deref(),
-            Some("1.2.3.4"),
-            "ipify 优先"
+            pick_public_ip(None, Some(trace), None, None).as_deref(),
+            Some("2001:db8::1")
         );
-        // 「没查到」与「查到垃圾」都不许当成一个公网 IP
-        assert_eq!(pick_public_ip(Some("rate limited"), Some("nope")), None);
-        assert_eq!(pick_public_ip(Some("1.2.3.4:80"), None), None, "端口不能混进 IP");
-        assert_eq!(pick_public_ip(None, None), None);
+        assert_eq!(
+            pick_public_ip(None, None, Some(r#"{"ipString":"1.2.3.4","ipType":"IPv4"}"#), None)
+                .as_deref(),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            pick_public_ip(None, None, None, Some(r#"{"ip":"5.6.7.8","country":"HK"}"#)).as_deref(),
+            Some("5.6.7.8")
+        );
+
+        // 优先级：ipify → cdn-cgi/trace → bigdatacloud → country.is（结果确定）
+        assert_eq!(
+            pick_public_ip(
+                Some("1.2.3.4"),
+                Some("ip=5.6.7.8"),
+                Some(r#"{"ipString":"9.9.9.9"}"#),
+                Some(r#"{"ip":"8.8.8.8"}"#)
+            )
+            .as_deref(),
+            Some("1.2.3.4"),
+            "四个都答 ⇒ 取最先加入的那个"
+        );
+        assert_eq!(
+            pick_public_ip(None, Some("ip=5.6.7.8"), Some(r#"{"ipString":"9.9.9.9"}"#), None)
+                .as_deref(),
+            Some("5.6.7.8")
+        );
+        assert_eq!(
+            pick_public_ip(None, None, Some("<html>blocked</html>"), Some(r#"{"ip":"8.8.8.8"}"#))
+                .as_deref(),
+            Some("8.8.8.8"),
+            "前面那个坏了就往后走"
+        );
+
+        // 全挂 / 垃圾：都不许当成一个公网 IP
+        assert_eq!(pick_public_ip(Some("rate limited"), Some("nope"), None, None), None);
+        assert_eq!(pick_public_ip(Some("1.2.3.4:80"), None, None, None), None, "端口不能混进 IP");
+        assert_eq!(pick_public_ip(None, None, Some(r#"{"ipString":""}"#), Some(r#"{"ip":"x"}"#)), None);
+        assert_eq!(pick_public_ip(None, None, None, None), None);
     }
 
     /// `ipinfo.io`：`loc` 是 `"lat,lon"` **字符串**、`country` 是**两字母代码**、
@@ -2144,6 +2519,94 @@ mod tests {
             "(0,0) **显式给出**是合法坐标，不该被误拒");
         assert!(parse_ifconfig_co(r#"{"latitude":1.0,"longitude":2.0}"#).is_none(), "缺 ip");
         assert!(parse_ifconfig_co("not json").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.9.1-E：四个新源（**先实测可达再写进来**；形状来自本机 curl）
+    // -----------------------------------------------------------------------
+
+    /// `ipwhois.app`：`success` 必须为 true；**缺坐标 → None**（不许 default 成 0）。
+    #[test]
+    fn ipwhois_app_parses_success_and_rejects_missing_coordinates() {
+        let body = r#"{"ip":"45.207.197.185","success":true,"type":"IPv4",
+                       "country":"Hong Kong","city":"Hong Kong",
+                       "latitude":22.2783168,"longitude":114.1746891,
+                       "connection":{"isp":"Vapeline Technology","org":"X"}}"#;
+        let l = parse_ipwhois_app(body).expect("应当解析成功");
+        assert_eq!(l.source, "ipwhois.app");
+        assert_eq!(l.city, "Hong Kong");
+        assert_eq!(l.isp, "Vapeline Technology");
+        assert!((l.lat - 22.2783168).abs() < 1e-9);
+
+        assert!(parse_ipwhois_app(r#"{"ip":"1.2.3.4","success":false}"#).is_none());
+        assert!(
+            parse_ipwhois_app(r#"{"ip":"1.2.3.4","success":true,"city":"X"}"#).is_none(),
+            "缺坐标不许被 serde default 成 (0,0)"
+        );
+        assert!(parse_ipwhois_app("<html>challenge</html>").is_none());
+    }
+
+    /// `json.geoiplookup.io`：用 `country_name`（全名），不用 `country_code`。
+    #[test]
+    fn geoiplookup_parses_success_and_rejects_missing_coordinates() {
+        let body = r#"{"ip":"45.207.197.185","isp":"Vapeline Technology","org":"",
+                       "latitude":22.3193,"longitude":114.169,"city":"Hong Kong",
+                       "country_code":"HK","country_name":"Hong Kong"}"#;
+        let l = parse_geoiplookup(body).expect("应当解析成功");
+        assert_eq!(l.source, "geoiplookup.io");
+        assert_eq!(l.country, "Hong Kong");
+        assert_eq!(l.isp, "Vapeline Technology");
+        assert!((l.lon - 114.169).abs() < 1e-9);
+
+        assert!(
+            parse_geoiplookup(r#"{"ip":"1.2.3.4","city":"X","country_name":"Y"}"#).is_none(),
+            "缺坐标 ⇒ None"
+        );
+        assert!(parse_geoiplookup(r#"{"isp":"x"}"#).is_none(), "缺 ip ⇒ None");
+        assert!(parse_geoiplookup("not json").is_none());
+    }
+
+    /// `freeipapi.com`（**307 重定向**）：`ipAddress`/`latitude`/`longitude`/`countryName`/`cityName`。
+    #[test]
+    fn freeipapi_parses_success_and_rejects_missing_coordinates() {
+        let body = r#"{"ipVersion":4,"ipAddress":"45.207.197.185","latitude":22.3193,
+                       "longitude":114.169,"countryName":"Hong Kong","countryCode":"HK",
+                       "cityName":"Hong Kong","regionName":"Kowloon"}"#;
+        let l = parse_freeipapi(body).expect("应当解析成功");
+        assert_eq!(l.source, "freeipapi.com");
+        assert_eq!(l.city, "Hong Kong");
+        assert_eq!(l.country, "Hong Kong");
+        assert!((l.lat - 22.3193).abs() < 1e-9);
+
+        assert!(
+            parse_freeipapi(r#"{"ipAddress":"1.2.3.4","countryName":"X"}"#).is_none(),
+            "缺坐标 ⇒ None"
+        );
+        assert!(parse_freeipapi(r#"{"latitude":1.0,"longitude":2.0}"#).is_none(), "缺 ip ⇒ None");
+        assert!(parse_freeipapi("<html>redirect target</html>").is_none());
+    }
+
+    /// `api.ipquery.io`：坐标在**嵌套的 `location`** 里；顶层没有坐标字段。
+    #[test]
+    fn ipquery_parses_nested_location_and_rejects_missing_coordinates() {
+        let body = r#"{"ip":"45.207.197.185",
+                       "isp":{"asn":"AS137899","org":"I LAYER LIMITED","isp":"I LAYER LIMITED"},
+                       "location":{"country":"Hong Kong","country_code":"HK","city":"Hong Kong",
+                                   "state":"Kowloon","latitude":22.300523882689273,
+                                   "longitude":114.17668557541151}}"#;
+        let l = parse_ipquery(body).expect("应当解析成功");
+        assert_eq!(l.source, "ipquery.io");
+        assert_eq!(l.city, "Hong Kong");
+        assert_eq!(l.isp, "I LAYER LIMITED");
+        assert!((l.lat - 22.300523882689273).abs() < 1e-9);
+
+        assert!(
+            parse_ipquery(r#"{"ip":"1.2.3.4","location":{"city":"X"}}"#).is_none(),
+            "location 里缺坐标 ⇒ None"
+        );
+        assert!(parse_ipquery(r#"{"ip":"1.2.3.4"}"#).is_none(), "缺 location ⇒ None");
+        assert!(parse_ipquery(r#"{"location":{"latitude":1.0,"longitude":2.0}}"#).is_none(), "缺 ip");
+        assert!(parse_ipquery("not json").is_none());
     }
 
     /// 缓存条目 ↔ 对外位置：字段一个不丢；**抓取时绑没绑卡必须留在条目里**
