@@ -69,12 +69,13 @@ async function renderSettings(focus?: string, over: Partial<AppSettings> = {}) {
 /** 第 `i` 次 `save_settings` 的载荷。 */
 const savePayload = (i = 0) => mocks.saveSettings.mock.calls[i]![0] as AppSettings;
 
-const autoReconnectBox = () =>
-  screen.getByRole("checkbox", { name: /自动连回来/ }) as HTMLInputElement;
+/** 本文件拿「允许局域网设备使用本机代理」当样本开关：它属于默认分类、且无副作用。 */
+const allowLanBox = () =>
+  screen.getByRole("checkbox", { name: /允许局域网设备使用本机代理/ }) as HTMLInputElement;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  /** 后端原样持久化回传的整份设置（与 `autoReconnectSetting` 的模拟同一口径）。 */
+  /** 后端原样持久化回传的整份设置（与其它设置页测试的模拟同一口径）。 */
   mocks.saveSettings.mockImplementation(async (next: AppSettings) => ({
     ...snap(),
     settings: next,
@@ -92,33 +93,35 @@ describe("0.9 B1 · 改完即生效 + 一次可撤销", () => {
     expect(screen.queryByRole("button", { name: "放弃" }), "还有「放弃」按钮").toBeNull();
     expect(screen.queryByText("有未保存的改动。"), "还有草稿横幅").toBeNull();
 
-    fireEvent.click(autoReconnectBox());
+    const before = allowLanBox().checked;
+    fireEvent.click(allowLanBox());
 
     await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
-    expect(savePayload().auto_reconnect, "改动必须原样进入载荷").toBe(false);
+    expect(savePayload().allow_lan, "改动必须原样进入载荷").toBe(!before);
   });
 
   it("每次保存都有回声：role=status 的「已保存「X」」+ 一颗「撤销」", async () => {
     await renderSettings();
     expect(screen.queryByRole("status"), "没改之前不该有回声").toBeNull();
 
-    fireEvent.click(autoReconnectBox());
+    fireEvent.click(allowLanBox());
 
     const echo = await screen.findByRole("status");
     expect(echo.textContent).toContain("已保存");
-    expect(echo.textContent, "回声要说清是哪一项改动").toContain("自动连回来");
+    expect(echo.textContent, "回声要说清是哪一项改动").toContain("允许局域网设备使用本机代理");
     expect(screen.getByRole("button", { name: "撤销" })).toBeTruthy();
   });
 
   it("撤销**真的写回上一个值**（再存一次），不是只在界面上回滚一下", async () => {
     await renderSettings();
-    fireEvent.click(autoReconnectBox());
+    const before = allowLanBox().checked;
+    fireEvent.click(allowLanBox());
     await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(1));
 
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
 
     await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(2));
-    expect(savePayload(1).auto_reconnect, "撤销 = 把上一个值写回去").toBe(true);
+    expect(savePayload(1).allow_lan, "撤销 = 把上一个值写回去").toBe(before);
     await waitFor(() => expect(screen.getByText(/已撤销/)).toBeTruthy());
     // 「一次可撤销」：撤销完不再挂第二颗
     expect(screen.queryByRole("button", { name: "撤销" })).toBeNull();
@@ -142,15 +145,17 @@ describe("0.9 B1 · 改完即生效 + 一次可撤销", () => {
   it("连续两次改动**都落盘**，且第二次载荷带着第一次的结果（排队，不是忙时丢弃）", async () => {
     await renderSettings();
 
-    fireEvent.click(autoReconnectBox());
+    const before = allowLanBox().checked;
+    fireEvent.click(allowLanBox());
     // 第二次改动在第一次还没返回时就发生。`run()` 在这种情况会**直接丢弃**第二次
     // （`busy` 非空 ⇒ return false），而自动保存必须每次都落盘。
-    fireEvent.click(screen.getByRole("checkbox", { name: /允许局域网设备使用本机代理/ }));
+    const level = (await screen.findByText("日志级别")).closest(".field")!.querySelector("select")!;
+    fireEvent.change(level, { target: { value: "warning" } });
 
     await waitFor(() => expect(mocks.saveSettings).toHaveBeenCalledTimes(2));
-    expect(savePayload(0).auto_reconnect).toBe(false);
-    expect(savePayload(1).auto_reconnect, "第二次载荷丢了第一次的改动").toBe(false);
-    expect(savePayload(1).allow_lan).toBe(true);
+    expect(savePayload(0).allow_lan).toBe(!before);
+    expect(savePayload(1).allow_lan, "第二次载荷丢了第一次的改动").toBe(!before);
+    expect(savePayload(1).log_level).toBe("warning");
   });
 
   it("保存失败 ⇒ **不许说「已保存」**，也**不许拿旧设置去重启核心**（task-120 不变量）", async () => {

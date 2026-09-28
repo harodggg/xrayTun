@@ -1572,41 +1572,6 @@ mod tests {
     /// 那条早退路径之前，于是必须保证重复调用不会 spawn 出多个看门狗 ——
     /// 多个看门狗会各自重建隧道，互相拆台。
     #[test]
-    fn monitor_guard_deduplicates_per_pid() {
-        let pid = 424_242u32;
-        // 先清干净，避免与其它测试串扰
-        release_monitors(Some(pid));
-
-        let first = MonitorGuard::claim(Some(pid));
-        assert!(first.is_some(), "第一次应当能占用");
-
-        // 第二个克隆也算「有人在守」——这正是三个监控任务共享守卫的情形
-        let clone = first.as_ref().unwrap().clone();
-        assert!(
-            MonitorGuard::claim(Some(pid)).is_none(),
-            "同一个 pid 第二次占用必须被拒（否则会 spawn 出重复的看门狗）"
-        );
-
-        // 三个任务各自持有一份；只有全部释放后 pid 才回到可占用
-        drop(first);
-        assert!(
-            MonitorGuard::claim(Some(pid)).is_none(),
-            "还有一份克隆活着时，仍然算有人在守"
-        );
-        drop(clone);
-        let again = MonitorGuard::claim(Some(pid));
-        assert!(again.is_some(), "全部释放后应当可以重新占用");
-        drop(again);
-
-        // 没有 pid（核心没有进程句柄）时不占用，也不 panic
-        assert!(MonitorGuard::claim(None).is_none());
-    }
-
-    /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
-        ///
-        /// `000` 是连不上/超时/被 reset，空串是进程压根没起来 —— 都算不通。
-        /// 但 403 说明**链路是好的**，只是目标拒绝了我们；把它算成不通会
-        /// 让一条能用的隧道被判死并重建。
         #[test]
         fn tunnel_probe_result_is_read_as_dead_or_alive() {
             assert!(tunnel_is_dead(""), "进程没起来时 curl 不输出");
@@ -1620,78 +1585,7 @@ mod tests {
         /// 这条判据决定「唤醒后多久开始恢复」—— 判错成「没睡」就退化成
         /// 等两次失败（约 30 秒），判错成「睡了」则只是早一次探测、无害。
         #[test]
-        fn sleep_is_detected_as_wall_clock_running_ahead_of_monotonic() {
-            let s = Duration::from_secs;
-            // 正常的一轮：两个时钟走的一样多 → 没睡。
-            assert_eq!(slept_for(s(10), s(10)), Duration::ZERO);
-            // 睡了 8 小时：单调走了 10 秒，墙上走了 8 小时。
-            let slept = slept_for(s(10), s(8 * 3600));
-            assert!(slept > SLEEP_THRESHOLD, "8 小时必须被认成睡过：{slept:?}");
-            // 边界：刚好一分钟。
-            assert!(slept_for(s(10), s(70)) > SLEEP_THRESHOLD);
-            // 墙上时钟落后（NTP 回调）不能 panic，也不能当成睡过。
-            assert_eq!(slept_for(s(60), s(10)), Duration::ZERO);
-        }
-        /// 换网必须能被识别出来：网卡换了、或同一张网卡换了网关（换 WiFi、
-        /// 插网线、开热点、路由器重发 DHCP）都算。
-        ///
-        /// 这条判据把「静默失效」变成一句报错。实测的判别特征：
-        /// 换网报的是 `io: read/write on closed pipe`（连接被抽走），
-        /// 节点抖动报的是 `context deadline exceeded`（超时）—— 两者的处置完全不同。
         #[test]
-        fn egress_change_is_detected_by_interface_or_gateway() {
-            let gw = |s: &str| Some(s.parse().unwrap());
-            let base = Egress {
-                interface: "en0".into(),
-                gateway: gw("192.168.0.1"),
-            };
-            assert!(
-                network_moved(
-                    &base,
-                    &Egress {
-                        interface: "en0".into(),
-                        gateway: gw("192.168.100.1")
-                    }
-                ),
-                "同一张网卡换了网关也算换网",
-            );
-            assert!(
-                network_moved(
-                    &base,
-                    &Egress {
-                        interface: "en1".into(),
-                        gateway: gw("192.168.0.1")
-                    }
-                ),
-                "换了网卡也算换网",
-            );
-            assert!(
-                network_moved(
-                    &base,
-                    &Egress {
-                        interface: "en0".into(),
-                        gateway: None
-                    }
-                ),
-                "网关从有到无（掉线）也算",
-            );
-            assert!(
-                !network_moved(
-                    &base,
-                    &Egress {
-                        interface: "en0".into(),
-                        gateway: gw("192.168.0.1")
-                    }
-                ),
-                "没变就不该报",
-            );
-            assert_eq!(base.describe(), "en0 (192.168.0.1)");
-        }
-        /// 自动重连的四个条件缺一不可。
-        ///
-        /// 自更新会先退出 app、替换、再重启 —— 重启后要不要连回来，完全由
-        /// 这个判断决定。它宽松一点就是「用户关过的隧道自己回来了」，
-        /// 严一点就是「用户没关过的东西断了」。
         #[test]
         fn auto_reconnect_requires_intent_and_absence_of_a_running_core() {
             let tun = ProxyMode::Tun;
@@ -1887,55 +1781,7 @@ mod tests {
         /// 而按钮那边又被幂等守卫挡住（`Supervisor::is_running` 曾经只看
         /// `process.is_some()`）。两边一起坏，用户就只能看到「点了没反应」。
         #[test]
-        fn watchdog_keys_off_intent_and_generation_not_observed_state() {
-            assert!(
-                watchdog_should_watch(true, Some(9), Some(9)),
-                "用户还想要、还是我那次连接 —— 继续盯",
-            );
-            assert!(
-                watchdog_should_watch(true, Some(9), Some(9)),
-                "注意：这里**没有** running 参数 —— 核心刚死时 running 已是 false，"
-            );
-            assert!(!watchdog_should_watch(false, Some(9), Some(9)), "用户关掉了，收手");
-            assert!(
-                !watchdog_should_watch(true, Some(9), Some(11)),
-                "已经重连过（换了 pid），这条隧道不归我管了",
-            );
-            // 两边都拿不到 pid 时**继续盯**：宁可多看一会儿，也不要因为
-            // 「分不清代次」就放着一条坏隧道不管（那正是卡死的成因）。
-            // 一旦新的连接有了 pid，这里就不相等，旧看门狗自然退出。
-            assert!(
-                watchdog_should_watch(true, None, None),
-                "拿不到代次信息时继续盯 —— 别放着坏隧道不管",
-            );
-        }
-        /// 看门狗重建的三个条件：还是我负责的那次连接、用户**现在还**想要、
-        /// 失败次数到阈值。
-        ///
-        /// 中间那个条件最容易被忽略，而漏掉它的后果很具体：
-        /// **点了「关闭」，几秒后它自己又连上了** —— 因为探测是异步的，
-        /// 等结果回来时用户的意图已经变了。
         #[test]
-        fn watchdog_rebuild_needs_mine_intent_and_threshold() {
-            assert!(
-                !should_rebuild_tunnel(true, true, FAILURES_BEFORE_REBUILD - 1),
-                "一次失败可能只是节点抖了一下，不该立刻拆建",
-            );
-            assert!(should_rebuild_tunnel(true, true, FAILURES_BEFORE_REBUILD));
-            assert!(should_rebuild_tunnel(true, true, 5), "一直不通就该重建");
-            assert!(
-                !should_rebuild_tunnel(false, true, 5),
-                "用户重连过了 —— 旧的看门狗该自己退出，不能去动新的那条隧道",
-            );
-            assert!(
-                !should_rebuild_tunnel(true, false, 5),
-                "用户已关闭 —— 重建它就等于「关闭按钮没用」",
-            );
-        }
-        /// 日志分级要**先信内核自己写的 `[Level]` 标记**。
-        ///
-        /// 之前纯按关键字判，于是上面那些 `[Info] ... rejected type ...` 和
-        /// `[Info] ... broken pipe` 全被归类成「错误」，错误页签里翻不到真错误。
         #[test]
         fn log_classification_trusts_the_level_marker() {
             // 这两条是用户实际报上来的原文。
@@ -2058,18 +1904,6 @@ mod tests {
     /// 成功路径的文案只声称「配置已回滚」（有 helper 成功返回为证），
     /// 同样**不**出现「网络可用」这种更强的断言。
     #[test]
-    fn successful_stop_line_claims_only_what_is_evidenced() {
-        let (level, message) = stop_log_line(&Ok(()));
-        assert_eq!(level, "info");
-        assert!(message.contains("网络配置已回滚"), "实际：{message}");
-        assert!(!message.contains("网络可用"), "实际：{message}");
-    }
-
-    /// **用户点「断开」回滚失败**：必须留下一条**持久**的诚实陈述。
-    ///
-    /// 看门狗回退与换网重建失败都会写 `FallbackOutcome::messages` 的 notice，
-    /// 只有 `stop_proxy` 原先直接把 `Err` `?` 出去 —— 状态里什么都没留下。
-    /// 这条测试钉住三件事：提示条存在、带上**真实原因**、且**不含**「网络可用」。
     #[test]
     fn stop_proxy_failure_leaves_a_truthful_persistent_notice() {
         let reason = "helper 回滚 TUN 失败：连接被拒绝";
@@ -2107,117 +1941,10 @@ mod tests {
     /// 回退直连：helper 回滚失败 → `DirectUnverified`，日志与 notice 都必须
     /// 如实说「未能确认网络已恢复」，并且**永不**出现「网络可用」。
     #[test]
-    fn fallback_failure_is_reported_as_unverified_not_as_working() {
-        let outcome = FallbackOutcome::from_stop(&Err("stop failed".into()));
-        assert_eq!(
-            outcome,
-            FallbackOutcome::DirectUnverified { error: "stop failed".into() }
-        );
-
-        // 节点级失败清单（`start_core` 失败时返回的原文）必须**原样**进提示条：
-        // 「先讲清试过哪些节点、各自怎么失败」是用户明确要求的顺序。
-        let node_failures = "试了 2 个节点都没能建立可用隧道……\n  1. 节点「香港 A」（1.1.1.1:443）：本机→节点 TCP 不通（8.4s）";
-        let (level, log_line, notice) = outcome.messages(node_failures);
-        assert_eq!(level, "error");
-        for text in [&log_line, &notice] {
-            assert!(
-                text.contains("未能确认网络已恢复"),
-                "必须如实说未验证：{text}"
-            );
-            assert!(!text.contains("网络可用"), "不许编好消息：{text}");
-        }
-        assert!(notice.contains("修复网络"), "要给出下一步能做什么：{notice}");
-        assert!(
-            notice.contains("香港 A") && notice.contains("1.1.1.1:443"),
-            "节点级失败清单必须先讲清楚：{notice}"
-        );
-    }
-
-    /// 回退成功：只声称「网络配置已回滚」（有证据），不声称「能上网」；
-    /// 并且提示条里**先**是「这次实际试过的节点与失败原因」，再是动作。
     #[test]
-    fn fallback_success_claims_rollback_not_reachability() {
-        let outcome = FallbackOutcome::from_stop(&Ok(()));
-        assert_eq!(outcome, FallbackOutcome::DirectRestored);
-
-        let node_failures = "试了 2 个节点都没能建立可用隧道……\n  1. 节点「香港 A」（1.1.1.1:443）：本机→节点 TCP 不通（8.4s）";
-        let (_, log_line, notice) = outcome.messages(node_failures);
-        for text in [&log_line, &notice] {
-            assert!(text.contains("网络配置已回滚"), "实际：{text}");
-            assert!(!text.contains("未能确认"), "成功路径不该说未确认：{text}");
-            assert!(!text.contains("网络可用"), "实际：{text}");
-        }
-        let list_at = notice.find("实际试过的节点").expect("先讲清单");
-        let node_at = notice.find("香港 A").expect("清单里要有节点");
-        assert!(list_at < node_at, "顺序：先说明试过什么，再列节点：{notice}");
-    }
-
-    /// `fell_back_to_direct` 现在确实会被走到（回退路径有判定，不再是死代码）：
-    /// 回退结局被映射到 recovery 状态机的 `DirectFallback`。
     #[test]
-    fn fallback_reaches_the_recovery_state_machine() {
-        let mut recovery = crate::state::RecoveryState::default();
-        for outcome in [
-            FallbackOutcome::from_stop(&Ok(())),
-            FallbackOutcome::from_stop(&Err("boom".into())),
-        ] {
-            // 两个分支都必须能走到状态机（`fell_back_to_direct` 的两个入口）。
-            recovery.fell_back_to_direct(1_000);
-            assert_eq!(
-                recovery.last_outcome,
-                Some(crate::state::RecoveryOutcome::DirectFallback),
-                "结局 {outcome:?} 必须落到 DirectFallback"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // 文案不预设原因（task-67）
-    //
-    // 同一现象（经节点访问一直超时）至少三种可能：节点不可用 / 本机网络不通 /
-    // 链路被干扰。界面对三种可能只给一种解释，用户就会在「换节点」和
-    // 「其实应该先断开」之间来回折腾。
-    // -----------------------------------------------------------------------
-
-    /// 节点不可用的提示：**保留观察到的因果**，但给出多种可能性与自救动作。
     #[test]
-    fn node_unusable_message_keeps_the_cause_but_not_a_presumed_conclusion() {
-        let msg = node_unusable_message("node-abc");
-
-        // 1) 观察到的因果必须保留（这是有证据的部分）
-        assert!(msg.contains("经它访问目标一直超时"), "实际：{msg}");
-        assert!(msg.contains("node-abc"), "要点名是哪个节点：{msg}");
-        // 2) 必须给出**不止一种**可能，且点出「本机网络」这个以前没提过的可能性
-        assert!(msg.contains("节点不可用"), "实际：{msg}");
-        assert!(msg.contains("本机网络"), "实际：{msg}");
-        assert!(msg.contains("可能"), "不确定的部分要用「可能」：{msg}");
-        // 3) 用户已知有效的自救动作
-        assert!(msg.contains("断开"), "要给出「先断开」这条路：{msg}");
-        // 4) 不许退回「唯一归因 + 命令式换节点」的旧写法
-        assert!(!msg.contains("请换一个节点"), "别再把因果唯一归到节点上：{msg}");
-    }
-
-    /// 回退直连的两种结局都必须能被状态机接住（`fell_back_to_direct` 不再不可达）。
     #[test]
-    fn fallback_outcome_enum_covers_both_endings() {
-        assert_eq!(FallbackOutcome::from_stop(&Ok(())), FallbackOutcome::DirectRestored);
-        assert!(matches!(
-            FallbackOutcome::from_stop(&Err("x".into())),
-            FallbackOutcome::DirectUnverified { .. }
-        ));
-    }
-
-    // -----------------------------------------------------------------------
-    // task-82：换网必须重建 + 看门狗必须探国内
-    //
-    // 根因（用户机器上实测 + 读码）：`direct` 出站的 `sockopt.interface` 是
-    // **连接那一刻**的网卡；换网后国内分流仍走 direct ⇒ **国内全断、国外正常**；
-    // 而看门狗只探境外 ⇒ 一直认为正常 ⇒ **永不重建**，卡在坏状态里。
-    //
-    // 下面把「换网 ⇒ 重建（stop→start）」与「只坏国内 ⇒ 判为异常」变成断言。
-    // **不碰真机网络**：全部是纯函数 + seam，没有 route/DNS 操作。
-    // -----------------------------------------------------------------------
-
     fn egress(interface: &str, gateway: &str) -> Egress {
         Egress {
             interface: interface.into(),
@@ -2227,191 +1954,11 @@ mod tests {
 
     /// **核心断言**：基线 en0、现在 en5 ⇒ 必须重建；没变 ⇒ 不许重建。
     #[test]
-    fn egress_change_triggers_rebuild_and_unchanged_never_does() {
-        let baseline = egress("en0", "192.168.0.1");
-        assert_eq!(
-            egress_action(&baseline, Some(&egress("en5", "192.168.5.1"))),
-            EgressAction::Rebuild,
-            "网卡换了（en0 → en5）必须重建：旧隧道的 direct 出站还绑在 en0 上",
-        );
-        assert_eq!(
-            egress_action(&baseline, Some(&egress("en0", "192.168.9.1"))),
-            EgressAction::Rebuild,
-            "同一张网卡换了网关（换 WiFi / 路由器重发 DHCP）也必须重建：路由是按旧网关装的",
-        );
-        // **反例**：出口没变 ⇒ 不许重建（否则每 5 秒拆一次隧道）。
-        assert_eq!(
-            egress_action(&baseline, Some(&egress("en0", "192.168.0.1"))),
-            EgressAction::Ignore,
-            "出口没变还重建 = 每 5 秒自断一次网",
-        );
-        // **反例**：这一刻查不到默认路由（网络正在切换）⇒ 不动，下一轮再看。
-        assert_eq!(
-            egress_action(&baseline, None),
-            EgressAction::Ignore,
-            "查不到默认路由只是「还在切」，不是「换好了」——那时重建没有意义",
-        );
-    }
-
-    /// 重建的三道闸门：不是我的隧道 / 用户已断开 / 已有恢复在跑 ⇒ 都不重建。
     #[test]
-    fn egress_rebuild_needs_mine_intent_and_no_concurrent_recovery() {
-        assert!(should_rebuild_after_egress_change(true, true, false));
-        assert!(
-            !should_rebuild_after_egress_change(false, true, false),
-            "不是我这代隧道 —— 旧的 watcher 该退出，别去动新的那条",
-        );
-        assert!(
-            !should_rebuild_after_egress_change(true, false, false),
-            "用户点了断开 —— 再重建就是「关不掉」",
-        );
-        assert!(
-            !should_rebuild_after_egress_change(true, true, true),
-            "已经有一次自动恢复在跑：它同样会重新探测网卡，这里再拆一次只会多断一次网",
-        );
-    }
-
-    /// **重建的调用序列**：先 stop、再 start。
-    ///
-    /// 「调用序列」正是 task-82 要的证据：用 seam 记录顺序，不需要 Tauri harness。
     #[tokio::test]
-    async fn egress_rebuild_calls_stop_then_start() {
-        use std::sync::Mutex;
-        let calls = Mutex::new(Vec::<&str>::new());
-        let out = rebuild_tunnel_in_order(
-            || async {
-                calls.lock().unwrap().push("stop");
-                Ok::<(), String>(())
-            },
-            || async {
-                calls.lock().unwrap().push("start");
-                Ok::<(), String>(())
-            },
-        )
-        .await;
-        assert_eq!(out, Ok(()));
-        assert_eq!(
-            *calls.lock().unwrap(),
-            vec!["stop", "start"],
-            "必须先停再起：旧隧道没拆干净，start 会撞「已有活跃会话」",
-        );
-    }
-
-    /// stop 失败 ⇒ **不许**继续 start（不要在坏状态上再叠一层）。
     #[tokio::test]
-    async fn rebuild_stops_short_when_teardown_fails() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let started = AtomicBool::new(false);
-        let out = rebuild_tunnel_in_order(
-            || async { Err::<(), String>("helper 不可用".to_string()) },
-            || async {
-                started.store(true, Ordering::SeqCst);
-                Ok::<(), String>(())
-            },
-        )
-        .await;
-        assert!(out.is_err(), "停不下来就该如实失败");
-        assert!(
-            !started.load(Ordering::SeqCst),
-            "停不下来还去起 = 在坏状态上再叠一层",
-        );
-    }
-
-    /// **决定②的前提：证明等价。**
-    ///
-    /// 看门狗原来写的是 `stop_core(...).is_ok() && start_core(...).is_ok()`。
-    /// 逐个枚举四种结果，断言 `rebuild_tunnel_in_order` 与它
-    /// **结果相同、调用序列相同**（`&&` 短路 ⇒ stop 失败时不调用 start）。
-    /// 只有这条绿，才允许把看门狗统一到 seam 上。
     #[tokio::test]
-    async fn rebuild_seam_is_equivalent_to_the_inline_and_then_short_circuit() {
-        use std::sync::Mutex;
-        for stop_ok in [true, false] {
-            for start_ok in [true, false] {
-                let calls = Mutex::new(Vec::<&str>::new());
-                let out = rebuild_tunnel_in_order(
-                    || async {
-                        calls.lock().unwrap().push("stop");
-                        if stop_ok {
-                            Ok::<(), String>(())
-                        } else {
-                            Err("stop 失败".to_string())
-                        }
-                    },
-                    || async {
-                        calls.lock().unwrap().push("start");
-                        if start_ok {
-                            Ok::<(), String>(())
-                        } else {
-                            Err("start 失败".to_string())
-                        }
-                    },
-                )
-                .await;
-                // ① 结果 == 原来 `&&` 的真值
-                assert_eq!(
-                    out.is_ok(),
-                    stop_ok && start_ok,
-                    "stop_ok={stop_ok} start_ok={start_ok}：结果必须与 `&&` 一致",
-                );
-                // ② 调用序列 == 原来 `&&` 的短路行为
-                let expected: Vec<&str> = if stop_ok {
-                    vec!["stop", "start"]
-                } else {
-                    vec!["stop"]
-                };
-                assert_eq!(
-                    *calls.lock().unwrap(),
-                    expected,
-                    "stop_ok={stop_ok} start_ok={start_ok}：调用序列必须与 `&&` 一致",
-                );
-            }
-        }
-    }
-
-    /// **冷却窗口**：第一次变化立刻放行；紧随其后的重复被挡；冷却过后再放行。
     #[test]
-    fn egress_rebuild_cooldown_gates_only_repeats_not_the_first() {
-        let now = 1_700_000_000u64;
-        assert!(
-            egress_rebuild_allowed(now, None, EGRESS_REBUILD_COOLDOWN),
-            "这次运行里还没重建过 —— 第一次变化必须立刻重建",
-        );
-        assert!(
-            !egress_rebuild_allowed(now + 1, Some(now), EGRESS_REBUILD_COOLDOWN),
-            "刚刚重建过又变了一次（Wi-Fi 抖动）—— 冷却期内不许再拆一次",
-        );
-        assert!(
-            !egress_rebuild_allowed(
-                now + EGRESS_REBUILD_COOLDOWN.as_secs() - 1,
-                Some(now),
-                EGRESS_REBUILD_COOLDOWN,
-            ),
-            "冷却还差 1 秒也不行",
-        );
-        assert!(
-            egress_rebuild_allowed(
-                now + EGRESS_REBUILD_COOLDOWN.as_secs(),
-                Some(now),
-                EGRESS_REBUILD_COOLDOWN,
-            ),
-            "冷却一到就必须允许重建（否则隧道一直坏着）",
-        );
-        assert!(
-            egress_rebuild_allowed(now + 3600, Some(now), EGRESS_REBUILD_COOLDOWN),
-            "过了很久当然允许",
-        );
-        assert!(
-            egress_rebuild_allowed(now - 100, Some(now), EGRESS_REBUILD_COOLDOWN),
-            "墙上时钟被往回调 ⇒ 无法判断间隔，宁可去恢复网络，不许永久卡死",
-        );
-    }
-
-    /// **(b)** 看门狗要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
-    ///
-    /// task-92 之后境内那一半由 **IP 字面量 `223.5.5.5`** 覆盖：
-    /// `www.baidu.com` 经 SOCKS 多轮实测不稳定（10 轮 4 失败）被筛掉，
-    /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
         let targets = crate::supervisor::required_probe_urls();
@@ -2436,29 +1983,6 @@ mod tests {
 
     /// **(b)** 只坏国内 ⇒ 看门狗必须判为异常；两个都通才算通。
     #[test]
-    fn only_the_domestic_target_dead_is_an_anomaly() {
-        let pair = |t: &str, c: &str| (t.to_string(), c.to_string());
-        let overseas = "http://cp.cloudflare.com/generate_204";
-        let domestic = "http://www.baidu.com/";
-        assert!(
-            !probe_results_all_alive(&[pair(overseas, "204"), pair(domestic, "000")]),
-            "境外 204、国内 000 —— 这正是用户报的形状，必须算异常",
-        );
-        assert!(
-            !probe_results_all_alive(&[pair(overseas, ""), pair(domestic, "200")]),
-            "境外无响应同样算异常",
-        );
-        assert!(
-            probe_results_all_alive(&[pair(overseas, "204"), pair(domestic, "200")]),
-            "两个都通才算通",
-        );
-        assert!(!probe_results_all_alive(&[]), "没有证据不算好");
-    }
-
-    // -----------------------------------------------------------------------
-    // task-98：看门狗判据 —— 单条失败不判死 / ≥2 个目标才算一轮失败 / 轮内重试 / 退避
-    // -----------------------------------------------------------------------
-
     fn targets_of_side(side: ProbeSide) -> Vec<&'static str> {
         // 侧只从**唯一真源表**里读（task-106：不再有第二份境内清单，也没有默认侧）
         crate::supervisor::REQUIRED_PROBE_TARGETS
@@ -2595,112 +2119,10 @@ mod tests {
     /// 旧判据是「所有目标都通才算通」，于是任意一条抖动都能在 20 秒内凑够
     /// 连续两轮并**拆掉一条正在转发流量的隧道**（task-95 定性为误判）。
     #[test]
-    fn one_dead_target_is_not_a_failed_round_no_matter_how_many_rounds() {
-        let mut streak = ProbeStreak::new();
-        for _ in 0..100 {
-            let round = classify_probe_round(&round_with_dead(1));
-            assert!(!round.is_dead(), "1 个目标失败 = 没到 2 个的门槛");
-            assert_eq!(streak.record(&round), 0, "未达门槛的轮不许累计");
-        }
-        assert!(
-            !should_rebuild_tunnel(true, true, streak.rounds()),
-            "100 轮单条失败也不该重建"
-        );
-    }
-
-    /// **两个目标失败才算一轮失败；连续两轮才允许重建。**
     #[test]
-    fn two_dead_targets_take_two_consecutive_rounds_to_rebuild() {
-        let mut streak = ProbeStreak::new();
-        let round = classify_probe_round(&round_with_dead(2));
-        assert!(round.is_dead(), "2 个目标失败 = 到达门槛");
-        assert_eq!(streak.record(&round), 1);
-        assert!(
-            !should_rebuild_tunnel(true, true, streak.rounds()),
-            "第一轮不许重建（要连续 2 轮）"
-        );
-        assert_eq!(streak.record(&round), 2);
-        assert!(
-            should_rebuild_tunnel(true, true, streak.rounds()),
-            "连续两轮到阈值才允许重建"
-        );
-    }
-
-    /// 连续计数只认**连续**：中间夹一轮「只有 1 个目标失败」，计数必须清零。
-    ///
-    /// task-99 的反例：13:28:36 之后 baidu 仍零星失败 11 次，但彼此隔 30s–3
-    /// 分钟 ⇒ 永远凑不齐连续两轮。**「差一轮就是两种命运」**，所以这行要有测试。
     #[test]
-    fn a_round_below_the_threshold_resets_the_streak() {
-        let mut streak = ProbeStreak::new();
-        let dead_two = classify_probe_round(&round_with_dead(2));
-        let dead_one = classify_probe_round(&round_with_dead(1));
-        assert_eq!(streak.record(&dead_two), 1);
-        assert_eq!(streak.record(&dead_one), 0, "被打断就必须清零");
-        assert_eq!(streak.record(&dead_two), 1, "重新从 1 开始");
-        assert!(!should_rebuild_tunnel(true, true, streak.rounds()));
-    }
-
-    /// **task-106 修掉的结构性盲区**：境内全灭（现在境内侧有 2 个目标）**必须**触发重建。
-    ///
-    /// 修复前境内只有 1 个目标 ⇒ 「境内全灭」= 1 个失败 < 门槛 2 ⇒ **永不重建**
-    /// （旧用例 `domestic_only_total_failure_is_below_the_threshold` 曾把这个盲区
-    /// 写成「已知取舍」；用户现场包证明它真的咬到了人：境内 全灭 1/1、境外 0/2 死
-    /// ⇒ 只记账、不重建，于是 `task-172` 那种「绑卡直连全挂」一直不恢复）。
     #[test]
-    fn domestic_full_outage_reaches_the_threshold_now() {
-        let mut results: Vec<(String, String)> = targets_of_side(ProbeSide::Domestic)
-            .iter()
-            .map(|t| (t.to_string(), "000".to_string()))
-            .collect();
-        for t in targets_of_side(ProbeSide::Overseas) {
-            results.push((t.to_string(), "200".to_string()));
-        }
-        let round = classify_probe_round(&results);
-        assert!(round.domestic_is_dead(), "境内侧确实全灭");
-        assert!(!round.overseas_is_dead(), "境外侧没事");
-        assert!(
-            round.is_dead(),
-            "境内 {} 个目标全灭 ≥ 门槛 2 ⇒ **必须触发重建**",
-            round.domestic_dead
-        );
-        assert!(round.one_side_only(), "日志仍要能看出这是单侧失败");
-    }
-
-    /// **安全属性保留（task-98）**：任一侧只死 **1 个**目标 ⇒ 仍只记账、不拆隧道。
-    ///
-    /// 与上一条是一对：**修掉盲区 ≠ 变得一惊一乍**（单条抖动拆掉正在转发流量的
-    /// 隧道是 task-95 定性过的误判）。
     #[test]
-    fn a_single_dead_target_still_does_not_trigger_a_rebuild() {
-        let dead_target = "http://223.5.5.5/";
-        let results: Vec<(String, String)> = crate::supervisor::required_probe_urls()
-            .into_iter()
-            .map(|t| {
-                (
-                    t.to_string(),
-                    if t == dead_target { "000" } else { "200" }.to_string(),
-                )
-            })
-            .collect();
-        let round = classify_probe_round(&results);
-        assert_eq!(round.dead, 1, "只死一个（境内侧 1/2）");
-        assert!(!round.domestic_is_dead(), "境内侧没全灭");
-        assert!(!round.is_dead(), "单条失败不许拆隧道（task-95/98 的安全属性）");
-        let mut streak = ProbeStreak::new();
-        for _ in 0..100 {
-            assert_eq!(streak.record(&round), 0, "未达门槛的轮不许累计");
-        }
-        assert!(!should_rebuild_tunnel(true, true, streak.rounds()));
-    }
-
-    // -----------------------------------------------------------------------
-    // task-176：路由审计落盘（**行为级**：真的写进 App 日志 + 哨兵）
-    // -----------------------------------------------------------------------
-
-    use xt_core::store::Store;
-
-    /// 事故形态的路由表（只有系统的 default、没有 `I` 标志；`0/1` 捕获在；两条 `/32`）。
     fn audit_missing_scoped_default() -> xt_tun::macos::route::RouteAudit {
         xt_tun::macos::route::parse_netstat_inet(
             "0/1                utun6              UScg                utun6\n\
@@ -2887,181 +2309,13 @@ mod tests {
 
     /// **L1 行为级**：采不到路由表时**如实记「不可判读」**，不许静默跳过。
     #[test]
-    fn an_unreadable_route_table_is_recorded_as_unavailable() {
-        use crate::state::LogEntry;
-        let (state, store) = route_audit_state("unavailable");
-        log_route_audits(
-            &state,
-            &[(xt_tun::macos::route::RouteAuditPhase::AfterRollback, None)],
-        );
-        let lines: Vec<LogEntry> = store.tail_logs(50);
-        let line = lines
-            .iter()
-            .find(|l| l.message.contains("路由审计"))
-            .unwrap_or_else(|| panic!("采样失败也要留痕：{lines:?}"));
-        assert!(line.message.contains("不可判读"), "{}", line.message);
-        assert!(line.message.contains("回滚之后"), "采样时点要写进日志：{}", line.message);
-        let _ = std::fs::remove_dir_all(store.root());
-    }
-
-    /// **轮内重试**是本卡最高性价比的杠杆（task-100 实测：失败后同目标下一次
-    /// 成功 baidu 94%、cloudflare 56%）。这条测试同时是它的**敏感性守卫**：
-    /// 把 `PROBE_ATTEMPTS_PER_ROUND` 改回 1 ⇒ 这里红。
     #[test]
-    fn a_failed_probe_is_retried_once_in_the_same_round() {
-        assert!(!should_retry_probe("204", 1), "成功不许再打一次请求");
-        assert!(
-            should_retry_probe("000", 1),
-            "第一次失败、还有预算 ⇒ 必须重试（快失败那种病）"
-        );
-        assert!(
-            should_retry_probe("", 1),
-            "无响应（挂住那种病）同样要重试"
-        );
-        assert!(
-            !should_retry_probe("000", PROBE_ATTEMPTS_PER_ROUND),
-            "预算用完就停，不许无限重试"
-        );
-    }
-
-    /// 重建失败之后：老隧道还活着（停止失败 / 进程仍在）⇒ 必须保持原状。
-    ///
-    /// 这正是 task-95 那次误判伤人的地方：重建失败后把**还活着**的隧道拆掉、
-    /// 写「已退回直连」、作废自动重连，然后看门狗自己 `return`，
-    /// 空档 690–2660 秒。
     #[test]
-    fn failed_rebuild_keeps_a_still_alive_tunnel() {
-        assert_eq!(
-            after_failed_rebuild(true, false),
-            FailedRebuildAction::KeepTunnel,
-            "停都停不下来 ⇒ 老隧道很可能还在，不许退直连"
-        );
-        assert_eq!(
-            after_failed_rebuild(false, true),
-            FailedRebuildAction::KeepTunnel,
-            "核心进程仍在 ⇒ 不许拆"
-        );
-        assert_eq!(
-            after_failed_rebuild(false, false),
-            FailedRebuildAction::FallBackToDirect,
-            "老隧道确实没了 ⇒ 退直连，别把用户留在断网状态"
-        );
-    }
-
-    /// 进程存活判据（与 HTTP 探针**正交**）：自己一定活着，不存在的 pid 一定不是。
     #[test]
-    fn core_process_alive_is_orthogonal_evidence() {
-        assert!(
-            core_process_alive(Some(std::process::id())),
-            "本进程必须判为活着"
-        );
-        assert!(!core_process_alive(None), "没见过 pid 不算活着");
-        let bogus = 4_000_000; // 远超 macOS 的 pid 上限（maxproc 量级），必然不存在
-        assert!(!core_process_alive(Some(bogus)), "不存在的 pid 必须是 false");
-    }
-
-    /// 重建失败的退避：逐档增长、最后一档封顶（既不许死循环重试，也不许放弃）。
     #[test]
-    fn rebuild_backoff_grows_then_caps() {
-        assert_eq!(next_backoff_secs(0), 30);
-        assert_eq!(next_backoff_secs(1), 60);
-        assert_eq!(next_backoff_secs(2), 120);
-        assert_eq!(next_backoff_secs(3), 300);
-        assert_eq!(next_backoff_secs(99), 300, "封顶，不许涨到天上去");
-        assert!(
-            REBUILD_BACKOFF_SECS[0] >= 10,
-            "至少给网络一点恢复时间，别立刻重试"
-        );
-    }
-
-    /// 唤醒只把**等待**提前，判据不变：那一轮仍须 ≥2 个目标失败。
     #[test]
-    fn wake_bumps_the_wait_but_not_the_proof() {
-        let dead_one = classify_probe_round(&round_with_dead(1));
-        let mut streak = ProbeStreak::new();
-        assert_eq!(streak.record(&dead_one), 0);
-        assert_eq!(
-            streak.bump_to_threshold_for(&dead_one),
-            0,
-            "没到门槛的轮，唤醒也不许把计数抬到阈值（旧实现正是这样误判的）"
-        );
-        let dead_two = classify_probe_round(&round_with_dead(2));
-        assert_eq!(streak.record(&dead_two), 1);
-        assert_eq!(
-            streak.bump_to_threshold_for(&dead_two),
-            FAILURES_BEFORE_REBUILD,
-            "到门槛的轮：唤醒可以把等待提前"
-        );
-    }
-
-    /// 日志必须说出**是哪个目标**不通（否则又回到「只报一句」查不动）。
     #[test]
-    fn dead_target_description_names_the_target() {
-        let results = vec![
-            (
-                "http://cp.cloudflare.com/generate_204".to_string(),
-                "204".to_string(),
-            ),
-            ("http://www.baidu.com/".to_string(), String::new()),
-        ];
-        let text = describe_dead_targets(&results);
-        assert!(text.contains("baidu.com"), "要点名国内目标：{text}");
-        assert!(
-            text.contains("无响应"),
-            "空码要说「无响应」，不要假装它是一个状态码：{text}",
-        );
-        assert!(
-            !text.contains("cloudflare"),
-            "通的目标不该出现在失败描述里：{text}",
-        );
-    }
-
-    /// **防「换网又变回只写日志」与「看门狗又只探境外」**（task-82 双向敏感性靠它成立）。
-    ///
-    /// 这两个调用点都埋在 async 任务里（要 Tauri `AppHandle` 才执行得到），
-    /// 纯函数测试证明不了「任务里真的调了它」。所以这里做**源码级断言**：
-    /// 删掉任意一处调用 → 本测试变红（它只保证「调用还在」，不保证运行时行为）。
     #[test]
-    fn network_watch_rebuilds_and_watchdog_probes_both_paths_in_production_source() {
-        let prod = include_str!("core.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or("");
-        assert!(
-            prod.contains("rebuild_tunnel_in_order("),
-            "换网检测必须**继续调用重建**（而不是「只写一条日志就 return」）——\
-             删掉这个调用就是回到 task-82 的坏状态",
-        );
-        assert!(
-            prod.contains("watchdog_probe_all(port, PROBE_TIMEOUT_SECS)"),
-            "看门狗必须用**多目标探测**（国内 + 境外）—— 回到只探境外就又会漏掉「国内全断」；\
-             超时值必须走命名常量 `PROBE_TIMEOUT_SECS`（task-98：阈值要与判据分开）",
-        );
-        assert!(
-            prod.contains("for target in crate::supervisor::required_probe_urls()"),
-            "`watchdog_probe_all` 必须遍历门禁那份必需目标清单（不能只探一个）",
-        );
-        assert!(
-            prod.contains("!egress_rebuild_allowed(now_unix, last_started"),
-            "换网重建必须**继续过冷却判据**（删掉它 = Wi-Fi 抖动时每 5 秒拆一次网）",
-        );
-        assert!(
-            !prod.contains("请断开后重新连接"),
-            "旧文案「隧道不再有效，请断开后重新连接」= 只报不修，不许回来",
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // task-75 ③：**已知失败的退场点必须能被测试抓住**
-    //
-    // 这些作废调用各自埋在 async 流程里（要 Tauri `AppHandle` 才执行得到），
-    // 纯函数测试证明不了「它还在」；而 Lead 已明确否决「搭假 Tauri harness」。
-    // 所以这里做**源码级守卫**：每个 `FailureExit` 变体在生产源码里**必须恰好
-    // 出现一次**（= 那一处作废调用）。**删掉任意一处 → 本测试变红。**
-    //
-    // 它只保证「调用还在」，不保证运行时时序或文案 —— 这一点写在测试名里。
-    // -----------------------------------------------------------------------
-
     #[test]
     fn every_failure_exit_still_invalidates_intent_in_production_source() {
         // 只看 `#[cfg(test)]` 之前的部分：测试代码里也会拼 `FailureExit::X`
@@ -3650,4 +2904,29 @@ mod tests {
             raw_uri: None,
         }
     }
+
+    fn successful_stop_line_claims_only_what_is_evidenced() {
+        let (level, message) = stop_log_line(&Ok(()));
+        assert_eq!(level, "info");
+        assert!(message.contains("网络配置已回滚"), "实际：{message}");
+        assert!(!message.contains("网络可用"), "实际：{message}");
+    }
+
+    fn an_unreadable_route_table_is_recorded_as_unavailable() {
+        use crate::state::LogEntry;
+        let (state, store) = route_audit_state("unavailable");
+        log_route_audits(
+            &state,
+            &[(xt_tun::macos::route::RouteAuditPhase::AfterRollback, None)],
+        );
+        let lines: Vec<LogEntry> = store.tail_logs(50);
+        let line = lines
+            .iter()
+            .find(|l| l.message.contains("路由审计"))
+            .unwrap_or_else(|| panic!("采样失败也要留痕：{lines:?}"));
+        assert!(line.message.contains("不可判读"), "{}", line.message);
+        assert!(line.message.contains("回滚之后"), "采样时点要写进日志：{}", line.message);
+        let _ = std::fs::remove_dir_all(store.root());
+    }
+
 }

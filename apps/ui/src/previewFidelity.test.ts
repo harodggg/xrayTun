@@ -23,9 +23,8 @@
  * 另一层保险在源码里：本卡把 `as unknown as` 断言**去掉了**，那些块现在由
  * `tsc` 直接约束（少字段/多字段都编译不过）。这条测试覆盖的是「有人把断言加回去」的情况。
  *
- * ⚠️ 已知边界（不假装解决）：**只有 TS 里声明过的字段才在比较范围内**。
- * 例如 `settings.auto_reconnect` 目前**不在** `AppSettings` 里（task-71 有意没改 types.ts），
- * 所以它不在本断言的射程内 —— 预览对它的处理是「缺省 ⇒ 界面按后端默认值 true 显示」。
+ * ⚠️ 已知边界（不假装解决）：**只有 TS 里声明过的字段才在比较范围内** ——
+ * 后端有、TS 没声明的字段，预览漏了它也不会在这里变红。
  */
 import { describe, expect, it } from "vitest";
 
@@ -95,8 +94,8 @@ describe("预览快照的保真度（task-87）", () => {
     const problems: string[] = [];
 
     // 防空壳：字段提取如果真的失效（全 0 个字段），下面的比较会**恒真**。
-    // 当前精确值是 **132**（task-89 补 `auto_reconnect` 之前是 **131**）；
-    // 新增字段时**同步上调**，这样「解析器失效」与「字段被误缩进」都会先在这里暴露。
+    // 当前精确值是 **131**；新增字段时**同步上调**，
+    // 这样「解析器失效」与「字段被误缩进」都会先在这里暴露。
     const extracted = BLOCKS.map((b) => fieldsOf(src, b.iface));
     const total = extracted.reduce((n, f) => n + f.length, 0);
     expect(total, "从 types.ts 抽出的字段总数太少 —— 这条断言基本成了空壳").toBeGreaterThan(130);
@@ -138,9 +137,6 @@ describe("预览快照的保真度（task-87）", () => {
     expect(s.subscriptions[0]!.enabled, "订阅 enabled").toBe(true);
     expect(s.subscriptions[0]!.update_interval_hours, "订阅间隔（Rust 默认 24）").toBe(24);
     expect(s.dns.probes[0]!.kind, "探测分组取值域").toBe("domestic");
-    // task-89：`auto_reconnect` 现在**声明进 TS** 了（撤掉 task-71 的类型旁路），
-    // 所以它进了本断言的射程；预览值取 Rust 默认 true。
-    expect(s.settings.auto_reconnect, "auto_reconnect（Rust 默认 true）").toBe(true);
     // helper 的版本核对：**明确的预览态**，不是假装成 match/mismatch
     expect(s.helper.version_check.state).toBe("unreadable");
     expect(

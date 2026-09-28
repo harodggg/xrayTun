@@ -131,20 +131,20 @@ describe("B1 设置页：逐项自动保存 + 真的可撤销", () => {
     expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
     expect(screen.queryByRole("button", { name: "放弃" })).toBeNull();
 
-    const box = screen.getByRole("checkbox", { name: /自动连回来/ }) as HTMLInputElement;
+    const box = screen.getByRole("checkbox", { name: /允许局域网设备使用本机代理/ }) as HTMLInputElement;
     const before = box.checked;
     fireEvent.click(box);
 
     await waitFor(() => expect(fn("saveSettings")).toHaveBeenCalledTimes(1));
-    const payload = callsOf("saveSettings")[0]![0] as { auto_reconnect: boolean };
-    expect(payload.auto_reconnect, "改动必须原样进载荷").toBe(!before);
+    const payload = callsOf("saveSettings")[0]![0] as { allow_lan: boolean };
+    expect(payload.allow_lan, "改动必须原样进载荷").toBe(!before);
   });
 
   it("有回声 + 撤销把**上一个值再存一次**（不是只回滚界面）", async () => {
     renderInStore(<Settings />);
     await screen.findByRole("tablist");
 
-    const box = screen.getByRole("checkbox", { name: /自动连回来/ }) as HTMLInputElement;
+    const box = screen.getByRole("checkbox", { name: /允许局域网设备使用本机代理/ }) as HTMLInputElement;
     const before = box.checked;
     fireEvent.click(box);
     await waitFor(() => expect(fn("saveSettings")).toHaveBeenCalledTimes(1));
@@ -154,8 +154,8 @@ describe("B1 设置页：逐项自动保存 + 真的可撤销", () => {
     fireEvent.click(screen.getByRole("button", { name: "撤销" }));
 
     await waitFor(() => expect(fn("saveSettings")).toHaveBeenCalledTimes(2));
-    const second = callsOf("saveSettings")[1]![0] as { auto_reconnect: boolean };
-    expect(second.auto_reconnect, "撤销 = 旧值再存一次").toBe(before);
+    const second = callsOf("saveSettings")[1]![0] as { allow_lan: boolean };
+    expect(second.allow_lan, "撤销 = 旧值再存一次").toBe(before);
   });
 });
 

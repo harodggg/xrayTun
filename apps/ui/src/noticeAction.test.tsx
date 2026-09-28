@@ -55,9 +55,9 @@ describe("NoticeAction：带 confirm 的动作走内联二次确认", () => {
     expect(screen.getByText(/隧道/)).toBeTruthy();
     expect(screen.getByText(/网络会回到直连/)).toBeTruthy();
     expect(screen.getByText(/连接会断/)).toBeTruthy();
-    // **不许**写代码确认不了的后果：`restore_stale` 确实不重连，但隧道被拆之后
-    // 看门狗仍可能把隧道重建回来（`was_connected` 未被清），所以「不会自动重连」
-    // 这句话的真假取决于后续行为，不能写进问句。
+    // **不许**写这个动作确认不了的后果：`restore_stale` 只做「还原路由与 DNS +
+    // 拆掉当前那条隧道」，之后网络会怎样不由它决定，所以「不会自动重连」这类
+    // 关于后续状态的断言不能写进问句。
     expect(screen.queryByText(/不会自动重连/)).toBeNull();
     // 仍然**没有**执行。
     expect(run).not.toHaveBeenCalled();

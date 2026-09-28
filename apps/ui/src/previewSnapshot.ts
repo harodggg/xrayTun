@@ -229,9 +229,6 @@ const BASE_SNAPSHOT: AppSnapshot = {
     launch_at_login: true,
     log_level: "info",
     restore_system_proxy_on_exit: true,
-    // `auto_reconnect` 的 Rust 默认值是 `true`（`#[serde(default = "yes")]`）——
-    // 预览取**与真实一致**的值，不再靠「字段缺失 ⇒ 界面按默认值显示」蒙过去（task-89）。
-    auto_reconnect: true,
     show_speed_in_title: false,
     // `IntentSettings`（`model.rs`）。预览取真实默认值：**关闭 + 演练模式**，
     // 而且**不填 `api_key_ref`** —— 预览快照里永远不会出现任何密钥引用，
