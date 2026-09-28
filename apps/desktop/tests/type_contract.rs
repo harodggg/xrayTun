@@ -26,8 +26,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use xraytun_desktop_lib::state::{
-    AppSnapshot, CoreAvailability, CoreRuntime, HelperAvailability, LoginItemState, RecoveryOutcome,
-    RecoveryState, TrafficSample, UpdateStatus,
+    AppSnapshot, CoreAvailability, CoreRuntime, HelperAvailability, LoginItemState,     TrafficSample, UpdateStatus,
 };
 use xt_core::model::AppSettings;
 use xt_core::store::Store;
@@ -169,11 +168,6 @@ fn assert_ts_is_covered_by_rust(
 /// 噪音源；但差异必须是**显式写在这里**的，不能是没人注意的漂移。
 const SETTINGS_FIELDS_NOT_IN_TS: &[(&str, &str)] = &[
     ("settings_version", "迁移用的内部版本号，界面不需要也不该依赖"),
-    (
-        "was_connected",
-        "重连意图（上次退出时是否连着），由 Rust 侧读写；**界面仍不显示这个字段**。\
-         注意别和 task-22 的自动恢复混淆：恢复状态走 CoreRuntime.recovery，不是它",
-    ),
     // `auto_reconnect` 曾经登记在这里，理由是「界面目前没有对应控件」。
     // **这条理由在 `task-71` 之后已经过期**（那一步给设置页加了控件），
     // **而把它声明进 `types.ts` 是 `task-89`（`383cd3d`）做的** —— `task-71` 当时**有意**没改 `types.ts`
@@ -343,13 +337,16 @@ fn connection_shapes_match_the_frontend_types() {
 ///
 /// 它此前**不在**本测试的覆盖里 —— 后果实测过：`last_good_node` 一路漂移
 /// （Rust 一直在发，`types.ts` 没声明，界面读它就是 `undefined`）。
-/// 现在把它也钉住；task-22 新加的 `recovery` 一并受保护。
+/// 现在把它也钉住。
+///
+/// ⚠️ 2026-09-28：`recovery`（看门狗自动恢复状态）随那一族一起删掉了 ——
+/// 它已经没有任何写入者，留着就是让前端读一个永远是 idle 的死字段。
 #[test]
 fn core_runtime_shape_matches_the_frontend_types() {
     let src = types_ts();
 
-    // 刻意把每个字段都填上非默认值：`RecoveryState` 里全是 0/None 字段，
-    // 用 `Default` 构造会让「将来加了 skip_serializing_if」悄悄缩键。
+    // 刻意把每个字段都填上非默认值：用 `Default` 构造会让
+    // 「将来加了 skip_serializing_if」悄悄缩键。
     let runtime = CoreRuntime {
         running: true,
         pid: Some(4321),
@@ -360,14 +357,6 @@ fn core_runtime_shape_matches_the_frontend_types() {
         routes_committed: true,
         last_error: Some("示例错误".into()),
         last_good_node: Some("node-1".into()),
-        recovery: RecoveryState {
-            recovering: true,
-            attempt: 2,
-            probe_failures: 3,
-            started_unix: Some(1_700_000_010),
-            last_outcome: Some(RecoveryOutcome::DirectFallback),
-            finished_unix: Some(1_700_000_020),
-        },
     };
 
     let json = serde_json::to_value(&runtime).expect("CoreRuntime 应当能序列化");
@@ -376,8 +365,8 @@ fn core_runtime_shape_matches_the_frontend_types() {
     let ts = ts_interface_fields(&src, label);
     assert_eq!(
         ts.len(),
-        10,
-        "\nCoreRuntime: 从 types.ts 只解析出 {} 个字段，预期 10 个；\
+        9,
+        "\nCoreRuntime: 从 types.ts 只解析出 {} 个字段，预期 9 个（`recovery` 已随看门狗删除）；\
          新增字段的话请同时更新这里与 types.ts。实际解析到: {ts:?}",
         ts.len()
     );
@@ -387,13 +376,7 @@ fn core_runtime_shape_matches_the_frontend_types() {
         "\n{label}: Rust 提供了前端未声明的字段 {extra:?}\n\
          界面上这些字段会静默读到 undefined（`last_good_node` 就这样漂移过）。"
     );
-    // 嵌套的 `recovery` 单独再比一次：它自己也是前端要读的形状。
-    let recovery = json.get("recovery").expect("必须有 recovery 字段");
-    let rust = assert_ts_is_covered_by_rust("RecoveryState", recovery, "RecoveryState", &src);
-    let ts = ts_interface_fields(&src, "RecoveryState");
-    assert_eq!(ts.len(), 6, "RecoveryState 预期 6 个字段，实际 {ts:?}");
-    let extra: Vec<_> = rust.difference(&ts).collect();
-    assert!(extra.is_empty(), "\nRecoveryState: Rust 多出字段 {extra:?}");
+    // `recovery` 的子形状断言已随该字段一起删除（没有写入者的状态不该再被前端读）。
 }
 
 // ---------------------------------------------------------------------------
