@@ -232,6 +232,31 @@ Worker 侧可 `wrangler deployments rollback`。**默认关闭**，符合本项�
   （⚠️ 原稿简写成"kimi-k2.6/2.7" —— **不存在 `kimi-k2.7`**，且漏了 `glm-5.3-flash`，已按原文改全。）
 * 个别模型有 **cached input 折扣**（例：`deepseek-v4-flash` 缓存输入 $0.014/M）。
 
+### 8.1a Neuron 是什么（先定义，否则下面的表看不懂）
+
+官方定义（[Workers AI Pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/) 原文）：
+**Neurons are our way of measuring AI outputs across different models, representing the GPU
+compute needed to perform your request.** 定价页同时给 `Price in Tokens` 与 `Price in Neurons`
+两列，并写明**两列等价** —— 也就是说它是"按 token 折算、以 GPU 算力为单位计费"的中间量。
+
+三条对本方案有直接影响的推论：
+
+1. **免费额度以 Neuron 计**（10,000 Neurons/天，账号级）⇒ "免费能跑多少次"**必须按具体模型算**。
+2. **换算是逐模型的**：官方没有"1 token = N neurons"的通用公式，只在表里逐模型列
+   ⇒ **比价必须看 Neurons 列**，只看 token 单价会选错。
+3. **输出比输入贵得多**（生成是逐 token 串行的）：例 `llama-3.1-8b-instruct` =
+   25,608 neurons/M 输入 vs **75,147 neurons/M 输出**（2.9×）。
+   ⇒ **我们的输出是结构化 JSON，越短越省**：1,000 in + 80 out 里，那 80 个输出 token 占 19% 的费用；
+   若把"模型原话/解释"也塞进 JSON、输出涨到 300 token，输出占比升到 47%。
+   （但"模型原话"是**必须回传**的审计字段 —— 这是"省钱"与"可申诉"的取舍，别为了省钱把它删掉。）
+
+⚠️ **诚实的边界**：官方只说 Neuron "represent the GPU compute needed"，
+**没有公布**"1 Neuron = 多少 FLOPs / GPU 秒"这类物理换算 ⇒ 它对我们是一个**黑箱计费单位**，
+**能用来比价与算额度，不能用来推导这个模型实际跑了多久 GPU**。
+本文件引用的所有 Neuron 数字都直接取自官方表格，没有自行换算。
+
+---
+
 **本用例的成本估算**（假设每次判定 ≈ 1,000 输入 token + 80 输出 token；
 Neurons/次 = 1000×in_per_M/1e6 + 80×out_per_M/1e6；每次 $ = Neurons × $0.011/1000
 ⇒ **Neurons/次 与「每次 $」是同一个数除以 1000**，下面两列互为校验）：
