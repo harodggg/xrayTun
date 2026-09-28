@@ -16,60 +16,6 @@ use serde::{Deserialize, Serialize};
 use xt_core::model::{AppSettings, Node, ProxyMode, Subscription};
 use xt_core::store::Store;
 
-/// 自动重建（看门狗自愈）的结局。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RecoveryOutcome {
-    /// 重建成功，隧道已恢复。
-    Recovered,
-    /// 重建失败，已**尝试**退回直连（不再走代理）。
-    ///
-    /// ⚠️ **不等于「网络可用」**：这一步的结局有两种 ——
-    /// 回滚成功（路由/DNS 已还原）或回滚失败（网络恢复**未经验证**，
-    /// 见 `commands::FallbackOutcome`）。界面必须按结局区分文案，
-    /// **不许**一律说「能上网」。
-    ///
-    /// 刻意不叫 `failed`：退回直连是一个**动作**，与「隧道失败」不是同一件事。
-    DirectFallback,
-}
-
-/// 看门狗自动重建隧道的状态。
-///
-/// # 为什么需要它
-///
-/// 看门狗（`commands/core.rs::spawn_tunnel_watchdog`）在换网 / 熄屏唤醒 /
-/// 节点抖动时**确实会自动重建**，但此前这件事**只写进了一个自由文本 notice**，
-/// 而 notice 只在 `snapshot` 命令里下发 —— 界面因此看不到「正在自愈」，
-/// 反而把按钮变回「连接」，用户去点就和看门狗抢。
-///
-/// 这个结构给出**机器可读**的状态，并且随 `CoreRuntime` 一起在
-/// `runtime://changed` 事件与快照里下发（两者都传整个 `CoreRuntime`）。
-///
-/// # 刻意没有「预计下次重试时间」
-///
-/// 看门狗的探测是固定 10 秒一跳；一旦判定需要重建就**立刻**做，
-/// 失败后直接退回直连并**退出**（不再重试）。也就是说后端并不知道
-/// 「下次重试在什么时候」—— 编一个数字（或一个恒为 `null` 的字段）
-/// 都是无意义的语义，所以它不存在。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RecoveryState {
-    /// 看门狗正在重建隧道。**后端真实状态**，不是前端按时间猜的。
-    pub recovering: bool,
-    /// 自 App 启动以来发起自动重建的序号（含进行中的这次）；`0` = 从未发起。
-    ///
-    /// **刻意不持久化**：App 重启后从 `0` 重新计。这是语义的一部分、不是 bug ——
-    /// 「第 N 次」指的是**这一次运行**里发生过几次自愈。
-    pub attempt: u32,
-    /// 触发这次重建的连续探测失败次数（看门狗每 10 秒探测一次）。
-    pub probe_failures: u32,
-    /// 本次自动重建的开始时刻（Unix 秒）；没发起过就是 `None`。
-    pub started_unix: Option<u64>,
-    /// 最近一次自动重建的结局；`None` = 还没结束过任何一次。
-    pub last_outcome: Option<RecoveryOutcome>,
-    /// 最近一次自动重建的结束时刻（Unix 秒）。
-    pub finished_unix: Option<u64>,
-}
-
 impl RecoveryState {
     /// 同步「连续探测失败次数」。返回 `true` 表示状态变了
     /// （调用方据此决定要不要发事件，避免每 10 秒无谓地推一次）。
@@ -152,13 +98,6 @@ pub struct CoreRuntime {
     /// 只在**连通性检查通过之后**才写，所以它是「验证过的」而不是「选过的」。
     #[serde(default)]
     pub last_good_node: Option<String>,
-    /// 自动恢复（看门狗重建）的状态。界面据此显示「正在自动恢复（第 N 次）」，
-    /// 并在恢复期间禁用/改写连接按钮，避免和看门狗抢。
-    ///
-    /// 放在 `CoreRuntime` 里而不是事件载荷顶层：`CoreRuntime` 是**整体**
-    /// 在事件与快照两条路上传的，这样刷新快照时恢复状态不会丢。
-    #[serde(default)]
-    pub recovery: RecoveryState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1076,68 +1015,9 @@ mod tests {
     // 可单测**的；看门狗里那部分异步装配由这些方法驱动。
     // -----------------------------------------------------------------------
 
-    /// 初始状态：没在恢复、没发起过、没有结局。
-    #[test]
-    fn recovery_starts_idle() {
-        let r = RecoveryState::default();
-        assert!(!r.recovering);
-        assert_eq!(r.attempt, 0);
-        assert_eq!(r.probe_failures, 0);
-        assert_eq!(r.started_unix, None);
-        assert_eq!(r.last_outcome, None);
-        assert_eq!(r.finished_unix, None);
-    }
 
-    /// 探测失败次数只在**变化**时报告变化 —— 否则看门狗每 10 秒都要推一次事件。
-    #[test]
-    fn probe_failure_count_only_reports_changes() {
-        let mut r = RecoveryState::default();
-        assert!(r.set_probe_failures(1), "0 → 1 是变化");
-        assert!(!r.set_probe_failures(1), "1 → 1 不是变化");
-        assert!(r.set_probe_failures(2), "1 → 2 是变化");
-        assert!(r.set_probe_failures(0), "恢复到 0 也是变化（界面要收回告警）");
-        assert!(!r.set_probe_failures(0));
-    }
 
-    /// **看门狗触发 → 状态变 recovering → 成功** 这条主路径。
-    #[test]
-    fn watchdog_recovery_is_visible_then_finishes_as_recovered() {
-        let mut r = RecoveryState::default();
-        r.set_probe_failures(1);
-        r.set_probe_failures(2);
 
-        let attempt = r.begin(1_000);
-        assert_eq!(attempt, 1, "第一次自动重建的序号是 1");
-        assert!(r.recovering, "重建期间必须是 recovering —— 界面据此禁用连接按钮");
-        assert_eq!(r.started_unix, Some(1_000));
-        assert_eq!(r.probe_failures, 2, "保留触发这次重建的失败次数");
-        assert_eq!(r.last_outcome, None, "还没结束，不能提前写结局");
-
-        r.succeeded(1_030);
-        assert!(!r.recovering);
-        assert_eq!(r.last_outcome, Some(RecoveryOutcome::Recovered));
-        assert_eq!(r.finished_unix, Some(1_030));
-        assert_eq!(r.probe_failures, 0, "恢复后失败计数归零");
-    }
-
-    /// 失败路径：退回直连，结局与成功**可区分**（界面文案不同）。
-    #[test]
-    fn watchdog_recovery_failure_is_recorded_as_direct_fallback() {
-        let mut r = RecoveryState::default();
-        r.set_probe_failures(2);
-        assert_eq!(r.begin(2_000), 1);
-        assert!(r.recovering);
-
-        r.fell_back_to_direct(2_040);
-        assert!(!r.recovering);
-        assert_eq!(r.last_outcome, Some(RecoveryOutcome::DirectFallback));
-        assert_eq!(r.finished_unix, Some(2_040));
-        assert_ne!(
-            r.last_outcome,
-            Some(RecoveryOutcome::Recovered),
-            "失败与成功必须可区分，不能都只报「结束了」"
-        );
-    }
 
     /// **重建成功必须清掉恢复中的提示条**（product-manager 实测的缺陷：
     /// 不清的话下一次快照刷新会把「正在自动恢复…」带回来，
@@ -1173,53 +1053,5 @@ mod tests {
         assert_eq!(empty, None);
     }
 
-    /// 第二次自动重建拿到序号 2（界面显示「第 N 次」的依据）。
-    #[test]
-    fn second_recovery_gets_the_next_ordinal() {
-        let mut r = RecoveryState::default();
-        assert_eq!(r.begin(100), 1);
-        r.succeeded(110);
-        assert_eq!(r.begin(200), 2);
-        assert!(r.recovering);
-        assert_eq!(r.attempt, 2, "第 N 次是累计序号，不是每次都从 1 开始");
-        assert_eq!(r.started_unix, Some(200), "开始时刻更新为本次");
-        assert_eq!(r.last_outcome, Some(RecoveryOutcome::Recovered), "上一次的结局保留");
-    }
 
-    /// 序列化给前端的**字段名**就是契约（`apps/ui/src/types.ts` 手写）。
-    /// 顺带把「刻意没有 next_retry」钉进契约：谁想加一个恒为 null 的字段，
-    /// 就得先改这条测试并想清楚它到底有没有真实语义。
-    #[test]
-    fn recovery_state_wire_shape_is_deliberate() {
-        let json = serde_json::to_value(RecoveryState::default()).unwrap();
-        let mut keys: Vec<&str> = json
-            .as_object()
-            .expect("应当是 JSON 对象")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            vec![
-                "attempt",
-                "finished_unix",
-                "last_outcome",
-                "probe_failures",
-                "recovering",
-                "started_unix",
-            ],
-            "字段名/数量变了就要同步 apps/ui/src/types.ts 的 RecoveryState；\
-             并且想清楚新字段是不是后端真的知道"
-        );
-        // 结局是字符串枚举，不是自由文本 —— 前端不用猜文案。
-        assert_eq!(
-            serde_json::to_value(RecoveryOutcome::DirectFallback).unwrap(),
-            serde_json::json!("direct_fallback")
-        );
-        assert_eq!(
-            serde_json::to_value(RecoveryOutcome::Recovered).unwrap(),
-            serde_json::json!("recovered")
-        );
-    }
 }

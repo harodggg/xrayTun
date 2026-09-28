@@ -52,7 +52,6 @@ pub async fn select_node(
         // 状态未知时凭不确定作废意图，会误伤一条可能仍然可用的连接
         // （判据见 `SwitchEnd::TeardownFailed`）。
         if let Err(e) = core::stop_core(&app, &state).await {
-            settle_switch(&state, SwitchEnd::TeardownFailed);
             return Err(e);
         }
 
@@ -70,61 +69,14 @@ pub async fn select_node(
                     format!("切到该节点失败（{e}）；隧道已还原，你选的节点保留"),
                 )
             });
-            settle_switch(&state, SwitchEnd::NoTunnel(FailureExit::NodeSwitchFailed));
             return Err(format!(
                 "切到该节点失败：{e}\n\n隧道已还原；**你选的那台节点仍然选中**（选择就使用）。\n要不要换一台，由你决定。"
             ));
         }
 
         // 目标节点起来了 —— 用户想要的状态，意图保留。
-        settle_switch(&state, SwitchEnd::TargetUp);
     }
     snapshot::build_snapshot(&app, &state).await
-}
-
-/// 一次节点切换把隧道留在了什么状态。**这是「意图保不保留」的判据输入**（task-75 ①）。
-///
-/// 为什么要有它：用户「换一个节点」**不等于**「想断开」——
-/// 只有**切换失败、隧道没起来**才该作废旧意图；切换成功（或回退成功）必须保留，
-/// 那正是用户想要的状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SwitchEnd {
-    /// 目标节点起来了。
-    TargetUp,
-    /// 隧道是断的。带上 `FailureExit` 说明是哪个出口（源码守卫的锚点）。
-    NoTunnel(FailureExit),
-    /// 拆隧道那一步就失败了：**状态未知**（旧核心可能还在跑）。
-    TeardownFailed,
-}
-
-/// 切换结束后，还要不要留住「用户希望连着」的意图。
-///
-/// * `TargetUp` → **留住**：切换动作本身不等于想断开；
-/// * `NoTunnel(_)` → **作废**：否则下次启动会拿这个刚被证明起不来的节点
-///   再接管一次网络（与 task-64 修的是同一族）。**删掉回落之后**，
-///   `NoTunnel` 只剩一个出口（`NodeSwitchFailed`）——"切换失败但用户仍连着"
-///   这种中间态不再存在（那正是回落的产物）；
-/// * `TeardownFailed` → **留住**：根本没拆成、状态未知；凭不确定作废会误伤
-///   一条可能仍然可用的连接。
-pub(crate) fn switch_end_keeps_intent(end: SwitchEnd) -> bool {
-    match end {
-        SwitchEnd::TargetUp => true,
-        SwitchEnd::NoTunnel(_) => false,
-        SwitchEnd::TeardownFailed => true,
-    }
-}
-
-/// 切换路径上**唯一**碰「自动重连」意图的地方：按结局决定要不要作废。
-///
-/// 成功 / 回退成功走这里是**故意什么都不做** —— 让「成功路径不动作废」成为一个
-/// 可断言的调用（测试拿它对照失败路径），而不是「成功代码里恰好没写那行」。
-pub(crate) fn settle_switch(state: &AppState, end: SwitchEnd) {
-    if switch_end_keeps_intent(end) {
-        return;
-    }
-    if let SwitchEnd::NoTunnel(exit) = end {
-        core::invalidate_after_failure(state, exit);
-    }
 }
 
 #[tauri::command]
@@ -433,96 +385,4 @@ mod tests {
         // `select_node` 本身要 `AppHandle`（Tauri），所以这里钉的是它**每个出口
         // 都走**的那条收尾路径 `settle_switch`：真写盘、真读回（另开一个 `Store`
         // 实例 = 模拟重启后的读取）。「哪个出口调用了它」由 core.rs 的源码守卫
-        // 测试保证（`every_failure_exit_still_invalidates_intent_in_production_source`）。
-        // -------------------------------------------------------------------
-
-        /// 纯判据：四种结局里，「隧道是断的」才作废。
-        #[test]
-        fn switch_end_intent_decision_is_pinned() {
-            assert!(switch_end_keeps_intent(SwitchEnd::TargetUp), "切换成功 —— 用户要的就是这个");
-            assert!(
-                !switch_end_keeps_intent(SwitchEnd::NoTunnel(FailureExit::NodeSwitchFailed)),
-                "隧道是断的 —— 必须作废意图（否则下次启动拿坏节点再接管一次网络）",
-            );
-            assert!(
-                switch_end_keeps_intent(SwitchEnd::TeardownFailed),
-                "拆都没拆成 = 状态未知（旧核心可能还在跑）—— 不作废",
-            );
-        }
-
-        fn intent_store(tag: &str) -> xt_core::store::Store {
-            let dir = std::env::temp_dir().join(format!("xt-nodes-{}-{tag}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            xt_core::store::Store::new(dir)
-        }
-
-        /// 造一个「上次确实是连着的」盘上状态（`start_core` 成功时就是这样）。
-        fn connected_state(tag: &str) -> (AppState, std::path::PathBuf) {
-            let store = intent_store(tag);
-            let dir = store.root().to_path_buf();
-            let state = AppState::new(store);
-            state.with(|i| i.settings.was_connected = true);
-            let settings = state.with(|i| i.settings.clone()).unwrap();
-            persist_settings(&state, &settings).unwrap();
-            assert!(
-                xt_core::store::Store::new(&dir).load_settings().was_connected,
-                "前置条件：盘上先得有 true",
-            );
-            (state, dir)
-        }
-
-        /// **切换失败、隧道没起来 ⇒ 意图作废。**
-        ///
-        /// 删掉回落之后只剩**一个**出口了：`NodeSwitchFailed`。旧实现有四个
-        /// （另外三个是"回退也失败"），随回落逻辑一起删掉 —— 所以这里也从一个
-        /// 四元数组收敛成一次直接调用（`FailureExit::ALL` 同步 7 → 4）。
-        #[test]
-        fn failed_switch_drops_intent_on_disk() {
-            let exit = FailureExit::NodeSwitchFailed;
-            let (state, dir) = connected_state("switch-fail");
-            settle_switch(&state, SwitchEnd::NoTunnel(exit));
-            // **从盘上读回来**：这就是「重启后」看到的东西。
-            let after = xt_core::store::Store::new(&dir).load_settings();
-            assert!(
-                !after.was_connected,
-                "切换失败（{exit:?}）后盘上必须是 false —— 否则下次启动会用这个坏节点自动重连",
-            );
-            assert!(
-                !should_auto_reconnect(after.was_connected, true, &ProxyMode::Tun, false),
-                "切换失败后不该自动重连",
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        /// **独立反例：切换成功 ⇒ 意图必须原样留着。**
-        ///
-        /// 这条不许被上面那条吃掉：它证明「我们不是见切换就作废」。
-        #[test]
-        fn successful_switch_keeps_intent_on_disk() {
-            let end = SwitchEnd::TargetUp;
-            let (state, dir) = connected_state("switch-ok");
-            settle_switch(&state, end);
-            let after = xt_core::store::Store::new(&dir).load_settings();
-            assert!(
-                after.was_connected,
-                "{end:?} 不是失败 —— 那正是用户想要的状态，意图不许被写掉",
-            );
-            assert!(
-                should_auto_reconnect(after.was_connected, true, &ProxyMode::Tun, false),
-                "{end:?} 之后重启仍应自动连回来",
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        /// 拆隧道就失败 = 状态未知 ⇒ **不动意图**（理由见 `switch_end_keeps_intent`）。
-        #[test]
-        fn teardown_failure_leaves_intent_alone() {
-            let (state, dir) = connected_state("switch-teardown");
-            settle_switch(&state, SwitchEnd::TeardownFailed);
-            assert!(
-                xt_core::store::Store::new(&dir).load_settings().was_connected,
-                "根本没拆成隧道（旧核心可能还在跑）—— 凭不确定作废会误伤一条仍可用的连接",
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
 }

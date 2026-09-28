@@ -26,29 +26,6 @@ pub async fn save_settings(
         });
     }
 
-    // **`was_connected` 归后端所有，前端不得覆盖它。**
-    //
-    // 它是「用户希望它连着」这个**意图**，只有 `core::start_core`（连上）和
-    // `stop_proxy`（用户主动点停止）能改。
-    //
-    // 而前端保存的是**整份** `AppSettings`，那份快照可能是**连接之前**取的
-    // —— 于是用户只是改了个「显示网速」或日志级别，就把意图悄悄清成了
-    // false，下一次开机自然不自动连。
-    //
-    // 这是 docs/08 的 A 类：一个字段的**来源**（后端）和**去向**（前端整份回传）
-    // 不是同一个地方。凡是"前端不拥有"的字段，都不能让整份回传覆盖它。
-    let mut settings = settings;
-    if let Some(intent) = state.with(|i| i.settings.was_connected) {
-        if settings.was_connected != intent {
-            tracing::debug!(
-                from = settings.was_connected,
-                to = intent,
-                "忽略前端回传的 was_connected（它由后端拥有）"
-            );
-        }
-        settings.was_connected = intent;
-    }
-
     persist_settings(&state, &settings)?;
 
     // 意图过滤按新设置重建（换预设/模型/阈值 ⇒ 判决缓存整库作废）。

@@ -606,9 +606,6 @@ pub(crate) async fn start_core_with_outcome(
 
     state.with(|i| {
         i.runtime = runtime.clone();
-        // 记下「用户希望它连着」。自更新/重启之后要靠它自动连回来 ——
-        // 否则就是用户没关过、网却断了。
-        i.settings.was_connected = true;
         i.push_log(
             "app",
             "info",
@@ -621,15 +618,6 @@ pub(crate) async fn start_core_with_outcome(
         );
     });
 
-    // **必须落盘。** 只在内存里改是不够的：这个标记的**全部用途**就是跨进程
-    // 存活（自更新会重启 app），而重启后读的是磁盘上那份。
-    // 第一版漏了这一步，于是"修好了自动重连"其实没生效 —— 磁盘上始终是
-    // false，重启后照样不连。（实测发现：核心在跑，was_connected 却是 false。）
-    if let Some(current) = state.with(|i| i.settings.clone()) {
-        if let Err(e) = persist_settings(state, &current) {
-            tracing::warn!(error = %e, "记录「上次是连接状态」失败，自更新后可能不会自动重连");
-        }
-    }
     events::runtime_changed(app, state);
 
     // **节点账本变了 ⇒ 让界面重读快照。**
@@ -875,141 +863,6 @@ pub(crate) fn tunnel_is_dead(http_code: &str) -> bool {
     http_code.is_empty() || http_code == "000"
 }
 
-/// 启动时该不该自动连回来。
-///
-/// 四个条件缺一不可 —— 抽成纯函数是为了能测，而不是散在 async 流程里。
-///
-/// **第一个参数的含义比它的名字严。** 它不只是「上次是连着的」，还必须是
-/// 「上次**不是**以已知失败告终」。这一层由 [`invalidate_connect_intent`] 在每个
-/// 退场点写回磁盘来保证 —— 本函数只管**读**，写盘在那一侧。
-///
-/// task-64 之前，只有用户亲手点「断开」（`stop_proxy`）会写回它；**自动退场**
-/// （门禁没过 / 看门狗重建后仍不通 / 退回直连）从来没人写，于是磁盘上留着
-/// `true`，下次启动就拿同一个刚被证明不通的节点再接管一次网络。
-pub(crate) fn should_auto_reconnect(
-    was_connected: bool,
-    auto_reconnect: bool,
-    mode: &ProxyMode,
-    already_running: bool,
-) -> bool {
-    // 「上次是连着的」= 用户的意图。用户主动停止会清掉它，所以这里成立。
-    was_connected
-        && auto_reconnect
-        && *mode != ProxyMode::Direct
-        && !already_running
-}
-
-/// 「用户希望连着」这个意图**为什么**该作废。这是 (a) 判据的全部输入。
-///
-/// 只列**明说**的两种退场。正常打断（自更新 / 崩溃 / 退出应用时隧道还连着）
-/// **故意不在这个枚举里** —— 那条路什么都不写，见 [`connect_intent_after_stop`]
-/// 的对照组说明与 `normal_interruption_*` 测试。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IntentDrop {
-    /// 用户亲手点「断开」（`stop_proxy`）。
-    UserStop,
-    /// **已知失败**：门禁没过 / 看门狗重建后仍不通 / 退回直连。
-    KnownFailure,
-}
-
-/// 退场之后，`settings.was_connected` 该落盘成什么。
-///
-/// 返回 `Some(false)` = **必须写盘作废**；`None` = 不用写（意图本来就不该变）。
-///
-/// # 判据为什么只能是这个字段
-///
-/// `settings.was_connected`（`settings.json`）是**本工程里唯一跨进程存活的
-/// 「用户意图」证据**：`runtime.recovery.last_outcome`、`runtime.last_error`、
-/// 失败提示条全在内存里，重启即失（已核实：`store.rs` 里持久化的**结构化状态**
-/// 只有 settings / subscriptions / nodes / runtime/config 这四份；`logs/*.jsonl`
-/// 是给人看的文本，不是状态）。所以「上次会话以失败告终」
-/// 要想跨重启被读到，只能写进这个**已存在的**字段 —— 这不是新造状态，
-/// 而是把它写诚实。
-///
-/// # 为什么必须写
-///
-/// 用户能用「退出应用」逃生：退出那一刻网络确实恢复。但意图还在盘上，
-/// 于是**下次启动 / 登录项自启 / 自更新重启**会读到 `true` 并自动重连
-/// （而且后台重试 `RECONNECT_ATTEMPTS` 次）—— 用同一个刚被证明不通的节点
-/// 把用户刚修好的网络再接管一次。**「退出应用」因此只在本次进程内有效。**
-///
-/// # 对照组（故意什么都不写）
-///
-/// 自更新 / 崩溃打断一条**正连着**的会话**不是失败**：那条路径不调用
-/// [`invalidate_connect_intent`]，`was_connected` 原样留在磁盘上，下次启动
-/// 照样自动连回来 —— 这正是自动重连存在的理由，有独立测试钉住。
-pub(crate) fn connect_intent_after_stop(
-    drop_kind: IntentDrop,
-    was_connected: bool,
-) -> Option<bool> {
-    if was_connected {
-        match drop_kind {
-            IntentDrop::UserStop | IntentDrop::KnownFailure => Some(false),
-        }
-    } else {
-        // 意图已经是 false（用户早先断开过 / 上一次退场已作废）—— 不重复写盘。
-        None
-    }
-}
-
-/// 把「意图作废」落盘（`settings.was_connected` → false）。
-///
-/// 两条调用路径共用它：用户亲手断开（`stop_proxy`）与自动退场（已知失败）。
-///
-/// **只碰意图。** `runtime.recovery` 与失败提示条必须留着 —— 界面正靠它们显示
-/// 「已退回直连」和原因（`stop_proxy` 那条路另外清 runtime，见它的调用点）。
-///
-/// 落盘失败**必须留痕**：否则下次启动仍会自动重连一次，而没人知道为什么。
-pub(crate) fn invalidate_connect_intent(state: &AppState, drop_kind: IntentDrop, detail: &str) {
-    let Some(mut settings) = state.with(|i| i.settings.clone()) else {
-        return;
-    };
-    if connect_intent_after_stop(drop_kind, settings.was_connected).is_none() {
-        return;
-    }
-    settings.was_connected = false;
-    match persist_settings(state, &settings) {
-        Ok(()) => state.log(
-            "app",
-            "info",
-            format!("已作废「自动重连」意图（{detail}）：下次启动不会自动连"),
-        ),
-        Err(e) => state.log(
-            "app",
-            "warn",
-            format!("记录「不再自动重连」失败：{e} —— 下次启动可能仍会自动重连"),
-        ),
-    }
-}
-
-/// **每一个「已知失败」的退场点**（task-75 ③）。
-///
-/// 列成枚举有两个用处：
-///
-/// 1. 让「该不该作废意图」成为**可断言的值**（`what_happened()` 是给日志的文案）；
-/// 2. 让「调用点还在不在」**能被测试抓住** —— 这些调用点各自埋在 async 流程里
-///    （要 Tauri `AppHandle` 才执行得到），纯函数测试证明不了「它还在」。
-///    测试 `every_failure_exit_still_invalidates_intent_in_production_source`
-///    按 `FailureExit::<Variant>` 这个标记在生产源码里逐个计数，**删一个就红**。
-///
-/// ⚠️ 新增退场点时：加变体 + 在 [`FailureExit::ALL`] 里登记 +
-/// 在出口调用 [`invalidate_after_failure`]。三件事缺一，守卫测试都会红。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FailureExit {
-    /// 看门狗重建隧道失败，已退回直连。
-    WatchdogRebuild,
-    /// 换网后重建隧道失败，已退回直连。
-    NetworkWatchRebuild,
-    /// 自动重连试满 `RECONNECT_ATTEMPTS` 仍未成功（门禁没过）。
-    ReconnectExhausted,
-    /// 切换节点失败：**隧道已还原，用户选中的节点保留**。
-    ///
-    /// 「回退到别的节点」这条路 2026-09-28 被整个删掉了（用户裁决：选择就使用，
-    /// 不使用任何回落）。所以这里原本的四个出口收敛成一个 ——
-    /// 「切到该节点失败」就是一个**终局**，不再有"回退也失败"这种中间态。
-    NodeSwitchFailed,
-}
-
 impl FailureExit {
     /// 全部退场点。**新增变体必须登记在这里**；`ALL` 与生产调用点的一致性
     /// 由源码守卫测试保证。
@@ -1034,24 +887,6 @@ impl FailureExit {
             Self::NodeSwitchFailed => "切换到该节点失败（隧道已还原，你选的节点保留）",
         }
     }
-}
-
-/// **已知失败退场**：登记是哪个出口，并作废「自动重连」意图（落盘 + 留痕）。
-///
-/// `exit` 是枚举而不是散文案，所以每个调用点都能被源码守卫测试逐个计数。
-pub(crate) fn invalidate_after_failure(state: &AppState, exit: FailureExit) {
-    // 被动哨兵（task-130）：「作废自动重连意图」是最该进现场的一类事件。
-    record(state, "watchdog_invalidated", "warn", exit.what_happened());
-    invalidate_connect_intent(state, IntentDrop::KnownFailure, exit.what_happened());
-}
-
-/// 自动重连还要不要继续试。
-///
-/// 两种情况都该停：
-/// * 用户明确关掉了（意图变了）—— 继续试就是「关不掉」；
-/// * 隧道已经在跑 —— 用户自己点了连接并成功了，再插一手就是抢。
-pub(crate) fn should_keep_reconnecting(user_wants_it: bool, already_running: bool) -> bool {
-    user_wants_it && !already_running
 }
 
 /// 探针目标属于哪一侧 —— **真源在 `supervisor.rs` 的那张表**（task-106）。
@@ -1580,199 +1415,7 @@ mod tests {
             assert!(!tunnel_is_dead("200"));
             assert!(!tunnel_is_dead("403"), "服务器答了任何码都说明链路通");
         }
-        /// 自动重连的四个条件缺一不可。
-        ///
-        /// 自更新会先退出 app、替换、再重启 —— 重启后要不要连回来，完全由
-        /// 这个判断决定。它宽松一点就是「用户关过的隧道自己回来了」，
-        /// 严一点就是「用户没关过的东西断了」。
-        #[test]
-        fn auto_reconnect_requires_intent_and_absence_of_a_running_core() {
-            let tun = ProxyMode::Tun;
-            assert!(should_auto_reconnect(true, true, &tun, false), "上次连着就该连回来");
-            assert!(
-                !should_auto_reconnect(false, true, &tun, false),
-                "用户主动停止过 —— 不该自己连回来",
-            );
-            assert!(
-                !should_auto_reconnect(true, false, &tun, false),
-                "用户关掉了自动重连",
-            );
-            assert!(
-                !should_auto_reconnect(true, true, &ProxyMode::Direct, false),
-                "直连模式没有隧道可连",
-            );
-            assert!(
-                !should_auto_reconnect(true, true, &tun, true),
-                "已经在跑就别重复启动（那会撞出「核心已经在运行」）",
-            );
-        }
 
-        // -------------------------------------------------------------------
-        // task-64：**已知失败**之后不许再自动重连
-        //
-        // 起因是把两条已核实的事实放在一起：
-        // ① 用户实测「退出应用后网络恢复」—— 退出是他在用的逃生路；
-        // ② `should_auto_reconnect` 读的 `was_connected` 以前**只有手动断开**
-        //    会清（`stop_proxy`），自动退场（门禁没过 / 重建后仍不通 / 退回直连）
-        //    从来不写回 ⇒ 磁盘上还是 true ⇒ **下次启动**（含登录项自启、自更新
-        //    重启）用同一个坏节点再接管一次网络，「退出」于是只在本次进程内有效。
-        //
-        // 修法：把这些**已知失败**写进**已存在的**持久化字段 `settings.was_connected`
-        // （`settings.json`）—— 不新造状态。下面四条测试分别钉：判据、磁盘语义、
-        // 以及**必须保留的反例**（正常打断仍要连回来）。
-        // -------------------------------------------------------------------
-
-        /// 判据：**已知失败 / 用户主动断开 ⇒ 作废**；意图本来就是 false ⇒ 不写盘。
-        #[test]
-        fn intent_drop_decision_is_explicit_about_the_two_drops() {
-            assert_eq!(
-                connect_intent_after_stop(IntentDrop::KnownFailure, true),
-                Some(false),
-                "已知失败之后必须把意图写盘作废（否则下次启动会拿坏节点再接管一次网络）",
-            );
-            assert_eq!(
-                connect_intent_after_stop(IntentDrop::UserStop, true),
-                Some(false),
-                "用户亲手断开同样作废 —— 两条路共用一个判据",
-            );
-            assert_eq!(
-                connect_intent_after_stop(IntentDrop::KnownFailure, false),
-                None,
-                "意图已经是 false —— 不必重复写盘",
-            );
-        }
-
-        /// **(c) 手动「断开」→ 重启后不得自动重连。**
-        ///
-        /// **真的写盘、再真的读回来**（另开一个 `Store` 实例 = 模拟重启后的读取），
-        /// 而不是只看内存字段：这个标记的全部用途就是跨进程存活。
-        /// 走的是 `stop_proxy` 用的**同一个** `invalidate_connect_intent`。
-        #[test]
-        fn user_stop_persists_intent_false_across_restart() {
-            let store = temp_intent_store("user-stop");
-            let dir = store.root().to_path_buf();
-            let state = AppState::new(store);
-            // 先造出「用户希望连着」的盘上状态（`start_core` 成功时就是这样）。
-            state.with(|i| i.settings.was_connected = true);
-            let settings = state.with(|i| i.settings.clone()).unwrap();
-            persist_settings(&state, &settings).unwrap();
-            assert!(
-                xt_core::store::Store::new(&dir).load_settings().was_connected,
-                "前置条件：盘上先得有 true",
-            );
-
-            invalidate_connect_intent(&state, IntentDrop::UserStop, "用户主动断开");
-
-            // **从盘上读回来** —— 这就是「重启后」看到的东西。
-            let after_restart = xt_core::store::Store::new(&dir).load_settings();
-            assert!(
-                !after_restart.was_connected,
-                "断开必须落盘：重启读到的不能还是 true",
-            );
-            assert!(
-                !should_auto_reconnect(after_restart.was_connected, true, &ProxyMode::Tun, false),
-                "手动断开过 —— 重启后不该自动连回来",
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        /// **(a) 已知失败退场 → 磁盘上的意图作废，且失败提示不被顺手抹掉。**
-        ///
-        /// 前半段钉「重启后不会再用坏节点接管一次网络」；后半段钉
-        /// `invalidate_connect_intent` **只碰意图** —— 界面显示「已退回直连」
-        /// 靠的是 `last_notice` / `runtime.recovery`，它们必须留着。
-        #[test]
-        fn known_failure_persists_intent_false_but_keeps_the_notice() {
-            let store = temp_intent_store("known-failure");
-            let dir = store.root().to_path_buf();
-            let state = AppState::new(store);
-            state.with(|i| {
-                i.settings.was_connected = true;
-                i.last_notice = Some("网络未能恢复（直连状态未验证）".into());
-            });
-            let settings = state.with(|i| i.settings.clone()).unwrap();
-            persist_settings(&state, &settings).unwrap();
-
-            invalidate_connect_intent(
-                &state,
-                IntentDrop::KnownFailure,
-                "看门狗重建隧道失败，已退回直连",
-            );
-
-            let after_restart = xt_core::store::Store::new(&dir).load_settings();
-            assert!(!after_restart.was_connected, "已知失败必须写盘作废");
-            assert!(
-                !should_auto_reconnect(after_restart.was_connected, true, &ProxyMode::Tun, false),
-                "上次以失败告终 —— 不许自动重连（那等于把用户刚修好的网再弄坏一次）",
-            );
-            assert_eq!(
-                state.with(|i| i.last_notice.clone()).flatten(),
-                Some("网络未能恢复（直连状态未验证）".to_string()),
-                "只碰意图：失败提示条不许被抹掉（界面靠它说明发生了什么）",
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        /// **(c) 必须保留的反例：正常连接后被自更新/崩溃打断 → 仍要自动重连。**
-        ///
-        /// 独立于上面两条：那条路**什么都不写**（不是失败，用户没关过），
-        /// 所以盘上的意图原样是 true，重启后必须连回来 —— 这是自动重连存在的
-        /// 唯一理由（自更新会先退出 app 再重启）。这条不许被上面那条吃掉。
-        #[test]
-        fn normal_interruption_keeps_intent_and_still_reconnects() {
-            // 盘上的意图：**没有任何退场判据会去动它**（`IntentDrop` 只有
-            // UserStop / KnownFailure 两个变体，见上一条测试）。
-            let intent_on_disk_after_interruption = true;
-            let store = temp_intent_store("interruption");
-            let dir = store.root().to_path_buf();
-            let state = AppState::new(store);
-            state.with(|i| i.settings.was_connected = intent_on_disk_after_interruption);
-            let settings = state.with(|i| i.settings.clone()).unwrap();
-            persist_settings(&state, &settings).unwrap();
-
-            // 「重启」：从盘上读回来的就是打断前那个 true。
-            let after_restart = xt_core::store::Store::new(&dir).load_settings();
-            assert!(
-                after_restart.was_connected,
-                "正常打断不是失败 —— 意图不许被写掉",
-            );
-            assert!(
-                should_auto_reconnect(after_restart.was_connected, true, &ProxyMode::Tun, false),
-                "自更新/崩溃打断一条正连着的会话 —— 必须自动连回来",
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        /// 测试用的隔离 Store（`AppState::new` 只碰这个目录，不碰真实用户数据）。
-        fn temp_intent_store(tag: &str) -> xt_core::store::Store {
-            let dir = std::env::temp_dir().join(format!(
-                "xt-core-intent-{}-{tag}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            xt_core::store::Store::new(dir)
-        }
-        /// 自动重连该不该继续试。
-        ///
-        /// 它一次性最多试约 2 分钟（开机时网络和 helper 都可能没就绪），
-        /// 所以「什么时候停」必须判对：用户关掉了还继续试 = 关不掉；
-        /// 用户自己连上了还继续试 = 抢。
-        #[test]
-        fn auto_reconnect_stops_when_user_says_so_or_it_is_already_up() {
-            assert!(should_keep_reconnecting(true, false), "用户还想要、还没起来 —— 继续试");
-            assert!(
-                !should_keep_reconnecting(false, false),
-                "用户明确关掉了 —— 再试就是「关不掉的软件」",
-            );
-            assert!(
-                !should_keep_reconnecting(true, true),
-                "已经在跑了（用户自己点成功了）—— 再插一手就是抢",
-            );
-            assert!(
-                !should_keep_reconnecting(false, true),
-                "两种情况同时成立也该停",
-            );
-        }
         /// 日志分级要**先信内核自己写的 `[Level]` 标记**。
         ///
         /// 之前纯按关键字判，于是上面那些 `[Info] ... rejected type ...` 和
@@ -2350,31 +1993,6 @@ mod tests {
     // 它只保证「调用还在」，不保证运行时时序或文案 —— 这一点写在测试名里。
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn every_failure_exit_still_invalidates_intent_in_production_source() {
-        // 只看 `#[cfg(test)]` 之前的部分：测试代码里也会拼 `FailureExit::X`
-        // （构造具体变体做断言），那不该算进锚点计数。
-        let strip = |src: &str| src.split("#[cfg(test)]").next().unwrap_or("").to_string();
-        let prod = strip(include_str!("core.rs")) + &strip(include_str!("nodes.rs"));
-        // **必须先去掉注释**：把作废调用**注释掉**同样让它失效，而纯文本计数会
-        // 把它算成「还在」—— 第一次做这张卡的敏感性实验时就被它骗过（守卫仍绿）。
-        let code = strip_comments(&prod);
-        for exit in FailureExit::ALL {
-            let anchor = format!("FailureExit::{exit:?}");
-            let count = code.matches(&anchor).count();
-            assert_eq!(
-                count, 1,
-                "退场点 `{anchor}` 在**去掉注释后的**生产源码里应当恰好出现一次\
-                 （那一处作废调用），现在出现 {count} 次。删掉它、或把它注释掉，\
-                 都等于这处作废失效 —— 那正是本测试要防的回归。",
-            );
-            assert!(
-                code.contains(&format!("({anchor})")) || code.contains(&format!(", {anchor})")),
-                "`{anchor}` 必须**作为调用参数**出现（`invalidate_after_failure(&state, {anchor})`\
-                 或 `SwitchEnd::NoTunnel({anchor})`）—— 只是提到它、没传进调用，等于没作废。",
-            );
-        }
-    }
 
     /// 去掉 `//` 行注释与 `/* */` 块注释（保留换行，保证行结构不变）。
     ///
