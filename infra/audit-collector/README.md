@@ -138,7 +138,10 @@ npx wrangler r2 bucket list | grep -F xraytun-audit || npx wrangler r2 bucket cr
 # 端点令牌（**secret**，不进 wrangler.toml）：
 npx wrangler secret put AUDIT_TOKEN --config infra/audit-collector/wrangler.toml
 # ↑ 交互式粘贴一个随机字符串，例如：openssl rand -hex 24
-#   设备侧把它存进 Keychain 的 keychain:com.xraytun.audit-sync/upload-token（契约 §5.1）
+#   设备侧：App 里「设置 → 系统与助手 → 审计同步」把 token 填进输入框，
+#   它会以 0600 存到数据目录的 audit-sync.token（契约 §5.1：**不是 Keychain** ——
+#   本仓库还没有 Keychain 实现，这一版与 intent-audit.jsonl 同级同权限存放）
+#   命令行则用 --token-file 指向一个 0600 的文件。
 ```
 
 **R2 lifecycle：保留 400 天后自动删除**（契约 §4；与 worker 侧的惰性过期互为兜底）。
