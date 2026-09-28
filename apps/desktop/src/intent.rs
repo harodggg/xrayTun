@@ -256,6 +256,11 @@ impl IntentRuntime {
             gateway_calls: stats.as_ref().map(|s| s.gateway_calls).unwrap_or(0),
             gateway_errors: stats.as_ref().map(|s| s.gateway_errors).unwrap_or(0),
             cache_hits: stats.as_ref().map(|s| s.cache_hits).unwrap_or(0),
+            // 命中率 = cache_hits / (cache_hits + cache_misses)；继承命中是 hits 的子集，
+            // 单列出来是为了让界面能说清「这 N 次里有多少是继承来的」。
+            cache_inherited: stats.as_ref().map(|s| s.cache_inherited).unwrap_or(0),
+            cache_misses: stats.as_ref().map(|s| s.cache_misses).unwrap_or(0),
+            cooldown_skipped: stats.as_ref().map(|s| s.cooldown_skipped).unwrap_or(0),
             blocked: engine.cache().entries().filter(|e| e.verdict.is_block()).count(),
             note: self.last_error.clone().or_else(|| self.notes.first().cloned()),
         }
@@ -365,6 +370,13 @@ pub struct IntentSummary {
     pub gateway_calls: u64,
     pub gateway_errors: u64,
     pub cache_hits: u64,
+    /// 其中靠**父域继承**命中的次数（`cache_hits` 的子集）。
+    pub cache_inherited: u64,
+    /// 缓存查找未中的次数 —— 有了它界面才算得出命中率
+    /// （`cache_hits / (cache_hits + cache_misses)`）。
+    pub cache_misses: u64,
+    /// 因为网关失败冷却而跳过提问的次数（省钱，且如实计数）。
+    pub cooldown_skipped: u64,
     pub blocked: usize,
     pub note: Option<String>,
 }

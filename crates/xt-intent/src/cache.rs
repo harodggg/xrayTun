@@ -27,6 +27,13 @@ pub const QUESTIONS_REVISION: u32 = 1;
 /// 判决缓存的内容版本（结构变化时 +1）。
 pub const CACHE_VERSION: u32 = crate::CACHE_FORMAT_VERSION;
 
+/// **父域继承**的有效期上界（7 天）。
+///
+/// 继承是**策略推断**（"同一个可注册站点的子域，判决应当一致"），不是对子域本身的
+/// 判决：上界保证这个推断会被定期重新审视 —— 即使父判决还剩 90 天。
+/// 实际有效期取 `min(父条目剩余 TTL, now + 本上界)`（见 [`VerdictCache::inherit`]）。
+pub const INHERIT_TTL_CAP_SECS: u64 = 7 * 24 * 60 * 60;
+
 /// 指纹：模型 + 网关 + 问题版本 + 阈值摘要。
 ///
 /// 用 FNV-1a 64 而不是密码学哈希：这里要的是"变了就不同"，不是抗碰撞。
@@ -61,11 +68,53 @@ pub struct CacheEntry {
     /// 造出这条判决的模型 id（审计与解释用）。
     #[serde(default)]
     pub model: Option<String>,
+    /// 这条判决是**从可注册域继承来**的（值为父主机名）；`None` = 模型对它本身下过判决。
+    ///
+    /// # 为什么要如实标出来
+    ///
+    /// 继承是"同一个站点的子域判决应当一致"这条**策略推断**，不是模型对这个域的
+    /// 直接结论。带上它，界面/解释才能说清"这条拦截是从 `example.com` 继承来的"，
+    /// 用户申诉时也知道该去找哪一条。
+    #[serde(default)]
+    pub inherited_from: Option<String>,
 }
 
 impl CacheEntry {
     pub fn is_expired(&self, now: u64) -> bool {
         now >= self.expires_at_unix
+    }
+
+    /// 这条判决是继承来的吗（界面/审计据此措辞）。
+    pub fn is_inherited(&self) -> bool {
+        self.inherited_from.is_some()
+    }
+}
+
+/// 一次缓存查找的结果。
+///
+/// **有意不返回条目本身**：`observe()` 在数据面上（每行连接日志都会走一次），
+/// 克隆一条判决（含字符串）比一次查找贵得多 —— 调用方只需要知道"能不能用缓存"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheLookup {
+    /// 精确命中（模型直接判过这个主机）。
+    Hit,
+    /// 精确未中，但用**可注册域**的判决建了一条继承条目并命中。
+    Inherited { from: String },
+    /// 完全未中：没有条目、或可注册域也没有/不允许继承。
+    Miss,
+}
+
+impl CacheLookup {
+    pub fn is_hit(&self) -> bool {
+        !matches!(self, Self::Miss)
+    }
+
+    /// 继承自哪个主机（精确命中与未中都返回 `None`）。
+    pub fn inherited_from(&self) -> Option<&str> {
+        match self {
+            Self::Inherited { from } => Some(from),
+            _ => None,
+        }
     }
 }
 
@@ -145,6 +194,79 @@ impl VerdictCache {
     /// 只看不记命中（界面展示用）。
     pub fn peek(&self, host: &str, now: u64) -> Option<&CacheEntry> {
         self.entries.get(host).filter(|e| !e.is_expired(now))
+    }
+
+    /// **一次查找：先精确、再父域继承**（0.9.1-D 的命中率主线）。
+    ///
+    /// 精确命中照旧累加 `hits`；继承命中会给这个主机**建一条标了
+    /// `inherited_from` 的条目**（这样路由物化、`explain`、下一次查找都能看到它），
+    /// 累加的是**子条目**的 `hits`（那笔"省了多少次请求"的账属于这次查找）。
+    pub fn lookup(&mut self, host: &str, now: u64) -> CacheLookup {
+        if self.get(host, now).is_some() {
+            return CacheLookup::Hit;
+        }
+        match self.inherit(host, now) {
+            Some(from) => CacheLookup::Inherited { from },
+            None => CacheLookup::Miss,
+        }
+    }
+
+    /// 精确未中时，用**同一个可注册域下模型直接判过的那条**给 `host` 建一条继承条目。
+    ///
+    /// # 为什么在"同一个可注册域"里找，而不是只看 `registrable_domain(host)` 那条
+    ///
+    /// 用户先访问的通常是 `www.example.com`，模型判的是**它**；而
+    /// `api.example.com` 的可注册域是 `example.com` —— 只查 `example.com` 这一条
+    /// 会什么都找不到，继承就永远不发生。所以这里找"这个站点下**任意一条模型直接
+    /// 判过**的条目"（`inherited_from.is_none()`），取**最近判定**的那条。
+    ///
+    /// # 为什么线性扫描是可以的
+    ///
+    /// 这段只在"精确未中"时执行 —— 那一刻我们**本来就要花钱问模型**；扫一遍内存里
+    /// 几千条判决比一次 HTTPS 便宜几个数量级。换来的是**不需要维护第二份索引**：
+    /// 索引一旦与 `entries` 漂移，就会出现"以为有判决、其实没有"的幽灵继承。
+    ///
+    /// # 取舍（决定"什么情况下不问模型"）
+    ///
+    /// * 来源条目**过期** ⇒ 不继承（判据是当前时刻）；
+    /// * 来源条目是 `Deferred` ⇒ **不继承**：它是"还不知道"（网关不可用 / 答案缺
+    ///   字段），扩散给子域等于放弃一次可能成功的重试；网关侧的重复调用由失败冷却挡；
+    /// * 有效期 = `min(来源条目剩余 TTL, now + INHERIT_TTL_CAP_SECS)`，**不可能**
+    ///   比来源活得久；
+    /// * 可注册域算不出来（IP / 单标签 / 公共后缀本身）⇒ 不继承。
+    fn inherit(&mut self, host: &str, now: u64) -> Option<String> {
+        let site = crate::rules::registrable_domain(host)?;
+        let source = self
+            .entries
+            .values()
+            .filter(|e| e.inherited_from.is_none())
+            .filter(|e| !e.is_expired(now))
+            .filter(|e| !matches!(e.verdict, Verdict::Deferred(_)))
+            .filter(|e| host_is_in_site(&e.host, &site))
+            .max_by_key(|e| e.decided_at_unix)
+            .cloned()?;
+
+        let expires_at_unix = source
+            .expires_at_unix
+            .min(now.saturating_add(INHERIT_TTL_CAP_SECS));
+        if expires_at_unix <= now {
+            return None;
+        }
+        let from = source.host.clone();
+        self.put(CacheEntry {
+            host: host.to_string(),
+            verdict: source.verdict,
+            decided_at_unix: now,
+            expires_at_unix,
+            hits: 0,
+            model: source.model,
+            inherited_from: Some(from.clone()),
+        });
+        // 这次查找的命中记在**子条目**上（来源条目的 hits 只统计它自己被精确命中）。
+        if let Some(e) = self.entries.get_mut(host) {
+            e.hits = e.hits.saturating_add(1);
+        }
+        Some(from)
     }
 
     pub fn put(&mut self, entry: CacheEntry) {
@@ -247,6 +369,18 @@ impl VerdictCache {
     }
 }
 
+/// `host` 是否属于可注册域 `site`（`site` 本身或它的子域）。
+///
+/// 刻意不用 `ends_with` 单判：那会把 `notexample.com` 也算成 `example.com` 的子域。
+/// 这里额外要求前一个字符是点，且**不分配字符串**（这段在查找的未中路径上）。
+fn host_is_in_site(host: &str, site: &str) -> bool {
+    if host == site {
+        return true;
+    }
+    let (hb, sb) = (host.as_bytes(), site.as_bytes());
+    hb.len() > sb.len() && host.ends_with(site) && hb[hb.len() - sb.len() - 1] == b'.'
+}
+
 /// 原子写：先写同目录 `.tmp`（**权限在写入内容之前就已收紧**），再 rename。
 ///
 /// 与 `xt-core::store` 的做法一致，但刻意不引它：那个函数是私有的，
@@ -296,6 +430,7 @@ mod tests {
             expires_at_unix: expires,
             hits: 0,
             model: Some("jev-latest".into()),
+            inherited_from: None,
         }
     }
 
@@ -361,6 +496,7 @@ mod tests {
             expires_at_unix: 10_000,
             hits: 7,
             model: Some("jev-latest".into()),
+            inherited_from: None,
         });
         c.save(&path).unwrap();
 
@@ -451,9 +587,156 @@ mod tests {
             expires_at_unix: 2,
             hits: 0,
             model: None,
+            inherited_from: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: CacheEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back, e);
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.9.1-D：父域继承（同一可注册站点的子域复用一次判决）
+    // -----------------------------------------------------------------------
+
+    /// `www.` 判过之后，`api.` / `cdn.` 命中继承 —— 且继承条目**如实标出来源**。
+    #[test]
+    fn lookup_inherits_within_the_same_registrable_site() {
+        let mut c = VerdictCache::new("fp", 10);
+        c.put(block("www.example.com", 100, 100_000));
+
+        assert_eq!(c.lookup("www.example.com", 200), CacheLookup::Hit, "精确优先");
+        assert_eq!(
+            c.lookup("api.example.com", 200),
+            CacheLookup::Inherited { from: "www.example.com".into() }
+        );
+        assert_eq!(
+            c.lookup("cdn.example.com", 201),
+            CacheLookup::Inherited { from: "www.example.com".into() }
+        );
+
+        let child = c.peek("api.example.com", 201).expect("继承条目要落进缓存");
+        assert!(child.verdict.is_block(), "继承的是判决本身");
+        assert_eq!(child.inherited_from.as_deref(), Some("www.example.com"));
+        assert!(child.is_inherited());
+        assert_eq!(child.hits, 1, "这次查找的命中记在子条目上");
+
+        // 不相关的站点**不许**继承
+        assert_eq!(c.lookup("api.other.com", 200), CacheLookup::Miss);
+        // 反方向（apex 从子域往上继承）不发生：apex 会不会被判，得模型说了算
+        assert_eq!(c.lookup("example.com", 200), CacheLookup::Miss);
+    }
+
+    /// 继承的有效期**不得超过来源的剩余 TTL**。
+    #[test]
+    fn inherited_ttl_never_exceeds_the_source_remaining_ttl() {
+        let mut c = VerdictCache::new("fp", 10);
+        c.put(block("www.example.com", 1_000, 1_600)); // 只剩 600s
+
+        assert_eq!(
+            c.lookup("api.example.com", 1_000),
+            CacheLookup::Inherited { from: "www.example.com".into() }
+        );
+        assert_eq!(
+            c.peek("api.example.com", 1_000).unwrap().expires_at_unix,
+            1_600,
+            "子条目不许比来源活得久"
+        );
+        assert!(c.peek("api.example.com", 1_600).is_none(), "来源到期 ⇒ 子条目同时到期");
+    }
+
+    /// 来源 TTL 很长（90 天）时，继承也不超过 7 天上界（策略推断要定期重审）。
+    #[test]
+    fn inherited_ttl_is_capped_at_seven_days() {
+        let mut c = VerdictCache::new("fp", 10);
+        c.put(block("www.example.com", 1_000, 1_000 + 90 * 24 * 3600));
+
+        assert_eq!(
+            c.lookup("api.example.com", 1_000),
+            CacheLookup::Inherited { from: "www.example.com".into() }
+        );
+        assert_eq!(
+            c.peek("api.example.com", 1_000).unwrap().expires_at_unix,
+            1_000 + INHERIT_TTL_CAP_SECS
+        );
+    }
+
+    /// IP 字面量 / 单标签 / 公共后缀本身：**绝不允许继承**。
+    #[test]
+    fn never_inherits_for_ip_literal_single_label_or_public_suffix() {
+        let mut c = VerdictCache::new("fp", 20);
+        c.put(block("1.2.3.4", 100, 900_000));
+        c.put(block("localhost", 100, 900_000));
+        c.put(block("co.uk", 100, 900_000));
+
+        assert_eq!(c.lookup("2.3.4.5", 200), CacheLookup::Miss, "IP 不继承");
+        assert_eq!(c.lookup("otherhost", 200), CacheLookup::Miss, "单标签不继承");
+        assert_eq!(
+            c.lookup("other.co.uk", 200),
+            CacheLookup::Miss,
+            "`other.co.uk` 的可注册域就是它自己；`co.uk` 是公共后缀，不能当父域"
+        );
+    }
+
+    /// 多标签后缀下**不同站点不许串**（`a.co.uk` 与 `b.co.uk` 是两家）。
+    #[test]
+    fn different_registrable_sites_never_cross_inherit() {
+        let mut c = VerdictCache::new("fp", 20);
+        c.put(block("shop.a.co.uk", 100, 900_000));
+        c.put(block("foo.github.io", 100, 900_000));
+
+        assert_eq!(
+            c.lookup("api.a.co.uk", 200),
+            CacheLookup::Inherited { from: "shop.a.co.uk".into() }
+        );
+        assert_eq!(c.lookup("api.b.co.uk", 200), CacheLookup::Miss, "b.co.uk 是另一个站点");
+        assert_eq!(
+            c.lookup("bar.foo.github.io", 200),
+            CacheLookup::Inherited { from: "foo.github.io".into() }
+        );
+        assert_eq!(c.lookup("bar.github.io", 200), CacheLookup::Miss, "github.io 下的另一个用户站点");
+    }
+
+    /// 来源是 `Deferred`（"还不知道"）或已过期 ⇒ **不继承**。
+    #[test]
+    fn deferred_and_expired_sources_are_not_inherited() {
+        let mut c = VerdictCache::new("fp", 10);
+        c.put(CacheEntry {
+            host: "www.example.com".into(),
+            verdict: Verdict::Deferred(DeferReason::GatewayUnavailable { message: "timeout".into() }),
+            decided_at_unix: 100,
+            expires_at_unix: 900_000,
+            hits: 0,
+            model: None,
+            inherited_from: None,
+        });
+        assert_eq!(
+            c.lookup("api.example.com", 200),
+            CacheLookup::Miss,
+            "把「还不知道」扩散给子域 = 放弃一次可能成功的重试"
+        );
+
+        let mut c = VerdictCache::new("fp", 10);
+        c.put(block("www.example.com", 100, 150));
+        assert_eq!(c.lookup("api.example.com", 200), CacheLookup::Miss, "来源已过期 ⇒ 不继承");
+    }
+
+    /// `host_is_in_site` 不许把 `notexample.com` 当成 `example.com` 的子域。
+    #[test]
+    fn site_membership_requires_a_label_boundary() {
+        assert!(host_is_in_site("example.com", "example.com"));
+        assert!(host_is_in_site("api.example.com", "example.com"));
+        assert!(!host_is_in_site("notexample.com", "example.com"));
+        assert!(!host_is_in_site("example.com", "api.example.com"));
+    }
+
+    /// 清理/淘汰之后不会留下"幽灵继承"（来源没了就不继承）。
+    #[test]
+    fn no_inheritance_after_the_source_is_removed_or_expired() {
+        let mut c = VerdictCache::new("fp", 10);
+        c.put(block("www.example.com", 100, 900_000));
+        assert!(c.lookup("api.example.com", 200).is_hit());
+        assert!(c.remove("www.example.com").is_some());
+        assert!(c.remove("api.example.com").is_some());
+        assert_eq!(c.lookup("api.example.com", 201), CacheLookup::Miss, "来源被删 ⇒ 不再继承");
     }
 }

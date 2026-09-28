@@ -13,6 +13,7 @@
 //! 任何一步失败都落到 [`crate::verdict::Verdict::Deferred`]，也就是**放行 + 审计**。
 //! 没有一条失败路径会生成 block 规则。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tracing::{debug, warn};
@@ -20,7 +21,7 @@ use xt_core::xray::access_log::ConnectionRecord;
 
 use crate::audit::{AuditLog, AuditRecord};
 use crate::budget::{Budget, BudgetSnapshot};
-use crate::cache::{fingerprint, CacheLoadOutcome, CacheEntry, VerdictCache};
+use crate::cache::{fingerprint, CacheEntry, CacheLoadOutcome, CacheLookup, VerdictCache};
 use crate::gateway::Gateway;
 use crate::observer::{ObserveOutcome, Observer, ObserverStats};
 use crate::question::{domain_request, FlowContext};
@@ -35,6 +36,13 @@ pub const DEFERRED_TTL_SECS: u64 = 60 * 60;
 /// 形状不对（服务端少给字段 / 标签不认识）时的退避：比网关故障长一点，
 /// 避免对着一个持续坏掉的服务端猛发请求。
 pub const SCHEMA_FAILURE_TTL_SECS: u64 = 10 * 60;
+
+/// **网关失败后的冷却**（秒）：这段时间内对同一个 host **不再调网关**。
+///
+/// 网关挂掉时，每个连接都会重试（失败不写缓存，见 `classify_pending` 的第 3 步）
+/// —— 那既花钱又拖慢恢复。冷却**只影响重试时机**：它绝不写进 `VerdictCache`
+/// （那会把"没问到"伪装成"判决"），只让这一轮**跳过提问**并如实计数。
+pub const GATEWAY_ERROR_COOLDOWN_SECS: u64 = 60;
 
 /// 引擎配置。**整体参与缓存指纹** —— 任何一项变化都会让旧判决失效。
 #[derive(Debug, Clone, PartialEq)]
@@ -133,10 +141,16 @@ impl IntentConfig {
 pub struct ClassifyReport {
     pub candidates: u32,
     pub cache_hits: u32,
+    /// 其中**靠父域继承**命中的次数（`cache_hits` 的子集）。
+    pub cache_inherited: u32,
+    /// 缓存查了但没命中（也不含继承）—— 没有它就算不出命中率。
+    pub cache_misses: u32,
     pub asked: u32,
     pub blocked: u32,
     pub allowed: u32,
     pub deferred: u32,
+    /// 其中因为**网关失败冷却**而跳过提问的次数（`deferred` 的子集）。
+    pub cooldown_skipped: u32,
     pub budget_denied: u32,
     pub gateway_errors: u32,
     pub schema_invalid: u32,
@@ -161,7 +175,23 @@ pub struct EngineStats {
     pub observer: ObserverStats,
     pub gateway_calls: u64,
     pub gateway_errors: u64,
+    /// 缓存查找**命中**（含继承）的次数。
+    ///
+    /// # 口径（很重要，否则数字会被重复计）
+    ///
+    /// 这里只统计 **`observe()` 连接级**的查找 —— 分母是"用户实际访问了多少次"。
+    /// `classify_pending` 里的查找**不**计进这里：观察者一定会在首次发现时把域名
+    /// 排队，于是一个刚刚被继承命中的子域会在下一轮又被查一次；两处都计的话，
+    /// 同一个域名一次访问会被记成两次命中，命中率就不再对应任何真实的东西。
+    /// 判定轮里的账在 [`ClassifyReport`] 里（那是"这一轮发生了什么"）。
     pub cache_hits: u64,
+    /// 其中靠父域继承命中的次数（`cache_hits` 的子集）。
+    pub cache_inherited: u64,
+    /// 缓存查找**未中**的次数 —— `lookups = cache_hits + cache_misses`，
+    /// 命中率 = `cache_hits / lookups`（本仓库无遥测，这是唯一的度量来源）。
+    pub cache_misses: u64,
+    /// 因为网关失败冷却而跳过提问的次数。
+    pub cooldown_skipped: u64,
     pub audit_written: u64,
 }
 
@@ -178,6 +208,14 @@ pub struct IntentEngine<G: Gateway> {
     gateway_calls: u64,
     gateway_errors: u64,
     cache_hits: u64,
+    cache_inherited: u64,
+    cache_misses: u64,
+    cooldown_skipped: u64,
+    /// 网关失败后的冷却：host → 可以再问的时刻。
+    ///
+    /// **刻意只在内存里**：它是"这一轮别问"的节流，不是判决；进程重启后重试一次
+    /// 是可以接受的代价（而落盘会多一份需要维护、可能漂移的状态）。
+    gateway_retry_after: BTreeMap<String, u64>,
 }
 
 impl<G: Gateway> IntentEngine<G> {
@@ -217,6 +255,10 @@ impl<G: Gateway> IntentEngine<G> {
             gateway_calls: 0,
             gateway_errors: 0,
             cache_hits: 0,
+            cache_inherited: 0,
+            cache_misses: 0,
+            cooldown_skipped: 0,
+            gateway_retry_after: BTreeMap::new(),
         })
     }
 
@@ -273,10 +315,21 @@ impl<G: Gateway> IntentEngine<G> {
         // 这条路径在数据面上（每行日志一次），所以只做一次 BTreeMap 查找。
         if matches!(outcome, ObserveOutcome::Discovered(_) | ObserveOutcome::Updated) {
             if let Some(host) = rec.domain.as_deref().map(crate::rules::normalize) {
-                if self.cache.get(&host, now).is_some() {
-                    self.cache_hits += 1;
-                } else {
-                    self.observer.requeue(&host);
+                // 一次查找：精确 → 父域继承。**这是命中率的第一个计数点**
+                // （每行连接日志都会走到这里）。
+                match self.cache.lookup(&host, now) {
+                    CacheLookup::Hit => {
+                        self.cache_hits += 1;
+                    }
+                    CacheLookup::Inherited { from } => {
+                        self.cache_hits += 1;
+                        self.cache_inherited += 1;
+                        debug!(host = %host, from = %from, "意图判定：父域继承命中（省一次网关调用）");
+                    }
+                    CacheLookup::Miss => {
+                        self.cache_misses += 1;
+                        self.observer.requeue(&host);
+                    }
                 }
             }
         }
@@ -298,18 +351,52 @@ impl<G: Gateway> IntentEngine<G> {
             report.candidates += 1;
             let host = candidate.host.clone();
 
-            // 1) 缓存：命中就零成本。
+            // 1) 缓存：精确命中 → 父域继承 → 未中。
             //
             // 正常情况下走到这里的候选都已经在 `observe()` 里被缓存挡过一次了；
             // 能进来的只有"排队期间刚被判过"这种边角情况。**不写审计** ——
             // 缓存命中不是一次新的判决，写进去只会把审计刷成噪音。
-            if self.cache.get(&host, now).is_some() {
-                self.cache_hits += 1;
-                report.cache_hits += 1;
+            match self.cache.lookup(&host, now) {
+                CacheLookup::Hit => {
+                    // 这条命中可能是**继承来的条目**（`observe` 阶段建的）——分开记，
+                    // 否则「这一轮有多少次是继承」会看成 0（条目已经存在 ⇒ 走精确命中）。
+                    if self.cache.peek(&host, now).is_some_and(|e| e.is_inherited()) {
+                        report.cache_inherited += 1;
+                    }
+                    report.cache_hits += 1;
+                    continue;
+                }
+                CacheLookup::Inherited { from } => {
+                    report.cache_hits += 1;
+                    report.cache_inherited += 1;
+                    debug!(host = %host, from = %from, "意图判定：父域继承命中（省一次网关调用）");
+                    continue;
+                }
+                CacheLookup::Miss => {
+                    report.cache_misses += 1;
+                }
+            }
+
+            // 2) 网关失败冷却（0.9.1-D）：冷却期内**不问**（省钱、也不再拖慢恢复）。
+            //
+            // 放在预算之前：这一轮既然不问，就不该消耗预算。
+            // **不写审计**：这不是一次新判决（与缓存命中同一个理由），
+            // 而且每 10 秒一拍都写一条会把审计刷成噪音 —— 日志里有 debug 行可查。
+            if let Some(until) = self.gateway_retry_after.get(&host).copied().filter(|u| now < *u) {
+                self.cooldown_skipped += 1;
+                report.cooldown_skipped += 1;
+                report.deferred += 1;
+                self.observer.requeue(&host);
+                report.requeued += 1;
+                debug!(
+                    host = %host,
+                    retry_in_s = until.saturating_sub(now),
+                    "意图判定：网关失败冷却中，本轮不问（沿用上一次的状态）"
+                );
                 continue;
             }
 
-            // 2) 预算：超了**放行**，并把候选放回队列等下一个窗口。
+            // 3) 预算：超了**放行**，并把候选放回队列等下一个窗口。
             if let Err(exhausted) = self.budget.try_consume(now) {
                 let scope = exhausted.scope().to_string();
                 let verdict = Verdict::Deferred(DeferReason::BudgetExhausted { scope });
@@ -323,7 +410,7 @@ impl<G: Gateway> IntentEngine<G> {
                 continue;
             }
 
-            // 3) 网关。
+            // 4) 网关。
             let request = domain_request(
                 &FlowContext {
                     host: host.clone(),
@@ -347,6 +434,11 @@ impl<G: Gateway> IntentEngine<G> {
                     report.deferred += 1;
                     self.observer.requeue(&host);
                     report.requeued += 1;
+                    // 冷却**只影响重试时机**：这段时间里同一个 host 不会再问
+                    // （网关挂掉时每个连接都重试，既花钱又拖慢恢复）。
+                    // 它**不写缓存** —— 失败绝不是这个域名的判决。
+                    self.gateway_retry_after
+                        .insert(host.clone(), now.saturating_add(GATEWAY_ERROR_COOLDOWN_SECS));
                     let verdict = Verdict::Deferred(DeferReason::GatewayUnavailable {
                         message: e.to_string(),
                     });
@@ -360,7 +452,9 @@ impl<G: Gateway> IntentEngine<G> {
                     continue;
                 }
                 Ok(response) => {
-                    // 4) 答案完整性：少一个 id 都算失败。
+                    // 这一轮问到答案了 ⇒ 撤掉这个 host 的冷却（下次失败重新计时）。
+                    self.gateway_retry_after.remove(&host);
+                    // 5) 答案完整性：少一个 id 都算失败。
                     let Some(_complete) = request.read_answers(&response.answers) else {
                         let missing = request
                             .ids()
@@ -377,7 +471,7 @@ impl<G: Gateway> IntentEngine<G> {
                         continue;
                     };
 
-                    // 5) 闸门。
+                    // 6) 闸门。
                     let bonus = candidate.shape.bonus(self.config.thresholds.shape_bonus_max);
                     let verdict = decide(&response.answers, &self.config.thresholds, bonus);
                     match &verdict {
@@ -401,6 +495,7 @@ impl<G: Gateway> IntentEngine<G> {
             expires_at_unix: now.saturating_add(ttl),
             hits: 0,
             model: model.clone(),
+            inherited_from: None,
         });
     }
 
@@ -548,6 +643,9 @@ impl<G: Gateway> IntentEngine<G> {
             gateway_calls: self.gateway_calls,
             gateway_errors: self.gateway_errors,
             cache_hits: self.cache_hits,
+            cache_inherited: self.cache_inherited,
+            cache_misses: self.cache_misses,
+            cooldown_skipped: self.cooldown_skipped,
             audit_written: self.audit.written,
         }
     }
@@ -654,11 +752,42 @@ mod tests {
         assert_eq!(report.requeued, 1);
         assert!(e.rules().block.is_empty(), "网关坏了绝不能拦任何东西");
         assert_eq!(e.pending(), 1, "失败的要排队重试");
+        // 冷却绝不写缓存 —— 失败不是这个域名的判决。
+        assert!(e.explain_at("ads.example", 1_001).is_none());
 
-        // 下一轮它又被问了 —— 网关故障不是这个域名的属性。
-        let report = e.classify_pending(1_010);
-        assert_eq!(report.gateway_errors, 1);
+        // 冷却期内（0.9.1-D）：**不再打网关**（网关挂掉时每个连接都重试既花钱又慢）。
+        let cooled = e.classify_pending(1_010);
+        assert_eq!(cooled.gateway_errors, 0);
+        assert_eq!(cooled.cooldown_skipped, 1);
+        assert_eq!(e.gateway().call_count(), 1, "冷却内不许再问");
+        assert_eq!(e.pending(), 1, "仍然排队，冷却一过就重试");
+
+        // 冷却过期后自动重试（这才是"稍后重试"，不是"永不重试"）。
+        let after = e.classify_pending(1_001 + GATEWAY_ERROR_COOLDOWN_SECS + 1);
+        assert_eq!(after.gateway_errors, 1);
         assert_eq!(e.gateway().call_count(), 2);
+    }
+
+    /// 冷却**只影响重试时机**：不问、不写缓存、不生成规则，并如实计数。
+    #[test]
+    fn cooldown_never_pretends_to_be_a_verdict() {
+        let g = ScriptedGateway::always_failing(GatewayError::Timeout);
+        let mut e = engine(g, enabled(false));
+        e.observe(&conn("ads.example", 443, "tcp"), 1_000);
+        e.classify_pending(1_001);
+
+        e.observe(&conn("ads.example", 443, "tcp"), 1_010);
+        let report = e.classify_pending(1_010);
+        assert_eq!(report.cooldown_skipped, 1);
+        assert_eq!(report.deferred, 1, "仍算 deferred（沿用上次状态）");
+        assert_eq!(report.cache_hits, 0, "冷却**不是**缓存命中");
+        assert_eq!(report.blocked, 0);
+        assert!(e.rules().block.is_empty());
+        assert!(e.explain_at("ads.example", 1_010).is_none(), "冷却不出现在「解释」里");
+
+        let s = e.stats(1_010);
+        assert_eq!(s.cooldown_skipped, 1);
+        assert_eq!(s.cache_hits, 0);
     }
 
     #[test]
@@ -837,5 +966,153 @@ mod tests {
         assert_eq!(ttl_for(&Verdict::Allow(AllowReason::BelowThreshold { ads_intent: 0.1, effective_min: 0.85 })), ALLOW_TTL_SECS);
         assert_eq!(ttl_for(&Verdict::Deferred(DeferReason::GatewayUnavailable { message: "x".into() })), DEFERRED_TTL_SECS);
         assert_eq!(ttl_for(&Verdict::Deferred(DeferReason::MissingAnswer { id: "x".into() })), SCHEMA_FAILURE_TTL_SECS);
+    }
+
+    // -----------------------------------------------------------------------
+    // 0.9.1-D：命中率 —— 父域继承 + 可测量的 miss/继承计数
+    // -----------------------------------------------------------------------
+
+    /// **同一站点 3 个子域：改前 3 次网关调用 ⇒ 改后 1 次 + 2 次继承命中。**
+    #[test]
+    fn one_gateway_call_covers_the_whole_site() {
+        let g = ScriptedGateway::always(scripted_response(
+            "m",
+            KIND_AD_OR_MONETIZATION,
+            0.97,
+            0.05,
+            0.93,
+        ));
+        let mut e = engine(g, enabled(false));
+
+        // 第一次访问 www.example.com：真问一次模型。
+        e.observe(&conn("www.example.com", 443, "tcp"), 1_000);
+        let first = e.classify_pending(1_001);
+        assert_eq!(first.asked, 1);
+        assert_eq!(first.cache_misses, 1, "首查必须记一次 miss（否则算不出命中率）");
+
+        // 同站点的另外两个子域：一次网关都不该再打。
+        e.observe(&conn("api.example.com", 443, "tcp"), 1_002);
+        e.observe(&conn("cdn.example.com", 443, "tcp"), 1_002);
+        let second = e.classify_pending(1_003);
+
+        // 观察者第一次见到这两个域名就把它们排进了队列（它不知道缓存），
+        // 所以这一轮**有**两个候选 —— 但判定轮里的缓存查找直接命中继承条目，一个网关都不打。
+        assert_eq!(second.candidates, 2);
+        assert_eq!(second.asked, 0, "继承命中 ⇒ 不问模型");
+        assert_eq!(second.cache_hits, 2, "两个候选都由缓存直接服务");
+        assert_eq!(second.cache_inherited, 2, "而且这两条都是继承来的");
+        assert_eq!(e.gateway().call_count(), 1, "3 个子域只花 1 次调用");
+
+        // 连接级口径：一次 miss（首访 www）+ 两次继承命中 ⇒ 命中率 2/3。
+        let s = e.stats(1_003);
+        assert_eq!(s.cache_misses, 1);
+        assert_eq!(s.cache_hits, 2);
+        assert_eq!(s.cache_inherited, 2);
+        assert_eq!(s.cache_hits + s.cache_misses, 3);
+
+        // 继承出来的判决**真的生效**：两个子域各有一条 block 规则。
+        let rules = e.rules();
+        let ids: Vec<&str> = rules.block.iter().map(|r| r.id.as_str()).collect();
+        assert!(ids.contains(&"intent-block-www.example.com"));
+        assert!(ids.contains(&"intent-block-api.example.com"), "继承的判决要落到规则上：{ids:?}");
+        assert!(ids.contains(&"intent-block-cdn.example.com"));
+    }
+
+    /// 继承命中会在缓存里留下**标了来源**的条目，`explain` 能看到。
+    #[test]
+    fn inherited_entries_are_explained_with_their_source() {
+        let g = ScriptedGateway::always(scripted_response(
+            "m",
+            KIND_AD_OR_MONETIZATION,
+            0.97,
+            0.05,
+            0.93,
+        ));
+        let mut e = engine(g, enabled(false));
+        e.observe(&conn("www.example.com", 443, "tcp"), 1_000);
+        e.classify_pending(1_001);
+
+        e.observe(&conn("api.example.com", 443, "tcp"), 1_002);
+        let entry = e
+            .explain_at("api.example.com", 1_002)
+            .expect("继承条目要能被解释（用户申诉时要知道它从哪来）");
+        assert_eq!(entry.inherited_from.as_deref(), Some("www.example.com"));
+        assert!(entry.verdict.is_block());
+        assert!(entry.is_inherited());
+    }
+
+    /// 缓存命中 / 继承 / 未中三种账**分开记**：没有 miss 就算不出命中率。
+    #[test]
+    fn cache_misses_and_inherited_hits_are_counted_separately() {
+        let g = ScriptedGateway::always(scripted_response(
+            "m",
+            KIND_AD_OR_MONETIZATION,
+            0.97,
+            0.05,
+            0.93,
+        ));
+        let mut e = engine(g, enabled(false));
+
+        e.observe(&conn("target.example", 443, "tcp"), 1_000);
+        let report = e.classify_pending(1_001);
+        assert_eq!(report.cache_misses, 1, "这一轮：查了一次、没中");
+        assert_eq!(report.cache_inherited, 0);
+        assert_eq!(
+            e.stats(1_001).cache_misses,
+            1,
+            "连接级口径只记 observe 那一次（判定轮不重复计）"
+        );
+
+        // 精确命中（同域名再来一条连接）
+        e.observe(&conn("target.example", 443, "tcp"), 1_002);
+        let s = e.stats(1_002);
+        assert_eq!(s.cache_hits, 1);
+        assert_eq!(s.cache_misses, 1, "连接级：一次命中、一次未中");
+        assert_eq!(s.cache_inherited, 0);
+        assert_eq!(s.cache_hits + s.cache_misses, 2, "命中率 1/2");
+    }
+
+    /// **同一轮里同一个 host 不会被问两次**（观察者队列本来就按 host 去重 —— 这里钉住它）。
+    #[test]
+    fn the_same_host_is_not_asked_twice_in_one_tick() {
+        let g = ScriptedGateway::always(scripted_response(
+            "m",
+            KIND_AD_OR_MONETIZATION,
+            0.97,
+            0.05,
+            0.93,
+        ));
+        let mut e = engine(g, enabled(false));
+
+        // 同一个域名的两条连接
+        e.observe(&conn("ads.example", 443, "tcp"), 1_000);
+        e.observe(&conn("ads.example", 443, "tcp"), 1_000);
+        assert_eq!(e.pending(), 1, "同一域名只排一次队");
+
+        let report = e.classify_pending(1_001);
+        assert_eq!(report.candidates, 1);
+        assert_eq!(report.asked, 1);
+        assert_eq!(e.gateway().call_count(), 1, "一轮里同一个 host 只问一次");
+    }
+
+    /// 继承只发生在**同一个可注册站点**内 —— 不同站点、IP、单标签都不许串。
+    #[test]
+    fn inheritance_never_crosses_sites() {
+        let g = ScriptedGateway::always(scripted_response(
+            "m",
+            KIND_AD_OR_MONETIZATION,
+            0.97,
+            0.05,
+            0.93,
+        ));
+        let mut e = engine(g, enabled(false));
+
+        e.observe(&conn("shop.a.co.uk", 443, "tcp"), 1_000);
+        e.classify_pending(1_001);
+        e.observe(&conn("api.b.co.uk", 443, "tcp"), 1_002);
+        let report = e.classify_pending(1_002);
+        assert_eq!(report.asked, 1, "b.co.uk 是另一个站点 ⇒ 必须单独问");
+        assert_eq!(report.cache_inherited, 0);
+        assert_eq!(e.gateway().call_count(), 2);
     }
 }

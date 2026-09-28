@@ -247,6 +247,76 @@ pub fn normalize(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// **多标签公共后缀小表**（自带，不引依赖）。
+///
+/// # 为什么需要它
+///
+/// `a.b.co.uk` 的可注册域（eTLD+1）是 `b.co.uk`，而"取最后两段"会得到 `co.uk`
+/// —— 那是一整个后缀、不是任何人的站点。父域继承（`cache.rs`）如果按"最后两段"
+/// 走，就会把 `a.co.uk` 与 `b.co.uk` 串成同一个站点，那是**错的**。
+///
+/// # 为什么只有一张小表
+///
+/// 真正的 PSL 有上万条，且需要定期更新；本项目的用途只有一个 —— **缓存聚合**
+/// （同一站点的子域复用一次判决），判错一条的代价是"多问一次模型 / 少拦截一个
+/// 子域"，不值得为它引一个依赖 + 一份常驻数据。表里是常见多标签后缀；
+/// **不在表里就按最后两段**处理（这条回退有测试）。
+pub const MULTI_LABEL_SUFFIXES: &[&str] = &[
+    // 英国
+    "co.uk", "org.uk", "ac.uk", "gov.uk",
+    // 中国
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
+    // 澳大利亚 / 日本 / 韩国
+    "com.au", "net.au", "co.jp", "ne.jp", "or.jp", "co.kr",
+    // 台湾 / 香港 / 新西兰 / 新加坡 / 巴西
+    "com.tw", "com.hk", "co.nz", "com.sg", "com.br",
+    // 托管平台（每个用户站点都是 eTLD+1，绝不能跨用户聚合）
+    "github.io", "vercel.app", "netlify.app", "pages.dev", "workers.dev",
+    "herokuapp.com", "amazonaws.com", "cloudfront.net", "azurewebsites.net", "fly.dev",
+];
+
+/// 可注册域（eTLD+1）；**只有在真的存在"父域可继承"时才返回 `Some`**。
+///
+/// 返回 `None` 的情形（每条都有单测）：
+///
+/// 1. 主机是 **IP 字面量**（`1.2.3.4` / `::1`，以及全数字的伪 IP `999.1.1.1`）——
+///    按段继承 IP 没有任何意义；
+/// 2. 主机是**单标签**（`localhost`）——没有父域；
+/// 3. 主机**本身就是公共后缀**（`co.uk`）：`None`（它的父域是 `uk`，更不该继承）；
+/// 4. 主机**就是自己的可注册域**（`example.com` / `foo.github.io`）——没有更短的
+///    父域可继承（精确查找已经查过它了）；
+/// 5. 主机畸形（空标签）。
+///
+/// 注意它**不做**"跨一层"以外的推导：`a.b.c.example.com` 的可注册域就是
+/// `example.com`（一次继承到位），不会先试 `c.example.com`。
+pub fn registrable_domain(host: &str) -> Option<String> {
+    let h = normalize(host);
+    if h.is_empty() || h.parse::<std::net::IpAddr>().is_ok() {
+        return None; // ① IP 字面量
+    }
+    let labels: Vec<&str> = h.split('.').collect();
+    if labels.iter().any(|l| l.is_empty()) {
+        return None; // ⑤ 畸形
+    }
+    if labels.len() < 2 {
+        return None; // ② 单标签
+    }
+    if labels.iter().all(|l| l.chars().all(|c| c.is_ascii_digit())) {
+        return None; // ① 伪 IP（`999.1.1.1` 解析不出但显然不是域名）
+    }
+    let last_two = format!("{}.{}", labels[labels.len() - 2], labels[labels.len() - 1]);
+    let suffix_len = if MULTI_LABEL_SUFFIXES.contains(&last_two.as_str()) { 2 } else { 1 };
+    if labels.len() <= suffix_len {
+        return None; // ③ 主机本身就是公共后缀
+    }
+    let registrable = labels[labels.len() - suffix_len - 1..].join(".");
+    if registrable == h {
+        None // ④ 没有更短的父域
+    } else {
+        Some(registrable)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +479,7 @@ mod tests {
             expires_at_unix: 10,
             hits: 0,
             model: None,
+            inherited_from: None,
         };
         let from_cache = materialize_from_cache(std::slice::from_ref(&entry), &RuleOptions::default());
         let direct = materialize(vec![("a.example", &entry.verdict)], &RuleOptions::default());
@@ -432,5 +503,59 @@ mod tests {
     fn normalize_only_lowercases_and_strips_the_trailing_dot() {
         assert_eq!(normalize(" ADS.Example. "), "ads.example");
         assert_eq!(normalize("a.b.c"), "a.b.c");
+    }
+
+    // -----------------------------------------------------------------------
+    // 可注册域（eTLD+1）：父域继承的判据
+    // -----------------------------------------------------------------------
+
+    /// 多标签后缀表：`a.b.co.uk` 的可注册域是 `b.co.uk`，**不是** `co.uk`。
+    #[test]
+    fn registrable_domain_uses_the_multi_label_table() {
+        assert_eq!(registrable_domain("a.b.co.uk").as_deref(), Some("b.co.uk"));
+        assert_eq!(registrable_domain("www.example.co.uk").as_deref(), Some("example.co.uk"));
+        assert_eq!(registrable_domain("x.y.com.cn").as_deref(), Some("y.com.cn"));
+        assert_eq!(registrable_domain("cdn.example.com.au").as_deref(), Some("example.com.au"));
+        // 托管平台：每个用户站点自己就是 eTLD+1，**绝不能**跨用户聚合
+        assert_eq!(registrable_domain("foo.github.io"), None, "foo.github.io 自己就是可注册域");
+        assert_eq!(registrable_domain("a.foo.github.io").as_deref(), Some("foo.github.io"));
+        assert_eq!(registrable_domain("app.vercel.app"), None);
+        assert_eq!(registrable_domain("x.app.vercel.app").as_deref(), Some("app.vercel.app"));
+        // 不在表里 ⇒ 默认最后两段（这条回退必须有）
+        assert_eq!(registrable_domain("a.example.zz").as_deref(), Some("example.zz"));
+        // 一次继承到位：不管几层，都落到可注册域
+        assert_eq!(registrable_domain("a.b.c.example.com").as_deref(), Some("example.com"));
+        assert_eq!(registrable_domain("ads.tracker.example.com").as_deref(), Some("example.com"));
+        // 大小写与尾随点也走 normalize
+        assert_eq!(registrable_domain(" Ads.Example.COM. ").as_deref(), Some("example.com"));
+    }
+
+    /// **五种绝不允许继承的情形**（任务点名的四种 + 伪 IP）。
+    #[test]
+    fn registrable_domain_refuses_what_must_never_inherit() {
+        // ① IP 字面量（v4 / v6 / 伪 IP）
+        assert_eq!(registrable_domain("1.2.3.4"), None);
+        assert_eq!(registrable_domain("2001:db8::1"), None);
+        assert_eq!(registrable_domain("999.1.1.1"), None, "全数字标签 = 伪 IP");
+        // ② 单标签
+        assert_eq!(registrable_domain("localhost"), None);
+        assert_eq!(registrable_domain("intranet"), None);
+        // ③ 主机本身就是公共后缀
+        assert_eq!(registrable_domain("co.uk"), None);
+        assert_eq!(registrable_domain("github.io"), None);
+        // ④ 主机就是自己的可注册域（没有更短的父域）
+        assert_eq!(registrable_domain("example.com"), None);
+        assert_eq!(registrable_domain("example.co.uk"), None);
+        // ⑤ 畸形
+        assert_eq!(registrable_domain("a..example.com"), None);
+        assert_eq!(registrable_domain(""), None);
+    }
+
+    /// P1-6：`www.` 由继承覆盖（显式一条，防止有人把 `www` 当特例硬编码）。
+    #[test]
+    fn www_prefix_is_covered_by_inheritance() {
+        assert_eq!(registrable_domain("www.example.com").as_deref(), Some("example.com"));
+        assert_eq!(registrable_domain("www.example.co.uk").as_deref(), Some("example.co.uk"));
+        assert_eq!(registrable_domain("www.foo.github.io").as_deref(), Some("foo.github.io"));
     }
 }
