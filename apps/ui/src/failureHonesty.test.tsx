@@ -417,7 +417,6 @@ describe("appStatus：快照没回来时是「不知道」，不是「未找到�
     routesCommitted: false,
     lastError: null,
     corePath: null,
-    recovery: { phase: "idle" as const, text: null, hint: null, button: "connect" as const, justRecovered: false },
     socksPort: null,
     httpPort: null,
   };

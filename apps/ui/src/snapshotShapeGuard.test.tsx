@@ -32,7 +32,6 @@ vi.mock("./ipc", () => ({
   },
   errorText: (e: unknown) =>
     typeof e === "string" ? e : e instanceof Error ? e.message : String(e),
-  parseRecovery: () => null,
   subscribe: (h: Record<string, (...a: unknown[]) => void>) => {
     mocks.handlers = h;
     return () => {};

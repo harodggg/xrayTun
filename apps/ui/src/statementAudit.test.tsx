@@ -38,7 +38,7 @@ const mocks = vi.hoisted(() => ({
   globeData: vi.fn(),
 }));
 
-// `recoveryView` 等纯函数保持真的（用 importOriginal 展开）：被测的是**页面**，
+// `errorText` 等纯函数保持真的（用 importOriginal 展开）：被测的是**页面**，
 // 不是把整个 ipc 层换成桩。
 vi.mock("./ipc", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./ipc")>();
