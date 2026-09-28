@@ -2328,12 +2328,12 @@ mod tests {
     /// 落盘那一行必须**同时**带 App 版本与真实触发者。
     #[test]
     fn core_start_line_names_version_and_trigger() {
-        let line = core_start_log_line("0.8.34", CoreStartTrigger::WatchdogRebuild);
+        let line = core_start_log_line("0.8.34", CoreStartTrigger::NodeSwitch);
         assert!(
             line.contains("XrayTun 0.8.34"),
             "必须带 **App** 版本：核心横幅是核心版本，不随 App 变，不能代替它：{line}"
         );
-        assert!(line.contains("看门狗重建"), "必须带真实触发者：{line}");
+        assert!(line.contains("切换节点"), "必须带真实触发者：{line}");
     }
 
     /// **源码级守卫**：每个调用点必须**显式**传入它自己的触发者。
@@ -2363,21 +2363,6 @@ mod tests {
                 "start_core(&app, &state, CoreStartTrigger::NodeSwitch)",
                 "切节点",
             ),
-            (
-                &core,
-                "start_core_with_outcome(&handle, &state, CoreStartTrigger::EgressChange)",
-                "换网重建",
-            ),
-            (
-                &core,
-                "start_core_with_outcome(&handle, &state, CoreStartTrigger::WatchdogRebuild)",
-                "看门狗重建",
-            ),
-            (
-                &core,
-                "start_core(app, state, CoreStartTrigger::AutoReconnect)",
-                "启动时自动重连",
-            ),
         ] {
             assert!(
                 file.contains(anchor),
@@ -2390,36 +2375,6 @@ mod tests {
     // 自动重建 ⇄ 首连：**同一条回落策略**，且成功必须说出用了哪个节点
     // -----------------------------------------------------------------------
 
-    /// **源码级守卫**：自动重建（看门狗 / 换网）**不许自己再写一份回落**。
-    ///
-    /// 判据：
-    /// 1. 两条重建路径都调 [`start_core_with_outcome`]（回落 + 带回结局）；
-    /// 2. 回落循环**只有一处实现** —— `run_node_fallbacks(` 全文件出现 2 次
-    ///    （定义 1 + 调用 1）。多一处就说明有人复制了第二份策略。
-    ///
-    /// 判别性：把任一重建点改回 `start_core(`（丢掉结局）或把循环复制一份 ⇒ 红。
-    #[test]
-    fn auto_rebuild_shares_the_single_fallback_strategy() {
-        let strip = |src: &str| src.split("#[cfg(test)]").next().unwrap_or("").to_string();
-        let core = strip(include_str!("core.rs"));
-
-        for anchor in [
-            "start_core_with_outcome(&handle, &state, CoreStartTrigger::WatchdogRebuild)",
-            "start_core_with_outcome(&handle, &state, CoreStartTrigger::EgressChange)",
-        ] {
-            assert!(core.contains(anchor), "重建路径必须走带回结局的入口：{anchor}");
-        }
-        assert!(
-            core.contains("start_core_with_outcome(app, state, trigger).await.map(|_| ())"),
-            "首连入口必须与重建入口**共用同一个实现**（薄包装），不许各写一份回落"
-        );
-        assert_eq!(
-            core.matches("run_node_fallbacks(").count(),
-            2,
-            "回落策略只许有一处实现（定义 1 次 + 调用 1 次）：{}",
-            core.matches("run_node_fallbacks(").count()
-        );
-    }
 
     /// **验收判据 ①（自动重建那一半）**：重建成功后返回的结局必须能说出
     /// 「实际用了哪个节点、有没有换」—— 否则用户无从知道它是不是悄悄换了节点。

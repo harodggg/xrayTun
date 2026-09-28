@@ -49,12 +49,13 @@ const TRIAGE_SCRIPT: &str = "triage-incident.py";
 // 只有测试会读这个常量（生产是各处直接写字面量）；按本仓既有做法标成
 // 「非测试构建下允许 dead_code」，而不是为了消警告把它塞给生产代码。
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) const ANOMALY_KINDS: [&str; 6] = [
-    "probe_round_failed",
-    "rebuild_failed",
-    "watchdog_invalidated",
+///
+/// ⚠️ 2026-09-28：看门狗 / 网络监视 / 自动重连被整段删除后，跟着它们一起消失的
+/// 信号也从这里删掉 —— `probe_round_failed` / `rebuild_failed` / `self_healed` /
+/// `watchdog_invalidated` 的生产写入者全都没了。**留着它们会让守卫测试永远绿不了**
+/// （它按生产源码逐个计数），也会让"信号清单"描述一件不存在的事。
+pub(crate) const ANOMALY_KINDS: [&str; 2] = [
     "log_read_loss",
-    "self_healed",
     // task-176：接管后缺「作用域默认路由」⇒ 绑该网卡的直连会 ENETUNREACH（task-172 的形态）
     "route_audit",
 ];
