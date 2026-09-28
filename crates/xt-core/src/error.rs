@@ -48,6 +48,14 @@ pub enum Error {
     #[error("Xray 核心在 {0:?} 内未就绪")]
     CoreNotReady(std::time::Duration),
 
+    /// 核心在**开始监听之前**就退出了。带上退出码（拿不到就是 `None`）。
+    ///
+    /// 为什么必须与 `CoreNotReady` 分开：那是**两件完全不同的事** ——
+    /// 「它自己死了」（配置错 / 端口被占 / 二进制不对）与「它活着但一直没监听」，
+    /// 让用户去查的方向完全相反。混成一句"未在预期时间内就绪"会指错路。
+    #[error("核心在开始监听之前就退出了（退出码 {0:?}）")]
+    CoreExitedEarly(Option<i32>),
+
     #[error("Xray 配置非法: {0}")]
     InvalidConfig(String),
 

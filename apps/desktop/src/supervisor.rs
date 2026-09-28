@@ -49,12 +49,6 @@ const CORE_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 /// 也不能太短：跨国线路首次握手可能要 1 秒以上。
 const REGION_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
-/// 端到端门禁失败后、重试之前的停顿。
-///
-/// 与 `tcp_reachable_with_retry` 的 700ms 同一个量级，理由也同一条：
-/// 刚睡醒 / 刚换网 / 节点侧瞬时丢包时，一次单发探测的失败不等于"这条路走不通"。
-const GATE_RETRY_PAUSE: Duration = Duration::from_millis(500);
-
 /// 预览 TUN 启动将要做的网络改动（**只读，不改动任何东西**）。
 ///
 /// 与 `start()` 走的是同一套计算：探测物理出口 → 解析服务器地址 →
@@ -116,21 +110,22 @@ async fn tcp_reachable(addr: std::net::SocketAddr, timeout: Duration) -> bool {
 ///
 /// 重试一次能把「瞬时抖动」与「真的不可达」分开；轨迹进日志与错误文案，
 /// 于是"到底是几次都失败"这件事可见，而不是一句笼统的"联系不上"。
+///
+/// ⚠️ **两次尝试之间不 sleep**（旧实现等 700ms）。用户裁决：这条链路上不要靠等待。
+/// 分开"抖动"与"不可达"靠的是**一条新连接**（探测本身每次都是全新的），
+/// 而不是靠等一段时间 —— 等来的那 700ms 并不能让判据更准，只是把用户多按 0.7 秒。
 async fn tcp_reachable_with_retry(addr: std::net::SocketAddr, timeout: Duration) -> (bool, String) {
-    tcp_reachable_with_retry_by(|| tcp_reachable(addr, timeout), Duration::from_millis(700)).await
+    tcp_reachable_with_retry_by(|| tcp_reachable(addr, timeout)).await
 }
 
 /// 可注入探测函数的版本（测试用：不碰真网络也能钉住"重试一次"的语义）。
-async fn tcp_reachable_with_retry_by<F, Fut>(mut probe: F, pause: Duration) -> (bool, String)
+async fn tcp_reachable_with_retry_by<F, Fut>(mut probe: F) -> (bool, String)
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
     let mut trace: Vec<String> = Vec::new();
     for attempt in 1..=2u32 {
-        if attempt > 1 {
-            tokio::time::sleep(pause).await;
-        }
         if probe().await {
             trace.push(format!("第{attempt}次成功"));
             return (true, trace.join("、"));
@@ -544,14 +539,17 @@ where
         // 理由与 `tcp_reachable_with_retry` 完全一样：这是**单发**探测，而它的结果
         // 决定"整次启动中止 + 回滚"。现场报错里就出现过"四个目标里只有一个域名目标
         // 拿到 000"的中止 —— 那可能是节点侧真的解析不了，也可能只是一次抖动。
-        // 重试一次能把两者分开，而且只多花 500ms + 失败目标那一次探测。
+        // 重试一次能把两者分开。
+        //
+        // ⚠️ **这里不再等 500ms**（旧实现 `sleep(GATE_RETRY_PAUSE)`）。分开两者的判据是
+        // "**再来一次全新的请求**"，不是"等一会儿再问" —— 等待不会让判据更准，
+        // 只会让用户多等；而且它紧挨着"用户刚点完连接"那几秒，是最不该排队的位置。
         //
         // 语义**没有放松**：重试后仍要求每个目标都拿到真实响应才允许 commit。
         tracing::info!(
             failed = failed.len(),
-            "端到端门禁首次失败，重试失败的目标一次"
+            "端到端门禁首次失败，立即重试失败的目标一次（不等待）"
         );
-        tokio::time::sleep(GATE_RETRY_PAUSE).await;
         let retry_targets: Vec<String> = failed.iter().map(|f| f.target.clone()).collect();
         let mut again: tokio::task::JoinSet<(String, String)> = tokio::task::JoinSet::new();
         for target in retry_targets {
@@ -839,12 +837,16 @@ impl Supervisor {
         .into_iter()
         .flatten()
         .collect();
-        let process =
+        let mut process =
             spawn_core(&core_path, &config_path, self.tun_fd, events, &geo_fallback).await?;
 
         // ---- 5) 等待就绪 ----
+        //
+        // **事件驱动**：核心每输出一行就试一次连接（见 `XrayProcess::wait_ready`），
+        // 不再"每 50ms 去 connect 一次"。超时只是上界；进程若提前退出，
+        // 立刻报「它在监听之前就退出了」而不是干等到超时。
         let port_started = std::time::Instant::now();
-        if let Err(e) = xray::wait_for_port(settings.socks_port, CORE_READY_TIMEOUT).await {
+        if let Err(e) = process.wait_ready(settings.socks_port, CORE_READY_TIMEOUT).await {
             // 核心没干净退出**不影响**网络回滚：回滚是随后单独调用 helper 做的
             // （见后面的 `rollback_tun` / helper 的 Restore），所以这里是 B 级 ——
             // 只留痕、不改控制流（task-122 A-3）。
@@ -855,7 +857,7 @@ impl Supervisor {
             return Err(format!("核心未在预期时间内就绪：{e}"));
         }
         tracing::info!(
-            stage = "wait_for_port",
+            stage = "wait_ready",
             ms = port_started.elapsed().as_millis() as u64,
             "启动阶段耗时"
         );
@@ -1517,14 +1519,11 @@ mod tests {
     #[tokio::test]
     async fn a_single_transient_probe_failure_is_retried_and_does_not_abort() {
         let mut calls = 0;
-        let (ok, trace) = tcp_reachable_with_retry_by(
-            || {
-                calls += 1;
-                let n = calls;
-                async move { n > 1 }
-            },
-            Duration::from_millis(1),
-        )
+        let (ok, trace) = tcp_reachable_with_retry_by(|| {
+            calls += 1;
+            let n = calls;
+            async move { n > 1 }
+        })
         .await;
         assert!(ok, "首次失败、第二次成功 ⇒ 应当判定为可达");
         assert_eq!(calls, 2, "只重试一次（不无限重试）");
@@ -1536,7 +1535,7 @@ mod tests {
     #[tokio::test]
     async fn two_real_failures_still_abort_with_a_visible_trace() {
         let (ok, trace) =
-            tcp_reachable_with_retry_by(|| async { false }, Duration::from_millis(1)).await;
+            tcp_reachable_with_retry_by(|| async { false }).await;
         assert!(!ok);
         assert_eq!(trace, "第1次失败、第2次失败");
     }

@@ -8,11 +8,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::error::{Error, Result};
@@ -35,6 +38,11 @@ pub struct XrayProcess {
     pub binary: PathBuf,
     pub config_path: PathBuf,
     log_tasks: Vec<JoinHandle<()>>,
+    /// **事件源**：核心每输出一行就 `notify_waiters()` 一次 ——
+    /// 给 [`XrayProcess::wait_ready`] 用，取代"每 50ms 去连一次端口"的轮询。
+    ready_tick: Arc<Notify>,
+    /// 还有几个输出流没到 EOF。减到 0 = 进程不会再说话了（用它判"已退出"）。
+    readers_left: Arc<AtomicUsize>,
     /// 启动时刻，用于「已运行时长」展示。
     pub started_at: Instant,
 }
@@ -89,13 +97,29 @@ impl XrayProcess {
             .spawn()
             .map_err(|e| Error::CoreSpawn(format!("{}: {e}", binary.display())))?;
 
+        let ready_tick = Arc::new(Notify::new());
+        let readers_left = Arc::new(AtomicUsize::new(0));
         let mut log_tasks = Vec::new();
         if let Some(tx) = events {
             if let Some(out) = child.stdout.take() {
-                log_tasks.push(spawn_reader(out, LogStream::Stdout, tx.clone()));
+                readers_left.fetch_add(1, Ordering::SeqCst);
+                log_tasks.push(spawn_reader(
+                    out,
+                    LogStream::Stdout,
+                    tx.clone(),
+                    ready_tick.clone(),
+                    readers_left.clone(),
+                ));
             }
             if let Some(err) = child.stderr.take() {
-                log_tasks.push(spawn_reader(err, LogStream::Stderr, tx));
+                readers_left.fetch_add(1, Ordering::SeqCst);
+                log_tasks.push(spawn_reader(
+                    err,
+                    LogStream::Stderr,
+                    tx,
+                    ready_tick.clone(),
+                    readers_left.clone(),
+                ));
             }
         }
 
@@ -104,6 +128,8 @@ impl XrayProcess {
             binary: binary.to_path_buf(),
             config_path: config_path.to_path_buf(),
             log_tasks,
+            ready_tick,
+            readers_left,
             started_at: Instant::now(),
         })
     }
@@ -143,7 +169,13 @@ impl XrayProcess {
     }
 }
 
-fn spawn_reader<R>(reader: R, stream: LogStream, tx: UnboundedSender<CoreEvent>) -> JoinHandle<()>
+fn spawn_reader<R>(
+    reader: R,
+    stream: LogStream,
+    tx: UnboundedSender<CoreEvent>,
+    tick: Arc<Notify>,
+    readers_left: Arc<AtomicUsize>,
+) -> JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -152,6 +184,8 @@ where
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    // **先叫醒等着的人**再转发：用户侧的日志通道堵住不该拖慢就绪判定。
+                    tick.notify_waiters();
                     if tx.send(CoreEvent { stream, line }).is_err() {
                         break; // 接收端已关闭
                     }
@@ -159,6 +193,11 @@ where
                 Ok(None) => break,
                 Err(_) => break,
             }
+        }
+        // 这个流结束 ≠ 进程退出（另一个流可能还在说），所以用计数：
+        // 减到 0 才是"它不会再说话了"。
+        if readers_left.fetch_sub(1, Ordering::SeqCst) == 1 {
+            tick.notify_waiters();
         }
     })
 }
@@ -200,6 +239,62 @@ pub async fn validate_config(binary: &Path, config_path: &Path) -> Result<()> {
 ///
 /// 为什么不解析日志里的 "started"？因为日志格式随版本变化，而端口可连
 /// 是唯一的、与版本无关的就绪信号。
+/// 单发连一次本地端口（带一个**很短的**上界，避免 SYN 挂住）。
+///
+/// 连本地端口：拒绝/成功都在微秒级返回；250ms 只是防御性的上界。
+async fn port_open(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    matches!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            tokio::net::TcpStream::connect(addr)
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+impl XrayProcess {
+    /// 等到核心**开始监听** `port`：**事件驱动，不轮询、不 sleep**。
+    ///
+    /// 判据来自核心自己的输出 —— 每收到一行就试一次连接（`port_open` 在本地是
+    /// 立即返回的）。所以：
+    ///
+    /// * 通常比"每 50ms 探一次"**更早**就绪（不再有最多 50ms 的量化误差）；
+    /// * 进程退出时立刻报 [`Error::CoreExitedEarly`] —— 不是干等到超时，
+    ///   而且错误指向"它自己死了"，不是"没等到"；
+    /// * `timeout` 只是 [`tokio::select!`] 里的 **deadline（上界）**，
+    ///   不是轮询周期 —— 这是它与旧 `wait_for_port` 的本质区别。
+    pub async fn wait_ready(&mut self, port: u16, timeout: Duration) -> Result<()> {
+        if port_open(port).await {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            tokio::select! {
+                biased;
+                // 核心说了一句话 ⇒ 立刻再试（不做任何定时）
+                _ = self.ready_tick.notified() => {}
+                // 上界：到点还没监听 = 它还活着但不监听
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(Error::CoreNotReady(timeout));
+                }
+            }
+            if port_open(port).await {
+                return Ok(());
+            }
+            if self.readers_left.load(Ordering::SeqCst) == 0 {
+                // stdout/stderr 都到 EOF ⇒ 它已经不会监听了。退出码拿不到就是 None。
+                let code = self.child.try_wait().ok().flatten().and_then(|s| s.code());
+                return Err(Error::CoreExitedEarly(code));
+            }
+        }
+    }
+}
+
+/// ⚠️ 这个函数是**轮询**实现（每 50ms 探一次端口），只用于**没有进程句柄**的调用方
+/// （`probe` 与测试）。**应用路径请用 [`XrayProcess::wait_ready`]** ——
+/// 它是事件驱动的，既不睡眠也更早返回。
 pub async fn wait_for_port(port: u16, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -404,6 +499,76 @@ mod tests {
         assert!(ev.line.contains("fake core started"));
 
         proc.shutdown(Duration::from_secs(2)).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **假核心自己死掉 ⇒ 立刻报"它在监听前就退出了"，不是干等到 deadline。**
+    ///
+    /// 这是把"50ms 轮询"换成"事件驱动"之后必须钉住的行为：
+    /// * 旧实现要等满 `CORE_READY_TIMEOUT`（默认 10s）才报"未就绪"，而且把
+    ///   "进程死了"说成"没等到就绪"（用户会去查错方向）；
+    /// * 新实现靠 stdout/stderr 的 EOF 事件立刻判定，退出码也带上。
+    #[tokio::test]
+    async fn wait_ready_reports_early_exit_instead_of_waiting_for_the_deadline() {
+        let dir = std::env::temp_dir().join(format!("xt-ready-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-xray-dies");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            // 打印一行就**退出**（模拟配置错 / 端口被占）。
+            writeln!(f, "#!/bin/sh").unwrap();
+            writeln!(f, "echo 'fake core says hi'").unwrap();
+            writeln!(f, "exit 3").unwrap();
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let cfg = dir.join("config.json");
+        std::fs::write(&cfg, "{{}}").unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut proc = XrayProcess::spawn(&script, &cfg, Some(tx)).await.unwrap();
+        let started = std::time::Instant::now();
+        // 端口 1 上不会有服务；给 10 秒上界 —— 但**正确行为是远早于它返回**。
+        let err = proc.wait_ready(1, Duration::from_secs(10)).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, Error::CoreExitedEarly(Some(3))),
+            "必须是「它在监听之前就退出了」并带上退出码 3，实际：{err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "必须在进程退出后立刻返回，而不是等到 deadline；实际用了 {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反例（正对照）：核心**活着但不监听** ⇒ 到 deadline 报 `CoreNotReady`。
+    ///
+    /// 与上一条合起来说明：两种失败**是两件事**，错误也不再混成一句。
+    #[tokio::test]
+    async fn wait_ready_still_times_out_when_the_core_stays_silent_and_alive() {
+        let dir = std::env::temp_dir().join(format!("xt-ready-hang-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-xray-quiet");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            writeln!(f, "#!/bin/sh").unwrap();
+            writeln!(f, "sleep 5").unwrap();
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let cfg = dir.join("config.json");
+        std::fs::write(&cfg, "{{}}").unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut proc = XrayProcess::spawn(&script, &cfg, Some(tx)).await.unwrap();
+        let err = proc.wait_ready(1, Duration::from_millis(400)).await.unwrap_err();
+        assert!(matches!(err, Error::CoreNotReady(_)), "实际：{err:?}");
+        proc.shutdown(Duration::from_secs(1)).await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
