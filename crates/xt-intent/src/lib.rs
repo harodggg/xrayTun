@@ -21,6 +21,13 @@
 //!          ──▶ rules     判决 → `Vec<RoutingRule>`（复用 xt-core 的既有 IR）
 //! ```
 //!
+//! 判定链路**之外**（离线，不参与任何一次实时决策）：
+//!
+//! ```text
+//! intent-audit.jsonl ──▶ audit_report  离线聚合：L0 归纳候选 / 阈值候选 / Token 与 Neuron 账
+//!                    ──▶ audit_sync    按天组 bundle → 端到端加密 → 上传（默认关闭）
+//! ```
+//!
 //! # 五条硬约束（写在类型里，不靠口头约定）
 //!
 //! 1. **fail-open**：网关超时 / 预算耗尽 / 解析失败 / 答案缺字段 —— 一律放行 + 审计。
@@ -34,6 +41,8 @@
 
 pub mod answer;
 pub mod audit;
+pub mod audit_report;
+pub mod audit_sync;
 pub mod budget;
 pub mod cache;
 pub mod engine;
@@ -50,6 +59,11 @@ pub mod verdict;
 
 pub use answer::Answers;
 pub use audit::{AuditRecord, AuditLog};
+pub use audit_report::{utc_day, AuditReport};
+pub use audit_sync::{
+    bundle_for_day, decrypt_envelope, encrypt_bundle, new_device_id, new_key, pending_days,
+    strip_context, sync_once, Bundle, Envelope, SyncConfig, SyncError, SyncRun, SyncState,
+};
 pub use budget::{Budget, BudgetExhausted};
 pub use cache::{CacheEntry, CacheLookup, VerdictCache};
 pub use engine::{ClassifyReport, EngineStats, IntentEngine};

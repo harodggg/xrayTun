@@ -14,3 +14,6 @@ thiserror.workspace = true
 tracing.workspace = true
 rustls.workspace = true
 webpki-roots.workspace = true
+# 审计同步的端到端加密只用 ring：它**本来就在依赖树里**（rustls 的 ring provider，
+# xt-tun 也直接用它），所以这不是"新增一个密码学代码来源"。
+ring = "0.17"
