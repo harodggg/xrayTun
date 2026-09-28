@@ -118,10 +118,11 @@ fn nibble(c: u8) -> Result<u8, SyncError> {
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], SyncError> {
     let mut buf = [0u8; N];
+    // `SystemRandom::new()` 是**不会失败**的（ring 的签名就是 `-> Self`）——
+    // 会失败的是 `fill`（系统熵源不可用）。
     SystemRandom::new()
-        .map_err(|_| SyncError::Crypto("拿不到系统随机数".into()))?
         .fill(&mut buf)
-        .map_err(|_| SyncError::Crypto("随机数填充失败".into()))?;
+        .map_err(|_| SyncError::Crypto("系统随机数不可用".into()))?;
     Ok(buf)
 }
 

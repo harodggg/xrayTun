@@ -39,6 +39,7 @@ use crate::events;
 use crate::state::{persist_settings, AppSnapshot, CoreAvailability, CoreRuntime};
 use crate::AppState;
 
+mod audit;
 mod core;
 mod diagnostics;
 mod helper;
@@ -53,6 +54,7 @@ mod globe;
 mod topology;
 mod util;
 
+pub use audit::*;
 pub use core::*;
 pub use diagnostics::*;
 pub use helper::*;

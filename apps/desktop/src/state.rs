@@ -519,6 +519,12 @@ pub struct AppState {
     /// `std::sync::MutexGuard` 不是 `Send`，把它跨 await 持有会让整个
     /// Tauri 命令的 future 失去 `Send`，编译期直接报错。
     pub helper: tokio::sync::Mutex<crate::helper_client::HelperClient>,
+    /// 审计自动同步的运行态（默认关闭）。
+    ///
+    /// **单独一把锁**，和 `inner` 分开：这里会读审计文件、组出成百 KB 的
+    /// JSON、发一次 HTTPS —— 塞进 `inner` 会把快照与托盘读取一起堵住
+    /// （与 `helper` 同一个理由）。见 [`crate::audit_sync`]。
+    pub audit_sync: tokio::sync::Mutex<crate::audit_sync::AuditSyncRuntime>,
 }
 
 impl AppState {
@@ -527,11 +533,17 @@ impl AppState {
             tracing::warn!(error = %e, "创建数据目录失败（首次写入时会重试）");
         }
         let inner = Inner::new(&store);
+        // 审计同步的运行态要数据目录，但 `store` 下面就要被移进 `Self` ——
+        // 先取出来（`root()` 是纯拷贝，没有副作用）。
+        let store_root = store.root().to_path_buf();
         Self {
             store,
             inner: Mutex::new(inner),
             supervisor: tokio::sync::Mutex::new(crate::supervisor::Supervisor::default()),
             helper: tokio::sync::Mutex::new(crate::helper_client::HelperClient::new(None)),
+            audit_sync: tokio::sync::Mutex::new(crate::audit_sync::AuditSyncRuntime::new(
+                store_root.clone(),
+            )),
             logs_dir_ready: std::sync::atomic::AtomicBool::new(false),
             geo: tokio::sync::Mutex::new(None),
         }
@@ -559,6 +571,32 @@ impl AppState {
             }
         }
         report
+    }
+
+    /// 审计自动同步的一轮（由 `lib.rs` 的定时任务调用）。
+    ///
+    /// 返回要写的日志行；**关闭 / 没到点 / 没有待传的天**都返回 `None`
+    /// —— 每分钟往日志里塞一条"什么都没做"是噪音。
+    pub async fn tick_audit_sync(&self) -> Option<String> {
+        // 先做一次**便宜的**判断：关着的时候连这次锁都不该拿。
+        //
+        // ⚠️ 这里必须是 `async`：`tokio::sync::Mutex::blocking_lock()` 在
+        // tokio 运行时上下文里调用会**直接 panic**，而本函数正是从
+        // `tauri::async_runtime::spawn` 的任务里调的。
+        let mut rt = self.audit_sync.lock().await;
+        if !rt.is_enabled() {
+            return None;
+        }
+        let run = rt.sync_now();
+        match &run.error {
+            Some(e) => Some(format!("审计同步失败：{e}")),
+            None if run.uploaded.is_empty() => None,
+            None => Some(format!(
+                "审计同步：上传 {} 天（{}）",
+                run.uploaded.len(),
+                run.uploaded.join(", ")
+            )),
+        }
     }
 
     /// 记一条日志并落盘 —— **写文件在锁外**。

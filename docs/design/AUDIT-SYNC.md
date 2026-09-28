@@ -17,7 +17,7 @@
 | 独立 Worker | 新建 `infra/audit-collector/`，**不动** `incident-collector` | 两者的数据类别、保留期、接口（本服务要 revoke/list）都不同；不让现场包管道承担被改坏的风险 |
 | 调度 | **进程内定时**（App 运行时每 30 分钟检查一次）+ **按天补齐** | 不装第二个常驻组件。审计按天分桶且上传幂等 ⇒ 关机期间的天数在下次启动时自动补齐 |
 | 不装 launchd | 明确**不做** LaunchAgent | 见 §6 |
-| 默认 | **默认关闭**；关闭时**零网络请求** | 开启即代表数据离开设备，必须是显式同意，且可撤回 |
+| 默认 | **默认关闭**；关闭时**零网络请求**；偏好文件坏掉按**关闭**处理（fail-closed） | 开启即代表数据离开设备，必须是显式同意，且可撤回。一个读不懂的配置绝不能被解读成"用户同意上传" |
 | 幂等 | R2 key = `audit/<device>/<day>.json`，重复上传**覆盖同一 key** | 重试永远不可能产生重复数据 |
 | 只传完整天 | 只传 `day < 今天(UTC)` | 否则同一天会被反复上传、且内容是半截的 |
 
@@ -126,13 +126,26 @@ R2 侧：key `audit/<device>/<day>.json`；**retention 用 R2 lifecycle 规则**
 
 ## 5. 设备侧：密钥、状态、调度
 
-### 5.1 密钥与 token 放哪
+### 5.1 密钥与 token 放哪 —— **落盘为 0600 文件**（与原稿不同，这里是修正）
 
-按仓库既有约定（`docs/07-roadmap-and-risks.md`、`apps/desktop/src/intent.rs`）：
-`settings.json` 里只留 `keychain:<service>/<account>` 引用，真正的值在 Keychain。
+原稿写的是 Keychain。**动手时发现本仓库还没有 Keychain 实现**：
+`apps/desktop/src/intent.rs` 的模块头写明 Jev 的 API Key 也"还没落地"，
+`store.rs` 只有"引用形式"的约定。与其为了让文档好看而假装有 Keychain，不如先把值放数据目录：
 
-- 加密密钥：`keychain:com.xraytun.audit-sync/day-key`（32 字节，首次开启时生成，**可导出用于备份**）
-- 上传 token：`keychain:com.xraytun.audit-sync/upload-token`（用户在 Worker 侧设的那个 secret）
+| 文件（都在数据目录，0600） | 内容 |
+| --- | --- |
+| `intent-audit-sync.json` | 进度：设备 id + 已上传到哪一天（**与 CLI 共用同一份**）|
+| `audit-sync.json` | 偏好：`enabled` / `base_url` |
+| `audit-sync.key` | 加密密钥（32 字节 hex，首次开启时生成）|
+| `audit-sync.token` | 上传 token |
+
+**为什么这个取舍可以接受**：审计文件 `intent-audit.jsonl` 本身就是**明文域名**，与密钥文件
+同目录同权限（0600）—— 同一个用户身份本来就读得到两者，所以密钥落盘**没有扩大暴露面**。
+**代价写清楚**：备份/迁移要连这几个文件一起带走；密钥丢了，已上传的密文再也解不开
+（本机审计文件仍是第一副本）。Keychain 是后续可以单独做的一步，不阻塞这条链路。
+
+共用进度文件是**故意**的：App 与 CLI 谁先跑，都不会把对方已经传过的天重传一遍
+（R2 key 由 device+day 决定，重复也只是覆盖）。
 
 ⚠️ **诚实的代价**：密钥丢了 ⇒ 已上传的密文永久读不出（只能撤回删除）。本机的
 `intent-audit.jsonl` 始终是第一副本，所以不会因此丢历史。

@@ -18,6 +18,7 @@
 //! 收益是**整个代理内核都不需要 root**。取舍与退路见
 //! `docs/02-tun-and-privileges.md`。
 
+pub mod audit_sync;
 pub mod commands;
 pub mod events;
 pub mod helper_client;
@@ -216,6 +217,35 @@ pub fn run() {
                 commands::prewarm_location_cache(prewarm_handle).await;
             });
 
+            // 审计自动同步（0.9.2，**默认关闭**）：启动 60 秒后查一次，之后每 30 分钟一次。
+            //
+            // 为什么是「进程内定时 + 按天补齐」而不是 launchd：
+            // * 审计按 UTC 天分桶、R2 key 由 device+day 决定 ⇒ 上传是**幂等**的，
+            //   关机/退出期间错过的天在下次启动时会被补齐；
+            // * 装一个 LaunchAgent 就多一个常驻安装物（plist 生命周期、TCC、升级残留），
+            //   而它换来的只是"精确在某个时刻上传" —— 这一点价值不值那个代价。
+            // 取舍与完整契约见 `docs/design/AUDIT-SYNC.md` §5.3 / §6。
+            //
+            // **关闭时这一轮什么都不做**（`tick_audit_sync` 先看 enabled，连锁都不拿）。
+            let sync_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    audit_sync::FIRST_CHECK_DELAY_SECS,
+                ))
+                .await;
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+                    audit_sync::SYNC_INTERVAL_SECS,
+                ));
+                loop {
+                    if let Some(state) = sync_handle.try_state::<AppState>() {
+                        if let Some(note) = state.tick_audit_sync().await {
+                            state.log("audit-sync", "info", note);
+                        }
+                    }
+                    ticker.tick().await;
+                }
+            });
+
             // 客户端版本自动检测（task-188）：**排在 `bootstrap` 之后**，
             // 并且自己再延迟 20 秒才联网（`version_check::INITIAL_DELAY`）——
             // 它最不急，不该和「找核心 / 探 helper / 回滚遗留 / 探 DNS」抢启动窗口与网络。
@@ -283,6 +313,13 @@ pub fn run() {
             commands::incident_preview,
             commands::incident_upload,
             commands::incident_anomaly_count,
+            commands::audit_sync_status,
+            commands::audit_sync_set_enabled,
+            commands::audit_sync_set_base_url,
+            commands::audit_sync_set_token,
+            commands::audit_sync_now,
+            commands::audit_sync_preview,
+            commands::audit_sync_revoke,
         ])
         .build(tauri::generate_context!())
     {

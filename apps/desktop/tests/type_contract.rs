@@ -633,10 +633,14 @@ fn registered_commands_match_the_frontend_invoke_literals() {
     // 50 = 47 + 观察结论「留档 / 导出 / 读回」的 3 个（`mitm_observe_export` /
     // `mitm_observe_clear` / `mitm_observe_saved`）—— 导出要用户给绝对路径、
     // 清空要连数据目录里的留档一起删、读回是"重启后仍能看到看到了什么"。
+    // 57 = 50 + 审计自动同步的 7 个（`audit_sync_status` / `_set_enabled` /
+    // `_set_base_url` / `_set_token` / `_now` / `_preview` / `_revoke`）——
+    // 开关、端点、token 各自一个命令（改哪个说哪个），而「预览将要上传的内容」
+    // 必须能**在开启之前**调（同意之前要看得见），「撤回」更不能和别的动作混在一起。
     assert_eq!(
         rust.len(),
-        50,
-        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 50。\
+        57,
+        "\nlib.rs 的 generate_handler! 注册了 {} 个命令，预期 57。\
          增删命令请同步更新这个数字与 ipc.ts。实际注册: {rust:?}",
         rust.len()
     );
@@ -644,7 +648,7 @@ fn registered_commands_match_the_frontend_invoke_literals() {
     // （第一次改这个契约时就漏了它 —— Rust 侧改到 43、TS 侧还是 37，于是红。）
     assert_eq!(
         ts.len(),
-        50,
+        57,
         "\nipc.ts 的 invoke 字面量有 {} 个，预期 50；实际: {ts:?}",
         ts.len()
     );
