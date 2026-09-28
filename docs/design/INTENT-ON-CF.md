@@ -563,7 +563,10 @@ stored = 3.84M ≤ 5M ✓；queried = `(6000 + 5000) × 768` ≈ 8.4M ≤ 30M �
 
 **今天缺什么（以及缺得不多）**
 
-缺一个**读 `intent-audit.jsonl` 的离线聚合**（上表第 2 行）：现在只有界面看最近 200 条，
-没有按域/按模型/按 category 的汇总，也没有规则归纳。
-工作量小 —— 一个 CLI（可挂在 `eval_domains` 旁边）+ 一批 `node --test` / Rust 单测风格的断言，
-**不联网、不加服务、不进在线路径**。想上 CF 之前先把这个跑通，比先写 Worker 更划算。
+> **2026-09-28 更新：这一条已经补上了。** `crates/xt-intent/src/audit_report.rs` +
+> `crates/xt-intent/examples/intent_audit.rs report` 现在就是"读 `intent-audit.jsonl` 的离线聚合"：
+> 每天/每域/每模型的汇总、缓存命中率、演练比例、**新域/天 的均值与 p95**、
+> L0 规则归纳候选与阈值校准候选，外加 Token 与 Neuron 成本账。
+> 它**不联网、不加服务、不进在线路径**，也能直接吃解密回来的同步 bundle。
+> 同一批改动还做了「每天把密文自动送到我们自己的 Worker」那条路（默认关闭）——
+> 契约与取舍见 `docs/design/AUDIT-SYNC.md`。
