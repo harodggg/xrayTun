@@ -427,12 +427,15 @@
           </li>
           <li>
             <strong>Location page</strong>: draws the great-circle route from your public egress to the exit node
-            and labels both ends with a city. Location lookup uses several third parties (<code>ipwho.is</code>,
-            <code>ip-api.com</code>, <code>ipinfo.io</code>, <code>ifconfig.co</code> — compared with each other,
-            and only a value they agree on is shown), and the queried IP addresses are sent to those services.
-            Results are <strong>cached per public IP</strong>: if your IP has not changed, no lookup is repeated
-            (the page says how old the cached result is, and "Relocate" forces a fresh lookup). The continent
-            outlines are a rough 2° raster, not navigational coastlines.
+            and labels both ends with a city. A cold lookup asks several third parties and only shows a value they
+            agree on: <strong>eight coordinate sources</strong> (<code>ipwho.is</code>, <code>ip-api.com</code>,
+            <code>ipinfo.io</code>, <code>ifconfig.co</code>, <code>ipwhois.app</code>, <code>geoiplookup.io</code>,
+            <code>freeipapi.com</code>, <code>api.ipquery.io</code>) plus <strong>four sources asked only "what is my
+            public IP"</strong> (<code>ipify</code>, Cloudflare <code>cdn-cgi/trace</code>, <code>bigdatacloud</code>,
+            <code>country.is</code>). <strong>All of them see your current public IP</strong> (up to 12 requests on a
+            cold start). Results are <strong>cached per public IP</strong>: if your IP has not changed, nothing is
+            requested at all (the page says how old the cached result is, and "Relocate" forces a fresh lookup).
+            The continent outlines are a rough 2° raster, not navigational coastlines.
           </li>
           <li>
             <strong>Recent connections</strong>: lists time, source, target, <code>[inbound → outbound]</code>

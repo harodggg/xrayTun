@@ -405,11 +405,13 @@
             只有按入口、按出口的聚合计数器，没有逐条规则的计数器。
           </li>
           <li>
-            <strong>位置</strong>：画出本机公网出口到出口节点的大圆航线，两端标出城市。位置查询来自多家第三方服务
-            （<code>ipwho.is</code>、<code>ip-api.com</code>、<code>ipinfo.io</code>、<code>ifconfig.co</code>，互相比对后取一致的结果），
-            查询会把被查的 IP 发给这些服务；结果按<strong>公网 IP 缓存</strong>，IP 没变就不会重复查询
-            （界面会写出「来自缓存 + 多久前」，也可点「重新定位」强制重查）。大陆轮廓是 2°
-            分辨率的粗略示意，不是导航级海岸线。
+            <strong>位置</strong>：画出本机公网出口到出口节点的大圆航线，两端标出城市。一次冷启动会问多家第三方并互相比对，
+            只显示它们一致的结果：<strong>8 个坐标源</strong>（<code>ipwho.is</code>、<code>ip-api.com</code>、<code>ipinfo.io</code>、
+            <code>ifconfig.co</code>、<code>ipwhois.app</code>、<code>geoiplookup.io</code>、<code>freeipapi.com</code>、<code>api.ipquery.io</code>），
+            外加 <strong>4 个只问「我的公网 IP 是多少」的源</strong>（<code>ipify</code>、Cloudflare <code>cdn-cgi/trace</code>、
+            <code>bigdatacloud</code>、<code>country.is</code>）。<strong>这些服务都会看到你当前的公网 IP</strong>（一次冷启动最多 12 个请求）。
+            结果按<strong>公网 IP 缓存</strong>：IP 没变就完全不再联网（界面会写出「来自缓存 + 多久前」，
+            也可点「重新定位」强制重查）。大陆轮廓是 2° 分辨率的粗略示意，不是导航级海岸线。
           </li>
           <li>
             <strong>最近连接</strong>：从 Xray 访问日志里取每条连接的时间、来源、目标、<code>[入站 → 出站]</code>、域名，

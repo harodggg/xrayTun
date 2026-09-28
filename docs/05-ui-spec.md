@@ -166,7 +166,7 @@ xray run -c ~/Library/Application Support/com.xraytun.desktop/runtime/config.jso
 
 | 项 | 真实性 |
 |---|---|
-| 位置（城市 / 坐标） | 真实，来自**多个**第三方源（互校，见 `commands/globe.rs`）；**被查的 IP 会发给这些服务**，界面标注来源 |
+| 位置（城市 / 坐标） | 真实，来自**8 个坐标源**互校（`ipwho.is`/`ip-api.com`/`ipinfo.io`/`ifconfig.co`/`ipwhois.app`/`geoiplookup.io`/`freeipapi.com`/`api.ipquery.io`）；另用 **4 个只查「我的公网 IP」的源**判断 IP 是否变化（`ipify`/Cloudflare/`bigdatacloud`/`country.is`）。**这 12 个服务都会看到你当前的公网 IP**（一次冷启动最多 12 个请求），站点与界面都如实披露；只显示多个源一致的结果 |
 | 位置的时效 | 按**公网 IP** 持久缓存：IP 没变就不重查（界面写出「来自缓存 + 多久前」）；「重新定位」= 强制重查 |
 | 大圆航线弧线 | 真实几何 |
 | 飞机数量 | 由实测字节决定 |
