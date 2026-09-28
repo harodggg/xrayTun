@@ -57,9 +57,7 @@ impl CoreStartTrigger {
         Self::UserConnect,
         Self::ModeSwitch,
         Self::NodeSwitch,
-        Self::EgressChange,
-        Self::WatchdogRebuild,
-        Self::AutoReconnect,
+        Self::IntentRulesApply,
     ];
 }
 
@@ -2307,7 +2305,7 @@ mod tests {
     // task-108：核心启动必须**自证**（App 版本 + 触发者）
     // -----------------------------------------------------------------------
 
-    /// 六个触发者各有**互不相同**的名字（合成一个标签会让人没法归因）。
+    /// 剩下的触发者各有**互不相同**的名字（合成一个标签会让人没法归因）。
     ///
     /// ⚠️ 这里原来是 **7** 类：第 7 个是「切换节点（回退）」。节点回落 2026-09-28
     /// 被整个删掉（用户裁决：选择就使用），触发者也随之收敛成 6 个 ——
@@ -2317,8 +2315,9 @@ mod tests {
         let labels: Vec<&str> = CoreStartTrigger::ALL.iter().map(|t| t.label()).collect();
         assert_eq!(
             labels.len(),
-            6,
-            "全集是 6 类（`grep -rn 'start_core('` 核过所有调用点；回退路径已删）：{labels:?}"
+            4,
+            "全集是 4 类（`grep -rn 'start_core('` 核过所有调用点；\n\
+             回退 / 换网 / 看门狗 / 启动自动重连四条路径已删）：{labels:?}"
         );
         let uniq: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(uniq.len(), labels.len(), "标签不许重复：{labels:?}");
