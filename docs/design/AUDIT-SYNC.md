@@ -109,6 +109,12 @@ secret `AUDIT_TOKEN`）。
 | `POST /api/audit/list` | `{"device":"<16hex>"}` | `200 {"ok":true,"items":[{"day","rows","bytes","key","uploaded_unix"}]}` | `400`/`401`/`429` |
 | `POST /api/audit/revoke` | `{"device":"<16hex>"}` | `200 {"ok":true,"deleted":<n>}` | `400`/`401`/`429` |
 
+实现口径（与 `infra/audit-collector/src/worker.mjs` 一致）：路径对但方法不是 `POST` ⇒ **405**；
+路径不对 ⇒ **404**；`AUDIT_TOKEN` 没配 ⇒ **一切操作 401（fail closed）**，不是"放行"。
+`device` 会被**两道**正则挡住：入口校验 + `auditKey()` 拼 key 前的 self-guard（防前缀穿越）。
+R2 `list` 分页到底，`truncated=true` 却没给 cursor、或 cursor 不前进 ⇒ **抛错 500**，
+绝不把不完整的结果当成完整。
+
 服务端校验（**只验形状，绝不解密**）：
 
 - `v == 1`、`alg == "chacha20poly1305"`；
@@ -196,6 +202,13 @@ R2 侧：key `audit/<device>/<day>.json`；**retention 用 R2 lifecycle 规则**
   重新决定**，不是在这里偷偷放宽。
 - **服务端仍能看到的元数据**：设备随机 id、日期、行数、密文长度、上传时刻、来源 IP（CF 层面，
   我们**不存**）。这些**足以做流量模式分析**，文案必须承认，不能说"完全匿名"。
+- **端到端加密的一个直接后果（必须承认）**：服务端**无法校验密文内容** ——
+  它只能验形状。所以**拿到 token 的人可以覆盖某一天的对象**（污染/删除那一天的数据）。
+  这是 E2E 的代价，不是实现缺陷：要能校验内容就得能读内容。
+  缓解：token 是用户自己的 secret；R2 对象按天分键（污染一天不会波及别的天）；
+  `list` 会返回每天的行数与大小 ⇒ **不一致看得出来**。
+- **`list` 会顺手做惰性过期**：Worker 在列出时按对象 `uploaded` 年龄剔除 >`RETENTION_DAYS`（400 天）
+  的对象（拿不到 `uploaded` 就不判）。主机制仍是 R2 lifecycle 规则；这一层只是"lifecycle 忘了配"时的兜底。
 - **本文件写下的都是设计**。落地状态与验证证据见 §9、以及 `docs/verification/`（不含未验证的断言）。
 
 ## 8. 用户可见的三件事（UI 必须有，不许有假按钮）

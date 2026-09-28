@@ -1,0 +1,57 @@
+#:schema node_modules/wrangler/config-schema.json
+# XrayTun 审计密文接收端点（docs/design/AUDIT-SYNC.md §3/§4）
+#
+# 部署（由 lead 用**临时授权**执行；token 绝不进仓库）：
+#   CLOUDFLARE_ACCOUNT_ID=<account-id> CLOUDFLARE_API_TOKEN="$(cat ~/.cf-audit-token)" \
+#     npx wrangler deploy --config infra/audit-collector/wrangler.toml
+#
+# ⚠️ 只会创建/更新 **xraytun-audit-collector**（Worker）与 **xraytun-audit**（R2 桶）。
+#    账号里已有的其它 Worker 与别的桶**一律不动**：
+#    本目录里没有任何 delete/prune 命令；若你的输出里出现别的名字，说明命令写错了 —— 停下来。
+#
+# 路由为什么用 `xraytun.top/api/audit/*` 而不是 `*.workers.dev`：
+#   用户的机器在中国大陆，`*.workers.dev` 经常不可达；`xraytun.top` 已实测可达。
+#   同 zone 上的 Workers Route **优先于 Pages**，因此不需要新 DNS。
+#   若部署时报「路由需要 Zone 权限 / hostname 要有 DNS 记录」，**停手报 lead**。
+name = "xraytun-audit-collector"
+main = "src/worker.mjs"
+compatibility_date = "2026-09-22"
+
+# 同 zone 路由（Workers Route 优先于 Pages）
+#
+# ⚠️ **这个块必须放在文件最前面（任何 `[table]` / `[[array-of-table]]` 之前）。**
+# TOML 的表一直生效到下一个表头：`routes` 只要落在任何表头之后，就会被当成那张表里的
+# **未知字段**或普通变量 —— 两种表现都是同一个后果：**一条路由都不会注册**，
+# 部署看起来成功，而 `POST https://xraytun.top/api/audit` 返回 **405**（请求落到了 Pages）。
+# incident-collector 在 2026-09-23 的真实事故：先被当成 `vars.routes` 环境变量，改成放前面后
+# 又落进 `[[r2_buckets]]`（wrangler 只给一句 `Unexpected fields found in r2_buckets[0] field: "routes"`）。
+# 部署后**必须**用 `GET /zones/<zone>/workers/routes` 或直接 `curl -X POST` 复核，别看部署日志说成功。
+#
+# ⚠️ 两条 pattern 都要：`/api/audit/*` **不匹配** `/api/audit` 本身（少了尾部斜杠就是另一种路径），
+#    而上传入口恰好是「`POST <base>` 且 rest 为空」⇒ 只写带 `/*` 的那条，
+#    `POST https://xraytun.top/api/audit` 会落到 Pages，返回 **405**（同一天第二次事故）。
+routes = [
+  { pattern = "xraytun.top/api/audit", zone_name = "xraytun.top" },
+  { pattern = "xraytun.top/api/audit/*", zone_name = "xraytun.top" }
+]
+
+# R2：**只存密文信封**（服务端不解密，也不存 IP / 账号 / 明文 —— 见 PRIVACY.md）
+[[r2_buckets]]
+binding = "AUDIT_BUCKET"
+bucket_name = "xraytun-audit"
+
+# 保留 400 天：主机制是 R2 lifecycle（见 README「R2 lifecycle」，命令不能只写在提交信息里）；
+# 这里的 RETENTION_DAYS 是 worker 侧 list 的**惰性过期兜底**判据（同 incident-collector 的教训：
+# lifecycle 规则曾经事实上不存在，读路径上多一道）。
+[vars]
+BASE_PATH = "/api/audit"
+MAX_BYTES = "10485760"          # 10 MiB（契约 §4 硬上限）
+RETENTION_DAYS = "400"          # 建议 400 天，让「跨年趋势」有意义
+RATE_LIMIT_MAX = "120"          # 每窗口最多 120 次（每日一次上传的正常用量远低于此）
+RATE_LIMIT_WINDOW_SECONDS = "3600"
+
+# ⚠️ AUDIT_TOKEN 是**秘密**，不放 [vars]：
+#     npx wrangler secret put AUDIT_TOKEN --config infra/audit-collector/wrangler.toml
+#
+[observability]
+enabled = false   # 不采集请求日志（日志里可能有客户端信息）；排查用 curl 即可
