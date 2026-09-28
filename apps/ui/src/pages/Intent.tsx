@@ -320,21 +320,24 @@ export function cacheHitRateText(s: {
   cache_hits: number;
   cache_inherited?: number;
   cache_misses?: number;
+  cooldown_skipped?: number;
 }): string | null {
   const misses = s.cache_misses;
   if (misses == null) return null;
   const hits = Math.max(0, s.cache_hits);
-  const inherited = Math.max(0, s.cache_inherited ?? 0);
-  const total = hits + inherited + misses;
+  const inherited = Math.min(hits, Math.max(0, s.cache_inherited ?? 0));
+  const total = hits + misses;
   if (total === 0) return "缓存命中率：还没有可统计的判定";
-  const hitLike = hits + inherited;
-  const pct = Math.round((hitLike / total) * 100);
+  const pct = Math.round((hits / total) * 100);
   // 为 0 的明细不列（「精确 0」是噪音；用户要读的是"省了多少次"）。
   const parts: string[] = [];
-  if (hits > 0) parts.push(`精确 ${hits}`);
-  if (inherited > 0) parts.push(`继承父域 ${inherited}`);
+  if (inherited > 0) parts.push(`其中继承父域 ${inherited}`);
   parts.push(`未命中 ${misses}`);
-  return `缓存命中率 ${pct}%：${total} 次里 ${hitLike} 次没问大模型（${parts.join(" · ")}）`;
+  const cooldown =
+    (s.cooldown_skipped ?? 0) > 0
+      ? `；另有 ${s.cooldown_skipped} 次因网关失败冷却跳过提问`
+      : "";
+  return `缓存命中率 ${pct}%：${total} 次里 ${hits} 次没问大模型（${parts.join(" · ")}）${cooldown}`;
 }
 
 /**

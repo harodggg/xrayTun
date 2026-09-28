@@ -436,17 +436,23 @@ export interface IntentSummary {
    * 未命中缓存的次数（0.9.1 新增。**可缺省**：旧后端没有这个字段）。
    *
    * 为什么需要它：只有 `cache_hits` 时**算不出命中率**（分母都不知道），
-   * 于是「缓存命中率是多少」只能靠嘴说。加上它之后
-   * `命中率 = (cache_hits + cache_inherited) / (hits + inherited + misses)`。
+   * 于是「缓存命中率是多少」只能靠嘴说。
+   *
+   * ⚠️ 口径（与 Rust 的 `EngineStats` 逐字一致）：`lookups = cache_hits + cache_misses`，
+   * 而 `cache_inherited` 是 **`cache_hits` 的子集**，不是另一个加法项 ——
+   * `命中率 = cache_hits / (cache_hits + cache_misses)`。
    */
   cache_misses?: number;
   /**
-   * 通过**父域继承**命中的次数（0.9.1 新增，可缺省）。
+   * 其中靠**父域继承**命中的次数（0.9.1 新增，可缺省）。
    *
-   * 单独计数而不是并进 `cache_hits`：继承来的判决是「同一站点另一个子域」的结果，
-   * 与精确命中不是一回事，混在一起会让"缓存有多准"变得不可读。
+   * 它是 `cache_hits` 的**子集**（不是并列的一类）：单独列出来只是为了让界面能说清
+   * 「这 N 次命中里有多少是同一站点另一个子域的结果」。
+   * **不要再把它加进命中数** —— 那会让命中率虚高（0.9.1 实施时就差点这么写）。
    */
   cache_inherited?: number;
+  /** 因为网关失败冷却而**跳过提问**的次数（省钱，且如实计数）。可缺省。 */
+  cooldown_skipped?: number;
   /** 缓存里判为"拦"的域名数。 */
   blocked: number;
   /** 当前状态的一句话说明（未开启 / 缺密钥 / 待生效…）。 */
