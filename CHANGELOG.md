@@ -1,6 +1,64 @@
 # 更新记录
 
-## 未发布（v0.9.1）
+## 未发布（v0.9.2）
+
+> **一条主线**：**删掉假装能自愈的东西**。自动重连 / 看门狗 / 网络监视**检测不出「真的连不上」**，
+> 每一次都是你去点；切换既然「选择就用」，就不该偷偷回落到别的节点；启动等待应该是事件驱动，
+> 不该靠轮询和固定 `sleep`。相对 v0.9.1 净删 **5455 行**（+441 / −5455，54 个文件）。
+>
+> **用户动作见 `docs/release-notes/v0.9.2.md`**：换新 App、**不需要重装特权助手**
+> （`PROTOCOL_VERSION` 仍是 4，helper 侧三个 crate 零改动）。
+
+### 删除：自动重连 / 看门狗 / 网络监视 / 恢复状态
+
+* `apps/desktop/src/commands/core.rs`：删掉 `spawn_tunnel_watchdog`、`spawn_network_watch`、
+  `spawn_connectivity_check`、`spawn_monitors`、`reconnect_if_needed`、`MonitorGuard`、
+  `monitors_spawned`/`release_monitors`、`RECONNECT_ATTEMPTS`/`RECONNECT_INTERVAL`、
+  `SLEEP_THRESHOLD`、`FAILURES_BEFORE_REBUILD`、`tunnel_is_dead`、`targets_of_side`、
+  `should_auto_reconnect`、`should_keep_reconnecting`、`CoreStartOutcome`、`Egress`、
+  `FailureExit`、`IntentDrop`、`invalidate_*`、`connect_intent_after_stop`；
+  `CoreStartTrigger` 收敛到 4 个（`UserConnect` / `ModeSwitch` / `NodeSwitch` / `IntentRulesApply`），
+  `start_core_with_outcome` 回到 `Result<(), String>`。
+* `apps/desktop/src/state.rs`：删掉 `RecoveryState` / `RecoveryOutcome` / `CoreRuntime.recovery` /
+  `clear_recovering_notice` / `RECOVERING_NOTICE`（唯一调用者是被删的恢复状态机）。
+* `crates/xt-core/src/model.rs`：删掉 `AppSettings.auto_reconnect` 与 `AppSettings.was_connected`
+  ——「上次是连着的，所以这次自动连」不成立：网络条件变了它同样不知道。
+* UI：删掉设置页「自动连回来」整块、`types.ts` 的对应类型、`ipc.ts` 的 `recoveryView`/`parseRecovery`、
+  `store.tsx` / `topbarStatus.ts` / `preview.ts` / `previewSnapshot.ts` / `Dashboard.tsx` 里的恢复态分支；
+  相应测试一并删除（`autoReconnectSetting.test.tsx`、`autoReconnectScope.test.tsx`、`recovery.test.ts`、
+  `degradedStatus.test.ts`），其余测试里断言「已删机制」的段落删掉、**没有放宽断言**。
+* 诚实后果：这些机制里包含**兜底**，删掉之后一部分失败会**直接从界面暴露给你**（带真实原因）。
+  这是有意的 ——「它自己恢复了」和「你手动连的」必须能分清。
+
+### 切换：选择就用，没有回落
+
+* `apps/desktop/src/commands/nodes.rs`：`select_node` **先落盘你的选择**，连不上就返回真实原因并
+  **保留你的选择**，不再偷偷切回上一个「好节点」（那会让你不知道自己在用哪个出口）；
+  删掉 `switch_plan` / `SwitchPlan` / `SwitchEnd` / `settle_switch` / `switch_end_keeps_intent`。
+* `apps/desktop/src/supervisor.rs`：删掉**接管前的 TCP 门禁**（含 `GATE_RETRY_PAUSE` 与重试等待）。
+  理由写进了代码注释：TCP 连上不代表代理可用，连不上也不代表不能用 ——
+  **用一次 TCP 探测下判断本身就是错的**，它的等待还全落在你的操作路径上。
+
+### 启动更快：就绪等待改成事件驱动
+
+* `crates/xt-core/src/xray/process.rs`：新增 `XrayProcess::wait_ready(port, timeout)` ——
+  读进核心的**每一行输出**，端口一就绪立即返回；读线程全部 EOF（进程已退出）时立刻报
+  `Error::CoreExitedEarly(Option<i32>)`（`crates/xt-core/src/error.rs`），**不再干等到超时**。
+  配两条测试钉住：提前退出必须立刻失败、活着但没就绪仍须超时（`wait_for_port` 保留给没有 handle 的
+  调用方，文档注明优先用 `wait_ready`）。
+* 删掉 50ms 轮询与重试路径里的固定 `sleep`（700ms / 500ms）。
+
+### 内部
+
+* `scripts/bump-release.py`：修一个**真会卡住发布**的 bug —— Cargo.lock 的「版本字段残留」检查
+  以前会把同版本号的第三方 crate 一起算进去，导致发布被误判阻塞；现在只检查**没有 `source =` 的本地包**，
+  并补了自测 T8b（T8 保持绿）。
+* 契约哨兵：命令数仍是 57；`CoreRuntime` 字段 10 → 9；`was_connected` 从 TS/RS 字段差集里去掉；
+  `ANOMALY_KINDS` 6 → 2（`log_read_loss` / `route_audit`，其余种类的采集端已不存在）。
+
+---
+
+## v0.9.1（2026-09-28）
 
 > **一条主线**：**少查、少算、少藏** —— 「位置」只在公网 IP 变的时候才查；判决在父域已经判过时
 > 不再重复问模型；审计既能离线出报告，也能每天自动**加密**送出去。
