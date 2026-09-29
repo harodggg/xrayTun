@@ -2047,23 +2047,4 @@ mod tests {
 
 
 
-    fn node_fixture(id: &str, name: &str, address: &str) -> Node {
-        Node {
-            id: id.into(),
-            name: name.into(),
-            address: address.into(),
-            port: 443,
-            protocol: xt_core::model::Protocol::Vless {
-                uuid: "00000000-0000-0000-0000-000000000000".into(),
-                flow: String::new(),
-                encryption: "none".into(),
-            },
-            transport: Default::default(),
-            tls: Default::default(),
-            mux: None,
-            source: xt_core::model::NodeSource::Manual,
-            tags: Vec::new(),
-            raw_uri: None,
-        }
-    }
 }
