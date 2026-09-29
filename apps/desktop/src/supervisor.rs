@@ -201,6 +201,7 @@ pub(crate) fn curl_probe_args(
     ]
 }
 
+/// 同上，但显式指定"域名由谁解析"。
 pub(crate) async fn socks_http_probe_with(
     port: u16,
     target: String,
@@ -339,6 +340,10 @@ pub(crate) fn required_probe_urls() -> Vec<&'static str> {
     REQUIRED_PROBE_TARGETS.iter().map(|(url, _)| *url).collect()
 }
 
+/// URL 的主机部分是不是 **IP 字面量**（⇒ 这次探测**不需要解析**）。
+///
+/// 用途：目标清单里「不依赖解析」的那一半靠它认出来（task-92），
+/// 它同时也是「只有解析坏」这个诊断的基础。
 pub(crate) fn url_host_is_ip_literal(url: &str) -> bool {
     let rest = url.split("://").nth(1).unwrap_or(url);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");

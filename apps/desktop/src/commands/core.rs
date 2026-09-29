@@ -25,12 +25,6 @@ pub(crate) enum CoreStartTrigger {
     ModeSwitch,
     /// 切换节点（`select_node`）。
     NodeSwitch,
-    /// 物理出口变化（换网）触发的重建。
-    EgressChange,
-    /// 看门狗发现隧道不通触发的重建。
-    WatchdogRebuild,
-    /// 启动时按上次的连接意图自动重连。
-    AutoReconnect,
     /// 用户点了「应用意图规则」（规则在核心启动时才下发，所以要重连一次）。
     IntentRulesApply,
 }
@@ -42,9 +36,6 @@ impl CoreStartTrigger {
             Self::UserConnect => "用户点击连接",
             Self::ModeSwitch => "切换模式",
             Self::NodeSwitch => "切换节点",
-            Self::EgressChange => "物理出口变化（换网）",
-            Self::WatchdogRebuild => "看门狗重建",
-            Self::AutoReconnect => "启动时自动重连",
             Self::IntentRulesApply => "应用意图规则",
         }
     }
@@ -198,35 +189,7 @@ fn note_node_failure(
     }
 }
 
-/// `start_core` 的返回值：**说清这次用的是哪个节点、有没有换**。
-///
-/// # 为什么必须把它从 `Result<(), String>` 换掉
-///
-/// 「首连」与「自动重建（看门狗 / 换网）」走的是同一条回落策略，但重建路径
-/// 拿到的是 `Ok(())` —— 于是自动重建成功时只能写一句「已自动恢复」，
-/// **说不出这次实际用了哪个节点、是不是悄悄换掉了用户选的那个**。
-/// 用户要的正是后一句（「不许静默改我选中的节点」）。
-#[derive(Debug, Clone)]
-pub(crate) enum CoreStartOutcome {
-    /// 核心本来就在跑（幂等早退）：这次**没有**做任何节点回落。
-    AlreadyRunning { pid: Option<u32> },
-    /// 这次真的起来了：带上回落结局（哪个节点、有没有换、为什么）。
-    Started {
-        choice: crate::node_health::NodeFallbackOutcome,
-    },
-}
 
-impl CoreStartOutcome {
-    /// 一行、进日志 / 提示条。
-    pub(crate) fn describe(&self) -> String {
-        match self {
-            Self::AlreadyRunning { pid } => {
-                format!("核心已在运行（pid {pid:?}），本次未做节点回落")
-            }
-            Self::Started { choice } => choice.describe(),
-        }
-    }
-}
 
 /// 一次「按候选顺序试节点」的成功结局（内部聚合，避免四元组）。
 struct FallbackSuccess {
@@ -338,7 +301,7 @@ pub(crate) async fn start_core(
     state: &AppState,
     trigger: CoreStartTrigger,
 ) -> Result<(), String> {
-    start_core_with_outcome(app, state, trigger).await.map(|_| ())
+    start_core_with_outcome(app, state, trigger).await
 }
 
 /// 与 [`start_core`] **完全相同**，只是把**回落结局**也返回出来。
@@ -353,7 +316,7 @@ pub(crate) async fn start_core_with_outcome(
     app: &AppHandle,
     state: &AppState,
     trigger: CoreStartTrigger,
-) -> Result<CoreStartOutcome, String> {
+) -> Result<(), String> {
     // **先落盘「谁启动了核心」**（task-108）：这一行是 Q7「来源不明的 core 启动」
     // 的唯一解药，也是 after 对照的锚点（带 App 版本 ⇒ 不用再猜「新版在跑吗」）。
     //
@@ -373,11 +336,6 @@ pub(crate) async fn start_core_with_outcome(
     if settings.mode == ProxyMode::Direct {
         return Err("当前是直连模式，请先切换到「系统代理」或「TUN」".into());
     }
-
-    // 记下**连接之前**的物理出口：隧道是照它建的（helper 的路由指向它的网关、
-    // direct 出站绑它的网卡、核心的 DoH 连接也建在它上面）。换网之后这三样
-    // 一起失效，所以要留着基线做比对，见 `spawn_network_watch`。
-    let egress_before = Egress::now();
 
     let resource_dir = app.path().resource_dir().ok();
 
@@ -411,7 +369,7 @@ pub(crate) async fn start_core_with_outcome(
         let pid = supervisor.running_pid();
         drop(helper);
         drop(supervisor);
-        return Ok(CoreStartOutcome::AlreadyRunning { pid });
+        return Ok(());
     }
 
     // 意图过滤：把**这一次应该生效**的规则交给 supervisor（它在生成配置时用）。
@@ -734,7 +692,7 @@ pub(crate) async fn start_core_with_outcome(
         }
     });
 
-    Ok(CoreStartOutcome::Started { choice })
+    Ok(())
 }
 
 /// 停止核心后应当写回的运行态（**纯函数，便于单测**）。
@@ -794,7 +752,6 @@ pub(crate) fn stop_log_line(result: &Result<(), String>) -> (&'static str, Strin
 pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let mut supervisor = state.supervisor.lock().await;
     let mut helper = state.helper.lock().await;
-    let pid = supervisor.running_pid();
     let result = supervisor.stop(&mut helper).await;
     drop(helper);
     drop(supervisor);
@@ -827,6 +784,26 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
     result
 }
 
+/// 探针目标属于哪一侧 —— **真源在 `supervisor.rs` 的那张表**（task-106）。
+///
+/// 这里只做**转发**，不再自己维护一份「境内清单」：
+///
+/// * 旧实现有一份 `DOMESTIC_PROBE_TARGETS`，`probe_side()` 用
+///   「不在境内清单 ⇒ 算境外」的默认分支兜底 —— 于是**新加一个境内目标却忘了
+///   在这里表态，就会被静默算成境外**（诊断形状错、`probe_side` 语义被污染）；
+/// * 现在目标与侧写在**同一张表**（`supervisor::REQUIRED_PROBE_TARGETS`，
+///   `&[(url, ProbeSide)]`，**没有默认值**），`probe_side()` 只读它，
+///   表里没有的目标返回 `None`（由测试拦住）。
+pub(crate) use crate::supervisor::{probe_side, ProbeSide};
+
+/// task-176：把一次 TUN 生命周期里累积的**路由审计**写进可回溯的 App 日志。
+///
+/// 口径（与 `task-121` 的「事件 vs 每秒计数」一致）：
+/// * **按次**：一次会话 2–3 条（TunUp 后 / 接管后 / 回滚后），看门狗**只在状态变化时**；
+/// * `scoped_default` 缺失且时点是「接管后 / 看门狗变化」⇒ `warn` + 哨兵记录
+///   （`task-172` 的形态：绑该网卡的直连会 `ENETUNREACH`）；
+/// * 「接管前 / 回滚后」缺这条路由**本来就不该有** ⇒ 只记 `info`（否则是噪声）；
+/// * 采不到路由表（`netstat` 失败）⇒ 记一条 `warn`「不可判读」，**不许静默跳过**。
 pub(crate) fn log_route_audits(
     state: &AppState,
     records: &[(
@@ -1221,11 +1198,26 @@ pub(crate) struct Egress {
     gateway: Option<std::net::IpAddr>,
 }
 
-        match self.gateway {
-            Some(g) => format!("{} ({g})", self.interface),
-            None => self.interface.clone(),
+impl Drop for MonitorGuard {
+    fn drop(&mut self) {
+        // `Arc<u32>` 只有最后一个引用 drop 时才会走到这里（其余是克隆），
+        // 所以「最后一个任务结束才注销」是靠 Arc 的语义天然成立的。
+        if std::sync::Arc::strong_count(&self.0) == 1 {
+            if let Ok(mut set) = monitors_spawned().lock() {
+                set.remove(&self.0);
+            }
         }
     }
+}
+
+impl Egress {
+    fn now() -> Option<Self> {
+        xt_tun::macos::route::default_route().ok().map(|d| Self {
+            interface: d.interface,
+            gateway: d.gateway,
+        })
+    }
+
 }
 
 #[cfg(test)]
@@ -1415,6 +1407,11 @@ mod tests {
     // **不碰真机网络**：全部是纯函数 + seam，没有 route/DNS 操作。
     // -----------------------------------------------------------------------
 
+    /// **(b)** 看门狗要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
+    ///
+    /// task-92 之后境内那一半由 **IP 字面量 `223.5.5.5`** 覆盖：
+    /// `www.baidu.com` 经 SOCKS 多轮实测不稳定（10 轮 4 失败）被筛掉，
+    /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
         let targets = crate::supervisor::required_probe_urls();
@@ -1451,6 +1448,13 @@ mod tests {
             .collect()
     }
 
+    /// **守卫（task-106）**：唯一真源表必须自洽 ——
+    /// ① 表里每条 `probe_side(url) == 声明侧`；② URL 不重复；③ 两侧都有人；
+    /// ④ **表里没有的目标返回 `None`**（不许再有「不在境内清单就算境外」的兜底）。
+    ///
+    /// **敏感性**：把 `223.5.5.5` 的声明侧改成 `Overseas`（或删掉
+    /// `119.29.29.29`）⇒ `domestic_side_has_at_least_two_targets_and_keeps_the_domestic_literal`
+    /// 必红；给 `probe_side` 加回「不在表里就算境外」⇒ 第 ④ 条必红。
     #[test]
     fn every_required_probe_target_declares_a_side_in_the_single_table() {
         let mut domestic = 0;
