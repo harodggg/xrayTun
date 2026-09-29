@@ -39,7 +39,7 @@ RELEASES_PAGE = "https://github.com/harodggg/xrayTun/releases"
 # **发布两阶段**：资产还没发布时（提交 1），downloadUrl 指向 Releases 页面而不是
 # `.../download/v{版本}/...`（那会 404）。发布后（提交 2）把 PUBLISHED 置 True，
 # 结构化数据才写 pinned 直链 —— 与 `gen-site-geo.py` 的开关同名同义。
-PUBLISHED = False
+PUBLISHED = True
 XRAYTUN_DL = (
     f"https://github.com/harodggg/xrayTun/releases/download/v{XRAYTUN_VERSION}"
     f"/XrayTun_{XRAYTUN_VERSION}_x86_64_arm64.dmg"
