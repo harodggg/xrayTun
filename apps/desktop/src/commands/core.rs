@@ -25,6 +25,12 @@ pub(crate) enum CoreStartTrigger {
     ModeSwitch,
     /// 切换节点（`select_node`）。
     NodeSwitch,
+    /// 物理出口变化（换网）触发的重建。
+    EgressChange,
+    /// 看门狗发现隧道不通触发的重建。
+    WatchdogRebuild,
+    /// 启动时按上次的连接意图自动重连。
+    AutoReconnect,
     /// 用户点了「应用意图规则」（规则在核心启动时才下发，所以要重连一次）。
     IntentRulesApply,
 }
@@ -36,6 +42,9 @@ impl CoreStartTrigger {
             Self::UserConnect => "用户点击连接",
             Self::ModeSwitch => "切换模式",
             Self::NodeSwitch => "切换节点",
+            Self::EgressChange => "物理出口变化（换网）",
+            Self::WatchdogRebuild => "看门狗重建",
+            Self::AutoReconnect => "启动时自动重连",
             Self::IntentRulesApply => "应用意图规则",
         }
     }
@@ -189,6 +198,24 @@ fn note_node_failure(
     }
 }
 
+/// `start_core` 的返回值：**说清这次用的是哪个节点、有没有换**。
+///
+/// # 为什么必须把它从 `Result<(), String>` 换掉
+///
+/// 「首连」与「自动重建（看门狗 / 换网）」走的是同一条回落策略，但重建路径
+/// 拿到的是 `Ok(())` —— 于是自动重建成功时只能写一句「已自动恢复」，
+/// **说不出这次实际用了哪个节点、是不是悄悄换掉了用户选的那个**。
+/// 用户要的正是后一句（「不许静默改我选中的节点」）。
+#[derive(Debug, Clone)]
+pub(crate) enum CoreStartOutcome {
+    /// 核心本来就在跑（幂等早退）：这次**没有**做任何节点回落。
+    AlreadyRunning { pid: Option<u32> },
+    /// 这次真的起来了：带上回落结局（哪个节点、有没有换、为什么）。
+    Started {
+        choice: crate::node_health::NodeFallbackOutcome,
+    },
+}
+
 impl CoreStartOutcome {
     /// 一行、进日志 / 提示条。
     pub(crate) fn describe(&self) -> String {
@@ -311,7 +338,7 @@ pub(crate) async fn start_core(
     state: &AppState,
     trigger: CoreStartTrigger,
 ) -> Result<(), String> {
-    start_core_with_outcome(app, state, trigger).await
+    start_core_with_outcome(app, state, trigger).await.map(|_| ())
 }
 
 /// 与 [`start_core`] **完全相同**，只是把**回落结局**也返回出来。
@@ -326,7 +353,7 @@ pub(crate) async fn start_core_with_outcome(
     app: &AppHandle,
     state: &AppState,
     trigger: CoreStartTrigger,
-) -> Result<(), String> {
+) -> Result<CoreStartOutcome, String> {
     // **先落盘「谁启动了核心」**（task-108）：这一行是 Q7「来源不明的 core 启动」
     // 的唯一解药，也是 after 对照的锚点（带 App 版本 ⇒ 不用再猜「新版在跑吗」）。
     //
@@ -346,6 +373,11 @@ pub(crate) async fn start_core_with_outcome(
     if settings.mode == ProxyMode::Direct {
         return Err("当前是直连模式，请先切换到「系统代理」或「TUN」".into());
     }
+
+    // 记下**连接之前**的物理出口：隧道是照它建的（helper 的路由指向它的网关、
+    // direct 出站绑它的网卡、核心的 DoH 连接也建在它上面）。换网之后这三样
+    // 一起失效，所以要留着基线做比对，见 `spawn_network_watch`。
+    let egress_before = Egress::now();
 
     let resource_dir = app.path().resource_dir().ok();
 
@@ -379,7 +411,7 @@ pub(crate) async fn start_core_with_outcome(
         let pid = supervisor.running_pid();
         drop(helper);
         drop(supervisor);
-        return Ok(());
+        return Ok(CoreStartOutcome::AlreadyRunning { pid });
     }
 
     // 意图过滤：把**这一次应该生效**的规则交给 supervisor（它在生成配置时用）。
@@ -702,7 +734,7 @@ pub(crate) async fn start_core_with_outcome(
         }
     });
 
-    Ok(())
+    Ok(CoreStartOutcome::Started { choice })
 }
 
 /// 停止核心后应当写回的运行态（**纯函数，便于单测**）。
@@ -762,6 +794,7 @@ pub(crate) fn stop_log_line(result: &Result<(), String>) -> (&'static str, Strin
 pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let mut supervisor = state.supervisor.lock().await;
     let mut helper = state.helper.lock().await;
+    let pid = supervisor.running_pid();
     let result = supervisor.stop(&mut helper).await;
     drop(helper);
     drop(supervisor);
@@ -794,26 +827,6 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
     result
 }
 
-/// 探针目标属于哪一侧 —— **真源在 `supervisor.rs` 的那张表**（task-106）。
-///
-/// 这里只做**转发**，不再自己维护一份「境内清单」：
-///
-/// * 旧实现有一份 `DOMESTIC_PROBE_TARGETS`，`probe_side()` 用
-///   「不在境内清单 ⇒ 算境外」的默认分支兜底 —— 于是**新加一个境内目标却忘了
-///   在这里表态，就会被静默算成境外**（诊断形状错、`probe_side` 语义被污染）；
-/// * 现在目标与侧写在**同一张表**（`supervisor::REQUIRED_PROBE_TARGETS`，
-///   `&[(url, ProbeSide)]`，**没有默认值**），`probe_side()` 只读它，
-///   表里没有的目标返回 `None`（由测试拦住）。
-pub(crate) use crate::supervisor::{probe_side, ProbeSide};
-
-/// task-176：把一次 TUN 生命周期里累积的**路由审计**写进可回溯的 App 日志。
-///
-/// 口径（与 `task-121` 的「事件 vs 每秒计数」一致）：
-/// * **按次**：一次会话 2–3 条（TunUp 后 / 接管后 / 回滚后），看门狗**只在状态变化时**；
-/// * `scoped_default` 缺失且时点是「接管后 / 看门狗变化」⇒ `warn` + 哨兵记录
-///   （`task-172` 的形态：绑该网卡的直连会 `ENETUNREACH`）；
-/// * 「接管前 / 回滚后」缺这条路由**本来就不该有** ⇒ 只记 `info`（否则是噪声）；
-/// * 采不到路由表（`netstat` 失败）⇒ 记一条 `warn`「不可判读」，**不许静默跳过**。
 pub(crate) fn log_route_audits(
     state: &AppState,
     records: &[(
@@ -1208,6 +1221,67 @@ pub(crate) struct Egress {
     gateway: Option<std::net::IpAddr>,
 }
 
+        match self.gateway {
+            Some(g) => format!("{} ({g})", self.interface),
+            None => self.interface.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
+        ///
+        /// `000` 是连不上/超时/被 reset，空串是进程压根没起来 —— 都算不通。
+        /// 但 403 说明**链路是好的**，只是目标拒绝了我们；把它算成不通会
+        /// 让一条能用的隧道被判死并重建。
+        #[test]
+        fn tunnel_probe_result_is_read_as_dead_or_alive() {
+            assert!(tunnel_is_dead(""), "进程没起来时 curl 不输出");
+            assert!(tunnel_is_dead("000"), "连不上/超时/reset 都报 000");
+            assert!(!tunnel_is_dead("204"));
+            assert!(!tunnel_is_dead("200"));
+            assert!(!tunnel_is_dead("403"), "服务器答了任何码都说明链路通");
+        }
+
+        /// 日志分级要**先信内核自己写的 `[Level]` 标记**。
+        ///
+        /// 之前纯按关键字判，于是上面那些 `[Info] ... rejected type ...` 和
+        /// `[Info] ... broken pipe` 全被归类成「错误」，错误页签里翻不到真错误。
+        #[test]
+        fn log_classification_trusts_the_level_marker() {
+            // 这两条是用户实际报上来的原文。
+            assert_eq!(
+                classify_log(
+                    "2026/09/14 17:45:47.320581 [Info] [755193655] proxy/dns: rejected type TypeHTTPS query for domain x.com."
+                ),
+                "info",
+                "内核说的是 Info，消息里带 rejected 不该把它升级成错误",
+            );
+            assert_eq!(
+                classify_log(
+                    "2026/09/14 17:45:50.210081 [Info] [4072004086] app/proxyman/outbound: failed to process outbound traffic > ... write: broken pipe"
+                ),
+                "info",
+                "消息里带 failed 也一样",
+            );
+            assert_eq!(
+                classify_log("2026/01/01 00:00:00 [Warning] failed to dial"),
+                "warn",
+                "内核说是 Warning 就是 Warning",
+            );
+            assert_eq!(classify_log("2026/01/01 00:00:00 [Error] something exploded"), "error");
+            assert_eq!(classify_log("2026/01/01 00:00:00 [Debug] dialing 1.2.3.4"), "debug");
+            // 没有标记才用关键字。
+            assert_eq!(classify_log("Xray 26.9.9 (Xray, Penetrates Everything.)"), "info");
+            assert_eq!(classify_log("something debug level"), "debug");
+            assert_eq!(classify_log("failed to write config"), "error");
+            assert_eq!(classify_log("WARNING: %v"), "warn");
+        }
+
     // -----------------------------------------------------------------------
     // 停止 / 回退的诚实性（task-62）
     //
@@ -1341,11 +1415,6 @@ pub(crate) struct Egress {
     // **不碰真机网络**：全部是纯函数 + seam，没有 route/DNS 操作。
     // -----------------------------------------------------------------------
 
-    /// **(b)** 看门狗要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
-    ///
-    /// task-92 之后境内那一半由 **IP 字面量 `223.5.5.5`** 覆盖：
-    /// `www.baidu.com` 经 SOCKS 多轮实测不稳定（10 轮 4 失败）被筛掉，
-    /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
     fn watchdog_probes_cover_domestic_and_overseas() {
         let targets = crate::supervisor::required_probe_urls();
@@ -1382,13 +1451,6 @@ pub(crate) struct Egress {
             .collect()
     }
 
-    /// **守卫（task-106）**：唯一真源表必须自洽 ——
-    /// ① 表里每条 `probe_side(url) == 声明侧`；② URL 不重复；③ 两侧都有人；
-    /// ④ **表里没有的目标返回 `None`**（不许再有「不在境内清单就算境外」的兜底）。
-    ///
-    /// **敏感性**：把 `223.5.5.5` 的声明侧改成 `Overseas`（或删掉
-    /// `119.29.29.29`）⇒ `domestic_side_has_at_least_two_targets_and_keeps_the_domestic_literal`
-    /// 必红；给 `probe_side` 加回「不在表里就算境外」⇒ 第 ④ 条必红。
     #[test]
     fn every_required_probe_target_declares_a_side_in_the_single_table() {
         let mut domestic = 0;
@@ -2140,6 +2202,38 @@ pub(crate) struct Egress {
     // -----------------------------------------------------------------------
 
 
+    /// **验收判据 ①（自动重建那一半）**：重建成功后返回的结局必须能说出
+    /// 「实际用了哪个节点、有没有换」—— 否则用户无从知道它是不是悄悄换了节点。
+    ///
+    /// 这里用 [`CoreStartOutcome`] 的两个变体把「返回值里说明」钉死。
+    #[test]
+    fn rebuild_outcome_names_the_node_it_actually_used() {
+        use crate::node_health::{NodeAttempt, NodeFailureClass, NodeFallbackOutcome, TrialReport};
+        let sel = node_fixture("n-sel", "旧节点", "1.1.1.1");
+        let other = node_fixture("n-other", "备用节点", "2.2.2.2");
+        let mut report = TrialReport::new();
+        report.record(NodeAttempt::failed(
+            &sel,
+            NodeFailureClass::TcpUnreachable,
+            Duration::from_millis(8400),
+            "接管默认路由之前就联系不上代理服务器 1.1.1.1:443（第1次失败、第2次失败，每次 4 秒）",
+        ));
+        let used = NodeAttempt::ok(&other, Duration::from_millis(1200));
+        report.record(used.clone());
+        let choice = NodeFallbackOutcome::from_report(Some("n-sel"), used, &report);
+
+        let started = CoreStartOutcome::Started { choice };
+        let text = started.describe();
+        assert!(text.contains("备用节点") && text.contains("2.2.2.2:443"), "{text}");
+        assert!(text.contains("1.1.1.1:443"), "要说清为什么换：{text}");
+        assert!(text.contains("本机→节点 TCP 不通"), "{text}");
+
+        // 幂等早退那条路径**没有**做回落 ⇒ 不许假装知道用了哪个节点。
+        let already = CoreStartOutcome::AlreadyRunning { pid: Some(42) };
+        let text = already.describe();
+        assert!(text.contains("未做节点回落"), "{text}");
+        assert!(!text.contains("本次实际使用节点"), "{text}");
+    }
 
     fn node_fixture(id: &str, name: &str, address: &str) -> Node {
         Node {
