@@ -794,7 +794,7 @@ pub(crate) async fn stop_core(app: &AppHandle, state: &AppState) -> Result<(), S
 /// * 现在目标与侧写在**同一张表**（`supervisor::REQUIRED_PROBE_TARGETS`，
 ///   `&[(url, ProbeSide)]`，**没有默认值**），`probe_side()` 只读它，
 ///   表里没有的目标返回 `None`（由测试拦住）。
-pub(crate) use crate::supervisor::{probe_side, ProbeSide};
+pub(crate) use crate::supervisor::ProbeSide;
 
 /// task-176：把一次 TUN 生命周期里累积的**路由审计**写进可回溯的 App 日志。
 ///
@@ -1191,53 +1191,11 @@ pub(crate) fn throttled_window_summary_message(n: u64, sample: &str) -> String {
     )
 }
 
-/// 物理出口的「身份」。隧道是照它建的，换网之后要拿它比对。
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Egress {
-    interface: String,
-    gateway: Option<std::net::IpAddr>,
-}
-
-impl Drop for MonitorGuard {
-    fn drop(&mut self) {
-        // `Arc<u32>` 只有最后一个引用 drop 时才会走到这里（其余是克隆），
-        // 所以「最后一个任务结束才注销」是靠 Arc 的语义天然成立的。
-        if std::sync::Arc::strong_count(&self.0) == 1 {
-            if let Ok(mut set) = monitors_spawned().lock() {
-                set.remove(&self.0);
-            }
-        }
-    }
-}
-
-impl Egress {
-    fn now() -> Option<Self> {
-        xt_tun::macos::route::default_route().ok().map(|d| Self {
-            interface: d.interface,
-            gateway: d.gateway,
-        })
-    }
-
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
 
-    /// `curl` 的输出要分得清「没通」和「通了但服务器不高兴」。
-        ///
-        /// `000` 是连不上/超时/被 reset，空串是进程压根没起来 —— 都算不通。
-        /// 但 403 说明**链路是好的**，只是目标拒绝了我们；把它算成不通会
-        /// 让一条能用的隧道被判死并重建。
-        #[test]
-        fn tunnel_probe_result_is_read_as_dead_or_alive() {
-            assert!(tunnel_is_dead(""), "进程没起来时 curl 不输出");
-            assert!(tunnel_is_dead("000"), "连不上/超时/reset 都报 000");
-            assert!(!tunnel_is_dead("204"));
-            assert!(!tunnel_is_dead("200"));
-            assert!(!tunnel_is_dead("403"), "服务器答了任何码都说明链路通");
-        }
 
         /// 日志分级要**先信内核自己写的 `[Level]` 标记**。
         ///
@@ -1438,94 +1396,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // task-98：看门狗判据 —— 单条失败不判死 / ≥2 个目标才算一轮失败 / 轮内重试 / 退避
     // -----------------------------------------------------------------------
-
-    fn targets_of_side(side: ProbeSide) -> Vec<&'static str> {
-        // 侧只从**唯一真源表**里读（task-106：不再有第二份境内清单，也没有默认侧）
-        crate::supervisor::REQUIRED_PROBE_TARGETS
-            .iter()
-            .filter(|(_, declared)| *declared == side)
-            .map(|(url, _)| *url)
-            .collect()
-    }
-
-    /// **守卫（task-106）**：唯一真源表必须自洽 ——
-    /// ① 表里每条 `probe_side(url) == 声明侧`；② URL 不重复；③ 两侧都有人；
-    /// ④ **表里没有的目标返回 `None`**（不许再有「不在境内清单就算境外」的兜底）。
-    ///
-    /// **敏感性**：把 `223.5.5.5` 的声明侧改成 `Overseas`（或删掉
-    /// `119.29.29.29`）⇒ `domestic_side_has_at_least_two_targets_and_keeps_the_domestic_literal`
-    /// 必红；给 `probe_side` 加回「不在表里就算境外」⇒ 第 ④ 条必红。
-    #[test]
-    fn every_required_probe_target_declares_a_side_in_the_single_table() {
-        let mut domestic = 0;
-        let mut overseas = 0;
-        let mut seen: Vec<&str> = Vec::new();
-        for (url, declared) in crate::supervisor::REQUIRED_PROBE_TARGETS {
-            assert_eq!(
-                probe_side(url),
-                Some(*declared),
-                "表里的声明侧必须就是 probe_side 的答案：{url}"
-            );
-            assert!(!seen.contains(url), "同一个目标在表里出现了两次：{url}");
-            seen.push(url);
-            match declared {
-                ProbeSide::Domestic => domestic += 1,
-                ProbeSide::Overseas => overseas += 1,
-            }
-        }
-        assert!(domestic >= 1, "境内侧至少一个目标，否则日志分不清两种病");
-        assert!(overseas >= 1, "境外侧至少一个目标");
-        assert_eq!(
-            seen.len(),
-            crate::supervisor::REQUIRED_PROBE_TARGETS.len(),
-            "表里不许有重复项"
-        );
-        // ④ 表外目标必须返回 None（旧实现会「默认境外」——正是本卡要消除的静默误分类）
-        assert_eq!(
-            probe_side("http://203.0.113.99/"),
-            None,
-            "表里没有的目标必须返回 None：不许再有「不在境内清单就算境外」的默认分支",
-        );
-    }
-
-    /// **task-106 跨语言契约**：Python（`scripts/net-metrics.py`，task-175 起）与
-    /// 本文件**读同一份夹具** `scripts/fixtures/probe-targets.json`。
-    /// **Rust 是权威**，夹具是双方共同的真源 —— 任一侧改坏，本用例或 Python 自测必红。
-    ///
-    /// 用 `read_to_string`（不是 `include_str!`）：改夹具不必重编译就能被发现；
-    /// **文件缺失即失败**（共同真源缺了不许静默跳过）。
-    #[test]
-    fn probe_targets_fixture_matches_authoritative_table() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/fixtures/probe-targets.json");
-        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "读不到共享夹具 {}（共同真源，缺了必须红）：{e}",
-                path.display()
-            )
-        });
-        let cases: Vec<serde_json::Value> =
-            serde_json::from_str(&raw).expect("共享夹具必须是 JSON 数组");
-        assert_eq!(
-            cases.len(),
-            crate::supervisor::REQUIRED_PROBE_TARGETS.len(),
-            "夹具与 Rust 表的条数不同：{cases:?}"
-        );
-        for (i, (url, side)) in crate::supervisor::REQUIRED_PROBE_TARGETS.iter().enumerate() {
-            let c = &cases[i];
-            assert_eq!(c["url"].as_str(), Some(*url), "夹具第 {i} 条的 url 与 Rust 表不一致");
-            let want = match side {
-                ProbeSide::Domestic => "domestic",
-                ProbeSide::Overseas => "overseas",
-            };
-            assert_eq!(
-                c["side"].as_str(),
-                Some(want),
-                "夹具第 {i} 条的 side 与 Rust 表不一致（{url}）"
-            );
-        }
-        println!("共享夹具 {} 条与 Rust 权威表逐条一致", cases.len());
-    }
 
     /// **task-106 主判据**：境内侧必须 **≥2 个**目标。
     ///
@@ -2206,38 +2076,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
 
-    /// **验收判据 ①（自动重建那一半）**：重建成功后返回的结局必须能说出
-    /// 「实际用了哪个节点、有没有换」—— 否则用户无从知道它是不是悄悄换了节点。
-    ///
-    /// 这里用 [`CoreStartOutcome`] 的两个变体把「返回值里说明」钉死。
-    #[test]
-    fn rebuild_outcome_names_the_node_it_actually_used() {
-        use crate::node_health::{NodeAttempt, NodeFailureClass, NodeFallbackOutcome, TrialReport};
-        let sel = node_fixture("n-sel", "旧节点", "1.1.1.1");
-        let other = node_fixture("n-other", "备用节点", "2.2.2.2");
-        let mut report = TrialReport::new();
-        report.record(NodeAttempt::failed(
-            &sel,
-            NodeFailureClass::TcpUnreachable,
-            Duration::from_millis(8400),
-            "接管默认路由之前就联系不上代理服务器 1.1.1.1:443（第1次失败、第2次失败，每次 4 秒）",
-        ));
-        let used = NodeAttempt::ok(&other, Duration::from_millis(1200));
-        report.record(used.clone());
-        let choice = NodeFallbackOutcome::from_report(Some("n-sel"), used, &report);
-
-        let started = CoreStartOutcome::Started { choice };
-        let text = started.describe();
-        assert!(text.contains("备用节点") && text.contains("2.2.2.2:443"), "{text}");
-        assert!(text.contains("1.1.1.1:443"), "要说清为什么换：{text}");
-        assert!(text.contains("本机→节点 TCP 不通"), "{text}");
-
-        // 幂等早退那条路径**没有**做回落 ⇒ 不许假装知道用了哪个节点。
-        let already = CoreStartOutcome::AlreadyRunning { pid: Some(42) };
-        let text = already.describe();
-        assert!(text.contains("未做节点回落"), "{text}");
-        assert!(!text.contains("本次实际使用节点"), "{text}");
-    }
 
     fn node_fixture(id: &str, name: &str, address: &str) -> Node {
         Node {

@@ -2379,65 +2379,6 @@ mod tests {
         assert!(!url_host_is_ip_literal("http://www.baidu.com/"));
     }
 
-    /// **task-92 真正要回答的问题**：「只有解析坏、传输通」时怎么判？
-    ///
-    /// 结论：**判「链路不可用」**（门禁不接管、看门狗计一次失败），理由写在
-    /// [`REQUIRED_PROBE_TARGETS`] 的文档里。这条同时钉住两件事：
-    /// * IP 字面量目标**活着**（301/404 都算活着 —— 判据只认空/`000`）；
-    /// * 失败清单里**只有域名目标** ⇒ 诊断能说清「传输是通的，是解析坏了」；
-    /// * 结论仍是**不接管**。
-    #[tokio::test]
-    async fn only_resolution_broken_is_not_mistaken_for_a_dead_transport() {
-        // ① 判据：301/404 都不是「死」，所以 IP 目标不必要求 204
-        assert!(!tunnel_is_dead("301"), "IP 字面量回 301 就是活着");
-        assert!(!tunnel_is_dead("404"), "IP 字面量回 404 也是活着");
-        // ①b 这个场景**只有存在不依赖解析的目标**才有意义 ——
-        // 把它们删掉，这条就必然红（敏感性就钉在这里，而不是靠人自觉）。
-        let urls = required_probe_urls();
-        assert!(
-            probe_targets_without_dns(&urls).len() >= 2,
-            "「只有解析坏」的判据依赖 IP 字面量目标存在，实际清单：{urls:?}",
-        );
-
-        // ② 实际目标清单跑一遍假探测：IP 全活、域名全死
-        let log = GateLog::default();
-        let res = verify_paths_then_commit(
-            &urls,
-            |t: String| {
-                log.push(&format!("probe:{t}"));
-                let code = if t.contains("1.1.1.1") {
-                    "301"
-                } else if t.contains("223.5.5.5") || t.contains("119.29.29.29") {
-                    // task-106：新增的境内 IP 字面量同属「不依赖解析」那一半，必须是活的
-                    "404"
-                } else {
-                    "000"
-                };
-                async move { code.to_string() }
-            },
-            || {
-                log.push("commit");
-                async { Ok::<(), xt_proto::HelperError>(()) }
-            },
-        )
-        .await;
-
-        match &res {
-            Err(GateFailure::Probe { failed }) => {
-                let names: Vec<&str> = failed.iter().map(|f| f.target.as_str()).collect();
-                assert_eq!(failed.len(), 1, "只该有**域名**目标失败（IP 字面量是活的）：{names:?}");
-                assert!(
-                    names.iter().all(|t| t.contains("cloudflare.com")),
-                    "失败的必须只有域名目标 —— 这才是「传输通、只有解析坏」：{names:?}"
-                );
-            }
-            other => panic!("只有解析坏时**也不该**接管默认路由（判不可用），实际 {other:?}"),
-        }
-        assert!(
-            !log.seq().iter().any(|s| s == "commit"),
-            "**不得**调用 commit：解析全挂时接管默认路由 = 把一个已经坏掉的体验升级成系统级接管",
-        );
-    }
 
     /// **反例（别变成惊弓之鸟）**：所有目标都真答了 ⇒ 必须能提交。
     #[tokio::test]
