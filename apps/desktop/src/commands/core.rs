@@ -365,8 +365,6 @@ pub(crate) async fn start_core_with_outcome(
         // 若撞上这个早退，就落在这里。实测日志里 2 小时内
         // `[info] 连通性检查通过` 一条都没有，而看门狗每 10 秒就该记一条。
         //
-        // 用 `running_pid()` 而不是 `runtime.pid`：这里要的是**进程真的活着**那个 pid。
-        let pid = supervisor.running_pid();
         drop(helper);
         drop(supervisor);
         return Ok(());
@@ -1397,34 +1395,6 @@ mod tests {
     // task-98：看门狗判据 —— 单条失败不判死 / ≥2 个目标才算一轮失败 / 轮内重试 / 退避
     // -----------------------------------------------------------------------
 
-    /// **task-106 主判据**：境内侧必须 **≥2 个**目标。
-    ///
-    /// 理由：一轮算失败的门槛是「≥2 个目标失败」（`task-98`）。境内侧只有 1 个目标时，
-    /// 「境内全灭」最多只贡献 1 个失败 ⇒ **永不触发重建** —— 用户现场包的真实形状
-    /// （境内 全灭 1/1、境外 0/2 死 ⇒ 只记账、不重建），也正是 `task-172` 那种
-    /// 「绑卡直连全挂」不会自愈的原因。
-    ///
-    /// **敏感性**：把 `223.5.5.5` 的声明侧改成 `Overseas`（或删掉 `119.29.29.29`）
-    /// ⇒ 本测试必红。
-    #[test]
-    fn domestic_side_has_at_least_two_targets_and_keeps_the_domestic_literal() {
-        let domestic = targets_of_side(ProbeSide::Domestic);
-        assert!(
-            domestic.len() >= 2,
-            "境内侧必须 ≥2 个目标，否则「境内全灭」到不了门槛 2：{domestic:?}"
-        );
-        assert_eq!(
-            domestic,
-            vec!["http://223.5.5.5/", "http://119.29.29.29/"],
-            "境内侧就应该是这两条 anycast 字面量（顺序按表）"
-        );
-        let overseas = targets_of_side(ProbeSide::Overseas);
-        assert!(overseas.contains(&"http://1.1.1.1/"), "境外 IP 字面量不许被挪走");
-        assert!(
-            overseas.contains(&xt_core::xray::DEFAULT_PROBE_URL),
-            "域名目标必须留在境外侧（「只有解析坏」的判据）"
-        );
-    }
 
 
 

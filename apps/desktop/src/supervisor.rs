@@ -1462,10 +1462,6 @@ mod tests {
     use super::*;
     use xt_core::model::{AppSettings, ProxyMode};
 
-    /// 「拿到真实响应码」的判据只有一份实现，在 `commands::core` —— 这里**引用**
-    /// 而不是抄一份（task-92：IP 目标回 301/404 也算活着，就是靠它）。
-    use crate::commands::tunnel_is_dead;
-
     /// 临时数据目录 + 一个「从不连接」的 helper 客户端。
     ///
     /// `HelperClient::new(None)` 只是构造对象，不会去连 socket —— 所以下面这些
