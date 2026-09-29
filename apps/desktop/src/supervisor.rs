@@ -201,11 +201,6 @@ pub(crate) fn curl_probe_args(
     ]
 }
 
-/// 经本机 SOCKS 发一次探测（**默认让节点解析**，与改造前的行为一致）。
-pub(crate) async fn socks_http_probe(port: u16, target: String, timeout_secs: u32) -> String {
-    socks_http_probe_with(port, target, timeout_secs, ProbeResolve::AtNode).await
-}
-
 /// 同上，但显式指定"域名由谁解析"。
 pub(crate) async fn socks_http_probe_with(
     port: u16,
@@ -343,14 +338,6 @@ pub(crate) const REQUIRED_PROBE_TARGETS: &[(&str, ProbeSide)] = &[
 /// 只要 URL 的视图（启动门禁 / 看门狗循环用）。
 pub(crate) fn required_probe_urls() -> Vec<&'static str> {
     REQUIRED_PROBE_TARGETS.iter().map(|(url, _)| *url).collect()
-}
-
-/// 目标属于哪一侧；**表里没有的返回 `None`**（不猜、不默认）。
-pub(crate) fn probe_side(target: &str) -> Option<ProbeSide> {
-    REQUIRED_PROBE_TARGETS
-        .iter()
-        .find(|(url, _)| *url == target)
-        .map(|(_, side)| *side)
 }
 
 /// URL 的主机部分是不是 **IP 字面量**（⇒ 这次探测**不需要解析**）。

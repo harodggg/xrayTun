@@ -48,12 +48,8 @@ pub async fn select_node(
             .unwrap_or_else(|| node_id.clone());
         state.log("app", "info", format!("正在切换到「{name}」，需要重建隧道（几秒）"));
 
-        // 拆隧道。**这一步失败不算「已知失败」**：根本没拆成，旧核心可能还在跑 ——
-        // 状态未知时凭不确定作废意图，会误伤一条可能仍然可用的连接
-        // （判据见 `SwitchEnd::TeardownFailed`）。
-        if let Err(e) = core::stop_core(&app, &state).await {
-            return Err(e);
-        }
+        // 拆隧道。这一步失败就直接把原因交出去（旧核心可能还在跑，状态未知）。
+        core::stop_core(&app, &state).await?;
 
         // **失败不再回退到别的节点。**（旧实现在这里会把用户的出口悄悄换成
         // `last_good`/切换前那台 —— 见上面「选择就用」那段。）
