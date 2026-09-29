@@ -16,27 +16,6 @@ use serde::{Deserialize, Serialize};
 use xt_core::model::{AppSettings, Node, ProxyMode, Subscription};
 use xt_core::store::Store;
 
-/// 自动恢复期间写进 `last_notice` 的文案（快照顶部的提示条）。
-pub const RECOVERING_NOTICE: &str = "网络中断，正在自动恢复…";
-
-/// 自动恢复**成功**后清掉恢复中的提示条。
-///
-/// # 为什么必须清
-///
-/// `last_notice` 会随快照下发。成功后不清，下一次刷新就会把过期的
-/// 「正在自动恢复…」带回来（还带一个无事可做的按钮）—— 那就从
-/// 「该显示恢复时看不见」变成「恢复完了还一直显示恢复中」。
-///
-/// # 为什么只清那一条
-///
-/// 同一个字段还被别的流程使用（例如「检测到上次异常退出，正在修复网络配置…」）。
-/// 无差别清空会把别人的提示一起抹掉，所以这里**按内容比对**，只清我们自己写的。
-pub fn clear_recovering_notice(notice: &mut Option<String>) {
-    if notice.as_deref() == Some(RECOVERING_NOTICE) {
-        *notice = None;
-    }
-}
-
 /// 运行中的核心/隧道运行时信息，直接给 UI 用。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CoreRuntime {
@@ -983,39 +962,6 @@ mod tests {
 
 
 
-    /// **重建成功必须清掉恢复中的提示条**（product-manager 实测的缺陷：
-    /// 不清的话下一次快照刷新会把「正在自动恢复…」带回来，
-    /// 于是变成「恢复完了还一直显示恢复中」）。
-    ///
-    /// 同时锁住「只清我们写的那条」：别的 notice 不能被误清。
-    #[test]
-    fn recovery_success_clears_only_our_own_notice() {
-        let mut ours = Some(RECOVERING_NOTICE.to_string());
-        clear_recovering_notice(&mut ours);
-        assert_eq!(ours, None, "恢复成功后不得留下过期的「正在自动恢复」");
-
-        let mut unrelated = Some("检测到上次异常退出，正在修复网络配置…".to_string());
-        clear_recovering_notice(&mut unrelated);
-        assert_eq!(
-            unrelated.as_deref(),
-            Some("检测到上次异常退出，正在修复网络配置…"),
-            "别的模块写的 notice 不能被顺手清掉"
-        );
-
-        // 夹具用**现在的生产文案**（回滚失败那一种）：它与本测试的目的无关，
-        // 但别引用已经删掉的旧文案 —— 那会让后来人以为旧文案还在用。
-        let mut unverified = Some(
-            "自动恢复失败，回退直连未完成：**未能确认网络已恢复**（helper 回滚失败）。\
-             请点「修复网络」重试回滚"
-                .to_string(),
-        );
-        clear_recovering_notice(&mut unverified);
-        assert!(unverified.is_some(), "失败时 notice 要保留并说清下一步");
-
-        let mut empty: Option<String> = None;
-        clear_recovering_notice(&mut empty);
-        assert_eq!(empty, None);
-    }
 
 
 }

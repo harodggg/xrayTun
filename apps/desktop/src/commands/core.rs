@@ -1363,13 +1363,13 @@ mod tests {
     // **不碰真机网络**：全部是纯函数 + seam，没有 route/DNS 操作。
     // -----------------------------------------------------------------------
 
-    /// **(b)** 看门狗要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
+    /// **(b)** 端到端门禁要探的目标必须**覆盖境内 + 境外**（不是只探境外）。
     ///
     /// task-92 之后境内那一半由 **IP 字面量 `223.5.5.5`** 覆盖：
     /// `www.baidu.com` 经 SOCKS 多轮实测不稳定（10 轮 4 失败）被筛掉，
     /// 理由写在 `supervisor.rs` 的 `REQUIRED_PROBE_TARGETS` 文档里。
     #[test]
-    fn watchdog_probes_cover_domestic_and_overseas() {
+    fn probe_targets_cover_domestic_and_overseas() {
         let targets = crate::supervisor::required_probe_urls();
         let ips = crate::supervisor::probe_targets_without_dns(&targets);
         assert!(
@@ -1378,7 +1378,7 @@ mod tests {
         );
         assert!(
             ips.iter().any(|t| t.contains("223.5.5.5")),
-            "必须有一个**境内**目标：只探境外时「国内全断、国外正常」会让看门狗永远认为正常（task-82）",
+            "必须有一个**境内**目标：只探境外时「国内全断、国外正常」会被判成一切正常（task-82）",
         );
         assert!(
             ips.iter().any(|t| t.contains("1.1.1.1")),

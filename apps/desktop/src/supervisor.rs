@@ -144,10 +144,8 @@ where
 ///
 /// # 为什么放在 supervisor 而不是 commands/core.rs
 ///
-/// 它是接管默认路由**之前**那道端到端门禁的实现，而门禁在
-/// [`Supervisor::start`] 里。看门狗与连通性检查（`commands/core.rs`）
-/// 也复用同一实现（那边只是薄封装 `tunnel_probe`）—— 一处实现、两处调用，
-/// 依赖方向仍是 `commands → supervisor`（本来就存在）。
+/// 它是**端到端门禁**的实现，而门禁在 [`Supervisor::start`] 里。
+/// 一处实现、一处调用，依赖方向仍是 `commands → supervisor`（本来就存在）。
 /// 复制第二份 curl 调用必然漂移，正是本项目反复踩过的坑。
 /// 域名由**谁**解析 —— 这是一个产品语义选择，不是 curl 参数细节。
 ///
@@ -270,17 +268,17 @@ pub(crate) async fn socks_http_probe_with(
 /// 2. **回退链已经试过了**：`disableFallback: false` 且没有任何 `skipFallback`
 ///    （见 `config.rs` 的生成），所以一次「域名目标失败」= 境外 DoH **和**境内
 ///    解析器都失败（task-91 的配置分析），不是「只问了一个服务器」；
-/// 3. 误判的代价由**连续失败策略**兜住：看门狗要连续 `FAILURES_BEFORE_REBUILD` 次
-///    才重建，一次解析抖动不会触发；
+/// 3. 误判的代价是**一次启动中止**（门禁没过 ⇒ 回滚，不接管默认路由），
+///    用户可以自己再点一次连接 —— 一次解析抖动不会造成持久损害；
 /// 4. 反过来的代价更大：判「可用」= **明明解析不了却宣称一切正常**，正是本项目
 ///    最忌讳的「界面比事实强」。
 ///
 /// **但诊断必须说清是哪一类**：IP 目标活着、只有域名目标死时，日志里只会点名
 /// 域名目标 —— 用户/我们能看到「传输是通的，是解析坏了」，而不是笼统一句「隧道不通」。
 ///
-/// **看门狗共用这一份**（`commands/core.rs::watchdog_probe_all`）：同一个盲区在
-/// 门禁那边修过（task-42/54），在看门狗那边却漏了 —— 结果是「国内全断、
-/// 国外正常」时看门狗永远认为一切正常（task-82）。**别再分叉出第二份清单。**
+/// **这份清单只有一个来源**：端到端门禁读它（task-42/54 修过"只探境外"的盲区，
+/// task-82 的教训是「国内全断、国外正常」会被误判成一切正常）。
+/// **别再分叉出第二份清单。**
 ///
 /// # 硬编码 IP 的风险与取舍
 ///
@@ -335,7 +333,7 @@ pub(crate) const REQUIRED_PROBE_TARGETS: &[(&str, ProbeSide)] = &[
     ("http://119.29.29.29/", ProbeSide::Domestic),
 ];
 
-/// 只要 URL 的视图（启动门禁 / 看门狗循环用）。
+/// 只要 URL 的视图（端到端门禁用）。
 pub(crate) fn required_probe_urls() -> Vec<&'static str> {
     REQUIRED_PROBE_TARGETS.iter().map(|(url, _)| *url).collect()
 }
@@ -614,8 +612,9 @@ pub struct Supervisor {
     /// # 不变量（两条都不是可选的）
     ///
     /// * **不 `take`**：规则留在 supervisor 上，直到下一次 `set_intent_rules`。
-    ///   看门狗重建会重新调 `start()`；若这里把规则取空，重建之后拦截就静默失效，
-    ///   而用户看到的只是"广告又回来了"（没有任何报错）。
+    ///   任何一次重建（换节点 / 换模式 / 重新连接）都会重新调 `start()`；
+    ///   若这里把规则取空，重建之后拦截就静默失效，而用户看到的只是"广告又回来了"
+    ///   （没有任何报错）。
     /// * **调用方每次 `start()` 前都应重新 set**：设置与判决缓存都可能变，
     ///   这两个字段只是"上次给过来的快照"。
     intent_allow: Vec<xt_core::routing::RoutingRule>,
@@ -997,10 +996,10 @@ impl Supervisor {
             tun_interface: self.physical_interface.clone().map(|_| "utun".to_string()),
             routes_committed: true,
             last_error: None,
-            // 由连通性检查在验证通过后写入（见 commands::spawn_connectivity_check）。
             // supervisor 这里不认识「哪个节点算好」—— 它只负责建隧道。
+            // （原来这里还有一条「自动恢复是否在进行中」的注释，那个状态机已随
+            //  看门狗一起删掉：现在没有"App 自己决定重建"这回事了。）
             last_good_node: None,
-            // 刚建好隧道时没有任何自动恢复在进行；只有看门狗会置位它。
         })
     }
 
