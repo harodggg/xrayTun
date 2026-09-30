@@ -629,20 +629,49 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(test)]
+// 这里**刻意**跨 await 持有 std 锁：要的是「同一时刻只有一个用例在写夹具/ fork」，
+// 也就是 OS 线程级串行。换成 tokio 的异步锁解决不了 —— 它只在异步任务间让路，
+// 而 ETXTBSY 是内核层的 fd 继承问题。理由与背景见 `FIXTURE_LOCK`。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    /// **会 spawn 进程的用例必须拿着这把锁跑完。**
+    ///
+    /// 真实原因（CI 上真红过两次，报 `Text file busy (os error 26)`）：
+    /// libtest 每个用例一个线程；线程 A 正在写夹具脚本（fd 处于可写）时，
+    /// 线程 B 调 `fork()`，子进程会**继承 A 那个可写的 fd**；
+    /// 之后 A 去 exec 这个文件，内核就回 `ETXTBSY`。
+    ///
+    /// 「写临时文件 → 改名」解决不了这个问题：改名换的是路径，inode 没变，
+    /// 那个可写 fd 仍然指向它。唯一稳的做法是让「写夹具」与「任何 fork」
+    /// 不重叠 —— 也就是让这些用例串行。夹具极小（毫秒级），串行的代价可以忽略。
+    ///
+    /// 更彻底的替代方案是给 crate 加一个真的假核心可执行文件（`[[bin]]`），
+    /// 运行时不再写任何可执行文件；那需要把用例挪到 `tests/`（`CARGO_BIN_EXE_*`
+    /// 只在集成测试里可用），本轮不做，记在这里免得下次重新踩。
+    static FIXTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serialize_process_spawning() -> std::sync::MutexGuard<'static, ()> {
+        // 中毒也继续：测的是进程行为，前一个用例 panic 不影响这把锁保护的资源。
+        FIXTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// 写一个可执行的假核心脚本。
     ///
     /// 必须处理 `version` 子命令并**退出**：`start()` 会用 `xray version` 做一次
     /// 真实版本探测，若假脚本对任何参数都长驻，那个探测就永远不返回。
     ///
-    /// 用「写临时文件 → chmod → 原子改名」而不是直接写目标路径：多线程测试里，
-    /// 另一个线程 fork/exec 的窗口会让 exec 撞上 `ETXTBSY`（Text file busy）——
-    /// 那是测试脚手架的 flake，不是被测行为。
-    fn fake_core(dir: &Path, name: &str, body: &str) -> PathBuf {
+    /// 返回的第二个值是串行锁：**必须绑到变量上**（`let (bin, _serial) = ...`），
+    /// 用 `_` 会立刻 drop，锁就白拿了。原因见 [`FIXTURE_LOCK`]。
+    fn fake_core(
+        dir: &Path,
+        name: &str,
+        body: &str,
+    ) -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let serial = serialize_process_spawning();
         let path = dir.join(name);
         let tmp = dir.join(format!("{name}.tmp"));
         {
@@ -657,7 +686,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&tmp, perms).unwrap();
         std::fs::rename(&tmp, &path).unwrap();
-        path
+        (path, serial)
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -700,7 +729,7 @@ mod tests {
         });
         // 第二个必需地址：端口 1 上没有任何服务，因此**还没有**就绪。
         let not_yet: SocketAddr = "127.0.0.1:1".parse().unwrap();
-        let bin = fake_core(&dir, "fake-xray-multi", "echo 'svc up'\nexec tail -f /dev/null");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-multi", "echo 'svc up'\nexec tail -f /dev/null");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
 
@@ -742,7 +771,7 @@ mod tests {
                 }
             });
         }
-        let bin = fake_core(&dir, "fake-xray-multi-ok", "echo 'svc up'\nexec tail -f /dev/null");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-multi-ok", "echo 'svc up'\nexec tail -f /dev/null");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
 
@@ -776,7 +805,7 @@ mod tests {
                 }
             }
         });
-        let bin = fake_core(&dir, "fake-xray", "echo 'fake core started'\nexec tail -f /dev/null");
+        let (bin, _serial) = fake_core(&dir, "fake-xray", "echo 'fake core started'\nexec tail -f /dev/null");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
 
@@ -799,7 +828,7 @@ mod tests {
     #[tokio::test]
     async fn early_exit_is_reported_with_the_real_exit_code() {
         let dir = temp_dir("exit");
-        let bin = fake_core(&dir, "fake-xray-dies", "echo 'boom: bad config'\nexit 3");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-dies", "echo 'boom: bad config'\nexit 3");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
         // 端口 1 上不会有服务。
@@ -828,6 +857,9 @@ mod tests {
     /// 假核心不存在 ⇒ `DatapathUnavailable`（一眼看出是本地问题）。
     #[tokio::test]
     async fn start_fails_for_a_missing_binary() {
+        // 这条用例自己不写夹具，但它会 fork 一次（exec 不存在的路径）——
+        // 只要 fork，就可能继承别的线程"正在写夹具"的 fd，所以同样要串行。
+        let _serial = serialize_process_spawning();
         let dir = temp_dir("missing");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
@@ -848,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn alive_but_not_listening_times_out_as_unavailable() {
         let dir = temp_dir("quiet");
-        let bin = fake_core(&dir, "fake-xray-quiet", "exec tail -f /dev/null");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-quiet", "exec tail -f /dev/null");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
         let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
@@ -865,7 +897,7 @@ mod tests {
     #[tokio::test]
     async fn stop_leaves_no_process_behind() {
         let dir = temp_dir("stop");
-        let bin = fake_core(&dir, "fake-xray-term", "echo 'up'\nexec tail -f /dev/null");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-term", "echo 'up'\nexec tail -f /dev/null");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
         let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
@@ -886,7 +918,7 @@ mod tests {
         let dir = temp_dir("kill");
         // `signal.pause()` 不用 sleep；`print` 是**就绪事件**：它之后 SIGTERM 才真的被忽略。
         // 没有这个事件，「stop 之前进程是否已经装好处理函数」就成了一场赌博。
-        let bin = fake_core(
+        let (bin, _serial) = fake_core(
             &dir,
             "fake-xray-stubborn",
             "echo 'up'\nexec python3 -c \"import signal,sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('term-ignored', flush=True); signal.pause()\"",
@@ -927,7 +959,7 @@ mod tests {
     #[tokio::test]
     async fn validate_config_reports_config_invalid() {
         let dir = temp_dir("validate");
-        let bin = fake_core(&dir, "fake-xray-test", "echo 'invalid: missing inbounds' >&2\nexit 23");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-test", "echo 'invalid: missing inbounds' >&2\nexit 23");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
         let err = validate_config(&bin, &cfg).await.unwrap_err();
@@ -939,7 +971,7 @@ mod tests {
     #[tokio::test]
     async fn validate_config_accepts_a_zero_exit() {
         let dir = temp_dir("validate-ok");
-        let bin = fake_core(&dir, "fake-xray-ok", "exit 0");
+        let (bin, _serial) = fake_core(&dir, "fake-xray-ok", "exit 0");
         let cfg = dir.join("config.json");
         std::fs::write(&cfg, "{}").unwrap();
         assert!(validate_config(&bin, &cfg).await.is_ok());
