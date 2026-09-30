@@ -33,13 +33,20 @@ scripts/guard.sh 不变量的机器判据
 ## 环境
 
 ```bash
-export RUSTUP_HOME=/Users/xbtg-/deepseek-harness/.rustup
-export CARGO_HOME=/Users/xbtg-/deepseek-harness/.cargo
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 ```
 
-真 Xray（端到端测试用，Linux amd64 26.3.27）：
-`/Users/xbtg-/deepseek-harness/.scratch/bin/xray`（可用 `XT_XRAY_BIN` 覆盖）
+端到端测试需要**真 xray 二进制**（不附带、也不写死路径）：
+
+```bash
+export XT_XRAY_BIN=/path/to/xray      # 或者把 xray 放进 PATH
+```
+
+实测版本 `Xray 26.3.27 linux/amd64`。脚本与测试遵守同一条查找顺序：
+`XT_XRAY_BIN`（旧名 `XRAY_BIN`）→ `PATH` 里的 `xray`；**找不到就失败，不会静默跳过**
+（"跳过"会让"端到端通过"这句话失去依据）。
 
 ## 状态（2026-09-29，冻结树）
 

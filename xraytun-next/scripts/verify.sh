@@ -14,11 +14,19 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1
 
-export RUSTUP_HOME="${RUSTUP_HOME:-/Users/xbtg-/deepseek-harness/.rustup}"
-export CARGO_HOME="${CARGO_HOME:-/Users/xbtg-/deepseek-harness/.cargo}"
+# 环境和真 xray 都**不写死绝对路径**：公开仓库里不该有某台机器的布局。
+# 顺序是「环境变量 → 本机开发目录（存在才用）→ 系统默认」。
+export RUSTUP_HOME="${RUSTUP_HOME:-$( [ -d "$ROOT/../.rustup" ] && echo "$ROOT/../.rustup" || echo "$HOME/.rustup" )}"
+export CARGO_HOME="${CARGO_HOME:-$( [ -d "$ROOT/../.cargo" ] && echo "$ROOT/../.cargo" || echo "$HOME/.cargo" )}"
 export PATH="$CARGO_HOME/bin:$PATH"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/xbtg-/deepseek-harness/.cargo-targets/verify}"
-export XT_XRAY_BIN="${XT_XRAY_BIN:-/Users/xbtg-/deepseek-harness/.scratch/bin/xray}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+
+resolve_xray() {
+  if [ -n "${XT_XRAY_BIN:-}" ]; then printf '%s' "$XT_XRAY_BIN"; return; fi
+  if [ -x "$ROOT/../.scratch/bin/xray" ]; then printf '%s' "$ROOT/../.scratch/bin/xray"; return; fi
+  command -v xray 2>/dev/null || printf ''
+}
+export XT_XRAY_BIN="$(resolve_xray)"
 
 declare -a NAMES=()
 declare -a RESULTS=()

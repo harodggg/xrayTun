@@ -33,20 +33,32 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(30);
 const UUID_1: &str = "11111111-1111-1111-1111-111111111111";
 const UUID_2: &str = "22222222-2222-2222-2222-222222222222";
 
-/// 真 xray 二进制：环境变量优先，其次契约里写明的下载位置。
+/// 真 xray 二进制：`XT_XRAY_BIN`（或旧名 `XRAY_BIN`）→ PATH 里的 `xray`。
+///
+/// 两条纪律：
+/// 1. **不写死绝对路径**。这里曾默认指向某台开发机上的
+///    `/Users/.../.scratch/bin/xray`，一进 CI 就红 —— 公开仓库里不该有某个人的机器布局。
+/// 2. **找不到就失败，不静默跳过**。"跳过"会让"端到端通过"这句话失去依据。
 fn xray_bin() -> PathBuf {
-    if let Ok(path) = std::env::var("XT_XRAY_BIN") {
-        let path = PathBuf::from(path);
-        assert!(path.is_file(), "XT_XRAY_BIN 指向的文件不存在：{}", path.display());
-        return path;
+    for key in ["XT_XRAY_BIN", "XRAY_BIN"] {
+        if let Ok(path) = std::env::var(key) {
+            let path = PathBuf::from(path);
+            assert!(path.is_file(), "{key} 指向的文件不存在：{}", path.display());
+            return path;
+        }
     }
-    let default = PathBuf::from("/Users/xbtg-/deepseek-harness/.scratch/bin/xray");
-    assert!(
-        default.is_file(),
-        "端到端测试需要真 xray 二进制：设置 XT_XRAY_BIN，或把它放到 {}",
-        default.display()
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("xray");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    panic!(
+        "端到端测试需要真 xray 二进制：设置 XT_XRAY_BIN=/path/to/xray，或把它放进 PATH。\
+         （本测试不做静默跳过：跳过会让结论失去依据。）"
     );
-    default
 }
 
 fn temp_dir(tag: &str) -> PathBuf {

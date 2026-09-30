@@ -4,7 +4,8 @@
 //! 证明不了「Xray 认这个形状」。字段名拼错时 serde_json 不会报错，
 //! 只有核心自己会拒绝启动 —— 所以这一层验证不可省。
 //!
-//! 二进制路径：`XRAY_BIN` 环境变量，默认 `/Users/xbtg-/deepseek-harness/.scratch/bin/xray`。
+//! 二进制路径：`XT_XRAY_BIN`（或旧名 `XRAY_BIN`）→ PATH 里的 `xray`。
+//! **不写死绝对路径**（那让 CI 必红，也不该出现在公开仓库里）。
 //! **二进制不存在就失败**，不静默跳过：跳过会让「合法」这个结论失去依据。
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -15,10 +16,23 @@ use xt_contract::model::{LogLevel, NodeId};
 use xt_xrayconf::{generate, generate_probe, ConfigInputs, OutboundSpec};
 
 fn xray_bin() -> PathBuf {
-    PathBuf::from(
-        std::env::var("XRAY_BIN")
-            .unwrap_or_else(|_| "/Users/xbtg-/deepseek-harness/.scratch/bin/xray".to_string()),
-    )
+    for key in ["XT_XRAY_BIN", "XRAY_BIN"] {
+        if let Ok(path) = std::env::var(key) {
+            return PathBuf::from(path);
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("xray");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    panic!(
+        "这个测试要把生成的配置交给真核心做 `xray run -test -c` 校验，需要真 xray 二进制：\
+         设置 XT_XRAY_BIN=/path/to/xray，或把它放进 PATH。"
+    );
 }
 
 /// 用 xt-subs 真解析一条链接，确保测的是「生产路径产出的 outbound」而不是手写夹具。
@@ -28,8 +42,9 @@ fn node_from_link(link: &str) -> (NodeId, serde_json::Value) {
 }
 
 fn assert_xray_accepts(config: &str, label: &str) {
+    // `xray_bin()` 已经保证"要么拿到真实路径，要么带着怎么配置的提示 panic"，
+    // 所以这里不再多写一条 exists 断言（那条会让人误以为还有第二种给法）。
     let bin = xray_bin();
-    assert!(bin.exists(), "找不到 xray 二进制：{}（用 XRAY_BIN 指定）", bin.display());
 
     let path = std::env::temp_dir().join(format!("xt-xrayconf-{}-{label}.json", std::process::id()));
     std::fs::write(&path, config).expect("写临时配置");
