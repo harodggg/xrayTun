@@ -13,12 +13,19 @@
 #   手动 workflow_dispatch  → 同上（tag 用工作区版本号拼）
 #
 # 顺序就是判据顺序：钉工具链 → guard → clippy → 测试（含真 xray 端到端）→ 构建 → 打包 → 发布。
-name: xraytun-next release (Linux)
+name: xraytun-next build & release
 
 on:
   push:
     tags:
       - 'xraytun-next-v*'
+    # 分支推送 = **只构建、只跑测试、只上传工作流产物**，不发 Release。
+    # 这样迭代不污染线上版本；发版仍然只由 tag 决定（见各 job 的 `if: github.ref_type == 'tag'`）。
+    branches:
+      - xraytun-next-v1
+    paths:
+      - 'xraytun-next/**'
+      - '.github/workflows/xraytun-next-*.yml'
   workflow_dispatch:
 
 permissions:
@@ -31,7 +38,7 @@ env:
   XRAY_VERSION: v26.3.27
 
 jobs:
-  build-and-release:
+  linux-core:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -92,7 +99,16 @@ jobs:
           cat "dist/SHA256SUMS.txt"
           sha256sum target/release/xt-daemon target/release/xt-cli
 
-      - name: 发布 Release（已存在则只补资产）
+      - name: 上传工作流产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xraytun-next-linux-x86_64
+          path: |
+            xraytun-next/dist/*.tar.gz
+            xraytun-next/dist/SHA256SUMS.txt
+
+      - name: 发布 Release（仅 tag；已存在则只补资产）
+        if: github.ref_type == 'tag'
         working-directory: xraytun-next
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,4 +125,128 @@ jobs:
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
           echo "--- 线上资产 ---"
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
+
+  # ---------------------------------------------------------------------------
+  # macOS 核心：本机（Linux）**根本没法编译也验证不了** macOS 产物，
+  # 所以这一段的唯一价值就是"在真 mac 上真的构建、真的跑测试"。
+  # 它与 linux-core 是两条并行产线（互不阻塞），产物是 universal（arm64 + x86_64）。
+  # ---------------------------------------------------------------------------
+  macos-core:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust 1.98.1 + 两个 mac target
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup target add --toolchain 1.98.1 aarch64-apple-darwin x86_64-apple-darwin
+          rustup target list --installed
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xraytun-next/target
+          key: xt-next-macos-${{ hashFiles('xraytun-next/Cargo.lock', 'xraytun-next/rust-toolchain.toml') }}
+          restore-keys: xt-next-macos-
+
+      - name: 取真 xray（两个架构 lipo 合成 universal）
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/xa /tmp/xb /tmp/xray
+          curl -fL --retry 3 -o /tmp/xa.zip \
+            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-macos-arm64-v8a.zip"
+          curl -fL --retry 3 -o /tmp/xb.zip \
+            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-macos-64.zip"
+          unzip -oq /tmp/xa.zip -d /tmp/xa
+          unzip -oq /tmp/xb.zip -d /tmp/xb
+          lipo -create /tmp/xa/xray /tmp/xb/xray -output /tmp/xray/xray
+          chmod +x /tmp/xray/xray
+          echo "核心架构：$(lipo -archs /tmp/xray/xray)"
+          /tmp/xray/xray version
+
+      - name: 不变量守卫（guard.sh）
+        working-directory: xraytun-next
+        run: bash scripts/guard.sh
+
+      - name: clippy
+        working-directory: xraytun-next
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试（含真 xray 端到端）—— 在真实 macOS 上跑
+        working-directory: xraytun-next
+        run: cargo test --workspace
+
+      - name: 构建两个架构并 lipo 成 universal
+        working-directory: xraytun-next
+        run: |
+          set -euo pipefail
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target "$t" -p xt-daemon -p xt-cli
+          done
+          mkdir -p dist/universal/bin
+          for b in xt-daemon xt-cli; do
+            lipo -create "target/aarch64-apple-darwin/release/$b" \
+                        "target/x86_64-apple-darwin/release/$b" \
+                        -output "dist/universal/bin/$b"
+          done
+          file dist/universal/bin/*
+          for b in xt-daemon xt-cli; do echo "$b 架构：$(lipo -archs "dist/universal/bin/$b")"; done
+
+      - name: 冒烟（真的能起来、真的能说话）
+        working-directory: xraytun-next
+        run: |
+          set -euo pipefail
+          ./dist/universal/bin/xt-daemon --socket /tmp/xt.sock --state-dir /tmp/xt-state \
+            --xray /tmp/xray/xray > /tmp/xt-daemon.log 2>&1 &
+          DAEMON=$!
+          trap 'kill $DAEMON 2>/dev/null || true' EXIT
+          # 测试夹具的等待（产品本身没有 sleep）
+          for _ in $(seq 1 100); do [ -S /tmp/xt.sock ] && break; sleep 0.1; done
+          [ -S /tmp/xt.sock ] || { echo "daemon socket 没出现"; cat /tmp/xt-daemon.log; exit 1; }
+          ./dist/universal/bin/xt-cli --socket /tmp/xt.sock hello
+          ./dist/universal/bin/xt-cli --socket /tmp/xt.sock --json status
+          kill $DAEMON; wait $DAEMON 2>/dev/null || true
+
+      - name: 打包 + 校验和
+        working-directory: xraytun-next
+        run: |
+          set -euo pipefail
+          VERSION="$(awk '/^\[workspace.package\]/{f=1;next} f&&/^version/{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)"
+          NAME="xraytun-next-${VERSION}-macos-universal"
+          mkdir -p dist
+          cp -R dist/universal "dist/$NAME"
+          cp packaging/INSTALL-macos.md "dist/$NAME/INSTALL.md"
+          cp ../LICENSE "dist/$NAME/LICENSE"
+          tar czf "dist/$NAME.tar.gz" -C dist "$NAME"
+          (cd dist && shasum -a 256 "$NAME.tar.gz" > SHA256SUMS-macos.txt)
+          cat "dist/SHA256SUMS-macos.txt"
+
+      - name: 上传工作流产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xraytun-next-macos-universal
+          path: |
+            xraytun-next/dist/*.tar.gz
+            xraytun-next/dist/SHA256SUMS-macos.txt
+
+      - name: 发布 Release（仅 tag；已存在则只补资产）
+        if: github.ref_type == 'tag'
+        working-directory: xraytun-next
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "xraytun-next（Linux + macOS 核心 · proxy 模式）" \
+              --prerelease \
+              --notes-file docs/release-notes/v1.0.0.md \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS-macos.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
