@@ -1,0 +1,112 @@
+# xraytun-next 发布流水线（Linux x86_64 核心）
+#
+# 为什么单独一条工作流，而不是塞进 release.yml：
+#   release.yml 的产物是 macOS 应用（dmg/zip + 公证 + 站点），跑在 macos-14 上，动辄几十分钟；
+#   这条分支现在交付的是 linux-x86_64 的核心二进制（daemon + CLI），跑 ubuntu 几分钟就好。
+#   两条产线混在一起会互相阻塞，也会让「哪一步慢了」难判断。
+#
+# 二进制不进 git：根 .gitignore 一贯把大体积第三方产物挡在外面，
+# 产物走 Release 资产、源码走 git 历史，两边由 sha256 对上。
+#
+# 触发：
+#   推 tag xraytun-next-v* → 构建 + 测试 + 发 Release（预发布）
+#   手动 workflow_dispatch  → 同上（tag 用工作区版本号拼）
+#
+# 顺序就是判据顺序：钉工具链 → guard → clippy → 测试（含真 xray 端到端）→ 构建 → 打包 → 发布。
+name: xraytun-next release (Linux)
+
+on:
+  push:
+    tags:
+      - 'xraytun-next-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # 钉死工具链：本机验证用的是 1.98.1，CI 不该用另一个版本得出另一个结论
+  RUSTUP_TOOLCHAIN: '1.98.1'
+  XT_XRAY_BIN: /tmp/xray/xray
+  XRAY_VERSION: v26.3.27
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust 1.98.1（含 clippy）
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          cargo --version && cargo clippy --version
+
+      - name: 缓存 cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xraytun-next/target
+          key: xt-next-linux-${{ hashFiles('xraytun-next/Cargo.lock', 'xraytun-next/rust-toolchain.toml') }}
+          restore-keys: xt-next-linux-
+
+      - name: 取真 xray（端到端测试需要，不跳测试）
+        run: |
+          curl -fL --retry 3 -o /tmp/xray.zip \
+            "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"
+          mkdir -p /tmp/xray
+          unzip -o /tmp/xray.zip -d /tmp/xray >/dev/null
+          "$XT_XRAY_BIN" version
+
+      - name: 不变量守卫（guard.sh）
+        working-directory: xraytun-next
+        run: bash scripts/guard.sh
+
+      - name: clippy
+        working-directory: xraytun-next
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试（含真 xray 端到端）
+        working-directory: xraytun-next
+        run: cargo test --workspace
+
+      - name: 构建 release 二进制
+        working-directory: xraytun-next
+        run: cargo build --release -p xt-daemon -p xt-cli
+
+      - name: 打包 + 校验和
+        working-directory: xraytun-next
+        run: |
+          set -euo pipefail
+          VERSION="$(awk '/^\[workspace.package\]/{f=1;next} f&&/^version/{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)"
+          NAME="xraytun-next-${VERSION}-linux-x86_64"
+          mkdir -p "dist/$NAME/bin"
+          cp target/release/xt-daemon target/release/xt-cli "dist/$NAME/bin/"
+          cp packaging/INSTALL-linux.md "dist/$NAME/INSTALL.md"
+          cp ../LICENSE "dist/$NAME/LICENSE"
+          tar czf "dist/$NAME.tar.gz" -C dist "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > SHA256SUMS.txt)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "--- 本次产物 ---"
+          cat "dist/SHA256SUMS.txt"
+          sha256sum target/release/xt-daemon target/release/xt-cli
+
+      - name: 发布 Release（已存在则只补资产）
+        working-directory: xraytun-next
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="xraytun-next-v${VERSION}"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; fi
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "xraytun-next v${VERSION}（Linux x86_64 核心 · proxy 模式）" \
+              --prerelease \
+              --notes-file docs/release-notes/v1.0.0.md \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
+          echo "--- 线上资产 ---"
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
