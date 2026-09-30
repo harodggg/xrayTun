@@ -7,6 +7,8 @@ license.workspace = true
 description = "macOS 系统网络原语：utun / 地址 / 路由 / DNS / 快照回滚（非 macOS 平台编译成显式 Unsupported 桩）"
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 xt-contract.workspace = true
 libc.workspace = true
