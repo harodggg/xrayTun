@@ -79,8 +79,14 @@ scan_code() {
 say "== xraytun-next guard =="
 
 # ---------------------------------------------------------------- I1 无等待
-mapfile -t CRATES < <(src_files)
-mapfile -t UIS < <(ui_files)
+#
+# 用 while-read 而不是 `mapfile`：macOS 自带的是 bash 3.2，没有 `mapfile`
+# （CI 上真红过一次）。这个脚本要在 Linux 与 macOS 上都跑得起来 ——
+# 「本机能过、换台机器就过不了」正是这个仓库反复在消除的那类问题。
+CRATES=()
+while IFS= read -r _f; do CRATES+=("$_f"); done < <(src_files)
+UIS=()
+while IFS= read -r _f; do UIS+=("$_f"); done < <(ui_files)
 
 scan_code "I1 无 sleep / 无轮询（Rust）" \
   '\b(sleep|sleep_ms|usleep|nanosleep)\s*\(|\bpoll_interval\b|\bspin_loop\b' "${CRATES[@]}"
