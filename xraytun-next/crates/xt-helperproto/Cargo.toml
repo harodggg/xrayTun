@@ -1,0 +1,15 @@
+[package]
+name = "xt-helperproto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "helper 的封闭指令集（帧复用 xt-ipc）；不接受任意命令/路径/文件写入"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+xt-contract.workspace = true
+xt-ipc.workspace = true

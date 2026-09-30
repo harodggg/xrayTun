@@ -902,6 +902,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "xt-helperd"
+version = "1.0.0"
+dependencies = [
+ "clap",
+ "libc",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "xt-contract",
+ "xt-helperproto",
+ "xt-ipc",
+ "xt-macosnet",
+]
+
+[[package]]
+name = "xt-helperproto"
+version = "1.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "xt-contract",
+ "xt-ipc",
+]
+
+[[package]]
 name = "xt-ipc"
 version = "1.0.0"
 dependencies = [
@@ -909,6 +937,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "xt-contract",
+]
+
+[[package]]
+name = "xt-macosnet"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "thiserror",
  "xt-contract",
 ]
 

@@ -185,6 +185,10 @@ check_deps xt-probe xt-contract xt-subs
 check_deps xt-datapath xt-contract xt-bus xt-xrayconf
 check_deps xt-daemon $ALL
 check_deps xt-cli xt-contract xt-ipc
+# macOS 层（S1/S2）：helperd → helperproto/macosnet → contract；macosnet 不认识协议、只认系统调用。
+check_deps xt-helperproto xt-contract xt-ipc
+check_deps xt-macosnet xt-contract
+check_deps xt-helperd xt-contract xt-ipc xt-helperproto xt-macosnet
 [ "$violations" -eq 0 ] && ok "I4 依赖方向与分层表一致"
 
 # ------------------------------------------------------------------- 汇总

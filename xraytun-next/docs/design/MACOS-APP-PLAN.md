@@ -117,3 +117,47 @@
 3. 一个决定：**要不要复用老仓库 macOS 层的设计**（不是照抄代码）。我的建议是要 ——
    那部分踩过的坑（fd 交付、两阶段启动、快照回滚的边界条件）比重新推一遍便宜得多，
    而且它是同一个作者、同一个许可证。
+
+## 5. 冻结接口（S1/S2/S3 三条线的契约，先定后写）
+
+新增 crate **`xt-macosnet`**：只做四件事（建/拆 utun、配地址、加/删路由、设置/还原 DNS）
+与快照回滚。**非 macOS 平台上编译成"能编译但一律返回 `Unsupported`"的桩**，
+这样 Linux 的 `cargo test --workspace` 仍然全绿（Linux 仍是我们最快的门）。
+
+```rust
+// xt-macosnet —— 只有 helper 进程会调用它（权限边界见 docs/architecture/ARCHITECTURE.md §1.2）
+pub struct TunRequest {
+    pub addresses: Vec<String>,   // "198.18.0.1/15" 形式
+    pub mtu: u16,
+    pub bypass_routes: Vec<String>, // 内网直连 + 网关 host 路由（建卡阶段装）
+    pub default_routes: Vec<String>,// 0.0.0.0/1 + 128.0.0.0/1（提交阶段才装）
+    pub dns_servers: Vec<String>,
+}
+pub struct TunSession { pub id: String, pub interface: String }
+
+/// 建卡 + 配地址 + 装 bypass 路由 + 落快照；此时**不碰默认路由、不改 DNS**。
+pub fn tun_up(req: &TunRequest) -> Result<TunSession, ErrorBody>;
+/// 交出 utun 的 fd（helper 把它通过 SCM_RIGHTS 发给 daemon）。
+pub fn take_fd(session: &TunSession) -> Result<std::os::fd::RawFd, ErrorBody>;
+/// 接管：装默认路由 + 改 DNS。失败必须能全量回滚。
+pub fn commit_routes(session: &TunSession) -> Result<(), ErrorBody>;
+/// 还原：按快照倒序撤销（DNS → 路由 → 接口）。
+pub fn tun_down(session: &TunSession) -> Result<(), ErrorBody>;
+/// 启动时处理上一次崩溃留下的半残状态（`pending_routes` 非空也算未完成）。
+pub fn restore_stale(state_dir: &std::path::Path) -> Result<Option<String>, ErrorBody>;
+```
+
+新增 **`xt-helperproto`**（helper 的封闭指令集，P2 冻结）：帧格式复用 `xt-ipc`；
+指令只有 `Status` / `TunUp` / `TakeTunFd` / `CommitRoutes` / `TunDown` / `RestoreStale`。
+**不接受**任意命令、任意路径、任意文件写入；数据面可执行文件路径必须落在白名单目录内。
+
+daemon 侧（S3）只认一个能力开关：`Capability::TunMode` —— **只有 S3 完成且真机验收通过才宣告**。
+
+## 6. 验证阶梯（这条决定了迭代速度）
+
+| 手段 | 能发现什么 | 代价 |
+| --- | --- | --- |
+| `cargo check --target aarch64-apple-darwin`（本机） | 类型/借用/API 误用（macOS-only 代码也能查） | 冷 1m44s，之后增量数秒 |
+| `cargo check --target x86_64-apple-darwin`（本机） | 同上（另一个架构） | 同上 |
+| macOS CI（`macos-14`） | 真编译、真单测、真 xray 端到端、universal、CLI 冒烟 | 每次约 8–12 分钟 |
+| 用户真机 | TUN 是否真的接管流量、helper 安装/卸载/回滚、Gatekeeper | 只有用户能做 |

@@ -22,6 +22,10 @@ members = [
     "crates/xt-datapath",
     "crates/xt-daemon",
     "crates/xt-cli",
+    # macOS 层（S1/S2）：xt-macosnet 只被特权 helper 调用；非 macOS 编译成显式桩。
+    "crates/xt-helperproto",
+    "crates/xt-macosnet",
+    "crates/xt-helperd",
 ]
 
 [workspace.package]
@@ -60,6 +64,10 @@ xt-nodes = { path = "crates/xt-nodes" }
 xt-stats = { path = "crates/xt-stats" }
 xt-probe = { path = "crates/xt-probe" }
 xt-datapath = { path = "crates/xt-datapath" }
+# macOS 层（S1/S2）：helper 专用。依赖方向：helperd → helperproto/macosnet → contract。
+xt-helperproto = { path = "crates/xt-helperproto" }
+xt-macosnet = { path = "crates/xt-macosnet" }
+xt-helperd = { path = "crates/xt-helperd" }
 
 [profile.release]
 lto = "thin"
