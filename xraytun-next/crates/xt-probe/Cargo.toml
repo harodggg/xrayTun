@@ -1,0 +1,13 @@
+[package]
+name = "xt-probe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "延迟探测：真实 TTFB，事件驱动上报"
+
+[dependencies]
+xt-contract.workspace = true
+xt-subs.workspace = true
+tokio.workspace = true
+serde_json.workspace = true

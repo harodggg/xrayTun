@@ -1,0 +1,12 @@
+[package]
+name = "xt-bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "进程内事件总线：watch/broadcast，无轮询"
+
+[dependencies]
+tokio.workspace = true
+xt-contract.workspace = true
+tracing.workspace = true

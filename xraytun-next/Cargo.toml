@@ -1,0 +1,66 @@
+# xraytun-next · 工作空间
+#
+# 依赖方向是单向的、并且由 Cargo.toml 强制（不是靠约定）：
+#   L0 xt-contract  ← 谁都可以依赖，它不依赖任何人
+#   L1 纯域 crate   ← 只依赖 xt-contract
+#   L2 有 IO 的 crate ← 依赖 L1
+#   L3 xt-daemon/xt-cli ← 组合根，依赖全部
+# 反向依赖一旦写出来，`cargo tree` 立刻能看见。
+[workspace]
+resolver = "2"
+members = [
+    "crates/xt-contract",
+    "crates/xt-bus",
+    "crates/xt-state",
+    "crates/xt-settings",
+    "crates/xt-subs",
+    "crates/xt-xrayconf",
+    "crates/xt-ipc",
+    "crates/xt-nodes",
+    "crates/xt-stats",
+    "crates/xt-probe",
+    "crates/xt-datapath",
+    "crates/xt-daemon",
+    "crates/xt-cli",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "net", "io-util", "sync", "time", "fs", "signal"] }
+base64 = "0.22"
+url = "2"
+percent-encoding = "2"
+serde_yaml = "0.9"
+h2 = "0.4"
+http = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+# 只为一件事：给 xray 子进程发 SIGTERM（tokio 的 Child 只提供 SIGKILL）。
+# libc 本来就是 tokio 的传递依赖，不引入新的下载版本。
+libc = "0.2"
+
+xt-contract = { path = "crates/xt-contract" }
+xt-bus = { path = "crates/xt-bus" }
+xt-state = { path = "crates/xt-state" }
+xt-settings = { path = "crates/xt-settings" }
+xt-subs = { path = "crates/xt-subs" }
+xt-xrayconf = { path = "crates/xt-xrayconf" }
+xt-ipc = { path = "crates/xt-ipc" }
+xt-nodes = { path = "crates/xt-nodes" }
+xt-stats = { path = "crates/xt-stats" }
+xt-probe = { path = "crates/xt-probe" }
+xt-datapath = { path = "crates/xt-datapath" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

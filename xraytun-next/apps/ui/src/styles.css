@@ -1,0 +1,1187 @@
+/* =============================================================================
+ * xraytun-next · 设计系统 v1
+ *
+ * 说明书：docs/design/DESIGN-SYSTEM.md（token 表、组件规格、状态 ↔ 契约字段绑定）
+ * 信息溯源：docs/design/TRUE-INFORMATION.md（每个可见数字的唯一合法来源）
+ *
+ * 三条不可协商的规则（违反即为返工）：
+ *   1. 绿色（--state-connected）只在 stage == "connected" 时出现；
+ *      connecting 用进行中蓝，disconnected 用中性灰，last_error 只在 error-box/banner 里上红。
+ *   2. stats == null / 任何 Option 为 null → 用 --state-unknown + 虚线 + 文字（未采样/未知），
+ *      绝不允许用数字 0 代替。实测的 0 才是 0，用正常文字色。
+ *   3. 颜色不是唯一载体：徽章、日志等级、通知条都必须带文字。
+ *
+ * 无依赖、无框架、无 JS。只有 transition；唯一的无限动画是 --connecting 的呼吸点，
+ * 且它在 prefers-reduced-motion 下被关掉，不承载任何不可替代的信息。
+ * ========================================================================== */
+
+/* ---------------------------------------------------------------------------
+ * 0. Token（与 DESIGN-SYSTEM.md §2 逐字一致）
+ * ------------------------------------------------------------------------ */
+:root {
+  /* 让原生控件（select 下拉、滚动条）跟随暗色，否则白底下拉框会刺眼 */
+  color-scheme: dark;
+
+  /* 层级与表面：一页最多 3 种表面色，层级靠留白与弱分隔线 */
+  --bg: #0e1320;
+  --bg-sunken: #090d16;
+  --bg-chrome: #0b1018;
+  --surface-1: #161d2c;
+  --surface-2: #1c2436;
+  --surface-hover: #1a2333;
+  --surface-active: #1b2740;
+
+  /* 边界：--border 是装饰（豁免 3:1）；--border-strong 承载「这里有控件」的信息（≥3:1） */
+  --border: #263148;
+  --border-strong: #5c7290;
+  --border-dashed: var(--tint-unknown-border);
+
+  /* 文字：三档，最差背景上全部 ≥4.5:1（见 DESIGN-SYSTEM.md §7 实算） */
+  --text: #e6ecf5;
+  --text-dim: #a7b3c6;
+  --text-faint: #7f8fa6;
+  --on-accent: #06101f;
+
+  /* 交互强调：只表示「可操作」，与数据无关 */
+  --accent: #4f8ef7;
+  --accent-hover: #6ba0ff;
+
+  /* 状态色：每一个都有且只有一个契约判据（DESIGN-SYSTEM.md §4） */
+  --state-idle: #8b98ab;        /* stage == "disconnected" 且 last_error == null */
+  --state-progress: #4f8ef7;    /* stage ∈ {"connecting","disconnecting"}；刻意与 --accent 同值 */
+  --state-connected: #34d399;   /* 唯一的绿：stage == "connected" */
+  --state-warning: #fbbf24;     /* NoticeSeverity.warning / LogLevel.warn / 事件跳号 */
+  --state-error: #f87171;       /* last_error != null / severity error / level error */
+  --state-unknown: #a3a8cf;     /* 任何 Option 字段为 null：未采样、未知、未探测 */
+
+  /* 状态 tint：底色只给 chip 一点体积感（对表面的对比度 1.0–1.2），
+     信息由「文字 + 描边 + 色相」承载，任何人只读底色都会读错 */
+  --tint-connected-bg: #12302a;
+  --tint-connected-border: #1f5545;
+  --tint-progress-bg: #14243a;
+  --tint-progress-border: #2a4d78;
+  --tint-error-bg: #2d171b;
+  --tint-error-border: #5b2b33;
+  --tint-warning-bg: #2a2310;
+  --tint-warning-border: #57471f;
+  --tint-idle-bg: #1d2534;
+  --tint-idle-border: #3b4a63;
+  --tint-unknown-bg: #0d121c;
+  --tint-unknown-border: #5f6b85;
+
+  /* 间距：内间距 2px 步进，布局 4px 步进；--gutter 是窗口级常量不进刻度 */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 24px;
+  --sp-8: 32px;
+  --gutter: 20px;
+
+  /* 圆角 */
+  --radius-xs: 3px;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* 字号 / 字重 / 行高 */
+  --fs-2xs: 10.5px;
+  --fs-xs: 11.5px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 20px;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --lh-tight: 1.25;
+  --lh-ui: 1.55;
+  --lh-read: 1.75;
+
+  /* 字体栈 */
+  --font-ui: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Noto Sans Mono", monospace;
+
+  /* 动效：默认 120ms；只过渡颜色/描边，不碰布局属性 */
+  --dur-fast: 120ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+  /* 焦点环：两层，任意底色上都可见（外圈对 --surface-1 为 5.25:1） */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+
+/* ---------------------------------------------------------------------------
+ * 1. 基础
+ * ------------------------------------------------------------------------ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-regular);
+  line-height: var(--lh-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+ul,
+ol,
+figure {
+  margin: 0;
+}
+
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+/* 原生控件继承排版：否则 input/select 会用系统默认字号，破坏字阶 */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+/* 焦点可见：只对键盘焦点画环，鼠标点击不画（避免噪声） */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-xs);
+}
+
+/* 暗色下的滚动条：不美化也可以用，但原生亮色滑块在深底上等于一个高对比色块 */
+* {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-pill);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 屏幕阅读器专用：状态变化播报用，不占视觉空间 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 等宽数字：实时字节数不开 tabular 会每秒变宽变窄，整行跳动。
+   所有数字（流量、时长、TTFB、时间戳）必须带 .mono 或 .num */
+.mono,
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+/* 未采样 / 未知：独立于「0」和「错误」的第三种视觉。
+   三个可区分维度：色相（淡紫）、虚线描边、内容只能是词——里面不允许出现数字 */
+.unknown {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border: 1px dashed var(--border-dashed);
+  border-radius: var(--radius-xs);
+  background: var(--tint-unknown-bg);
+  color: var(--state-unknown);
+  font-size: var(--fs-xs);
+  font-variant-numeric: normal;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * 2. 应用骨架
+ * ------------------------------------------------------------------------ */
+.app {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  height: 100%;
+  min-height: 100%;
+}
+
+.app__nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-6) var(--sp-3);
+  background: var(--bg-chrome);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.app__nav-item {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.app__nav-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* 选中导航用表面色 + 文字亮度，不用强调色：强调色要留给「可操作」 */
+.app__nav-item--active {
+  background: var(--surface-active);
+  color: var(--text);
+  font-weight: var(--fw-medium);
+}
+
+.app__main {
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* ---------------------------------------------------------------------------
+ * 3. 页面与通用容器
+ * ------------------------------------------------------------------------ */
+.page {
+  max-width: 960px;
+  padding: var(--sp-7) var(--gutter) var(--sp-8);
+}
+
+.page__title {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+}
+
+.page__hint {
+  margin-top: var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-read);
+}
+
+.page__section {
+  margin-top: var(--sp-7);
+}
+
+.page__section-title {
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+/* 空态：只描述事实 + 下一步，绝不写「一切正常」 */
+.page__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-7) var(--sp-6);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  text-align: center;
+}
+
+.page__empty-title {
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+}
+
+.page__empty-hint {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-read);
+}
+
+.card {
+  padding: var(--sp-6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+}
+
+.card__title {
+  margin-bottom: var(--sp-4);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+}
+
+.card__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+/* 键值对：键固定宽、值占满，长 endpoint/路径不撑破布局 */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-6);
+  align-items: baseline;
+}
+
+.kv__key {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.kv__value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+/* 表单行：标签左、值右 */
+.row {
+  display: grid;
+  grid-template-columns: minmax(120px, max-content) minmax(0, 1fr);
+  gap: var(--sp-2) var(--sp-6);
+  align-items: center;
+}
+
+.row__label {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.row__value {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * 4. 状态徽章：class 后缀 == 契约枚举的 serde snake_case 值
+ * ------------------------------------------------------------------------ */
+/* 基态 = 未知（还没有 ConnectionView 快照，stage == null）。
+   默认必须是「不可信」而不是「未连接」：漏配 modifier 时画成中性灰的 idle，
+   会把「界面还不知道状态」说成「确定没有连接」 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-4);
+  border: 1px dashed var(--border-dashed);
+  border-radius: var(--radius-pill);
+  background: var(--tint-unknown-bg);
+  color: var(--state-unknown);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+/* 显式写法（stage 快照未到达）：与基态同视觉，供测试断言与可读性使用 */
+.badge--unknown {
+  border: 1px dashed var(--border-dashed);
+  background: var(--tint-unknown-bg);
+  color: var(--state-unknown);
+}
+
+.badge--unknown .badge__dot {
+  background: transparent;
+  border: 1px dashed currentColor;
+}
+
+.badge__dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.badge__label {
+  color: currentColor;
+}
+
+/* 子阶段是次要信息：形状是同一枚徽章里的一小段文字，不新造一个色 */
+.badge__phase {
+  padding-left: var(--sp-3);
+  border-left: 1px solid currentColor;
+  color: currentColor;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  opacity: 1;
+}
+
+/* 错误码：只作为徽章上的小字出现，颜色属于 --state-error（因为唯一触发条件就是最后一步失败） */
+.badge__code {
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--tint-error-border);
+  color: var(--state-error);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+}
+
+/* disconnected：中性灰 + 空心细环（明度低 = 什么都没在跑） */
+.badge--disconnected {
+  border-color: var(--tint-idle-border);
+  background: var(--tint-idle-bg);
+  color: var(--state-idle);
+}
+
+.badge--disconnected .badge__dot {
+  background: transparent;
+  border: 1px solid currentColor;
+}
+
+/* connecting：进行中蓝 + 实心点 + 呼吸。它是「进行中」，不是「成功」 */
+.badge--connecting {
+  border-color: var(--tint-progress-border);
+  background: var(--tint-progress-bg);
+  color: var(--state-progress);
+}
+
+@keyframes xt-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.badge--connecting .badge__dot {
+  animation: xt-pulse 1.4s linear infinite;
+}
+
+/* connected：整个应用里唯一的绿。它证明的是「数据面已被证明可连」，
+   不证明「系统流量被代理」——所以徽章文字只能是「已连接」，不能是「已保护」 */
+.badge--connected {
+  border-color: var(--tint-connected-border);
+  background: var(--tint-connected-bg);
+  color: var(--state-connected);
+}
+
+/* disconnecting：与 connecting 同色相，用空心环 + 无呼吸区分「正在拆除」 */
+.badge--disconnecting {
+  border-color: var(--tint-progress-border);
+  background: var(--tint-progress-bg);
+  color: var(--state-progress);
+}
+
+.badge--disconnecting .badge__dot {
+  background: transparent;
+  border: 2px solid currentColor;
+}
+
+/* 子阶段颜色：四个 phase 都属于「进行中」，共用 --state-progress。
+   颜色不传递阶段顺序（顺序由文字表达），所以这里不引入新色相 */
+.badge__phase--preparing_config,
+.badge__phase--starting_core,
+.badge__phase--awaiting_ready,
+.badge__phase--committing_routes {
+  color: var(--state-progress);
+}
+
+/* ---------------------------------------------------------------------------
+ * 5. 按钮与输入
+ * ------------------------------------------------------------------------ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-5);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+/* 主按钮用强调色：它表示「可操作」，不表示「操作会成功」 */
+.btn--primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* 破坏性操作（断开、删除），不是「操作失败了」；失败信息只在 error-box/banner */
+.btn--danger {
+  border-color: var(--tint-error-border);
+  background: var(--tint-error-bg);
+  color: var(--state-error);
+}
+
+.btn--danger:hover:not(:disabled) {
+  border-color: var(--state-error);
+}
+
+.btn--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* 禁用态用明度表达，不用 opacity：opacity 会把对比度压到 AA 以下 */
+.btn:disabled {
+  border-color: var(--border);
+  background: var(--surface-1);
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.input,
+.select {
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.input:hover:not(:disabled),
+.select:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.input::placeholder {
+  color: var(--text-faint);
+}
+
+.input:disabled,
+.select:disabled {
+  border-color: var(--border);
+  background: var(--surface-1);
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.field__label {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.field__hint {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-read);
+}
+
+/* 本地表单校验失败：这是本地事实（用户输入不合法），与 daemon 的 last_error 分开 */
+.field__error {
+  color: var(--state-error);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------------------
+ * 6. 错误盒与通知条
+ * ------------------------------------------------------------------------ */
+.error-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  border: 1px solid var(--tint-error-border);
+  border-radius: var(--radius);
+  background: var(--tint-error-bg);
+}
+
+.error-box__code {
+  color: var(--state-error);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  letter-spacing: 0.02em;
+}
+
+.error-box__message {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-read);
+}
+
+.error-box__detail {
+  overflow-x: auto;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+}
+
+.banner {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--tint-progress-border);
+  border-radius: var(--radius);
+  background: var(--tint-progress-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.banner__severity {
+  flex: 0 0 auto;
+  color: var(--state-progress);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+
+.banner__code {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+}
+
+.banner__message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: var(--lh-read);
+}
+
+.banner__time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+}
+
+/* severity 只决定色相；正文始终用 --text（在三种 tint 上对比度 >12:1） */
+.banner--info {
+  border-color: var(--tint-progress-border);
+  background: var(--tint-progress-bg);
+}
+
+.banner--info .banner__severity {
+  color: var(--accent);
+}
+
+.banner--warn {
+  border-color: var(--tint-warning-border);
+  background: var(--tint-warning-bg);
+}
+
+.banner--warn .banner__severity {
+  color: var(--state-warning);
+}
+
+.banner--error {
+  border-color: var(--tint-error-border);
+  background: var(--tint-error-bg);
+}
+
+.banner--error .banner__severity {
+  color: var(--state-error);
+}
+
+/* ---------------------------------------------------------------------------
+ * 7. Dashboard：统计卡 + 控件区
+ * ------------------------------------------------------------------------ */
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+
+.dashboard__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--sp-6);
+  align-items: start;
+}
+
+/* 统计区：默认（有采样）无边框，未采样时改用虚线 + 未知色，布局不跳动 */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--sp-5);
+  padding: var(--sp-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.stats__item {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  gap: var(--sp-1) var(--sp-2);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.stats__label {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+/* 主数字：等宽数字防跳动；20px 是最大字号，不再往上走 */
+.stats__value {
+  color: var(--text);
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  line-height: var(--lh-tight);
+}
+
+.stats__unit {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.stats__sampled-at {
+  grid-column: 1 / -1;
+  color: var(--text-faint);
+  font-size: var(--fs-2xs);
+}
+
+/* 未采样（stats == null）：虚线圈出整块 + 未知色文字。
+   里面**不允许出现数字**——0 是实测值，不是「不知道」 */
+.stats--unsampled {
+  border: 1px dashed var(--border-dashed);
+  background: var(--tint-unknown-bg);
+}
+
+.stats--unsampled .stats__label {
+  color: var(--state-unknown);
+}
+
+.stats--unsampled .stats__value {
+  color: var(--state-unknown);
+  font-size: var(--fs-lg);
+  font-variant-numeric: normal;
+  font-feature-settings: normal;
+}
+
+.stats--unsampled .stats__unit,
+.stats--unsampled .stats__sampled-at {
+  color: var(--state-unknown);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.controls__note {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-read);
+}
+
+/* ---------------------------------------------------------------------------
+ * 8. Nodes
+ * ------------------------------------------------------------------------ */
+.nodes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.nodes__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.nodes__row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+.nodes__row:hover {
+  background: var(--surface-hover);
+}
+
+/* 选中：来自 SettingsView.selected_node（「下次连谁」）。
+   用左侧内阴影色条而不是 border-left：border-left 会参与 flex 基线对齐，行高会跳 */
+.nodes__row--selected {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* 当前：来自 ConnectionView.node_id + stage == "connected"（「现在连着谁」）。
+   它和「选中」是两件事，可以同时成立；这里只用描边，绿色徽章由 ui 放在 actions 里 */
+.nodes__row--current {
+  border-color: var(--tint-connected-border);
+}
+
+.nodes__name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodes__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+/* 上游协议名（NodeView.protocol）：如实显示 wire 上的原值，不做「优化」映射 */
+.nodes__protocol {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.nodes__endpoint {
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+/* 探测区：整行只放一枚 probe（三种状态互不相似），可换行不挤压名称 */
+.nodes__probe {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
+/* 来源（NodeView.source.kind）：订阅 vs 手填，措辞只能是这两个事实 */
+.nodes__source {
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+
+.nodes__source--subscription {
+  border-color: var(--tint-progress-border);
+  background: var(--tint-progress-bg);
+  color: var(--accent);
+}
+
+.nodes__source--manual {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+
+.nodes__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+/* 探测结果：ttfb_ms 与 error 恰好一个非空，三种视觉互不相似 */
+.probe {
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* 已测量 ≠ 成功：数值用正常文字色，绿只属于 stage==connected。
+   也不按延迟数值做红黄绿分级——契约里没有阈值字段 */
+.probe--ok {
+  color: var(--text);
+}
+
+.probe--fail {
+  border-color: var(--tint-error-border);
+  background: var(--tint-error-bg);
+  color: var(--state-error);
+}
+
+.probe--none {
+  border: 1px dashed var(--border-dashed);
+  background: var(--tint-unknown-bg);
+  color: var(--state-unknown);
+  font-family: var(--font-ui);
+}
+
+/* ---------------------------------------------------------------------------
+ * 9. Logs
+ * ------------------------------------------------------------------------ */
+.logs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.logs__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-sunken);
+  overflow-x: auto;
+}
+
+.log-line {
+  display: grid;
+  grid-template-columns: max-content max-content minmax(0, 16ch) minmax(0, 1fr);
+  gap: var(--sp-4);
+  align-items: baseline;
+  padding: var(--sp-1) var(--sp-3);
+  box-shadow: inset 2px 0 0 transparent;
+  font-size: var(--fs-sm);
+}
+
+.log-line__ts {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 等级必须有文字：色盲用户与灰度截图里颜色读不出等级 */
+.log-line__level {
+  color: var(--text-dim);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  white-space: nowrap;
+}
+
+.log-line__target {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-line__message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  line-height: var(--lh-read);
+}
+
+/* 等级色只区分「严重程度」，info 用中性色而不是绿：info 不代表成功 */
+.log-line--error {
+  box-shadow: inset 2px 0 0 var(--state-error);
+}
+
+.log-line--error .log-line__level {
+  color: var(--state-error);
+}
+
+.log-line--warn {
+  box-shadow: inset 2px 0 0 var(--state-warning);
+}
+
+.log-line--warn .log-line__level {
+  color: var(--state-warning);
+}
+
+.log-line--info {
+  box-shadow: inset 2px 0 0 transparent;
+}
+
+.log-line--info .log-line__level {
+  color: var(--text-dim);
+}
+
+.log-line--debug {
+  box-shadow: inset 2px 0 0 transparent;
+}
+
+.log-line--debug .log-line__level {
+  color: var(--text-faint);
+}
+
+/* ---------------------------------------------------------------------------
+ * 10. Settings / 订阅
+ * ------------------------------------------------------------------------ */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+
+.subs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.subs__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.subs__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+}
+
+/* URL 里含 token：这里只负责换行与等宽，脱敏由 ui 在渲染前完成 */
+.subs__url {
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.subs__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------------------
+ * 11. 窄窗口（应用窗口可缩到 ~900px 以下时导航改为横向）
+ * ------------------------------------------------------------------------ */
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .app__nav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .page {
+    padding: var(--sp-6) var(--sp-5) var(--sp-8);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 12. 减少动效
+ *      呼吸点不是唯一进度信号（同一枚徽章里始终有「连接中 + 子阶段」文字），
+ *      所以关掉它不丢信息；过渡全部压到 0.01ms，避免前庭敏感用户被闪动影响。
+ * ------------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .badge--connecting .badge__dot {
+    animation: none;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

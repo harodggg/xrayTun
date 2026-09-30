@@ -1,0 +1,15 @@
+[package]
+name = "xt-nodes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "节点目录：订阅 → 节点视图 + 选择（不做回落）"
+
+[dependencies]
+xt-contract.workspace = true
+xt-settings.workspace = true
+xt-subs.workspace = true
+xt-xrayconf.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

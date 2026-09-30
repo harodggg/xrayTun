@@ -1,0 +1,11 @@
+[package]
+name = "xt-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "连接生命周期状态机（纯函数，可在无 IO 下穷举测试）"
+
+[dependencies]
+xt-contract.workspace = true
+thiserror.workspace = true

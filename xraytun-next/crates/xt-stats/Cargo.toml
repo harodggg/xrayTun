@@ -1,0 +1,15 @@
+[package]
+name = "xt-stats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "真实流量计数：Xray StatsService（h2c）读取，不估算"
+
+[dependencies]
+xt-contract.workspace = true
+h2.workspace = true
+http.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+thiserror.workspace = true

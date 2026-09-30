@@ -1,0 +1,25 @@
+[package]
+name = "xt-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "控制面 daemon：组合根，装配服务并对外提供 IPC"
+
+[dependencies]
+xt-contract.workspace = true
+xt-bus.workspace = true
+xt-state.workspace = true
+xt-settings.workspace = true
+xt-subs.workspace = true
+xt-xrayconf.workspace = true
+xt-ipc.workspace = true
+xt-nodes.workspace = true
+xt-stats.workspace = true
+xt-probe.workspace = true
+xt-datapath.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde_json.workspace = true

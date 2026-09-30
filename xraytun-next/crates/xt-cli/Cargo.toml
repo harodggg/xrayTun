@@ -1,0 +1,15 @@
+[package]
+name = "xt-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "无头客户端：用与 UI 完全相同的契约驱动 daemon（端到端入口）"
+
+[dependencies]
+xt-contract.workspace = true
+xt-ipc.workspace = true
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

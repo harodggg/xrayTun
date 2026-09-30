@@ -1,0 +1,15 @@
+# xraytun-next · 不该入库的东西
+#
+# 与仓库根 .gitignore 的区别：那些规则是 `/apps/ui/...` 这种根锚定的，
+# 管不到这里的子目录，所以这一份必须存在。
+
+# 依赖与构建产物
+/node_modules
+/apps/ui/node_modules
+/apps/ui/dist
+/target
+**/target
+
+# 本机开发残留
+*.log
+.DS_Store

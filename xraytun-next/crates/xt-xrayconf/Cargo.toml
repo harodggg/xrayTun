@@ -1,0 +1,16 @@
+[package]
+name = "xt-xrayconf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Xray 配置生成：节点 + 设置 → 上游 JSON，纯函数"
+
+[dependencies]
+xt-contract.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# 只给集成测试用：用真实解析器的产物喂给真 Xray（dev-dependencies 不参与分层表）。
+[dev-dependencies]
+xt-subs.workspace = true
