@@ -102,10 +102,51 @@ UI → **29 passed / 1 skipped**（跳过的 1 条是 `XT_LIVE=1` 门控的活�
 
 * live 测试里有 2 处 React `act(...)` 警告（测试仪器问题，不影响断言，ux 已如实记录）。
 * `xt-cli` 的 `subscriptions` 是只读真实现；`add/refresh` 固定 exit 2 并说明能力未宣告。
-* 本机无 git 仓库：`xraytun-next/` 尚未 `git init`，所以以上证据以文件形式留档而非提交信息。
-  旧仓库 `xray-tun/`（v0.9.2）全程**一行未改**。
+* 本工作区已作为 `xraytun-next/` 子树提交到同一仓库的分支 `xraytun-next-v1`（见 §7.5），
+  所以证据既在文件里、也在提交信息里；旧仓库 `xray-tun/`（v0.9.2）全程**一行未改**。
 
-## 7. 怎么复核（任何人）
+## 7.5 发布通道（Linux 核心二进制）
+
+**为什么要单开一条流水线**：仓库根的 `release.yml` 产的是 macOS 应用（dmg/zip + 公证 + 站点），
+跑 `macos-14`、几十分钟；这条分支交付的是 linux-x86_64 的 `xt-daemon` / `xt-cli`，跑 ubuntu、几分钟。
+混在一条里会互相阻塞。流水线文件：`.github/workflows/xraytun-next-release.yml`。
+
+**为什么不用本机 PAT 发**：本机那只 PAT 对 Releases 没有权限（实测 403
+`Resource not accessible by personal access token`），而仓库自带的 workflow token 有
+`contents: write` —— 这也正是根 `release.yml` 一直在用的通道。**二进制因此不进 git**：
+产物走 Release 资产、源码走 git 历史，两边由 sha256 对上（根 `.gitignore` 一贯不让大体积
+第三方产物入库）。
+
+**怎么发**：
+
+```bash
+git tag -a xraytun-next-v1.0.0 -m "..." <commit>
+git push origin xraytun-next-v1.0.0        # 推 tag 即触发：守卫 → clippy → 测试(真 xray) → 构建 → 发布
+```
+
+**线上资产**（`https://github.com/harodggg/xrayTun/releases/tag/xraytun-next-v1.0.0`，预发布）：
+
+| 资产 | 字节 | sha256 |
+| --- | --- | --- |
+| `xraytun-next-1.0.0-linux-x86_64.tar.gz` | 2,826,693 | `30dd0da73e8d4141b47b8ebe20b55d2f42a577a13e1ffd97a896bcd109644de9` |
+| `SHA256SUMS.txt` | 105 | — |
+
+**发布产物本身也真跑过**（不是"CI 绿了就算"）：把资产下载回来、`sha256sum -c` 通过，
+解出来的 `xt-daemon` / `xt-cli` 再跑一遍完整冒烟 →
+connect 71 ms、经 SOCKS 收 65536 字节且 sha256 与源站逐字节相同、
+`stats uplink=96 downlink=131492`（真实 StatsService）、断开后 pid 消失。
+同一份清单也贴在该 Release 的说明里。
+
+## 7.6 CI 抓到过两个"本机能过、换台机器就过不了"的问题（都已修）
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `xt-xrayconf` 3 条真核心验收测试在 CI 直接红 | 同一个东西两个环境变量名：端到端测试用 `XT_XRAY_BIN`，契约验收测试用 `XRAY_BIN`；且两处都把**开发机绝对路径**当默认值写进了公开仓库 | 统一为 `XT_XRAY_BIN`（旧名 `XRAY_BIN` 继续认）→ `PATH` 里的 `xray`；删掉所有硬编码路径；**找不到仍失败、不静默跳过** |
+| 2 | `xt-datapath` 3 条用例报 `Text file busy (os error 26)` | libtest 每用例一线程：线程 A 写夹具脚本（fd 可写）时线程 B `fork()`，子进程继承了那个可写 fd，A 随后 exec 该文件即被拒。"写临时文件→改名"治不了（inode 没变） | 给"会 spawn 进程"的用例加进程内串行锁（`FIXTURE_LOCK`），夹具创建函数把锁作为返回值交出去；配 `#[allow(clippy::await_holding_lock)]` 并写明为什么异步锁不管用 |
+
+两次都是 CI 先发现、人后理解 —— 这就是"真跑一遍"的价值：它们都能编译、本机也都能过。
+
+## 8. 怎么复核（任何人）
 
 ```bash
 export RUSTUP_HOME=/Users/xbtg-/deepseek-harness/.rustup
