@@ -1,9 +1,10 @@
 # apps/desktop —— xraytun-next 桌面壳（Tauri 2）
 
-> **未验证声明**：本机（Linux）没有 macOS、没有 Tauri 工具链，本轮没有跑过
-> `cargo check`、没有跑过 `tauri build`、没有做过任何一次真实的
-> `invoke` / `listen` 往返。这个目录是「按契约形状写完的壳」，**不构成可用声明**。
-> 真机验收（S6）见 `docs/design/MACOS-APP-PLAN.md`。
+> **未验证声明**：本机（Linux）没有 macOS、没有 webkit2gtk（Linux 上编译 tauri 需要它）、
+> 没有 tauri-cli；本轮**一次 `cargo check` / `tauri build` / 真实 `invoke`·`listen`
+> 往返都没跑过**（`cargo` 与 stable 工具链存在于 `../../.cargo/bin`，但缺 GUI 系统库，
+> 编译必然停在环境而不是代码上；按任务要求也没有运行）。这个目录是「按契约形状写完的
+> 壳」，**不构成可用声明**。真机验收（S6）见 `docs/design/MACOS-APP-PLAN.md`。
 
 ## 它在整个系统里的位置
 
@@ -120,3 +121,7 @@ cd apps/desktop && XT_DAEMON_BIN=/abs/path/xt-daemon npm run tauri dev
    不需要 `disable-library-validation`（那只约束 `dlopen` 进来的库），所以不加
    —— 最小权限面（不变量 I5）。真机若发现 WKWebView 或子进程需要额外 entitlement，
    再按证据加，不预先放宽。
+8. 启动就绪竞态：壳在 `setup` 里并发拉起 daemon，而 UI 的首条请求可能早于 daemon
+   `bind`。按不变量 I1（无等待）壳**不会** sleep/轮询去等就绪，所以首条请求会拿到
+   诚实的 `Io`，用户再操作一次即可。要彻底消除，需要 daemon 把「就绪」变成事件
+   （或在壳里先起 daemon、后建 WebView），那是 S3/S6 的决定，本轮不猜。

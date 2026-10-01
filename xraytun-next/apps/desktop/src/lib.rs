@@ -37,8 +37,10 @@
 //!
 //! # 未验证声明（不许把它说成「可用」）
 //!
-//! 本机是 Linux，**没有 macOS、没有 Tauri 工具链、本轮没有跑过任何一次 `tauri build`
-//! 或真实 `invoke/listen` 往返**。因此：
+//! 本机是 Linux：没有 macOS、没有 webkit2gtk（Linux 上编译 tauri 需要它）、没有
+//! tauri-cli，**本轮一次 `cargo check` / `tauri build` / 真实 `invoke`·`listen`
+//! 往返都没跑过**（`cargo` 与 stable 工具链在 `.cargo/bin` 下存在，但缺 GUI 系统库，
+//! 编译必然停在环境而不是代码上；按任务要求也没有运行）。因此：
 //! * 本 crate 只保证「按契约形状写完」，不构成「在 mac 上能用」的声明；
 //! * daemon 的路径解析与生命周期是**占位**（见 `daemon_launch`），真机 S6 再对齐；
 //! * 打包（`bundle.resources` 里加 `xt-daemon`）**未接线**，见 `binaries/README.md`。
@@ -53,8 +55,6 @@ pub mod daemon_launch;
 pub mod tray;
 
 use std::path::Path;
-
-use tauri::Manager;
 
 /// 应用入口。`main.rs` 只有一行，真正逻辑在这里（便于将来加集成测试）。
 pub fn run() {

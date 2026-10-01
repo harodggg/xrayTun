@@ -839,7 +839,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xt-bus"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "tokio",
  "tracing",
@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "xt-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "serde",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "xt-contract"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "xt-daemon"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "libc",
@@ -893,7 +893,7 @@ dependencies = [
 
 [[package]]
 name = "xt-datapath"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "xt-helperd"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "clap",
  "libc",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "xt-helperproto"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "xt-ipc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "xt-macosnet"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "libc",
  "serde",
@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "xt-nodes"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde_json",
  "thiserror",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "xt-probe"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde_json",
  "tokio",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "xt-settings"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "xt-state"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "thiserror",
  "xt-contract",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "xt-stats"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "bytes",
  "h2",
@@ -1007,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "xt-subs"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "base64",
  "percent-encoding",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "xt-xrayconf"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
