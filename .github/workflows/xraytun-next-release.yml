@@ -52,7 +52,11 @@ jobs:
           curl -fsSL -o /tmp/actionlint.tgz \
             https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
           tar xzf /tmp/actionlint.tgz -C /tmp actionlint
-          /tmp/actionlint -color
+          # 只查**本**流水线：目标是把「GitHub 会拒绝解析」的错（表达式、上下文
+          # 可用性、job 图）挡在便宜的 ubuntu 上。仓库里 release.yml /
+          # cloudflare-pages.yml 还有既有的 shellcheck info 级提示，与本闸门无关，
+          # 不该因为它们红了就拦住发布，所以这里同时关掉 shellcheck。
+          /tmp/actionlint -color -shellcheck= .github/workflows/xraytun-next-release.yml
 
   linux-core:
     needs: workflow-lint
