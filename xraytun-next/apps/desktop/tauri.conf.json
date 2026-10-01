@@ -45,6 +45,11 @@
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"
+    },
+    "resources": {
+      "binaries/xray": "xray",
+      "binaries/xt-daemon": "xt-daemon",
+      "binaries/xt-helperd": "xt-helperd"
     }
   }
 }
