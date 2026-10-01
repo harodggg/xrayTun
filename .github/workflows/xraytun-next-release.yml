@@ -380,6 +380,49 @@ jobs:
           done
           codesign --verify --strict --verbose=1 "$APP"
 
+      # 真机 UI 验收的免费替代：在 runner 上真的把 .app 跑起来，截图 + 捞日志。
+      #
+      # 为什么要试：Tauri 壳的 UI 能不能起来、桥有没有真的把 hello 握上，只有真的跑一次
+      # 才知道 —— 编译通过、codesign 通过都不回答这个问题。
+      #
+      # 已知不确定：macOS 的 screencapture 需要「屏幕录制」TCC 授权，从 CI 里可能拿到
+      # 黑屏或直接失败。所以这里 continue-on-error，并且把壳的 stderr 与 daemon 日志
+      # 一并留下 —— 就算图没成，日志也回答「桥连上了没有」。
+      - name: 启动 app 并截图（免费的真机 UI 探针；失败不拦发布）
+        continue-on-error: true
+        run: |
+          set -x
+          APP="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app"
+          SHOT="$PWD/xraytun-next/shot"
+          mkdir -p "$SHOT"
+
+          # 直接跑壳的二进制而不是 `open`：`open` 会把 stderr 丢进系统日志，而壳的诊断
+          # 信息（socket 路径、daemon 就绪、桥的错误）全在 stderr 上。
+          "$APP/Contents/MacOS/xraytun-desktop" >"$SHOT/shell-stdout.log" 2>"$SHOT/shell-stderr.log" &
+          SHELL_PID=$!
+          echo "shell pid=$SHELL_PID"
+
+          # 等窗口出现 + daemon 报就绪（就绪等待的截止是 20 秒，留足余量）。
+          sleep 30
+
+          echo "=== 壳进程还在吗 ==="
+          ps -p "$SHELL_PID" -o pid,stat,command || echo "壳已经退出（这就是重要证据）"
+          echo "=== daemon 在跑吗 ==="
+          pgrep -lx xt-daemon || echo "没有 xt-daemon 进程"
+          echo "=== 有没有窗口 ==="
+          osascript -e 'tell application "System Events" to get name of every window of every process whose visible is true' 2>&1 | head -5 || true
+
+          echo "=== 截图 ==="
+          screencapture -x "$SHOT/screen.png" && echo "screencapture 成功" || echo "screencapture 失败（多半是屏幕录制 TCC 未授权）"
+          ls -l "$SHOT"
+
+          echo "=== 壳 stderr（桥的诊断都在这里） ==="
+          tail -60 "$SHOT/shell-stderr.log" || true
+          echo "=== 壳 stdout ==="
+          tail -20 "$SHOT/shell-stdout.log" || true
+          echo "=== daemon 日志 ==="
+          tail -60 "$HOME/Library/Logs/XrayTun/xt-daemon.log" 2>/dev/null || echo "没有 daemon 日志文件"
+
       - name: 上传 dmg/app 产物
         uses: actions/upload-artifact@v4
         with:
@@ -387,6 +430,7 @@ jobs:
           path: |
             xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/*.app
+            xraytun-next/shot/**
 
       - name: 发布 Release（仅 tag；已存在则只补资产）
         if: github.ref_type == 'tag'
