@@ -309,6 +309,15 @@ jobs:
         working-directory: xraytun-next/apps/desktop
         run: ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
 
+      - name: ad-hoc 签名（S4；S5 换 Developer ID 公证）
+        run: |
+          APP="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app"
+          # 先签内嵌二进制，再签 .app（macOS 嵌套代码签名顺序；--deep 已弃用不可靠）
+          for b in Contents/Resources/xray Contents/Resources/xt-daemon Contents/Resources/xt-helperd; do
+            codesign --force --sign - "$APP/$b"
+          done
+          codesign --force --sign - "$APP"
+
       - name: 校验 universal + codesign --strict
         run: |
           set -euo pipefail
