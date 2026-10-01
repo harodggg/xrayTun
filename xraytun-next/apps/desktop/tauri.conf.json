@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build"
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -30,7 +30,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "category": "Utility",
     "shortDescription": "xraytun-next 桌面壳：菜单栏 + 主窗口 + daemon IPC 桥",
     "longDescription": "XrayTun Next 是一个薄壳：daemon（xt-daemon，普通用户进程）持有全部业务与数据面，界面通过本机 AF_UNIX 契约帧与它通信。壳只负责拉起 daemon、承载界面、提供菜单栏，并转发这条桥。",
