@@ -38,7 +38,24 @@ env:
   XRAY_VERSION: v26.3.27
 
 jobs:
+  # 先 lint 再烧 runner：workflow 表达式写错时 GitHub 会判整个文件非法，
+  # 表现是 run 里 **0 个 job**、没有任何日志 —— 只能靠网页上看 "Invalid workflow file"。
+  # 2026-10-01 就这么白烧了两次运行（`secrets` 出现在步骤级 if 里）。
+  workflow-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: actionlint（抓表达式 / 上下文可用性错误）
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/actionlint.tgz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          tar xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -color
+
   linux-core:
+    needs: workflow-lint
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -133,6 +150,7 @@ jobs:
   # 它与 linux-core 是两条并行产线（互不阻塞），产物是 universal（arm64 + x86_64）。
   # ---------------------------------------------------------------------------
   macos-core:
+    needs: workflow-lint
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -254,7 +272,13 @@ jobs:
   # 桌面 .app（Tauri 2 薄壳）+ dmg。S4：只在 macOS 上能构建；tauri build + lipo + codesign。
   # 首次接通可能需要 CI 迭代（tauri CLI 调用、codesign 自签、dmg 布局）。
   macos-app:
+    needs: workflow-lint
     runs-on: macos-14
+    env:
+      # secrets **不能**出现在步骤级 if 里：GitHub 的上下文白名单不允许，
+      # 会直接判整个 workflow 非法（run 里 0 个 job，报 Unrecognized named-value）。
+      # 这里在 job 级把它取出来变成普通变量，步骤里再通过 env 引用。
+      XT_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -315,10 +339,18 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
+        run: |
+          # secrets 未配置时这些变量是**空串**而不是缺失。tauri 可能把「设了但为空」
+          # 当成一个签名身份，那样 ad-hoc 兜底就永远等不到。空就 unset，
+          # 让这一步与「从来没配过 secrets」完全等价。
+          for v in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v:-}" ]; then unset "$v"; fi
+          done
+          ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
 
       - name: ad-hoc 签名（无 Apple 凭据时的降级；有凭据则已由 tauri 签好）
-        if: ${{ secrets.APPLE_SIGNING_IDENTITY == '' }}
+        if: env.XT_APPLE_SIGNING_IDENTITY == ''
         run: |
           APP="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app"
           # 先签内嵌二进制，再签 .app（macOS 嵌套代码签名顺序；--deep 已弃用不可靠）
