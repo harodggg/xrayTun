@@ -57,8 +57,6 @@ pub mod tray;
 
 use std::path::Path;
 
-use tauri::Manager;
-
 /// 应用入口。`main.rs` 只有一行，真正逻辑在这里（便于将来加集成测试）。
 pub fn run() {
     // socket 是壳与 UI 的**唯一**约定值：壳用它拉起 daemon，并通过

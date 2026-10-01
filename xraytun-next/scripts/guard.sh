@@ -23,7 +23,10 @@ ok() { say "ok      $*"; }
 
 # 收集源码文件（不含 docs / target / node_modules / 生成产物）。
 src_files() {
-  find "$ROOT/crates" -path '*/target' -prune -o -name '*.rs' -print 2>/dev/null
+  # 壳（apps/desktop/src）也是 Rust，I1/I2/占位/unwrap 这些判据对它同样成立 ——
+  # 从前这里只扫 crates/，于是壳代码的等待、超时、命名**从来没被机器判据覆盖过**，
+  # 「提交前跑一遍 guard」对壳是一句空头承诺（2026-10-01 审查发现）。
+  find "$ROOT/crates" "$ROOT/apps/desktop/src" -path '*/target' -prune -o -name '*.rs' -print 2>/dev/null
 }
 ui_files() {
   find "$ROOT/apps/ui/src" -name '*.ts' -o -name '*.tsx' 2>/dev/null
@@ -193,7 +196,9 @@ check_deps xt-helperd xt-contract xt-ipc xt-helperproto xt-macosnet
 
 # ------------------------------------------------------------------- 汇总
 say ""
-say "crates=$(find "$ROOT/crates" -name '*.rs' | wc -l | tr -d ' ') 个 Rust 文件, ui=$(( ${#UIS[@]} )) 个 TS 文件"
+# 报**实际被扫**的数量（crates/ + apps/desktop/src），不是「crates 目录下有多少」——
+# 数字与扫描范围不一致，读的人会以为壳也被查了而其实没有（那正是修这次之前的状况）。
+say "rust=$(printf '%s\n' "${CRATES[@]}" | wc -l | tr -d ' ') 个 Rust 文件（含 apps/desktop/src）, ui=$(( ${#UIS[@]} )) 个 TS 文件"
 say "违规=$violations 警告=$warnings"
 if [ "$violations" -gt 0 ]; then
   echo "GUARD FAILED"

@@ -123,18 +123,29 @@ impl EventGate {
 
     /// 页面开始加载：关闸、序号归 1、清掉上一会话的滞留。
     ///
-    /// 上一个会话的滞留**不能**留给新会话：那是给一个已经消失的页面准备的，补发出去
-    /// 只会让新页面看到一堆它没请求过的旧事件。
+    /// **这是唯一给序号归零的地方。** 上一个会话若从未开过闸（页面加载了却没发
+    /// `hello`），它滞留的事件对新页面已经作废 —— 但不能静默丢：计进 `held_dropped`，
+    /// 由下一次 `begin_session` 如实报成 `Notice`。
     fn close_for_new_page(&mut self) {
+        self.held_dropped += self.held.len() as u64;
+        self.held.clear();
         self.session_started = false;
         self.seq = 1;
-        self.held.clear();
-        self.held_dropped = 0;
     }
 
-    /// UI 会话开始：序号归 1，交出「按序补齐」的滞留事件（可能为空）。
+    /// UI 发来一条 `hello`。**只有这是一个新会话时才归零**，返回「按序补齐」的滞留事件。
+    ///
+    /// 同一个 WebView 会话里的第二次 `hello`（用户按「重新连接」）**绝不能**归零：
+    /// UI 的 `expectedSeq`（`tauri.ts`）是每个页面会话从 1 开始的**闭包变量**，它只在
+    /// 页面重建时才回到 1。这里若也归零，两边立刻错开，下一条事件就被判「跳号」→
+    /// `fail()` 把客户端**永久钉死** —— 那等于把用户唯一的恢复动作变成自杀。
+    /// 序号继续往下走，UI 那边也还在同一个计数上，两边始终对齐。
     fn begin_session(&mut self, now_ms: u64) -> Vec<(u64, Event)> {
+        if self.session_started {
+            return Vec::new();
+        }
         self.session_started = true;
+        // 页面加载时已经归过一次；这里再显式写一次，让语义不依赖调用顺序。
         self.seq = 1;
         let mut out = Vec::with_capacity(self.held.len() + 1);
         if self.held_dropped > 0 {
