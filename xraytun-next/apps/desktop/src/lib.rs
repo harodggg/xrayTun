@@ -176,13 +176,31 @@ fn create_main_window(app: &tauri::AppHandle, socket: &Path) {
 
     // JSON 编码而不是字符串拼接：socket 路径里任何引号/反斜杠都不会破坏脚本。
     let socket_string = socket.to_string_lossy().to_string();
-    let script = match serde_json::to_string(&socket_string) {
+    let mut script = match serde_json::to_string(&socket_string) {
         Ok(json) => format!("window.__XT_SOCKET__ = {json};"),
         Err(error) => {
             eprintln!("xt shell: socket 路径无法编码为 JSON：{error}；跳过初始化脚本");
             return;
         }
     };
+
+    // CI/调试用的初始页注入（`XT_INITIAL_PAGE`）。
+    //
+    // 为什么值得有这一条：真机证据里「daemon 版本 / pid」与「设置未加载」这两件事
+    // **只出现在设置页**（`apps/ui/src/pages/Settings.tsx`），而 CI 上**点不动**界面 ——
+    // AppleScript 拿不到 WebView 里的按钮（实测报 -1728）。没有这个钩子，那张图只能靠
+    // 人手截；有了它，任意一页都能在 CI 里免费出图。
+    //
+    // 取值走**白名单**，且与 `apps/ui/src/App.tsx` 的页面 id 逐字一致：这个值来自环境
+    // 变量，绝不能让任意内容进到注入脚本里。未知值/空值 = 不注入，界面照常停在默认页。
+    if let Some(page) = std::env::var("XT_INITIAL_PAGE")
+        .ok()
+        .filter(|page| matches!(page.as_str(), "dashboard" | "nodes" | "logs" | "settings"))
+    {
+        if let Ok(json) = serde_json::to_string(&page) {
+            script.push_str(&format!("window.__XT_INITIAL_PAGE__ = {json};"));
+        }
+    }
 
     let builder = match tauri::WebviewWindowBuilder::from_config(app, &config) {
         Ok(builder) => builder,

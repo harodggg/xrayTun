@@ -382,56 +382,53 @@ jobs:
 
       # 打包出来的 .app 到底能不能起来 —— 编译通过、codesign 通过都不回答这个问题。
       #
-      # 这一步在 runner 上真的把 .app 跑 30 秒，并且把两件事变成**硬判据**（失败即拦发布）：
-      #   1. 壳进程必须还活着（启动即崩、缺资源、窗口建不起来都会在这里露）；
-      #   2. xt-daemon 必须真的在跑（冷启动就绪等待那条路径）。
-      # 图与日志是**尽力而为**：macOS 的 screencapture 需要屏幕录制 TCC，CI 里可能拿到
-      # 黑屏；AppleScript 驱动界面也需要辅助功能授权（实测枚举窗口返回空值，点不动）。
-      # 所以不拿图当判据，只当证据留档。
-      - name: 启动 app 冒烟 + 截图（进程存活与 daemon 是硬判据，失败拦发布）
+      # 跑两轮，各截一张图：
+      #   第 1 轮 默认启动（落在「状态」页）；
+      #   第 2 轮 用 `XT_INITIAL_PAGE=settings` 注入初始页，直接落在「设置」页。
+      # 为什么专门要设置页那张：真机上「daemon 版本 / pid 未知」与「设置未加载，无法编辑」
+      # 只出现在设置页（`apps/ui/src/pages/Settings.tsx`），而 CI 里**点不动**界面
+      # （AppleScript 够不到 WebView 里的按钮，实测 -1728），只能靠注入初始页。
+      #
+      # 硬判据两条，失败即拦发布：壳进程 30 秒后仍存活、xt-daemon 确实在跑。
+      # 图与日志是尽力而为（screencapture 需要屏幕录制 TCC），只当证据留档。
+      - name: 启动 app 冒烟 + 两页截图（进程存活与 daemon 是硬判据，失败拦发布）
         run: |
           set -x
           APP="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app"
           SHOT="$PWD/xraytun-next/shot"
+          BIN="$APP/Contents/MacOS/xraytun-desktop"
           rm -rf "$SHOT"; mkdir -p "$SHOT"
 
           # 直接跑壳的二进制而不是 `open`：`open` 会把 stderr 丢进系统日志，而壳的诊断
           # 信息（socket 路径、就绪握手、桥的错误）全在 stderr 上。
-          "$APP/Contents/MacOS/xraytun-desktop" >"$SHOT/shell-stdout.log" 2>"$SHOT/shell-stderr.log" &
-          SHELL_PID=$!
-          echo "shell pid=$SHELL_PID"
-
-          # 等窗口出现 + daemon 报就绪（就绪等待的截止是 20 秒，留足余量）。
+          echo "=== 第 1 轮：默认启动（状态页）==="
+          "$BIN" >"$SHOT/dashboard.out" 2>"$SHOT/dashboard.err" &
+          PID1=$!
           sleep 30
-
-          # 先取证，再判据 —— 顺序反了的话判据失败时就拿不到任何图了。
-          echo "=== 尽力而为：截图 ==="
-          screencapture -x "$SHOT/screen.png" && echo "screencapture 成功" || echo "screencapture 失败（多半是屏幕录制 TCC）"
-
-          echo "=== 尽力而为：试着点「设置」再截一张（需要辅助功能授权，实测多半不行） ==="
-          osascript -e 'tell application "System Events" to tell process "XrayTun" to click button "设置" of window 1' 2>&1 | head -5 || true
+          screencapture -x "$SHOT/dashboard.png" && echo "dashboard.png 成功" || echo "dashboard.png 失败（多半是屏幕录制 TCC）"
+          echo "--- 壳 stderr（第 1 轮）---"; tail -20 "$SHOT/dashboard.err" || true
+          ps -p "$PID1" >/dev/null || { echo "::error::默认启动 30 秒内就退出了（见上面 stderr）"; exit 1; }
+          kill "$PID1" 2>/dev/null || true
           sleep 3
-          screencapture -x "$SHOT/screen-settings.png" && echo "第二张成功" || echo "第二张失败"
 
-          echo "=== 壳 stderr ==="
-          tail -60 "$SHOT/shell-stderr.log" || true
-          echo "=== daemon 日志 ==="
-          tail -60 "$HOME/Library/Logs/XrayTun/xt-daemon.log" 2>/dev/null || echo "没有 daemon 日志文件"
+          echo "=== 第 2 轮：注入初始页 settings ==="
+          XT_INITIAL_PAGE=settings "$BIN" >"$SHOT/settings.out" 2>"$SHOT/settings.err" &
+          PID2=$!
+          sleep 30
+          screencapture -x "$SHOT/settings.png" && echo "settings.png 成功" || echo "settings.png 失败"
+          echo "--- 壳 stderr（第 2 轮）---"; tail -20 "$SHOT/settings.err" || true
+
+          echo "=== 尽力而为：daemon 日志 ==="
+          tail -40 "$HOME/Library/Logs/XrayTun/xt-daemon.log" 2>/dev/null || echo "没有 daemon 日志文件"
           ls -l "$SHOT"
 
           echo "=== 硬判据 1：壳进程必须还活着 ==="
-          if ! ps -p "$SHELL_PID" >/dev/null; then
-            echo "::error::打包出来的 .app 启动后 30 秒内退出了（见上面的 shell-stderr.log）"
-            exit 1
-          fi
-          echo "壳进程存活 ✓"
+          ps -p "$PID2" >/dev/null || { echo "::error::打包出来的 .app 30 秒内退出了（见上面 stderr）"; exit 1; }
+          echo "壳进程存活"
 
           echo "=== 硬判据 2：xt-daemon 必须真的在跑 ==="
-          if ! pgrep -x xt-daemon >/dev/null; then
-            echo "::error::壳起来了但 xt-daemon 没在跑（见上面的 shell-stderr.log）"
-            exit 1
-          fi
-          echo "xt-daemon 在跑 ✓"
+          pgrep -x xt-daemon >/dev/null || { echo "::error::壳起来了但 xt-daemon 没在跑（见上面 stderr）"; exit 1; }
+          echo "xt-daemon 在跑"
 
       - name: 上传 dmg/app 产物
         uses: actions/upload-artifact@v4

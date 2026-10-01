@@ -19,9 +19,21 @@ const NAV_ITEMS: { id: PageId; label: string }[] = [
   { id: 'settings', label: '设置' },
 ];
 
-function Shell() {
+/**
+ * 把外部给的初始页字符串收敛成一个合法页面 id。
+ *
+ * 这个值来自壳注入的 `window.__XT_INITIAL_PAGE__`（CI / 调试用，见 `main.tsx`），
+ * 属于**不可信输入**：不认识的值一律回落到默认页，而不是照单全收 —— 界面不该被一个
+ * 环境变量带到不存在的页面上。
+ */
+function toPageId(raw: string | undefined): PageId {
+  const matched = NAV_ITEMS.find((item) => item.id === raw);
+  return matched === undefined ? 'dashboard' : matched.id;
+}
+
+function Shell({ initialPage }: { initialPage: PageId }) {
   const { transportError, reconnect, reconnectPending } = useDaemon();
-  const [page, setPage] = useState<PageId>('dashboard');
+  const [page, setPage] = useState<PageId>(initialPage);
   const transportFailure = toDisplayErrorBody(transportError);
 
   return (
@@ -65,16 +77,19 @@ function Shell() {
   );
 }
 
-export function App({ client }: { client?: DaemonClient } = {}) {
+export function App({ client, initialPage }: { client?: DaemonClient; initialPage?: string } = {}) {
   // ux 的验收测试自己包 DaemonProvider 并直接渲染 <App/>；
   // main.tsx 则把按环境选好的真实 client 传进来。两种接线都必须成立，
   // 所以只在拿到 client 时才由 App 自己建 Provider。
+  //
+  // `initialPage` 只影响**初始**落在哪一页，之后仍由界面自己的导航状态说了算。
+  const page = toPageId(initialPage);
   if (client == null) {
-    return <Shell />;
+    return <Shell initialPage={page} />;
   }
   return (
     <DaemonProvider client={client}>
-      <Shell />
+      <Shell initialPage={page} />
     </DaemonProvider>
   );
 }

@@ -11,6 +11,13 @@ declare global {
   interface Window {
     __TAURI__?: unknown;
     __XT_SOCKET__?: string;
+    /**
+     * 初始页（可选）。由壳在页面脚本之前注入，来源是环境变量 `XT_INITIAL_PAGE`
+     * （白名单见 `apps/desktop/src/lib.rs`）。用途是 CI / 调试时直接打开某一页截图 ——
+     * CI 上点不动界面（AppleScript 够不到 WebView 里的按钮），没有它就只能靠人手截。
+     * 取值不合法时 `App` 会回落到默认页。
+     */
+    __XT_INITIAL_PAGE__?: string;
   }
 }
 
@@ -30,4 +37,6 @@ if (container == null) {
 const client =
   window.__TAURI__ != null ? createTauriClient(socketPath) : createUnixSocketClient(socketPath);
 
-createRoot(container).render(<App client={client} />);
+createRoot(container).render(
+  <App client={client} initialPage={window.__XT_INITIAL_PAGE__} />,
+);
