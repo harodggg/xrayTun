@@ -305,11 +305,20 @@ jobs:
       - name: 清理 FinderInfo xattr（codesign --strict 会拒带该 xattr 的二进制）
         run: xattr -cr xraytun-next/apps/desktop/binaries/ 2>/dev/null || true
 
-      - name: tauri build（universal）
+      - name: tauri build（universal；有 Apple 凭据则 Developer ID 签名 + 公证）
         working-directory: xraytun-next/apps/desktop
+        env:
+          # S5：这些 secrets 未配置时为空，tauri 退化为不签名（由下一步 ad-hoc 兜底）。
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
 
-      - name: ad-hoc 签名（S4；S5 换 Developer ID 公证）
+      - name: ad-hoc 签名（无 Apple 凭据时的降级；有凭据则已由 tauri 签好）
+        if: ${{ secrets.APPLE_SIGNING_IDENTITY == '' }}
         run: |
           APP="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app"
           # 先签内嵌二进制，再签 .app（macOS 嵌套代码签名顺序；--deep 已弃用不可靠）
