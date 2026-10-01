@@ -120,6 +120,22 @@ async fn handle_request(
     })?;
 
     let client = ensure_client(app, socket_path).await?;
+
+    // hello / subscribe 是**连接握手**的一部分，桥的 `Client::connect` 已经替 UI 做过了：
+    // daemon 只接受一条连接上的**第一条** hello（第二条回 `invalid_request`），
+    // 所以这里必须**本地吸收**、绝不转发。否则 UI 的 `hello()` 一发出就被 daemon 拒绝，
+    // 整条连接在 UI 看来就是坏的 —— 真机 S6 上的表现正是「daemon 版本/pid 未知 + 设置未加载」。
+    //
+    // 桥的 `Client::connect` 内部已 `Subscribe` 了 `ALL_TOPICS`，所以 UI 的 subscribe
+    // 也只需回一个成功应答（事件由桥的全量订阅覆盖，UI 侧自己按主题过滤）。
+    match &request {
+        Request::Hello { .. } => return Ok(Response::Hello(client.hello().clone())),
+        Request::Subscribe { topics } => {
+            return Ok(Response::Subscribed { topics: topics.clone() });
+        }
+        _ => {}
+    }
+
     match client.request(request).await {
         Ok(response) => Ok(response),
         Err(error) => {
