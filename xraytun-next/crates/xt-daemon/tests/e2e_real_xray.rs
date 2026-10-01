@@ -312,6 +312,7 @@ async fn real_xray_end_to_end() {
         // 服务端由测试自己驱动，没有额外必需端口。
         required_addrs: Vec::new(),
         log_level: LogLevel::Info,
+        tun_fd: None,
     })
     .await
     .expect("拉起真 xray 服务端");

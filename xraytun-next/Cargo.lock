@@ -872,6 +872,7 @@ name = "xt-daemon"
 version = "1.0.0"
 dependencies = [
  "clap",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",
@@ -879,6 +880,7 @@ dependencies = [
  "xt-bus",
  "xt-contract",
  "xt-datapath",
+ "xt-helperproto",
  "xt-ipc",
  "xt-nodes",
  "xt-probe",

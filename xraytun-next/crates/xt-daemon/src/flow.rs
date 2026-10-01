@@ -21,6 +21,9 @@ use xt_datapath::{DatapathSpec, RunningDatapath};
 use xt_probe::{ProbePlan, ProbeTarget, Prober};
 use xt_state::{apply, begin_connect, begin_switch, Signal};
 use xt_stats::StatsClient;
+use xt_helperproto::{SessionRef, TunUpArgs};
+
+use crate::helper::HelperClient;
 
 use crate::{
     api_addr_for, now_ms, parse_loopback_addr, Shared, CORE_STOP_DEADLINE, PROBE_BASE_PORT,
@@ -57,6 +60,24 @@ pub(crate) enum CoreExit {
     Died(Option<i32>),
 }
 
+/// TUN 会话持有的 helper 连接 + 会话引用：断开时用它调 helper.tun_down。
+pub(crate) struct TunSession {
+    pub helper: HelperClient,
+    pub session: SessionRef,
+}
+
+/// TUN 网段参数。设置里还没有 TUN 项（S4 接 UI 后再改成设置驱动），先用常量。
+const TUN_ADDRESS: &str = "198.18.0.1/15";
+const TUN_GATEWAY: &str = "198.18.0.1";
+const TUN_MTU: u16 = 1420;
+const TUN_DNS_SERVER: &str = "198.18.0.2";
+/// direct 出站绑定的物理网卡。**待真机/待 helper 上报**：daemon 目前不知道
+/// 物理网卡名（helper 的 discover_physical 结果还没回传），先用占位 `en0`。
+const TUN_PHYSICAL_IFACE: &str = "en0";
+const TUN_DEFAULT_ROUTES: &[&str] = &["0.0.0.0/1", "128.0.0.0/1"];
+/// helperd 的 AF_UNIX socket 路径（与 helperd 的默认 `--socket` 一致）。
+const HELPER_SOCKET: &str = "/var/run/xraytun-helper.sock";
+
 struct PreparedConfig {
     socks_addr: SocketAddr,
     api_addr: SocketAddr,
@@ -66,6 +87,10 @@ struct PreparedConfig {
 impl Shared {
     /// 连接（或切节点后重连）的完整流程。
     pub(crate) async fn connect_flow(self: &Arc<Self>, node_id: NodeId, intent: Intent) {
+        if matches!(intent, Intent::Connect(RunMode::Tun)) {
+            self.connect_tun_flow(node_id).await;
+            return;
+        }
         let _op = self.op_lock.lock().await;
         // 「就绪耗时」的起点：文档里说的启动耗时必须能追到这一个真实时刻。
         let connect_started_ms = now_ms();
@@ -125,6 +150,7 @@ impl Shared {
             // 后面的 StatsClient::connect 才不会撞上 refused。
             required_addrs: vec![prepared.api_addr],
             log_level: self.settings_view().await.log_level,
+            tun_fd: None,
         };
         let mut datapath = match xt_datapath::start(&spec).await {
             Ok(datapath) => datapath,
@@ -296,6 +322,187 @@ impl Shared {
         Ok(PreparedConfig { socks_addr, api_addr, config_path })
     }
 
+    /// TUN 连接：helper.TunUp → TakeTunFd → spawn xray(XRAY_TUN_FD) → 就绪 → CommitRoutes。
+    ///
+    /// 当前**不可达**：`begin_connect_intent` 在真机验收（S6）通过前拒绝 tun 模式。
+    /// 这里把两阶段流程写完并编译，真机验收后去掉入口拒绝即可启用。
+    async fn connect_tun_flow(self: &Arc<Self>, node_id: NodeId) {
+        let _op = self.op_lock.lock().await;
+        let connect_started_ms = now_ms();
+
+        let state = self.snapshot_state().await;
+        let transition = match begin_connect(&state, RunMode::Tun, node_id.clone()) {
+            Ok(t) => t,
+            Err(e) => return self.emit_intent_error(e).await,
+        };
+        self.log_daemon(LogLevel::Info, format!("开始连接节点 {node_id}（tun）")).await;
+        self.clear_stats().await;
+        self.set_datapath_version(None).await;
+        self.commit(transition).await; // Connecting{PreparingConfig}
+        self.stop_core_session().await;
+
+        // ---- PreparingConfig：生成 TUN 配置 + 预检 ---------------------------
+        let settings = self.settings_view().await;
+        let api_addr = match parse_loopback_addr(&settings.socks_listen, "api 地址") {
+            Ok(socks) => match api_addr_for(socks) {
+                Ok(a) => a,
+                Err(e) => return self.fail_connect(e).await,
+            },
+            Err(e) => return self.fail_connect(e).await,
+        };
+        let selected = match self.outbound_spec(&node_id).await {
+            Ok(s) => s,
+            Err(e) => return self.fail_connect(e).await,
+        };
+        let json = match xt_xrayconf::generate_tun(&xt_xrayconf::TunConfigInputs {
+            api_listen: api_addr,
+            selected,
+            log_level: settings.log_level,
+            addresses: vec![TUN_ADDRESS.to_string()],
+            gateway: TUN_GATEWAY.to_string(),
+            mtu: TUN_MTU,
+            dns_server_addr: TUN_DNS_SERVER.to_string(),
+            physical_interface: TUN_PHYSICAL_IFACE.to_string(),
+        }) {
+            Ok(j) => j,
+            Err(e) => return self.fail_connect(e).await,
+        };
+        let config_path = self.config.active_config_path();
+        if let Some(dir) = config_path.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                return self
+                    .fail_connect(ErrorBody::new(ErrorCode::Io, format!("创建配置目录失败: {e}")))
+                    .await;
+            }
+        }
+        if let Err(e) = tokio::fs::write(&config_path, json.as_bytes()).await {
+            return self
+                .fail_connect(ErrorBody::new(ErrorCode::Io, format!("写入配置失败: {e}")))
+                .await;
+        }
+        if let Err(e) = xt_datapath::validate_config(&self.config.xray_bin, &config_path).await {
+            return self.fail_connect(e).await;
+        }
+        let state = self.snapshot_state().await;
+        match apply(&state, Signal::ConfigReady, now_ms()) {
+            Ok(t) => self.commit(t).await, // StartingCore
+            Err(e) => return self.fail_connect(e).await,
+        }
+
+        // ---- helper：TunUp → TakeTunFd（拿 utun fd）--------------------------
+        let helper = match HelperClient::connect(std::path::Path::new(HELPER_SOCKET)).await {
+            Ok(h) => h,
+            Err(e) => return self.fail_connect(e).await,
+        };
+        let session = match helper
+            .tun_up(TunUpArgs {
+                addresses: vec![TUN_ADDRESS.to_string()],
+                mtu: TUN_MTU,
+                bypass_routes: vec![],
+                default_routes: TUN_DEFAULT_ROUTES.iter().map(|s| s.to_string()).collect(),
+                dns_servers: vec![TUN_DNS_SERVER.to_string()],
+            })
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => return self.fail_connect(e).await,
+        };
+        let tun_fd = match helper.take_tun_fd(&session).await {
+            Ok(fd) => fd,
+            Err(e) => {
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(e).await;
+            }
+        };
+
+        // ---- StartingCore：spawn xray 带 XRAY_TUN_FD -------------------------
+        let spec = DatapathSpec {
+            xray_bin: self.config.xray_bin.clone(),
+            config_path: config_path.clone(),
+            // TUN 无 socks 入站：就绪判定只看 api（StatsService）。
+            socks_addr: api_addr,
+            required_addrs: vec![],
+            log_level: settings.log_level,
+            tun_fd: Some(tun_fd),
+        };
+        let mut datapath = match xt_datapath::start(&spec).await {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(e).await;
+            }
+        };
+        let pid = match datapath.pid() {
+            Some(pid) => pid,
+            None => {
+                let _ = datapath.stop().await;
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(internal("核心已启动但读不到 pid")).await;
+            }
+        };
+        self.set_datapath_version(datapath.version()).await;
+        let state = self.snapshot_state().await;
+        match apply(&state, Signal::CoreStarted { pid }, now_ms()) {
+            Ok(t) => self.commit(t).await, // AwaitingReady
+            Err(e) => {
+                let _ = datapath.stop().await;
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(e).await;
+            }
+        }
+
+        // ---- AwaitingReady：等 api 入站可连 ----------------------------------
+        let ready = match datapath.wait_ready().await {
+            Ok(info) => info,
+            Err(e) => {
+                let _ = datapath.stop().await;
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(e).await;
+            }
+        };
+        let state = self.snapshot_state().await;
+        match apply(&state, Signal::CoreReady { at_ms: ready.ready_at_ms }, now_ms()) {
+            Ok(t) => self.commit(t).await, // CommittingRoutes
+            Err(e) => {
+                let _ = datapath.stop().await;
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(e).await;
+            }
+        }
+
+        // ---- CommittingRoutes：helper.CommitRoutes → RoutesCommitted ---------
+        if let Err(e) = helper.commit_routes(&session).await {
+            let _ = datapath.stop().await;
+            let _ = helper.tun_down(&session).await;
+            return self.fail_connect(e).await;
+        }
+        let state = self.snapshot_state().await;
+        match apply(&state, Signal::RoutesCommitted, now_ms()) {
+            Ok(t) => self.commit(t).await, // Connected
+            Err(e) => {
+                let _ = datapath.stop().await;
+                let _ = helper.tun_down(&session).await;
+                return self.fail_connect(e).await;
+            }
+        }
+
+        // ---- 监督 + 记住 tun 会话（断开时 tun_down）--------------------------
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(supervise(Arc::clone(self), datapath, stop_rx, exit_tx));
+        self.install_core(CoreSession { stop_tx, exit_rx: Some(exit_rx) }).await;
+        *self.tun.lock().await = Some(TunSession { helper, session });
+        self.publish_view().await;
+        self.log_daemon(
+            LogLevel::Info,
+            format!(
+                "已连接 {node_id}（tun，就绪耗时 {}ms）",
+                ready.ready_at_ms.saturating_sub(connect_started_ms)
+            ),
+        )
+        .await;
+    }
+
     /// 断开：StopCore → `Disconnected`（`last_error` 清空，历史日志保留）。
     pub(crate) async fn disconnect_flow(self: &Arc<Self>) {
         let _op = self.op_lock.lock().await;
@@ -320,6 +527,10 @@ impl Shared {
         self.log_daemon(LogLevel::Info, "正在断开").await;
         self.commit(transition).await; // Disconnecting
         self.stop_core_session().await;
+        // TUN：先停数据面（上面），再让 helper 回滚路由/DNS（顺序见架构 §4.2）。
+        if let Some(tun) = self.tun.lock().await.take() {
+            let _ = tun.helper.tun_down(&tun.session).await;
+        }
 
         let state = self.snapshot_state().await;
         if state.stage() == Stage::Disconnecting {

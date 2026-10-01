@@ -18,8 +18,11 @@ xt-nodes.workspace = true
 xt-stats.workspace = true
 xt-probe.workspace = true
 xt-datapath.workspace = true
+xt-helperproto.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+# helper 客户端要用 libc 手工拼 cmsghdr / 调 recvmsg(SCM_RIGHTS) 收 utun fd。
+libc.workspace = true

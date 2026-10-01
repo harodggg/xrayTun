@@ -74,6 +74,9 @@ pub struct DatapathSpec {
     /// 用户选择的日志档位。它不传给 xray（xray 的 loglevel 在配置文件里，
     /// 由 xt-xrayconf 写入），而是决定我们把核心输出转发到 tracing 的粒度。
     pub log_level: LogLevel,
+    /// TUN 模式的 utun fd：`Some` 时经 `XRAY_TUN_FD` 传给 xray（xray 据此跳过
+    /// 自己的地址/路由配置，配置责任在 helper）。proxy 模式为 `None`。
+    pub tun_fd: Option<std::os::fd::RawFd>,
 }
 
 /// 核心已被证明可连的事实。三个字段都来自真实观测：
@@ -134,8 +137,13 @@ pub async fn start(spec: &DatapathSpec) -> Result<RunningDatapath, ErrorBody> {
     let mut cmd = Command::new(&spec.xray_bin);
     cmd.arg("run")
         .arg("-c")
-        .arg(&spec.config_path)
-        .stdin(Stdio::null())
+        .arg(&spec.config_path);
+    // TUN 模式：把 helper 交来的 utun fd 经 XRAY_TUN_FD 传给 xray（xray 收到后
+    // 跳过自己的地址/路由配置，配置责任在 helper）。proxy 模式 tun_fd 为 None。
+    if let Some(fd) = spec.tun_fd {
+        cmd.env("XRAY_TUN_FD", fd.to_string());
+    }
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // 即便上层忘了 stop，daemon 崩溃时也不会留下孤儿进程。
@@ -706,6 +714,7 @@ mod tests {
             socks_addr: socks,
             required_addrs: Vec::new(),
             log_level: LogLevel::Info,
+            tun_fd: None,
         }
     }
 
@@ -739,6 +748,7 @@ mod tests {
             socks_addr: socks,
             required_addrs: vec![not_yet],
             log_level: LogLevel::Info,
+            tun_fd: None,
         })
         .await
         .unwrap();
@@ -781,6 +791,7 @@ mod tests {
             socks_addr: socks,
             required_addrs: vec![api],
             log_level: LogLevel::Info,
+            tun_fd: None,
         })
         .await
         .unwrap();

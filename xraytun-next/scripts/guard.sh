@@ -171,7 +171,7 @@ check_deps() {
     esac
   done
 }
-ALL="xt-contract xt-bus xt-state xt-settings xt-subs xt-xrayconf xt-ipc xt-nodes xt-stats xt-probe xt-datapath"
+ALL="xt-contract xt-bus xt-state xt-settings xt-subs xt-xrayconf xt-ipc xt-nodes xt-stats xt-probe xt-datapath xt-helperproto"
 check_deps xt-contract
 check_deps xt-bus xt-contract
 check_deps xt-state xt-contract

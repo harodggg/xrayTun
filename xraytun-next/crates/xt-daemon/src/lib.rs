@@ -22,6 +22,7 @@
 //!   （那是缓存闸门，不是定时器）。
 
 pub mod flow;
+mod helper;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -97,6 +98,8 @@ pub(crate) struct Shared {
     settings: Mutex<Settings>,
     logs: Mutex<VecDeque<LogLine>>,
     core: Mutex<Option<flow::CoreSession>>,
+    /// TUN 会话的 helper 客户端 + 会话引用（断开时调 helper.tun_down）。
+    tun: Mutex<Option<flow::TunSession>>,
     stats: Mutex<Option<Arc<StatsClient>>>,
     /// 上一次成功采样 + 采样时刻。未成功采样过就是 `None`。
     stats_gate: Mutex<Option<(StatsView, Instant)>>,
@@ -349,7 +352,7 @@ impl Shared {
     async fn begin_connect_intent(self: &Arc<Self>, node_id: NodeId, mode: RunMode) -> Outcome {
         if mode != RunMode::Proxy {
             return Outcome::error(unsupported(
-                "本轮只实现 proxy 模式：tun 需要特权 helper，而 helper 未实现",
+                "tun 模式需真机验收通过后才宣告 TunMode 能力（S6）；当前只开放 proxy",
             ));
         }
         let exists = { self.catalog.lock().await.get(&node_id).is_some() };
@@ -467,6 +470,7 @@ impl Daemon {
             settings: Mutex::new(settings),
             logs: Mutex::new(VecDeque::new()),
             core: Mutex::new(None),
+            tun: Mutex::new(None),
             stats: Mutex::new(None),
             stats_gate: Mutex::new(None),
             datapath_version: Mutex::new(None),
