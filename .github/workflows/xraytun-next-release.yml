@@ -515,6 +515,80 @@ jobs:
           pgrep -x xt-daemon >/dev/null || { echo "::error::壳起来了但 xt-daemon 没在跑（见上面 stderr）"; exit 1; }
           echo "xt-daemon 在跑"
 
+      # 【端到端】把**发出去的 dmg** 挂起来、按用户的做法装到 /Applications，再从那儿启动。
+      #
+      # 为什么必须单独有这一步：前面的冒烟验的是**构建树里**的 .app，而用户拿到的是 dmg。
+      # 两者之间隔着：只读挂载卷、ditto 复制、签名会不会被复制破坏、bundle 里资源是否齐。
+      # 「验 A 发 B」正是前面 dmg 那个缺陷的形态 —— 所以这一步验**发出去的那个东西本身**。
+      #
+      # 判据的取舍（刻意如此）：
+      #  * dmg 不存在（打 dmg 那步失败）→ 只告警、跳过本步：zip 仍是保底交付，
+      #    不能因为「没有 dmg」就让整次发布什么都发不出去。
+      #  * dmg 存在但里面的 app 起不来 → **硬失败**：绝不发布一个我们自己都跑不起来的 dmg。
+      - name: 【端到端】从 dmg 装到 /Applications 并启动（验发出去的那个 app）
+        run: |
+          set -x
+          SHOT="$PWD/xraytun-next/shot"
+          B="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle"
+          V="$(sed -n 's/^version = "\(.*\)"/\1/p' xraytun-next/Cargo.toml | head -1)"
+          DMG="$B/dmg/XrayTun_${V}_universal.dmg"
+          if [ ! -e "$DMG" ]; then
+            echo "::warning::没有 dmg（打 dmg 那步失败了），跳过端到端安装验收；zip 仍会发布"
+            exit 0
+          fi
+
+          # 先清场：前面几轮留下的 app 与 daemon 会让后面的断言变成假通过。
+          pkill -x xraytun-desktop 2>/dev/null || true
+          pkill -x xt-daemon 2>/dev/null || true
+          sleep 2
+          rm -f /tmp/xraytun-daemon.sock
+
+          MP="$(mktemp -d)"
+          hdiutil attach -nobrowse -quiet -mountpoint "$MP" "$DMG"
+          echo "=== 卷里的内容 ==="; ls -l "$MP"
+
+          # 用户的做法：把 app 拖进「应用程序」。/Applications 一般对 admin 组可写，
+          # 不可写就退到 ~/Applications（LaunchServices 一样认）。
+          DEST="/Applications"
+          if ! touch "$DEST/.xt-write-probe" 2>/dev/null; then DEST="$HOME/Applications"; fi
+          rm -f "$DEST/.xt-write-probe" 2>/dev/null || true
+          mkdir -p "$DEST"
+          rm -rf "$DEST/XrayTun.app"
+          ditto "$MP/XrayTun.app" "$DEST/XrayTun.app"
+          hdiutil detach -quiet "$MP"; rm -rf "$MP"
+          echo "=== 装到 $DEST/XrayTun.app ==="
+          ls -l "$DEST/XrayTun.app/Contents/Resources/"
+
+          echo "=== 装好之后签名与架构仍然成立吗 ==="
+          codesign --verify --strict --verbose=1 "$DEST/XrayTun.app"
+          lipo -archs "$DEST/XrayTun.app/Contents/MacOS/xraytun-desktop"
+
+          echo "=== 从 /Applications 启动 ==="
+          "$DEST/XrayTun.app/Contents/MacOS/xraytun-desktop" \
+            >"$SHOT/installed.out" 2>"$SHOT/installed.err" &
+          IPID=$!
+          sleep 30
+          screencapture -x "$SHOT/installed.png" && echo "installed.png 成功" || echo "installed.png 失败"
+          echo "--- 壳 stderr（安装版）---"; tail -20 "$SHOT/installed.err" || true
+
+          echo "=== 硬判据 1：装好的 app 必须还活着 ==="
+          if ! ps -p "$IPID" >/dev/null; then
+            echo "::error::从 dmg 装到 $DEST 之后启动的 app 退出了（见上面 stderr）"
+            exit 1
+          fi
+          echo "app 存活"
+          echo "=== 硬判据 2：它必须自己拉起 daemon ==="
+          if ! pgrep -x xt-daemon >/dev/null; then
+            echo "::error::app 起来了但没拉起 xt-daemon（见上面 stderr）"
+            exit 1
+          fi
+          echo "xt-daemon 在跑"
+
+          kill "$IPID" 2>/dev/null || true
+          sleep 2
+          pkill -x xt-daemon 2>/dev/null || true
+          rm -rf "$DEST/XrayTun.app"
+
       - name: 上传 dmg/app 产物
         uses: actions/upload-artifact@v4
         with:
