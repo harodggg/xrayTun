@@ -302,6 +302,9 @@ jobs:
         working-directory: xraytun-next/apps/ui
         run: npm ci && npm install --no-save @tauri-apps/cli@^2 && npm run build
 
+      - name: 清理 FinderInfo xattr（codesign --strict 会拒带该 xattr 的二进制）
+        run: xattr -cr xraytun-next/apps/desktop/binaries/ 2>/dev/null || true
+
       - name: tauri build（universal）
         working-directory: xraytun-next/apps/desktop
         run: ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
