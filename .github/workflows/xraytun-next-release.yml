@@ -333,7 +333,20 @@ jobs:
       - name: 清理 FinderInfo xattr（codesign --strict 会拒带该 xattr 的二进制）
         run: xattr -cr xraytun-next/apps/desktop/binaries/ 2>/dev/null || true
 
-      - name: tauri build（universal；有 Apple 凭据则 Developer ID 签名 + 公证）
+      # 只打 `.app`（`--bundles app`），**不打 dmg**。
+      #
+      # 为什么把 dmg 从 tauri 手里拿走（2026-10-01 两件事一起逼出来的）：
+      # 1. tauri 的 dmg 依赖 `bundle_dmg.sh` 里的 Finder 自动化，在 CI 上**偶发**失败
+      #    （实测 `error running bundle_dmg.sh`，还留下一个 diskimages-help 孤儿进程）。
+      # 2. 更要紧的是顺序：签名在 `tauri build` **之后**才做，而 dmg 在 `tauri build`
+      #    内部就打好了 —— 于是 **dmg 里装的是还没签名的 app**，而 CI 校验的是
+      #    `bundle/macos/XrayTun.app`。也就是说「我们验的」和「用户下的」不是同一个东西。
+      #
+      # 现在顺序反过来了：先只出 .app → 签名 → 校验 → 再**从已签名的 .app** 用 hdiutil
+      # 打 dmg，并且把 dmg 挂起来验里面的 app。tauri 自己的签名（有 Apple 凭据时）仍然在
+      # 这一步发生，不受影响。
+      - name: tauri build（universal，只出 .app；有 Apple 凭据则 Developer ID 签名 + 公证）
+        id: tauri_build
         working-directory: xraytun-next/apps/desktop
         env:
           # S5：这些 secrets 未配置时为空，tauri 退化为不签名（由下一步 ad-hoc 兜底）。
@@ -351,7 +364,17 @@ jobs:
                    APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
           done
-          ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
+          ../ui/node_modules/.bin/tauri build --target universal-apple-darwin --bundles app
+
+      - name: 断言 .app 真的产出了（后面每一步都以它为输入）
+        run: |
+          set -euo pipefail
+          BIN="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app/Contents/MacOS/xraytun-desktop"
+          if [ ! -x "$BIN" ]; then
+            echo "::error::没有产出可执行的 .app —— 这多半是编译失败，去看上一步 tauri build 的输出"
+            exit 1
+          fi
+          echo "✓ .app 已产出"
 
       - name: ad-hoc 签名（无 Apple 凭据时的降级；有凭据则已由 tauri 签好）
         if: env.XT_APPLE_SIGNING_IDENTITY == ''
@@ -391,6 +414,52 @@ jobs:
       #
       # 硬判据两条，失败即拦发布：壳进程 30 秒后仍存活、xt-daemon 确实在跑。
       # 图与日志是尽力而为（screencapture 需要屏幕录制 TCC），只当证据留档。
+      - name: 打包 signed .app 为 zip（DMG 偶发失败时的保底交付）
+        run: |
+          set -euo pipefail
+          B="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle"
+          V="$(sed -n 's/^version = "\(.*\)"/\1/p' xraytun-next/Cargo.toml | head -1)"
+          # 用 ditto 而不是 zip -r：.app 是 bundle，ditto 保留资源分叉与符号链接，
+          # zip -r 会在 .app 上丢东西。--keepParent 让解压出来直接就是 XrayTun.app。
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$B/macos/XrayTun.app" "$B/macos/XrayTun_${V}_universal.app.zip"
+          ls -l "$B/macos/"
+
+      # 从**已签名**的 .app 打 dmg，并把 dmg 挂起来验里面的 app。
+      #
+      # 为什么必须挂起来验：用户下载的是 dmg，不是 `bundle/macos` 里那个 .app。
+      # 只验后者等于「验 A 发 B」—— 之前 tauri 内建 dmg 时正是这个毛病。
+      #
+      # 为什么 continue-on-error：dmg 是**便利交付**，不是唯一交付。这一版同时产出
+      # `*.app.zip`（已签名、已校验），所以 dmg 出问题不应该让整个发布什么都发不出去。
+      # 但它失败会红着留在日志里，不会被吞掉。
+      - name: 打 DMG（从已签名 .app；hdiutil，不用 Finder 自动化）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          B="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle"
+          V="$(sed -n 's/^version = "\(.*\)"/\1/p' xraytun-next/Cargo.toml | head -1)"
+          STAGE="$(mktemp -d)"
+          # ditto 而不是 cp -R：.app 是 bundle，ditto 保留扩展属性与符号链接，
+          # 签名不会在复制过程中被破坏。
+          ditto "$B/macos/XrayTun.app" "$STAGE/XrayTun.app"
+          # 拖进「应用程序」的惯例软链，装机体验与样式化 dmg 一致
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p "$B/dmg"
+          rm -f "$B/dmg/XrayTun_${V}_universal.dmg"
+          hdiutil create -volname "XrayTun" -srcfolder "$STAGE" -ov -format UDZO \
+            -quiet "$B/dmg/XrayTun_${V}_universal.dmg"
+          rm -rf "$STAGE"
+
+          echo "=== 挂起来验 dmg 里的 app（我们发什么就验什么）==="
+          MP="$(mktemp -d)"
+          hdiutil attach -nobrowse -quiet -mountpoint "$MP" "$B/dmg/XrayTun_${V}_universal.dmg"
+          codesign --verify --strict --verbose=1 "$MP/XrayTun.app"
+          lipo -archs "$MP/XrayTun.app/Contents/MacOS/xraytun-desktop"
+          hdiutil detach -quiet "$MP"
+          rm -rf "$MP"
+          ls -l "$B/dmg/"
+
       - name: 启动 app 冒烟 + 两页截图（进程存活与 daemon 是硬判据，失败拦发布）
         run: |
           set -x
@@ -437,6 +506,7 @@ jobs:
           path: |
             xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg
             xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/*.app
+            xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/*.app.zip
             xraytun-next/shot/**
 
       - name: 发布 Release（仅 tag；已存在则只补资产）
@@ -453,5 +523,13 @@ jobs:
               --notes-file docs/release-notes/v1.1.3.md \
               --target "$GITHUB_SHA"
           fi
-          gh release upload "$TAG" \
-            apps/desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg --clobber
+          # DMG 与 .app.zip 各自独立、存在才传：「DMG 打包失败」不该等于
+          # 「这次发布没有 macOS 应用」。
+          B="apps/desktop/target/universal-apple-darwin/release/bundle"
+          for f in "$B"/dmg/*.dmg "$B"/macos/*.app.zip; do
+            if [ -e "$f" ]; then
+              gh release upload "$TAG" "$f" --clobber
+            else
+              echo "跳过（不存在）：$f"
+            fi
+          done
