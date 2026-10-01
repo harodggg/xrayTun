@@ -437,8 +437,17 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
+          SHOT="$PWD/xraytun-next/shot"
+          mkdir -p "$SHOT"
+          # 这一步的完整输出同时进 artifact：GitHub 的 job 日志接口会**截断**，
+          # 上一次 dmg 失败时我连一行错误都没拿到（同一次日志里连冒烟步骤的输出都缺）。
+          # 自己留一份，就不必靠猜。
+          exec > >(tee "$SHOT/dmg-step.log") 2>&1
+          set -x
+
           B="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle"
           V="$(sed -n 's/^version = "\(.*\)"/\1/p' xraytun-next/Cargo.toml | head -1)"
+          echo "version=$V"
           STAGE="$(mktemp -d)"
           # ditto 而不是 cp -R：.app 是 bundle，ditto 保留扩展属性与符号链接，
           # 签名不会在复制过程中被破坏。
@@ -446,9 +455,17 @@ jobs:
           # 拖进「应用程序」的惯例软链，装机体验与样式化 dmg 一致
           ln -s /Applications "$STAGE/Applications"
           mkdir -p "$B/dmg"
-          rm -f "$B/dmg/XrayTun_${V}_universal.dmg"
-          hdiutil create -volname "XrayTun" -srcfolder "$STAGE" -ov -format UDZO \
-            -quiet "$B/dmg/XrayTun_${V}_universal.dmg"
+          OUT="$B/dmg/XrayTun_${V}_universal.dmg"
+          TMP_RW="$B/dmg/.XrayTun_rw.dmg"
+          rm -f "$OUT" "$TMP_RW"
+
+          # 分两步：先从文件夹建**读写**镜像（UDRW），再 convert 成压缩只读（UDZO）。
+          # 这是 tauri 自己 bundle_dmg.sh 里、在这批 runner 上验证过能跑通的序列。
+          # 一步到位（`-srcfolder` + `-format UDZO`）上一次直接 exit 1 且没留下错误文本，
+          # 所以不再赌那条路。
+          hdiutil create -volname "XrayTun" -srcfolder "$STAGE" -ov -format UDRW "$TMP_RW"
+          hdiutil convert "$TMP_RW" -format UDZO -imagekey zlib-level=9 -o "$OUT"
+          rm -f "$TMP_RW"
           rm -rf "$STAGE"
 
           echo "=== 挂起来验 dmg 里的 app（我们发什么就验什么）==="
@@ -466,7 +483,8 @@ jobs:
           APP="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/XrayTun.app"
           SHOT="$PWD/xraytun-next/shot"
           BIN="$APP/Contents/MacOS/xraytun-desktop"
-          rm -rf "$SHOT"; mkdir -p "$SHOT"
+          # 只建不删：`dmg-step.log` 是上一步留在这儿的，删掉就等于又回到「没有证据」。
+          mkdir -p "$SHOT"
 
           # 直接跑壳的二进制而不是 `open`：`open` 会把 stderr 丢进系统日志，而壳的诊断
           # 信息（socket 路径、就绪握手、桥的错误）全在 stderr 上。
