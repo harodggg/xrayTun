@@ -250,3 +250,83 @@ jobs:
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS-macos.txt --clobber
           gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
+
+  # 桌面 .app（Tauri 2 薄壳）+ dmg。S4：只在 macOS 上能构建；tauri build + lipo + codesign。
+  # 首次接通可能需要 CI 迭代（tauri CLI 调用、codesign 自签、dmg 布局）。
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Rust + 两个 mac target
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component clippy
+          rustup target add --toolchain 1.98.1 aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: 缓存 cargo + npm
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xraytun-next/target
+            ~/.npm
+          key: xt-next-app-${{ hashFiles('xraytun-next/Cargo.lock', 'xraytun-next/apps/ui/package-lock.json') }}
+          restore-keys: xt-next-app-
+
+      - name: 取真 xray（两架构 lipo 合成 universal）放入 binaries
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/xa /tmp/xb xraytun-next/apps/desktop/binaries
+          curl -fL --retry 3 -o /tmp/xa.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-macos-arm64-v8a.zip"
+          curl -fL --retry 3 -o /tmp/xb.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-macos-64.zip"
+          unzip -oq /tmp/xa.zip -d /tmp/xa
+          unzip -oq /tmp/xb.zip -d /tmp/xb
+          lipo -create /tmp/xa/xray /tmp/xb/xray -output xraytun-next/apps/desktop/binaries/xray
+          chmod +x xraytun-next/apps/desktop/binaries/xray
+
+      - name: 构建 universal 核心（xt-daemon + xt-helperd）
+        working-directory: xraytun-next
+        run: |
+          set -euo pipefail
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --target "$t" -p xt-daemon -p xt-helperd
+          done
+          for b in xt-daemon xt-helperd; do
+            lipo -create "target/aarch64-apple-darwin/release/$b" \
+                        "target/x86_64-apple-darwin/release/$b" \
+                        -output "apps/desktop/binaries/$b"
+          done
+
+      - name: 装 tauri CLI + 构建 UI
+        working-directory: xraytun-next/apps/ui
+        run: npm ci && npm install --no-save @tauri-apps/cli@^2 && npm run build
+
+      - name: tauri build（universal）
+        working-directory: xraytun-next/apps/desktop
+        run: ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
+
+      - name: 校验 universal + codesign --strict
+        run: |
+          set -euo pipefail
+          D="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle"
+          APP="$D/macos/XrayTun.app"
+          for f in Contents/MacOS/xraytun-desktop Contents/Resources/xt-daemon \
+                   Contents/Resources/xt-helperd Contents/Resources/xray; do
+            [ -e "$APP/$f" ] || { echo "缺少 $f" >&2; exit 1; }
+            archs="$(lipo -archs "$APP/$f")"
+            echo "$f: $archs"
+            case "$archs" in
+              *x86_64*arm64*|*arm64*x86_64*) ;;
+              *) echo "$f 不是 universal（$archs）" >&2; exit 1 ;;
+            esac
+          done
+          codesign --verify --strict --verbose=1 "$APP"
+
+      - name: 上传 dmg/app 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xraytun-next-macos-app
+          path: |
+            xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle/macos/*.app
