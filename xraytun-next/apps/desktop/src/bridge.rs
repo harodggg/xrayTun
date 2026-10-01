@@ -23,10 +23,29 @@
 //! `xt-ipc` 自己检测，并以 `Event::Notice` 的形式放进同一条事件流 —— 也就是说，
 //! 丢帧不会被吞掉，用户会在界面上看到那条 Notice。
 //!
-//! 局限（真机 S6 必须知道）：WebView 整页重载后 UI 的 `expectedSeq` 归 1，而壳的
-//! 计数器不会归零，于是 UI 会判「seq 跳号」并进入致命错误。彻底修法是让 xt-ipc 的
-//! `events()` 暴露真实序号（`(EventSeq, Event)`），那是 xt-ipc 的接口变更，不在本
-//! 任务的范围内 —— 这里只把事实写清楚，不假装它不存在。
+//! # 会话边界（修 WebView 重载后必然自杀的那个 bug）
+//!
+//! 这个计数器是**进程级**的，而 UI 的 `expectedSeq` 是**每个 WebView 会话**从 1 开始的：
+//! WebView 一旦整页重载，两者必然错位，UI 判「seq 跳号」→ 进入致命错误，且**永不恢复**
+//! （`tauri.ts` 的 `fail()` 把实例钉死在 `closed`）。旧注释把这条局限写在明面上、没有修。
+//!
+//! 会话边界有**两个**信号，缺一不可（[`EventGate`]）：
+//!
+//! 1. **页面开始加载**（`on_page_load` 的 `PageLoadEvent::Started`，见 `lib.rs`）——这是
+//!    唯一的、**及时**的边界信号：从这一刻起闸门关闭，事件先滞留，绝不推给一个还没有
+//!    序号的页面。
+//! 2. **UI 发来的第一条 `hello`**（「一条连接上的第一个请求」正是契约给 `hello` 的地位）
+//!    —— 闸门打开，序号从 1 开始，滞留的事件按序补发。
+//!
+//! 为什么不能只靠 `hello`：`hello` 只能**事后**知道边界，而事件可能在那之前就推出去
+//! （桥缓存着连接时，daemon 的事件是持续到达的）。所以「及时关闸」必须由页面加载事件
+//! 提供，「开闸」才由 `hello` 提供。
+//!
+//! 这不是补一段「没真正到达过」的序列：那些事件确实来自 daemon，只是被推迟到 UI 会话
+//! 真正开始之后投递；滞留上限溢出时会如实补一条 `Notice`，绝不让丢帧变成静默。
+//!
+//! 别把这件事和 daemon → 桥 那一跳混起来：后者的丢帧由 `xt-ipc` 自己检测，并以
+//! `Event::Notice` 的形式放进同一条流，本来就不会被吞掉。
 //!
 //! # 错误形状
 //!
@@ -35,14 +54,14 @@
 //! 与 `xt-contract` 完全一致，UI 的 `toErrorBody` 能原样识别。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 use xt_contract::error::{bad_request, ErrorBody, ErrorCode};
-use xt_contract::protocol::{Outcome, Request, Response};
+use xt_contract::model::{Notice, NoticeSeverity};
+use xt_contract::protocol::{Event, Outcome, Request, Response};
 use xt_ipc::Client;
 
 /// 与 `apps/ui/src/transport/tauri.ts` 的默认值逐字一致；改名就是破坏契约。
@@ -61,24 +80,149 @@ struct Connection {
     client: Arc<Client>,
 }
 
+/// 「桥 → WebView」这一跳的帧闸门 + 序号。
+///
+/// 为什么要有它（而不是一个裸的原子计数器）：UI 的 `expectedSeq` 是**每个 WebView
+/// 会话**从 1 开始的，进程级的计数器在 WebView 重载后必然错位。会话边界取**第一条
+/// `hello`**；那之前的事件滞留不投递，hello 到达时归零并按序补发。详见模块文档。
+struct EventGate {
+    /// 本会话是否已开始（= 收到过这一轮 UI 发来的 hello）。
+    session_started: bool,
+    /// 下一个交给 UI 的序号；会话开始后从 1 递增。
+    seq: u64,
+    /// 会话开始前滞留的事件，按到达顺序。
+    held: Vec<Event>,
+    /// 因 `held` 到达上限而被丢弃的条数；会话开始时以 `Notice` 如实上报，不静默。
+    held_dropped: u64,
+}
+
+/// 滞留上限。只覆盖「连接已建好、但这一轮 UI 还没发 hello」这个窗口（通常毫秒级）；
+/// 给足余量是因为 xray 跑起来时日志事件可能很密。
+const HELD_CAP: usize = 1024;
+
+impl EventGate {
+    fn new() -> Self {
+        EventGate { session_started: false, seq: 1, held: Vec::new(), held_dropped: 0 }
+    }
+
+    /// 收下一条来自 daemon 的事件。返回 `None` = 闸门关着（会话还没开始），已滞留。
+    fn admit(&mut self, event: Event) -> Option<(u64, Event)> {
+        if !self.session_started {
+            if self.held.len() == HELD_CAP {
+                // 丢最旧的：越早的事件越可能已经过时。但**记账**，不假装没发生。
+                self.held.remove(0);
+                self.held_dropped += 1;
+            }
+            self.held.push(event);
+            return None;
+        }
+        let seq = self.seq;
+        self.seq += 1;
+        Some((seq, event))
+    }
+
+    /// 页面开始加载：关闸、序号归 1、清掉上一会话的滞留。
+    ///
+    /// 上一个会话的滞留**不能**留给新会话：那是给一个已经消失的页面准备的，补发出去
+    /// 只会让新页面看到一堆它没请求过的旧事件。
+    fn close_for_new_page(&mut self) {
+        self.session_started = false;
+        self.seq = 1;
+        self.held.clear();
+        self.held_dropped = 0;
+    }
+
+    /// UI 会话开始：序号归 1，交出「按序补齐」的滞留事件（可能为空）。
+    fn begin_session(&mut self, now_ms: u64) -> Vec<(u64, Event)> {
+        self.session_started = true;
+        self.seq = 1;
+        let mut out = Vec::with_capacity(self.held.len() + 1);
+        if self.held_dropped > 0 {
+            out.push((
+                self.seq,
+                Event::Notice {
+                    notice: Notice {
+                        severity: NoticeSeverity::Warning,
+                        code: ErrorCode::Internal,
+                        message: format!(
+                            "桥在 UI 会话开始前滞留上限（{HELD_CAP} 条）已满，丢失 {} 条事件",
+                            self.held_dropped
+                        ),
+                        at_ms: now_ms,
+                    },
+                },
+            ));
+            self.seq += 1;
+            self.held_dropped = 0;
+        }
+        for event in std::mem::take(&mut self.held) {
+            out.push((self.seq, event));
+            self.seq += 1;
+        }
+        out
+    }
+}
+
 /// 桥的全局状态，由 `tauri::Builder::manage` 注入。
 pub struct BridgeState {
     /// `None` = 还没连过（或上一次连接已被判定失效）。锁的粒度是整个「连接决策」：
     /// 首次并发请求由同一把锁串行化，不会重复握手。
+    ///
+    /// 这里是 tokio 的 Mutex：它会被**跨 await 持有**（建立连接要 await）。
     connection: Mutex<Option<Connection>>,
-    /// 事件序号计数器，从 1 开始（UI 的 `expectedSeq = 1`）。
-    event_seq: AtomicU64,
+    /// 事件序号与滞留缓冲。**投递与补发都在这一把锁内完成**，否则序号会交错。
+    ///
+    /// 刻意用 **std** 的 Mutex 而不是 tokio 的：`on_page_load` 的回调是**同步**的，
+    /// 那里没有 async 上下文，用 tokio 的锁就只能 `block_on` —— 主线程上 deadlock 的
+    /// 经典配方。代价是这把锁**绝不能跨 await 持有**；闸门里的操作全是同步的，能保证。
+    gate: std::sync::Mutex<EventGate>,
 }
 
 impl BridgeState {
     pub fn new() -> Self {
-        BridgeState { connection: Mutex::new(None), event_seq: AtomicU64::new(1) }
+        BridgeState { connection: Mutex::new(None), gate: std::sync::Mutex::new(EventGate::new()) }
     }
 
-    /// 下一个事件序号。`Relaxed` 足够：这里只需要原子自增，不靠它同步别的内存。
-    fn next_event_seq(&self) -> u64 {
-        self.event_seq.fetch_add(1, Ordering::Relaxed)
+    /// 取闸门。锁中毒（持锁期间有人 panic）不该让桥从此推不出任何事件：这里取回内部值。
+    /// 闸门里只有「序号 + 一个缓冲」，没有需要靠 panic 才能保护的跨字段不变量。
+    fn gate(&self) -> std::sync::MutexGuard<'_, EventGate> {
+        match self.gate.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
+}
+
+/// 页面开始加载：关上闸门、序号归 1。
+///
+/// 由 `lib.rs` 在 `WebviewWindowBuilder::on_page_load` 的 `PageLoadEvent::Started` 处调用。
+/// 为什么这个信号不可省（以及为什么不能只靠 `hello`），见模块文档的「会话边界」。
+///
+/// 对 `R: Runtime` 泛型而不是写 `WebviewWindow`：后者是 `default_runtime` 宏生成的
+/// 别名，直接写成泛型不必依赖那个别名的展开细节。
+pub fn close_gate_for_new_page<R: tauri::Runtime>(
+    window: &tauri::webview::WebviewWindow<R>,
+) {
+    let state = window.state::<BridgeState>();
+    state.gate().close_for_new_page();
+}
+
+/// 按 `tauri.ts` 的 `handleEvent` 认的形状推一条事件给 WebView。
+///
+/// 推送失败只留痕：窗口可能已关闭、监听方可能已注销。壳不补发、不缓存 ——
+/// 补发就是伪造一段没真正到达过的序列，那是撒谎。
+fn emit_event(app: &AppHandle, seq: u64, event: Event) {
+    let payload = serde_json::json!({ "seq": seq, "event": event });
+    if let Err(error) = app.emit(EVENT_NAME, payload) {
+        eprintln!("xt bridge: 事件推送失败（{EVENT_NAME}）：{error}");
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl Default for BridgeState {
@@ -129,7 +273,22 @@ async fn handle_request(
     // 桥的 `Client::connect` 内部已 `Subscribe` 了 `ALL_TOPICS`，所以 UI 的 subscribe
     // 也只需回一个成功应答（事件由桥的全量订阅覆盖，UI 侧自己按主题过滤）。
     match &request {
-        Request::Hello { .. } => return Ok(Response::Hello(client.hello().clone())),
+        Request::Hello { .. } => {
+            // UI 会话从这里开始：序号归 1，并把这一轮开始**之前**滞留的事件按序补发。
+            // 为什么必须归零见 `EventGate`：计数器的生命周期是进程，UI 的
+            // `expectedSeq` 的生命周期是 WebView 会话 —— 不归零，重载后的第一帧
+            // 就会被判「跳号」并自杀，而且那个实例再也救不回来。
+            //
+            // 补发与直发共用同一把锁，保证推给 UI 的 seq 始终单调。
+            {
+                let state = app.state::<BridgeState>();
+                let mut gate = state.gate();
+                for (seq, event) in gate.begin_session(now_ms()) {
+                    emit_event(app, seq, event);
+                }
+            }
+            return Ok(Response::Hello(client.hello().clone()));
+        }
         Request::Subscribe { topics } => {
             return Ok(Response::Subscribed { topics: topics.clone() });
         }
@@ -228,13 +387,13 @@ fn spawn_event_forwarder(app: AppHandle, client: &Client) {
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    let seq = app.state::<BridgeState>().next_event_seq();
-                    // 形状 = `{ seq, event }`，逐字对齐 `tauri.ts` 的 `handleEvent`。
-                    let payload = serde_json::json!({ "seq": seq, "event": event });
-                    if let Err(error) = app.emit(EVENT_NAME, payload) {
-                        // 推送失败只留痕：窗口可能已关闭、监听方可能已注销。壳不补发、
-                        // 不缓存 —— 补发就是伪造一段没真正到达过的序列。
-                        eprintln!("xt bridge: 事件推送失败（{EVENT_NAME}）：{error}");
+                    // `admit` 与投递必须在**同一把锁**里：否则「滞留补发」与
+                    // 「新事件直发」会交错，推给 UI 的序号就不再单调。
+                    // 用**同步**作用域包住，保证这把 std 锁不跨 await（见 `BridgeState::gate`）。
+                    let state = app.state::<BridgeState>();
+                    let mut gate = state.gate();
+                    if let Some((seq, event)) = gate.admit(event) {
+                        emit_event(&app, seq, event);
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {

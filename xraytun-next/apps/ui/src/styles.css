@@ -682,6 +682,11 @@ a:hover {
   line-height: var(--lh-read);
 }
 
+/* 用户动作按钮：error-box 是纵向 flex，默认会被拉满整行 —— 靠左收窄才不会看起来像「主操作」。 */
+.error-box__action {
+  align-self: flex-start;
+}
+
 .error-box__detail {
   overflow-x: auto;
   color: var(--text-dim);

@@ -35,15 +35,16 @@
 //! * 事件名 `xt_daemon_event`，载荷 `{ seq: number, event: Event }`（`tauri.ts` 读
 //!   `payload.seq` 与 `payload.event`）。见 `bridge` 模块文档里关于 `seq` 的诚实说明。
 //!
-//! # 未验证声明（不许把它说成「可用」）
+//! # 验证状态（不许把它说成「可用」）
 //!
-//! 本机是 Linux：没有 macOS、没有 webkit2gtk（Linux 上编译 tauri 需要它）、没有
-//! tauri-cli，**本轮一次 `cargo check` / `tauri build` / 真实 `invoke`·`listen`
-//! 往返都没跑过**（`cargo` 与 stable 工具链在 `.cargo/bin` 下存在，但缺 GUI 系统库，
-//! 编译必然停在环境而不是代码上；按任务要求也没有运行）。因此：
-//! * 本 crate 只保证「按契约形状写完」，不构成「在 mac 上能用」的声明；
-//! * daemon 的路径解析与生命周期是**占位**（见 `daemon_launch`），真机 S6 再对齐；
-//! * 打包（`bundle.resources` 里加 `xt-daemon`）**未接线**，见 `binaries/README.md`。
+//! * **编译与打包**：`macos-app` 作业在 macOS 14 上跑
+//!   `tauri build --target universal-apple-darwin`，并校验四个二进制的 `lipo -archs`
+//!   与 `codesign --verify --strict`。截至 v1.1.1 全绿；`bundle.resources` 已把
+//!   xt-daemon / xt-helperd / xray 映射进 `Contents/Resources/`。
+//! * **本机（Linux）**：没有 webkit2gtk，本 crate **无法**在本地 `cargo check` ——
+//!   改这里的代码，macOS CI 就是唯一的编译器。别凭「看起来对」就算过。
+//! * **运行时**：TUN 接管、helper 安装/回滚、菜单栏交互仍**未真机验收**（S6）。
+//!   编译通过、能起来、能看见窗口，都**不等于**在 mac 上可用。
 //!
 //! # unsafe
 //!
@@ -55,6 +56,8 @@ pub mod daemon_launch;
 pub mod tray;
 
 use std::path::Path;
+
+use tauri::Manager;
 
 /// 应用入口。`main.rs` 只有一行，真正逻辑在这里（便于将来加集成测试）。
 pub fn run() {
@@ -69,20 +72,27 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            // ① 主窗口。配置里 `create: false`，所以由这里建 —— 唯一目的是在页面脚本
-            //    执行**之前**注入 `__XT_SOCKET__`（UI 在模块求值时读它，见 main.tsx）。
-            //    `initialization_script` 是 Tauri 2 里唯一能保证时序的机制；`eval` 在
-            //    setup 里调不可靠（页面可能还没加载）。
-            create_main_window(app, &socket);
-
-            // ② 菜单栏。它是可选能力：建不起来不该让整个 App 起不来。
+            // ① 菜单栏。它是可选能力：建不起来不该让整个 App 起不来。
+            //    先把菜单栏建好，这样「等 daemon」期间应用也不是一个没有反应的空壳。
             if let Err(error) = tray::build(&handle) {
                 eprintln!("xt shell: 菜单栏图标创建失败：{error}（界面功能不受影响）");
             }
 
-            // ③ 拉起 xt-daemon。**必须**走 `tauri::async_runtime::spawn`：
-            //    `setup` 回调不在 tokio runtime context 里，裸 `tokio::spawn` /
-            //    `tokio::process::Command::spawn` 会 panic
+            // ② 拉起 xt-daemon，**等它确认已经在监听**，然后才建主窗口。
+            //
+            //    顺序绝不能反（2026-10-01 真机 S6 的教训）：UI 的引导链只发一次
+            //    hello、失败不重发（这是刻意的 —— 本项目禁自动重试），所以那唯一一次
+            //    请求必须落在**已经 bind 完成**的 daemon 上。窗口先建、daemon 后起时，
+            //    页面脚本可能抢在 bind 之前发出请求，那一次必然以 `io` 失败，界面就
+            //    永久停在「连不上」——用户只看到「未知 + 设置未加载」，没有任何出路。
+            //
+            //    为什么窗口改到异步任务里建：等就绪是异步的，而 `setup` 必须立刻返回。
+            //    `run_on_main_thread` 是 Tauri 给的「回到主线程再执行」的正式通道，
+            //    建窗口必须在那里做。窗口建在等待之后，`__XT_SOCKET__` 的注入时序不变
+            //    （注入发生在建窗口时、页面脚本之前）。
+            //
+            //    必须走 `tauri::async_runtime::spawn`：`setup` 回调不在 tokio runtime
+            //    context 里，裸 `tokio::spawn` / `tokio::process::Command::spawn` 会 panic
             //    （`there is no reactor running, must be called from the context of a
             //    Tokio 1.x runtime`）。老仓库 0.8.39 正是踩了裸 spawn 的 SIGABRT。
             let launch_socket = socket.clone();
@@ -93,12 +103,30 @@ pub fn run() {
                         launch_socket.display()
                     ),
                     daemon_launch::Launch::Spawned { pid, bin } => eprintln!(
-                        "xt shell: 已拉起 xt-daemon（pid={pid:?}，bin={}）",
+                        "xt shell: 已拉起 xt-daemon 并确认在监听（pid={pid:?}，bin={}）",
+                        bin.display()
+                    ),
+                    daemon_launch::Launch::NotListening { pid, bin, reason } => eprintln!(
+                        "xt shell: 拉起了 xt-daemon（pid={pid:?}，bin={}）但没能确认它在监听：\
+                         {reason}（界面连不上时会如实报错，壳不伪造连接）",
                         bin.display()
                     ),
                     daemon_launch::Launch::Unavailable(reason) => eprintln!(
                         "xt shell: 未能拉起 xt-daemon：{reason}（界面连不上时会如实报错，壳不伪造连接）"
                     ),
+                }
+
+                // 无论上面是哪种结局都建窗口：连不上也必须让界面把原因显示出来，
+                // 「干脆不建窗口」等于把一次失败藏起来。
+                let window_handle = handle.clone();
+                let window_socket = launch_socket.clone();
+                if let Err(error) = handle.run_on_main_thread(move || {
+                    create_main_window(&window_handle, &window_socket);
+                }) {
+                    eprintln!(
+                        "xt shell: 无法回到主线程建主窗口：{error}\
+                         （菜单栏仍可用，退出请用托盘菜单）"
+                    );
                 }
             });
 
@@ -132,7 +160,10 @@ pub fn run() {
 /// 为什么用 `from_config` 而不是把窗口完全写死在 Rust 里：窗口的尺寸/标题/最小尺寸
 /// 属于配置，应该留在 `tauri.conf.json`（一处可改）；Rust 只额外加**一个**配置里
 /// 表达不了的东西 —— 页面加载前执行的初始化脚本。
-fn create_main_window(app: &mut tauri::App, socket: &Path) {
+///
+/// 参数是 `AppHandle` 而不是 `&mut App`：调用点在 `run_on_main_thread` 的回调里，
+/// 那里能拿到的就是 `AppHandle`（`setup` 的 `&mut App` 早就随 setup 返回失效了）。
+fn create_main_window(app: &tauri::AppHandle, socket: &Path) {
     let Some(config) = app
         .config()
         .app
@@ -155,14 +186,28 @@ fn create_main_window(app: &mut tauri::App, socket: &Path) {
         }
     };
 
-    let builder = match tauri::WebviewWindowBuilder::from_config(app.handle(), &config) {
+    let builder = match tauri::WebviewWindowBuilder::from_config(app, &config) {
         Ok(builder) => builder,
         Err(error) => {
             eprintln!("xt shell: 主窗口配置无效：{error}");
             return;
         }
     };
-    if let Err(error) = builder.initialization_script(script).build() {
+    // 页面**开始加载** = 一个新的 WebView 会话：桥的序号闸门必须在这里关上。
+    //
+    // 为什么不能只靠 `hello`：`hello` 是**事后**信号，而桥缓存着连接时 daemon 的
+    // 事件是持续到达的 —— 完全可能抢在 hello 之前推给这个还没有序号的页面，那第一帧
+    // 就会被 UI 判「seq 跳号」并进入不可恢复的致命态（`tauri.ts` 的 `fail()` 会把
+    // 客户端实例永久钉死）。重载后「窗口一片错误、点重新连接也没用」正是这么来的。
+    if let Err(error) = builder
+        .initialization_script(script)
+        .on_page_load(|window, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                bridge::close_gate_for_new_page(&window);
+            }
+        })
+        .build()
+    {
         eprintln!("xt shell: 主窗口创建失败：{error}（菜单栏仍可用，退出请用托盘菜单）");
     }
 }

@@ -100,6 +100,33 @@ async fn main() -> ExitCode {
         }
     };
 
+    // 绑定与服务的**分界点**是对外可观测的：`Daemon::bind()` 的文档写明它的用途就是让
+    // 「socket 已经存在」成为一个可观测事件，调用方不必「等一会儿再看文件在不在」。
+    // 这里必须显式分两步（而不是 `serve()` —— 它把两步合并，正好把这个可观测点丢掉），
+    // 因为拉起 daemon 的壳要等到就绪信号才建主窗口。
+    let socket_display = daemon.socket_path().display().to_string();
+    let bound = match daemon.bind().await {
+        Ok(bound) => bound,
+        Err(error) => {
+            eprintln!("xt-daemon 绑定 {socket_display} 失败：{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // 就绪信号：写 **stdout** 并立刻 flush。
+    //
+    // 为什么是 stdout 而不是 tracing（它走 stderr、进日志文件）：壳要的是「现在能不能
+    // 连」这个**事件**，而日志文件只能靠轮询去看 —— 本项目禁轮询（不变量 I1）。
+    // 前缀与 `apps/desktop/src/daemon_launch.rs` 的 `READY_PREFIX` **逐字对应**。
+    {
+        use std::io::Write;
+        println!("xt-daemon: listening {}", bound.socket_path().display());
+        if let Err(error) = std::io::stdout().flush() {
+            // 刷不出去只影响「壳等不到就绪信号」，daemon 自己继续服务，不是致命问题。
+            eprintln!("xt-daemon: 就绪信号 flush 失败：{error}");
+        }
+    }
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -107,7 +134,7 @@ async fn main() -> ExitCode {
         }
     });
 
-    match daemon.serve(shutdown_rx).await {
+    match bound.serve(shutdown_rx).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("xt-daemon 退出：{error}");

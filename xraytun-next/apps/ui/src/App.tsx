@@ -20,7 +20,7 @@ const NAV_ITEMS: { id: PageId; label: string }[] = [
 ];
 
 function Shell() {
-  const { transportError } = useDaemon();
+  const { transportError, reconnect, reconnectPending } = useDaemon();
   const [page, setPage] = useState<PageId>('dashboard');
   const transportFailure = toDisplayErrorBody(transportError);
 
@@ -42,9 +42,19 @@ function Shell() {
       </nav>
       <main className="app__main">
         {/* 传输层自己的失败也要原样上报：它和业务失败同样重要，
-            静默吞掉会让界面看起来「一切正常」。 */}
+            静默吞掉会让界面看起来「一切正常」。
+            只有这一处额外给一个用户动作：引导链失败后界面停在「断了」，恢复必须由用户
+            显式发起（reconnect 用同一个 client 重跑整条链）。文案是「重新连接」，
+            因为界面里没有任何东西会自己再连一次。 */}
         {transportFailure != null && (
-          <ErrorBox error={transportFailure} testId="transport-error" />
+          <ErrorBox
+            error={transportFailure}
+            testId="transport-error"
+            actionLabel="重新连接"
+            actionTestId="transport-reconnect"
+            actionPending={reconnectPending}
+            onUserAction={reconnect}
+          />
         )}
         {page === 'dashboard' && <Dashboard />}
         {page === 'nodes' && <Nodes />}

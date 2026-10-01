@@ -141,7 +141,7 @@ jobs:
             gh release create "$TAG" \
               --title "xraytun-next v${VERSION}（Linux x86_64 核心 · proxy 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.1.md \
+              --notes-file docs/release-notes/v1.1.2.md \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
@@ -267,7 +267,7 @@ jobs:
             gh release create "$TAG" \
               --title "xraytun-next（Linux + macOS 核心 · proxy 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.1.md \
+              --notes-file docs/release-notes/v1.1.2.md \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS-macos.txt --clobber
@@ -397,9 +397,9 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "xraytun-next v1.1.1（macOS 应用 · TUN 模式）" \
+              --title "xraytun-next v1.1.2（macOS 应用 · TUN 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.1.md \
+              --notes-file docs/release-notes/v1.1.2.md \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" \
