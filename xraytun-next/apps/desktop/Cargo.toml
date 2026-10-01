@@ -1,0 +1,52 @@
+# xraytun-next · 桌面壳（Tauri 2）
+#
+# 这是一个**独立 crate，刻意不挂进根工作空间**：
+#   * 根工作空间的判据是 Linux 上 `cargo test --workspace` / `cargo clippy --all-targets`
+#     必须全绿；而 Tauri 依赖 webkit2gtk / 系统 GUI 库，在 Linux CI 上会直接编译失败。
+#   * 壳只能在 macOS 上构建（S4/S6），把它的失败传染给 Linux 门禁是净损失。
+# 所以这里用空的 `[workspace]` 表把本包变成自己的工作空间根，并在根 Cargo.toml 里
+# `exclude = ["apps/desktop"]` 明示意图。副作用：本包有自己的 Cargo.lock。
+#
+# 依赖纪律（不新增第三方依赖）：
+#   tauri / tauri-build / tokio / serde / serde_json 从老仓库抄版本号；
+#   xt-ipc / xt-contract 直接 path 引用本仓库的 crate（它们继承根工作空间的依赖）。
+#   没有引入 tauri-plugin-*：骨架阶段多一个插件就多一份版本兼容负担。
+
+[package]
+name = "xraytun-desktop"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.77"
+license = "MIT"
+description = "xraytun-next 桌面壳：macOS 菜单栏 + 主窗口 + daemon IPC 桥"
+default-run = "xraytun-desktop"
+
+[lib]
+name = "xraytun_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `tray-icon` = 菜单栏图标；`image-png` = 从 PNG 字节解码图标。
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",   # 拉起 xt-daemon
+    "net",       # UnixStream 探测 + AF_UNIX 连接（经 xt-ipc）
+    "io-util",
+    "sync",      # Mutex / broadcast
+    "time",
+    "signal",
+    "fs",
+] }
+
+# L2 传输 + L0 契约。壳只认识这两层，不认识 xt-daemon 的内部类型。
+xt-ipc = { path = "../../crates/xt-ipc" }
+xt-contract = { path = "../../crates/xt-contract" }
+
+[workspace]

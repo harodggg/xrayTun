@@ -28,6 +28,11 @@ members = [
     "crates/xt-helperd",
 ]
 
+# apps/desktop（Tauri 2 桌面壳）**刻意不挂进本工作空间**：它依赖 macOS/GUI 系统库，
+# 会让 Linux 上的 `cargo test --workspace` / `clippy --all-targets` 直接失败。
+# 它是自己的小工作空间（见 apps/desktop/Cargo.toml），这里排除只是为了把意图写明。
+exclude = ["apps/desktop"]
+
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
