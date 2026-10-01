@@ -267,6 +267,21 @@ a:hover {
 }
 
 .app__nav-item {
+  /* 必须重置原生按钮外观。
+   *
+   * 全局重置（`button, input, select, textarea { font: inherit; color: inherit; }`）只接管了
+   * 排版与文字色，**没有接管 background**；于是 `<button>` 保留 WebKit/macOS 的系统按钮外观
+   * （浅灰渐变底 + 高光描边），而这里的文字色 `--text-dim`（#a7b3c6）是给**深色底**设计的
+   * —— 浅灰字画在浅灰底上几乎看不见。选中项因为 `--active` 覆盖了 background 才可读。
+   *
+   * 症状：侧栏里只有当前所在那一项有字，另外三项看起来是三个空灰条（2026-10-01 真机
+   * 截图发现；jsdom 测试没有排版，dev 里也没人真的看过，所以一直没暴露）。
+   * `.btn` 之所以从来没这问题，是因为它自己显式写了 `background: var(--surface-2)`。 */
+  appearance: none;
+  background: transparent;
+  border: 0;
+  /* 原生按钮默认居中；这是左侧竖向导航，左对齐才符合阅读顺序 */
+  text-align: left;
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--radius);
   color: var(--text-dim);
