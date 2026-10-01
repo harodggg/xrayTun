@@ -141,7 +141,7 @@ jobs:
             gh release create "$TAG" \
               --title "xraytun-next v${VERSION}（Linux x86_64 核心 · proxy 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.4.md \
+              --notes-file docs/release-notes/v1.1.5.md \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
@@ -267,7 +267,7 @@ jobs:
             gh release create "$TAG" \
               --title "xraytun-next（Linux + macOS 核心 · proxy 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.4.md \
+              --notes-file docs/release-notes/v1.1.5.md \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS-macos.txt --clobber
@@ -333,24 +333,10 @@ jobs:
       - name: 清理 FinderInfo xattr（codesign --strict 会拒带该 xattr 的二进制）
         run: xattr -cr xraytun-next/apps/desktop/binaries/ 2>/dev/null || true
 
-      # 这一步同时产出 `.app` 和 `.dmg`（tauri.conf.json 的 targets = [app, dmg]）。
-      #
-      # 为什么容忍失败：DMG 打包依赖 tauri `bundle_dmg.sh` 里的 Finder 自动化，在 CI 上
-      # **偶发**失败（2026-10-01 实测过一次 `error running bundle_dmg.sh`，还留下一个
-      # diskimages-help 孤儿进程）。那时 `.app` 其实已经产出 —— 让整个作业为此失败，等于
-      # 「DMG 挂了就没有任何 macOS 应用可发」。所以容忍失败，紧接着用硬断言兜住真正要紧的
-      # `.app`；并且**永远**另外打一个已签名的 `.app.zip` 作为保底交付。
-      #
-      # 已知缺口（如实记，别当成已解决）：dmg 是在 `tauri build` **内部**打的，而 ad-hoc
-      # 签名在这之后 —— 所以 **dmg 里装的 app 还没签名**，而 CI 校验的是
-      # `bundle/macos/XrayTun.app`。我们验的与用户从 dmg 拿到的不是同一个东西。
-      # 我试过自己用 hdiutil 从已签名的 app 重打 dmg，两次都失败在
-      # `hdiutil: create failed - No space left on device`（挂载出来的镜像装不下内容），
-      # 所以退回 tauri 这条已验证能跑的路径。真正的解法是 S5（Apple 凭据，tauri 会在打包
-      # 时就签名）或 `APPLE_SIGNING_IDENTITY=-`（让 tauri 走 ad-hoc），两者都还没验。
-      - name: tauri build（universal；有 Apple 凭据则 Developer ID 签名 + 公证）
+      # 只打 `.app`（`--bundles app`）。dmg 交给后面的 hdiutil 步骤，理由是顺序问题：
+      # 签名必须在打包**之前**完成，否则 dmg 里装的是未签名的 app（而 CI 验的是 .app）。
+      - name: tauri build（universal，只出 .app；有 Apple 凭据则 Developer ID 签名 + 公证）
         id: tauri_build
-        continue-on-error: true
         working-directory: xraytun-next/apps/desktop
         env:
           # S5：这些 secrets 未配置时为空，tauri 退化为不签名（由下一步 ad-hoc 兜底）。
@@ -368,7 +354,7 @@ jobs:
                    APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
           done
-          ../ui/node_modules/.bin/tauri build --target universal-apple-darwin
+          ../ui/node_modules/.bin/tauri build --target universal-apple-darwin --bundles app
 
       - name: 断言 .app 真的产出了（后面每一步都以它为输入）
         run: |
@@ -429,6 +415,66 @@ jobs:
             "$B/macos/XrayTun.app" "$B/macos/XrayTun_${V}_universal.app.zip"
           ls -l "$B/macos/"
 
+      # 腾空间。runner 的 SSD 只有约 14 GB，而我们在这里堆了：两个架构的 target/、
+      # 合并后的 universal target/、node_modules、bundle 里的 universal 二进制……
+      # 证据：我用 hdiutil 从已签名 app 重打 dmg 时两次都死在
+      # `hdiutil: create failed - No space left on device`（挂载出来的镜像装不下内容），
+      # 而 tauri 自己的 dmg 也在 tag 运行里失败并留下 diskimages-help 孤儿进程。
+      # 所以先把**已经用不到**的中间产物删掉，再打 dmg。
+      - name: 腾出磁盘（打 dmg 前）
+        run: |
+          set -x
+          df -h /
+          du -sh xraytun-next/target 2>/dev/null || true
+          # 注意不要删 target/universal-apple-darwin/release/bundle —— .app 在那里
+          rm -rf xraytun-next/target/aarch64-apple-darwin \
+                 xraytun-next/target/x86_64-apple-darwin \
+                 xraytun-next/target/universal-apple-darwin/release/deps \
+                 xraytun-next/target/universal-apple-darwin/release/build \
+                 xraytun-next/target/universal-apple-darwin/release/.fingerprint \
+                 xraytun-next/target/universal-apple-darwin/release/incremental \
+                 xraytun-next/apps/desktop/binaries
+          df -h /
+
+      # 从**已签名**的 .app 打 dmg，并把它挂起来验里面的 app。
+      # 为什么必须挂起来验：用户下载的是 dmg。只验 bundle/macos 里的 .app 等于「验 A 发 B」。
+      # 为什么容忍失败：dmg 是便利交付，zip 才是保底；这步失败会红着留在日志里，不被吞掉。
+      - name: 打 DMG（从已签名 .app；hdiutil，不用 Finder 自动化）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          SHOT="$PWD/xraytun-next/shot"
+          mkdir -p "$SHOT"
+          # 完整输出同时进 artifact：GitHub 的 job 日志接口会截断，上次连一行错误都没拿到。
+          exec > >(tee "$SHOT/dmg-step.log") 2>&1
+          set -x
+
+          B="xraytun-next/apps/desktop/target/universal-apple-darwin/release/bundle"
+          V="$(sed -n 's/^version = "\(.*\)"/\1/p' xraytun-next/Cargo.toml | head -1)"
+          echo "version=$V"
+          STAGE="$(mktemp -d)"
+          # ditto 而不是 cp -R：.app 是 bundle，ditto 保留扩展属性与符号链接，签名不会被复制破坏
+          ditto "$B/macos/XrayTun.app" "$STAGE/XrayTun.app"
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p "$B/dmg"
+          OUT="$B/dmg/XrayTun_${V}_universal.dmg"
+          TMP_RW="$B/dmg/.XrayTun_rw.dmg"
+          rm -f "$OUT" "$TMP_RW"
+          df -h /
+          # 参数照抄 tauri bundle_dmg.sh：-fs HFS+ -fsargs 控制块大小，避免镜像尺寸估小
+          hdiutil create -volname "XrayTun" -srcfolder "$STAGE" -fs HFS+ \
+            -fsargs "-c c=64,a=16,e=16" -ov -format UDRW "$TMP_RW"
+          hdiutil convert "$TMP_RW" -format UDZO -imagekey zlib-level=9 -o "$OUT"
+          rm -f "$TMP_RW"; rm -rf "$STAGE"
+
+          echo "=== 挂起来验 dmg 里的 app（我们发什么就验什么）==="
+          MP="$(mktemp -d)"
+          hdiutil attach -nobrowse -quiet -mountpoint "$MP" "$OUT"
+          codesign --verify --strict --verbose=1 "$MP/XrayTun.app"
+          lipo -archs "$MP/XrayTun.app/Contents/MacOS/xraytun-desktop"
+          hdiutil detach -quiet "$MP"; rm -rf "$MP"
+          ls -l "$B/dmg/"
+
       - name: 启动 app 冒烟 + 两页截图（进程存活与 daemon 是硬判据，失败拦发布）
         run: |
           set -x
@@ -488,9 +534,9 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "xraytun-next v1.1.4（macOS 应用 · TUN 模式）" \
+              --title "xraytun-next v1.1.5（macOS 应用 · TUN 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.4.md \
+              --notes-file docs/release-notes/v1.1.5.md \
               --target "$GITHUB_SHA"
           fi
           # DMG 与 .app.zip 各自独立、存在才传：「DMG 打包失败」不该等于
