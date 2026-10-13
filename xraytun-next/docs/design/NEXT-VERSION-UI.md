@@ -67,7 +67,7 @@
 | 7 | 提示横幅：按 severity 排序，只显最急一条 + 「还有 N 条提示」 | `Dashboard.tsx:429-445` + `collectNotices()` `:536-680` | `rank` 越小越急；`error` → `role="alert"`，其余 `role="status"`；破坏性动作带二次确认 | 骨架照抄；条目按 v1 契约重列（§2.3） |
 | 8 | 折叠的「环境自检与诊断」 | `Dashboard.tsx:448-521` | 核心 / helper / 进程 / 配置路径 + 4 个动作按钮 | 只留契约有的：`DatapathView.pid/version/ready_at_ms` + 动作（更新全部订阅 / 打开数据目录 / 查看日志 / 全部设置） |
 | 9 | 「还没有状态」的兜底页 | `apps/ui/src/SnapshotState.tsx:24-47`，逐字 `正在读取状态…` / `读不到状态：{原因}` | 区分「还没读到」与「确实是空」 | `stage`/`connection` 为 `null` 时同样只显示「正在读取状态…」，**不许**显示成「未连接」 |
-| 10 | 主操作按钮**只在顶栏一颗** | `apps/ui/src/App.tsx:595-611`；`runButtonDisabled()` `topbarStatus.ts:283` | 仪表板里不重复渲染第二颗（老版 task-72 特意收敛过） | 把现在 Dashboard 里的连接/断开**移到新顶栏**（§3） |
+| 10 | 主操作按钮**全屏只有一处** | `apps/ui/src/App.tsx:595-611`；`runButtonDisabled()` `topbarStatus.ts:283` | 老版 task-72 特意把仪表板里那颗撤掉：同一动作同屏两颗只是重复 | 本版改成**仪表板顶部的大启动按钮**（§3.2）；顶栏只留状态，不再放同动作按钮 |
 | 11 | 样式与配色 | 老版 `apps/ui/src/styles.css`（`dash__*` / `banner--{error,warn,info}` / `badge--{fast,ok,slow,unknown}` / `dot--*` / `topbar--*`） | 线、点、状态词三处同色 | 搬进 `xraytun-next/apps/ui/src/styles.css`（design 所有） |
 | 12 | 导航第一项标签 | 老版：`仪表盘`（`App.tsx:43`） | — | v1 现为「状态」（`App.tsx:16`）；本版改为**「仪表盘」**，顺带消除 `docs/ux/IA.md:166` 与实现的漂移 |
 
@@ -76,7 +76,8 @@
 | 老版字段 / 行为 | v1 契约 | 本版处理 |
 | --- | --- | --- |
 | `settings.routing_preset`（分流预设） | `SettingsView` 只有 `socks_listen`/`selected_node`/`log_level`（`model.rs:262-269`） | 不显示 |
-| `settings.mode = direct`（直连档）+ 直连提示 | 没有 direct；只有 `RunMode::{Proxy,Tun}` + 断开 | 不显示该档与那条提示；空态由 `stage=disconnected` 表达 |
+| `settings.mode = direct`（直连档）+ 直连提示 | 没有 direct；只有 `RunMode::{Proxy,Tun}` + 断开 | **不显示**该档与那条提示；空态由 `stage=disconnected` 表达 |
+| **代理模式（SOCKS 入站）** 与「入站模式」选择器 | 契约里 `RunMode::{Proxy,Tun}` 仍在（后端不改）；v1 的 `run-mode-select` 是它的 UI 面 | **整档移除**（用户 2026-10-01 裁决：放弃直连与代理，只保留 TUN）：UI 不渲染任何模式选择器，`Connect` 只发 `tun`（§3.2、§3.3） |
 | `core.path / version / supports_native_tun / min_native_tun_version` | 只有 `DatapathView.version`（真实 `xray version` 输出） | 诊断区只显示 pid/version/ready_at；**不显示核心路径与「是否支持原生 TUN」** |
 | `helper.*`（reachable/version/protocol/tun_active/socket_present/stale_session） | 契约里**没有** helper 视图（I5：本轮 helper 未实现） | 不显示（连带老版 rank 1/2/3 三条横幅一并删除） |
 | `update.*`（app/core/geo 三路检查） | 无 | 不显示 |
@@ -128,9 +129,9 @@
 1. 状态线 + 圆点（与 §2.4 同源、同色）；
 2. 当前节点徽章（`node_id`；未选择时显示「未选择」）；
 3. 失败/阻塞徽章：有 `last_error` 时显示原文摘要；有操作在跑时显示「请求已受理，等待事件返回终态」（沿用 v1 现有逐字文案，`Dashboard.tsx:53-63`）；
-4. **唯一主操作按钮**：`stage = connected` ⇒ 「断开」；否则「连接」；
+4. **启动/停止**：动作收敛到仪表板顶部的大启动按钮（§3.2）；顶栏不再放同一动作的按钮，避免同屏两个「启动/停止」；
 5. 「为什么现在点不动」的 `title`/note：`requestPending`、`stage ∈ {connecting, disconnecting}`、`node_id == null`（「未选择节点」）各给一句真实原因；
-6. `capabilities` 含 `tun_mode` 时才给「入站模式」选择器（选项逐字「代理模式（SOCKS 入站）」/「TUN 模式」，沿用 `Dashboard.tsx:123-137`）；
+6. ~~「入站模式」选择器~~ **已删**（裁决：只保留 TUN）：顶栏与仪表板都不再出现任何模式选择器，`Connect` 只发 `tun`（§3.3）。
 7. **保留** v1 的传输层失败盒（`App.tsx:61-70`，带「重新连接」动作）——老版没有它，但它是 v1 唯一的传输失败出口，本版放在顶栏下方，不藏。
 
 禁用判据只写一处（老版抽成 `topbarStatus.runButtonDisabled()`，v1 同样抽成纯函数便于单测）。
@@ -143,6 +144,49 @@
 - v1 的托盘**已经存在**：`xraytun-next/apps/desktop/src/tray.rs`（65 行），菜单项逐字「显示主窗口」「退出 XrayTun Next」；文件头注释写明**刻意不放连接/断开/切节点**（那些动作由 daemon 拥有）。
 - 本版**保留托盘现状不动**：即它继续只提供「显示主窗口 / 退出」，**不新增**连接/速率/状态项。
 - 若要把连接/状态/速率也放进托盘（老版托盘确实有——老版 `apps/desktop/src/traffic.rs:132-135,166-175` 用 `format_rate_compact` 更新托盘），那是 `apps/desktop/**` 的**壳层**工作：① 超出本版「只改 `apps/ui/**`」的边界；② 老版托盘速率的来源正是 §4 那个后端 1s 定时器，同样要先裁决节拍问题。⇒ 列为 §8 待裁决项，不在本版实施。
+
+### 3.2 大的启动按钮（用户 2026-10-01：重新设计）
+
+**位置**：仪表板最上方的开始面板区，居中、占主视觉。顶栏保留状态（线/圆点/节点/失败徽章），**不再放同一动作的第二颗按钮** —— 老版 task-72 的判据：同一动作同屏两颗只是重复。
+
+**规格**
+- 尺寸：宽 `min(520px, 100% - 48px)`、高 ≥ `96px`；主色/危险色随状态切换；**不做百分比进度条与假动画**（契约里没有进度数据 ⇒ 不许造）。
+- 文案（逐字；状态取自 `ConnectionView.stage`）：
+
+| 状态 | 按钮文字 | 可点 | 按钮下方说明（逐字） |
+| --- | --- | --- | --- |
+| `disconnected` + 无节点 | **添加订阅** | ✅（跳订阅区） | 节点目录为空 —— 启动前先添加订阅 |
+| `disconnected` + 有节点 + 未选节点 | **启动** | ❌ | 未选择节点 |
+| `disconnected` + 已选节点 | **启动** | ✅ | — |
+| `connecting` | **启动中…**（附 `PHASE_TEXT` 阶段） | ❌ | 连接进行中：<阶段> |
+| `connected` | **停止** | ✅ | 已连接 · <节点名> · 已运行 <时长> |
+| `disconnecting` | **停止中…** | ❌ | 断开进行中 |
+| 请求已受理、终态未到 | **启动中… / 停止中…** | ❌ | 请求已受理，等待事件返回终态 |
+| `disconnected` + `last_error` 非空 | **启动** | ✅ | 上次运行出错：<原文> |
+| `capabilities` 不含 `tun_mode` | **启动** | ❌ | 当前 daemon 不提供 TUN 模式（未宣告 `tun_mode` 能力） |
+
+- 可访问性：`aria-busy`、状态变化经 `role="status"` live region 播报；`data-testid="start-button"`；Enter/Space 可触发；全屏只有这一处启动控件。
+- **诚实门控**：`tun_mode` 未宣告时按钮禁用并说清真因 —— 这不是假控件（它说的是事实），也**不是**把按钮藏起来假装功能不存在。
+
+### 3.3 只保留 TUN：一条必须先裁决的硬冲突
+
+**裁决**：放弃直连与代理模式，只保留 TUN 模式。
+
+**事实（v1.1.5 现状，后端不改跨不过去）**
+- daemon 的能力表只宣告 `ProxyMode / Stats / Probe / Subscriptions`（`crates/xt-daemon/src/lib.rs:317-332`，注释写明「没实现的能力不宣告，界面因此不会出现按不动的按钮」）；
+- `Connect` 只要带 `RunMode::Tun`，daemon **直接拒绝**：`unsupported("tun 模式需真机验收通过后才宣告 TunMode 能力（S6）；当前只开放 proxy")`（`crates/xt-daemon/src/lib.rs:352-357`）；
+- 即：TUN 的 daemon 通路是**刻意锁在 S6 真机验收之后**的。
+
+**⇒ 「只保留 TUN」+「后端不改」做出来的大按钮，在 v1.1.5 上连不上**（每次点都是 `Unsupported`）。两条路，必须由用户裁决：
+
+| 路径 | 做法 | 结果 |
+| --- | --- | --- |
+| **T1（UI-only，先做这个）** | 本版只做 UI：TUN-only + 大按钮 + 未宣告时的诚实禁用态；等 **S6 真机验收通过**、daemon 宣告 `TunMode` 后按钮自然可用 | 本版在 v1.1.5 上**不可连接**（按钮如实说原因）；后端零改动、既有纪律不破 |
+| **T2（放开裁决 5）** | 这一版就让后端宣告 `TunMode`（并完成 TUN 通路的后端工作） | 立刻可用；但**推翻「S6 真机验收后才宣告」的纪律**，且要动 `crates/**` —— 需要你明确同意 |
+
+**两条路共有的副作用（要写进 release notes 的诚实声明）**
+1. UI 不再提供 proxy ⇒ Linux/CI 上的「活体验收」（`apps/ui/tests/acceptance/live-daemon.test.ts` 现在用真 daemon + proxy 连接）无法再经界面连接，只能降级为渲染层验收；
+2. 非 macOS 平台没有任何可用连接方式（TUN 依赖 helper，v1 的 helper 仅 macOS）。
 
 ---
 
@@ -225,7 +269,7 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 ```
 
 **新增/扩展的断言清单（逐条）**
-1. 顶栏存在且**唯一**一颗连接/断开按钮；仪表板里不再有第二颗（老版 task-72 的判据）。
+1. **大启动按钮**是仪表板顶部的主控，且全屏只有这一处启动/停止控件（顶栏不再有同动作按钮）。
 2. 状态词与顶栏圆点同源：同一 `stage/phase` 下两处文本与 tone class 一致。
 3. `stats == null` ⇒ 流量区显示「未采样」，且**不出现** `0 B/s` / `累计 0 B`。
 4. 只有一个样本 ⇒ 不显示速率；两个样本（`sampled_at_ms` 不同）⇒ 速率 = `Δbytes/Δms`（固定 fixture 断言数值）。
@@ -235,6 +279,8 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 8. `Event::Notice` 被真实渲染（修复「缓冲了但不显示」的现状缺口），文案与 daemon 原文一致。
 9. 能力门控不回退：`tun_mode` 未宣告 ⇒ 没有入站模式选择器；`probe` 未宣告 ⇒ 没有探测按钮；`stats` 未宣告 ⇒ 没有流量卡。
 10. `scripts/guard.sh` 的 I1 豁免输出**恰好一行**（§4.1 那一处节拍），`xraytun-next/crates` 的 diff 为空。
+11. 界面上**不存在任何模式选择器**（`run-mode-select` 消失），也不出现「代理模式 / 直连」字样。
+12. `hello.capabilities` 不含 `tun_mode` ⇒ 大按钮**禁用**，说明逐字「当前 daemon 不提供 TUN 模式（未宣告 `tun_mode` 能力）」；且用假 client 断言 `Connect` 请求里的 `mode` **恒为 `tun`**。
 
 **只有用户真机能判的**：仪表板观感与老版的一致性（截图对比）；顶栏在真实 macOS 窗口里的布局。发布流水线已有的 app 启动探针目前只截两页（状态/设置），本版应扩到四页 + 顶栏可见性。
 
@@ -254,6 +300,8 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 - **开始面板 = 顶栏连接面板 + macOS 菜单栏托盘，两个都保留**（§3、§3.1）；托盘本版保持现状（只有「显示主窗口 / 退出」）。
 - **保留的粒度 = 保持 v1 现状、不照老版重建**（「不需要额外的功能」）；**日志只保留两个功能**：如实流动 + 分类显示（§6）。
 - **网速节拍 = 方案 C**（§4.1）：UI 里唯一一处展示用采样节拍 + `scripts/guard.sh` 的 I1 窄白名单；后端零改动。
+- **模式：放弃直连与代理，只保留 TUN**（§3.3）；仪表板顶部改为**一个大启动按钮**（§3.2），全屏只有这一处启动/停止控件。
 
 **仍待裁决**
-1. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作，且复用同一个节拍裁决（C）。
+1. **TUN 可用性路径**（§3.3）：**T1**（UI-only，等 S6 真机验收后 daemon 宣告 `TunMode`；本版按钮在 v1.1.5 上如实禁用）还是 **T2**（这一版就放开裁决 5、让 daemon 宣告 `TunMode`）？**默认 T1。**
+2. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作，且复用节拍裁决（C）。
