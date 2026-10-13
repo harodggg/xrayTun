@@ -3,7 +3,7 @@
 //! # 这一层负责什么
 //!
 //! helperd 以 root 运行，socket 是提权通道；daemon 只能用 [`xt_helperproto`]
-//! 的**封闭指令集**跟它说话（六条指令，见该 crate 的模块文档）。本模块就是那套
+//! 的**封闭指令集**跟它说话（目前七条指令，见该 crate 的模块文档）。本模块就是那套
 //! 线上词汇的客户端：一条 [`HelperClient`] 对应一条 AF_UNIX 连接，每个方法
 //! 发一帧 `Request`、读一帧 `Response`，不发明任何 helper 不认识的指令。
 //!
@@ -124,7 +124,9 @@ impl HelperClient {
     /// 在 `TunUp` 里本来就要用它 —— 这里只是把同一个事实**提前**取回来。
     /// **失败即失败**：不退回任何写死的网卡名。绑错网卡的 direct 出站会表现为
     /// 「连得上但出口不对」，比一条明确的失败更难查。
-    pub async fn discover_physical(&self) -> Result<(String, Option<std::net::IpAddr>), ErrorBody> {
+    pub async fn discover_physical(
+        &self,
+    ) -> Result<(String, Option<std::net::IpAddr>), ErrorBody> {
         match self.exchange(Request::DiscoverPhysical).await? {
             Response::PhysicalUplink { interface, gateway } => Ok((interface, gateway)),
             other => Err(unexpected_response("DiscoverPhysical", &other)),

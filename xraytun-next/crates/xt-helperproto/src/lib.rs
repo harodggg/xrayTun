@@ -1,7 +1,8 @@
 //! xt-helperproto —— 特权 helper 的**封闭**指令集。
 //!
-//! helper 不认识「代理」，只认识六条指令：`Status` / `TunUp` / `TakeTunFd` /
-//! `CommitRoutes` / `TunDown` / `RestoreStale`。不接受任意命令、任意路径、
+//! helper 不认识「代理」，只认识七条指令：`Status` / `TunUp` / `TakeTunFd` /
+//! `CommitRoutes` / `TunDown` / `RestoreStale` / `DiscoverPhysical`（最后一条 2026-10-01 新增，
+//! 只读地报告默认路由指向的物理网卡）。不接受任意命令、任意路径、
 //! 任意文件写入 —— 这是 C1+C2 推出的权限边界的落地（见 `ARCHITECTURE.md` §1.2）。
 //!
 //! # 帧格式
