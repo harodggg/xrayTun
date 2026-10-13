@@ -19,14 +19,14 @@
 | 项 | 值 |
 | --- | --- |
 | 目标版本 | **xraytun-next v1.2.0**（用户 2026-10-01 裁决）；当前基线 v1.1.5 = 分支 `xraytun-next-v1` |
-| 可以改 | `xraytun-next/apps/ui/**`（`src/**`、`tests/**`、`styles.css`）、本设计文档 |
+| 可以改 | `xraytun-next/apps/ui/**`（`src/**`、`tests/**`、`styles.css`）、`xraytun-next/scripts/guard.sh`（**只容许 §4.1 那一处 I1 豁免**）、本设计文档 |
 | 不许改 | `xraytun-next/crates/**`（`xt-contract`/`xt-daemon`/`xt-cli`/…）、`xt-ipc` 帧格式、协议与事件、能力宣告 |
 | 明令不动 | 分支 `xraytun3` 与 `xraytun3/**`（裁决 4） |
 | 老版参照 | `apps/ui/src/**`（v0.9.2，只读；含 `pages/Dashboard.tsx` 等） |
 
 **判据**
 
-1. `git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts` **输出必须为空**（「后端零改动」的机器判据，不靠跑 CI 自证）。
+1. `git diff --name-only <base>..HEAD -- xraytun-next/crates` **输出必须为空**（「后端零改动」的机器判据，不靠跑 CI 自证）。`xraytun-next/scripts/guard.sh` 允许**唯一一处**改动：§4.1 的 I1 窄白名单，且它必须打印豁免行。
 2. `bash xraytun-next/scripts/guard.sh` 仍绿（五条不变量的判据）。
 3. `cd xraytun-next/apps/ui && npm test && npx tsc --noEmit && npm run build` 全绿。
 4. `apps/ui/src/transport/contract.guard.test.ts` 仍绿（UI 不得越过契约认 Rust 内部类型）。
@@ -172,7 +172,17 @@
 | **C（推荐）** | 放开 I1 的一个**窄口子**：允许 UI 里**一处**纯展示用的采样节拍（每 ~1s 调一次 `Status`），同步在 `scripts/guard.sh:96-97` 加白名单（只放行这一处，不关掉整条 I1） | **真正的持续速率**，与老版观感一致；**后端一行不改**（`Status` 是契约里已有的请求） | 动的是**仓库不变量判据**（`scripts/guard.sh` 属 lead，不是后端）；commit 必须写清「为什么这次允许」，例外只限这一处展示采样 |
 | **D** | 后端加周期性 stats 事件（daemon 侧 tick，照老版 `apps/desktop/src/traffic.rs:30,58-98` 的做法） | 持续速率，且节拍归 daemon（与老版同构，架构最干净） | **违反裁决 5「后端逻辑不要改」** |
 
-**本设计的默认选择是 C**：它是唯一「不动后端、又能真正交付网速」的路径，代价是 I1 判据要开一个被记录在案的窄口子。若要守住 I1 原文，则退到 A（速率基本不动）或 B（不显示速率）。
+**已裁决（2026-10-01）：选 C。** 它是唯一「不动后端、又能真正交付网速」的路径，代价是 I1 判据要开一个被记录在案的窄口子。
+
+### 4.1 方案 C 的落地规则（已裁决）
+
+- **唯一节拍点**：UI 里只允许**一处** `setInterval(..., ~1000ms)`（挂在 store 层，如 `store/daemon.ts` 或同层模块），它只做一件事：发 `Request::Status`。别处一律不许再有定时器。
+- **只在连上时跳**：`stage !== connected` 时**不采样**，断开时清空基准 —— 既省请求，也避免拿跨会话样本算速率（§4 的规则）。
+- **速率仍按 §4 派生**：只保留上一次样本；`sampled_at_ms` 不同、字节不回退才出速率；`stats == null` ⇒ 「未采样」；显示带采样时刻。
+- **guard 的窄白名单（怎么写才不是空头承诺）**：`scripts/guard.sh` 的 I1 UI 扫描（`:96-97`）只放行这一处 —— 该行带显式标记（例如 `// GUARD-I1-EXEMPT: 展示用采样节拍，不参与同步（§4 C）`），guard 命中标记时**跳过该行并打印豁免行**。**不许**把整个文件或整个 UI 目录排除在扫描之外（那正是 `guard.sh:26-29` 记过的「空头承诺」教训）。
+- **不许用别的 API 绕过正则**：`requestAnimationFrame` 之类同样能定期回调，但那只是躲 grep，不改变「这是一个节拍」的事实 —— 要走明面：标记 + 白名单 + 理由。
+- **契约与 daemon 零改动**：`Status` 是契约里已有的请求（`protocol.rs:32`），采样仍由 daemon 侧 `sample_stats()` 完成（`xt-daemon/src/lib.rs:287-315`）。
+- **代价必须进 release notes**：I1 原文是「不许轮询 / 固定延时**用来同步**」；本例外是**展示采样**，不参与任何状态推进。机器判据：guard 的豁免输出恰一行 + `crates/**` 的 diff 为空。
 
 ---
 
@@ -224,6 +234,7 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 7. 导航恰为 4 项且第一项标签是「仪表盘」；源码与导航不含 `Intent|Topology|Globe|…`（§5.3）。
 8. `Event::Notice` 被真实渲染（修复「缓冲了但不显示」的现状缺口），文案与 daemon 原文一致。
 9. 能力门控不回退：`tun_mode` 未宣告 ⇒ 没有入站模式选择器；`probe` 未宣告 ⇒ 没有探测按钮；`stats` 未宣告 ⇒ 没有流量卡。
+10. `scripts/guard.sh` 的 I1 豁免输出**恰好一行**（§4.1 那一处节拍），`xraytun-next/crates` 的 diff 为空。
 
 **只有用户真机能判的**：仪表板观感与老版的一致性（截图对比）；顶栏在真实 macOS 窗口里的布局。发布流水线已有的 app 启动探针目前只截两页（状态/设置），本版应扩到四页 + 顶栏可见性。
 
@@ -242,7 +253,7 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 - **版本号 = `1.2.0`**（§0）。
 - **开始面板 = 顶栏连接面板 + macOS 菜单栏托盘，两个都保留**（§3、§3.1）；托盘本版保持现状（只有「显示主窗口 / 退出」）。
 - **保留的粒度 = 保持 v1 现状、不照老版重建**（「不需要额外的功能」）；**日志只保留两个功能**：如实流动 + 分类显示（§6）。
+- **网速节拍 = 方案 C**（§4.1）：UI 里唯一一处展示用采样节拍 + `scripts/guard.sh` 的 I1 窄白名单；后端零改动。
 
 **仍待裁决**
-1. **网速节拍**（§4）：选 **C（推荐：UI 一处展示节拍 + `guard.sh` 加白名单，后端不动）**、A（速率基本不动）还是 D（改后端，违背裁决 5）？B 已排除（一次采样给不出速率）。
-2. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**；要加属于 `apps/desktop/**` 壳层工作，且同样依赖第 1 条的节拍裁决。
+1. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作，且复用同一个节拍裁决（C）。
