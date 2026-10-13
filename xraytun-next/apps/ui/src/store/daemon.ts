@@ -260,11 +260,31 @@ export function DaemonProvider(props: { client: DaemonClient; children?: ReactNo
   }, [apply, client, runBootstrap, update]);
 
   /**
+   * 展示用采样节拍（用户 2026-10-01 裁决 C；设计 §4.1）—— 这是**全 UI 唯一的定时器**。
+   *
+   * 为什么必须有它：契约里 `StatsView` 只有累计字节，速率要两个 `sampled_at_ms` **不同**的
+   * 样本相减才能算出来；而 daemon 只在收到 `Status` 时才采样、`Event::State` 只在状态变化时发。
+   * 连接期间不主动问一次，速率就永远拿不到第二个样本 —— 那就不是「网速」。
+   *
+   * 边界（写清楚，别让下一个读的人以为是轮询）：
+   *  * 只在 `stage === 'connected'` 时按节拍问一次 `Status`；断开 / 未连接一律不跑；
+   *  * 它只做展示采样，不推进任何状态、不重发连接、失败后不自己重来（I1 / I2）；
+   *  * `setInterval` 在本目录**只出现这一处**，那一行带 guard 的显式豁免标记（明处的例外）。
+   */
+  const sampling = state.connection?.stage === 'connected';
+
+  /**
    * 为什么把 client 包一层再交给界面：patch_settings / add_subscription /
    * refresh_subscription 的应答里没有新值（契约里是 Ok/Accepted），界面拿到成功之后
    * state 会停在旧值 —— 那就是界面在说假话（I3）。这三个方法成功后各拉一次快照。
    * 其余方法与传输实现逐一同名同形地转发，没有第二条路径。
    */
+  useEffect(() => {
+    if (!sampling) return undefined;
+    const timer = setInterval(() => void client.status().catch(() => undefined), 1000); // GUARD-EXEMPT(I1-UI): 展示用采样节拍，不用于同步（设计 §4.1 C）
+    return () => clearInterval(timer);
+  }, [client, sampling]);
+
   const clientForUi = useMemo<DaemonClient>(
     () => ({
       hello: () => client.hello(),

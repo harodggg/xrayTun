@@ -105,3 +105,19 @@ export function formatTime(ms: number): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
+
+// 速率（字节/秒）。只对**真实派生出来的**速率调用（两个不同 sampled_at_ms 的样本），
+// 拿不到两个样本时调用方必须显示「未采样」，不许把 0 当成速率（I3）。
+export function formatRate(bytesPerSecond: number): string {
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+// 「已运行 12 分钟」这种相对时间。只用于状态区，精度到分钟就够。
+export function elapsedText(startedAtMs: number, nowMs: number): string {
+  const secs = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+  if (secs < 60) return `${secs} 秒`;
+  if (secs < 3600) return `${Math.floor(secs / 60)} 分钟`;
+  const hours = Math.floor(secs / 3600);
+  if (hours < 24) return `${hours} 小时 ${Math.floor((secs % 3600) / 60)} 分钟`;
+  return `${Math.floor(hours / 24)} 天`;
+}

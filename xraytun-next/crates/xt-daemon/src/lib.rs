@@ -319,9 +319,16 @@ impl Shared {
             daemon_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: xt_contract::PROTOCOL_VERSION,
             // 能力表是**唯一**事实来源：没实现的能力不宣告，界面因此不会
-            // 出现按不动的按钮（本轮 tun 与远端拉取不宣告）。
+            // 出现按不动的按钮。
+            //
+            // TunMode 为什么现在宣告：用户 2026-10-01 裁决（T2）—— 本版就打开 TUN 通路，
+            // 不再等 S6 真机验收。**宣告的是「本版本提供这条通路」（代码事实），
+            // 不是「TUN 已经能接管流量」**：真机验收（helper 安装/回滚、utun 接管、
+            // 路由与 DNS 提交）仍然没有证据，所以界面与 release notes 一律不许写成「已可用」。
+            // 远端拉取（SubscriptionFetch）仍未宣告。
             capabilities: vec![
                 Capability::ProxyMode,
+                Capability::TunMode,
                 Capability::Stats,
                 Capability::Probe,
                 Capability::Subscriptions,
@@ -350,11 +357,11 @@ impl Shared {
     // -------------------------------------------------------------- 意图受理
 
     async fn begin_connect_intent(self: &Arc<Self>, node_id: NodeId, mode: RunMode) -> Outcome {
-        if mode != RunMode::Proxy {
-            return Outcome::error(unsupported(
-                "tun 模式需真机验收通过后才宣告 TunMode 能力（S6）；当前只开放 proxy",
-            ));
-        }
+        // 2026-10-01（T2）：这里原来在真机验收（S6）前拒绝一切非 proxy 的意图。
+        // 用户裁决本版就打开 TUN，所以那道早退已删除 —— 受理后由 flow::connect_tun_flow
+        // 走 helper.TunUp → TakeTunFd → spawn xray → 就绪 → CommitRoutes；失败一律以真实
+        // ErrorBody 作为终态上报（helper 没装 / socket 连不上 / 路由提交失败各有自己的错误），
+        // 不做任何替代路径。
         let exists = { self.catalog.lock().await.get(&node_id).is_some() };
         if !exists {
             return Outcome::error(xt_contract::error::not_found(format!(

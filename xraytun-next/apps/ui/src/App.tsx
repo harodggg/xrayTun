@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ErrorBox } from './components/ErrorBox';
+import { Topbar } from './components/Topbar';
 import { toDisplayErrorBody } from './components/format';
 import { Dashboard } from './pages/Dashboard';
 import { Logs } from './pages/Logs';
@@ -8,12 +9,12 @@ import { Settings } from './pages/Settings';
 import { DaemonProvider, useDaemon } from './store/daemon';
 import type { DaemonClient } from './transport/client';
 
-// 导航只列本轮真实存在的四个页面。没有 TUN / 拓扑 / 地理这些入口，
-// 因为契约里没有对应能力，渲染入口就等于承诺了做不到的事。
+// 导航只列真实存在的四个页面。没有拓扑 / 地理这些入口 —— 契约里没有任何连接列表或地理字段，
+// 渲染入口就等于承诺了做不到的事。连接方式只有 TUN（daemon 宣告 tun_mode 时启动按钮才可点）。
 type PageId = 'dashboard' | 'nodes' | 'logs' | 'settings';
 
 const NAV_ITEMS: { id: PageId; label: string }[] = [
-  { id: 'dashboard', label: '状态' },
+  { id: 'dashboard', label: '仪表盘' },
   { id: 'nodes', label: '节点' },
   { id: 'logs', label: '日志' },
   { id: 'settings', label: '设置' },
@@ -53,6 +54,9 @@ function Shell({ initialPage }: { initialPage: PageId }) {
         ))}
       </nav>
       <main className="app__main">
+        {/* 顶栏是全局状态条（老版「开始面板」那一块）：只报状态，不放按钮 ——
+            启动 / 停止全屏只有仪表板顶部那一处（理由见 components/Topbar.tsx）。 */}
+        <Topbar />
         {/* 传输层自己的失败也要原样上报：它和业务失败同样重要，
             静默吞掉会让界面看起来「一切正常」。
             只有这一处额外给一个用户动作：引导链失败后界面停在「断了」，恢复必须由用户
@@ -68,7 +72,7 @@ function Shell({ initialPage }: { initialPage: PageId }) {
             onUserAction={reconnect}
           />
         )}
-        {page === 'dashboard' && <Dashboard />}
+        {page === 'dashboard' && <Dashboard onNavigate={setPage} />}
         {page === 'nodes' && <Nodes />}
         {page === 'logs' && <Logs />}
         {page === 'settings' && <Settings />}

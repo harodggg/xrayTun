@@ -79,6 +79,44 @@ scan_code() {
   fi
 }
 
+# 带豁免标记的扫描：标记只对**指定规则标签**生效，命中标记的那一行被跳过**并打印出来**。
+#
+# 标记形如（必须写在同一行）：
+#   const timer = setInterval(...);   // GUARD-EXEMPT(I1-UI): 展示用采样节拍，不用于同步
+#
+# 为什么不直接把这个文件从扫描里拿掉：那会让同文件里再冒出来的第二个定时器也没人管 ——
+# 正是本文件开头记过的「空头承诺」。这里只放行**被标记的那一行**，而且每次都打印出来。
+#
+# 为什么要回读原文件：strip_comments 会把注释去掉，标记在 stripped 文本里已经不存在，
+# 所以拿 grep 给的行号去**原文件**取那一行来判断；行号对得上是因为 strip_comments 保留换行数。
+scan_code_exempt() {
+  local desc="$1" tag="$2" pattern="$3"
+  shift 3
+  local hits="" exempt="" f n hit orig
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    while IFS= read -r hit; do
+      n="${hit%%:*}"
+      orig="$(sed -n "${n}p" "$f" 2>/dev/null || true)"
+      if printf '%s' "$orig" | grep -qF "GUARD-EXEMPT(${tag})"; then
+        exempt="${exempt}${f#$ROOT/}:${hit}"$'\n'
+      else
+        hits="${hits}${f#$ROOT/}:${hit}"$'\n'
+      fi
+    done < <(strip_comments "$f" | grep -nEi "$pattern" || true)
+  done
+  if [ -n "$hits" ]; then
+    bad "$desc"
+    printf '%s' "$hits" | head -20 | sed 's/^/          /'
+  else
+    ok "$desc"
+  fi
+  if [ -n "$exempt" ]; then
+    printf '%s' "$exempt" | sed 's/^/        豁免 /'
+    say "        以上行带 GUARD-EXEMPT(${tag})：只豁免这条判据的这一行，别处一律不许有"
+  fi
+}
+
 say "== xraytun-next guard =="
 
 # ---------------------------------------------------------------- I1 无等待
@@ -93,7 +131,9 @@ while IFS= read -r _f; do UIS+=("$_f"); done < <(ui_files)
 
 scan_code "I1 无 sleep / 无轮询（Rust）" \
   '\b(sleep|sleep_ms|usleep|nanosleep)\s*\(|\bpoll_interval\b|\bspin_loop\b' "${CRATES[@]}"
-scan_code "I1 无 sleep / 无定时器（UI）" \
+# I1（UI）：允许**唯一一处**展示用采样节拍（用户 2026-10-01 裁决 C；设计 §4.1）。
+# 豁免写在那一行的注释里：`GUARD-EXEMPT(I1-UI): <理由>`；只放行被标记的那一行。
+scan_code_exempt "I1 无 sleep / 无定时器（UI）" "I1-UI" \
   '\bset(Interval|Timeout)\s*\(|\bsleep\s*\(' "${UIS[@]}"
 
 # ----------------------------------------------------------------- I2 无回落

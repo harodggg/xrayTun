@@ -1205,3 +1205,506 @@ a:hover {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * 13. 开始面板（顶栏）· 仪表板 · 大启动按钮（v1.2.0 追加区块）
+ *
+ *     形状照老版 XrayTun v0.9.2 的 .topbar / .dash__*（只读参照），
+ *     颜色与尺寸一律落到本文件第 0 节的 token。tone 五档 ← 状态色：
+ *       on → --state-connected（唯一的绿）  partial → --accent
+ *       off → --state-idle（中性灰）        busy → --state-warning
+ *       failed → --state-error
+ *     顶栏的状态线与状态圆点必须同色：两者都用同一个 --state-* 变量。
+ *
+ *     以下类第 3/4/5/6 节已有定义，本区块**不重复**（重复会在文件末尾覆盖旧值，
+ *     把日志页/设置页的既有外观一起改掉）：
+ *       .mono .unknown .kv .row .row__label .row__value
+ *       .badge .badge--unknown .banner .banner--error .banner--warn .banner--info
+ *     这里只补真正缺的部分：.kv 的 <dl>/<dt>/<dd> 语义（浏览器给 dd 的默认
+ *     缩进必须清掉，否则窄窗下会被推出容器）。
+ * ------------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------- 顶栏 */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-4);
+  min-width: 0;
+  padding: var(--sp-5) var(--gutter);
+  background: var(--bg-chrome);
+  /* 底边 = 状态线。默认中性灰而不是绿：快照还没到 / 漏配 tone 时，界面必须
+     表现为「不可信」，不能表现为「已连接」。具体色调只由下面的 tone 类给。 */
+  border-bottom: 2px solid var(--state-idle);
+}
+
+.topbar--on {
+  border-bottom-color: var(--state-connected);
+}
+
+.topbar--partial {
+  border-bottom-color: var(--accent);
+}
+
+.topbar--off {
+  border-bottom-color: var(--state-idle);
+}
+
+.topbar--busy {
+  border-bottom-color: var(--state-warning);
+}
+
+.topbar--failed {
+  border-bottom-color: var(--state-error);
+}
+
+/* 左侧状态组：圆点 + 状态徽章 + 节点名。flex-wrap 保证 320px 窄窗换行而不是横向滚动；
+   margin-right: auto 把其余元素（失败徽章等）推到右侧。 */
+.topbar__line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  min-width: 0;
+  margin-right: auto;
+}
+
+/* 顶栏的状态词。它**不带** .badge，所以颜色由这里的 tone 组合给：
+   「线 / 圆点 / 状态词三处同色」——三者读的是同一个 --state-* 变量。
+   默认（漏配 tone）是未知态，不是灰的 off，更不是绿。 */
+.topbar__badge {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  vertical-align: middle;
+  padding: var(--sp-1) var(--sp-4);
+  border: 1px solid var(--tint-unknown-border);
+  border-radius: var(--radius-pill);
+  background: var(--tint-unknown-bg);
+  color: var(--state-unknown);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-ui);
+  /* 长文案（失败原摘要）省略而不是撑破顶栏；完整原文仍在 error-box / banner 里 */
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar--on .topbar__badge {
+  border-color: var(--tint-connected-border);
+  background: var(--tint-connected-bg);
+  color: var(--state-connected);
+}
+
+.topbar--partial .topbar__badge {
+  border-color: var(--tint-progress-border);
+  background: var(--tint-progress-bg);
+  color: var(--accent);
+}
+
+.topbar--off .topbar__badge {
+  border-color: var(--tint-idle-border);
+  background: var(--tint-idle-bg);
+  color: var(--state-idle);
+}
+
+.topbar--busy .topbar__badge {
+  border-color: var(--tint-warning-border);
+  background: var(--tint-warning-bg);
+  color: var(--state-warning);
+}
+
+.topbar--failed .topbar__badge {
+  border-color: var(--tint-error-border);
+  background: var(--tint-error-bg);
+  color: var(--state-error);
+}
+
+/* 状态的补充说明（阶段 / 失败原摘要）刻意压一档：主词承担 tone，补充只陈述事实。
+   放在 tone 规则之后，同特异性下由顺序取胜。 */
+.topbar .topbar__badge--sub {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-weight: var(--fw-regular);
+}
+
+.topbar__node {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态圆点：与顶栏那条线同色（同一 tone，同一变量） */
+.dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--state-idle);
+}
+
+.dot--on {
+  background: var(--state-connected);
+}
+
+.dot--partial {
+  background: var(--accent);
+}
+
+.dot--off {
+  background: var(--state-idle);
+}
+
+/* busy 只有一条圆点后缀（warn）；两个都接住，避免 tone 名与后缀错配时点没颜色 */
+.dot--warn,
+.dot--busy {
+  background: var(--state-warning);
+}
+
+.dot--failed {
+  background: var(--state-error);
+}
+
+/* --------------------------------------------------------- 仪表板状态区 */
+
+.dash {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  min-width: 0;
+  /* 单列阅读宽度（照老版）：1080 窗口下不留大半个屏幕的空白 */
+  max-width: 640px;
+}
+
+.dash__status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.dash__state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  min-width: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+}
+
+.dash__state-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+/* tone → 状态词颜色：绿色只在 --state-connected；未连接是中性灰，不是红；
+   红只留给「上一次真的失败了」（failed）。 */
+.dash__state--on .dash__state-label {
+  color: var(--state-connected);
+}
+
+.dash__state--partial .dash__state-label {
+  color: var(--accent);
+}
+
+.dash__state--off .dash__state-label {
+  color: var(--state-idle);
+}
+
+.dash__state--busy .dash__state-label {
+  color: var(--state-warning);
+}
+
+.dash__state--failed .dash__state-label {
+  color: var(--state-error);
+}
+
+/* 节点名比状态词弱一档：状态是主语，节点是补充。超长省略而不是撑破整行 */
+.dash__state-node {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态词下面那一行（阶段说明 / 上次失败原文 / 时长）：它是事实陈述，不是告警，
+   所以用中性色 —— 颜色不随内容在五档之间跳（红只在 error-box / banner--error）。 */
+.dash__state-sub {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-read);
+}
+
+.dash__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.dash__sep {
+  color: var(--text-faint);
+}
+
+/* 仪表板的动作行（「选择节点 / 测试延迟」）。.row 默认是「标签 + 值」的两列网格，
+   一行按钮需要横排；只对同时带 --actions 的行生效，不影响表单里的 .row。 */
+.row--actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+/* ------------------------------------------------------- 大启动按钮 */
+
+/* 全屏唯一的启动/停止控件（同屏不再有第二颗同动作按钮）。 */
+.start {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  /* 窄窗自动收窄：320px 窗口下 = 320 - 页面两侧留白 - 48px，仍然放得下 */
+  width: min(520px, calc(100% - 48px));
+  min-height: 96px;
+  /* 与上方状态区拉开距离，让它自己成组；水平居中 */
+  margin: var(--sp-4) auto 0;
+  padding: var(--sp-6) var(--sp-7);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  background: var(--accent);
+  color: var(--on-accent);
+  /* 字阶封顶在 --fs-xl（20px，本系统的最大字号），靠最小高度与内间距撑出体量 */
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  text-align: center;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    filter var(--dur-fast) var(--ease-out);
+}
+
+.start:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* 按下：没有「按下」专用的强调色 token，用亮度表达，不新造颜色变量 */
+.start:active:not(:disabled) {
+  filter: brightness(0.9);
+}
+
+/* 停止 = 破坏性动作（拆掉连接），与 .btn--danger 同一语义：
+   红表示「会断开」，不表示「操作失败了」。 */
+.start--danger {
+  border-color: var(--state-error);
+  background: var(--state-error);
+}
+
+/* 危险色相没有 hover token，用亮度而不是新颜色（并挡住上面的强调色 hover） */
+.start--danger:hover:not(:disabled) {
+  border-color: var(--state-error);
+  background: var(--state-error);
+  filter: brightness(1.08);
+}
+
+/* 禁用：明度表达，不用 opacity（opacity 会把对比度压到 AA 以下），与 .btn:disabled 同款 */
+.start:disabled {
+  border-color: var(--border);
+  background: var(--surface-1);
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+
+/* 键盘焦点：显式重画一次焦点环（全局环的圆角是 --radius-xs，与大按钮不匹配） */
+.start:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-lg);
+}
+
+/* 按钮下方的真实原因：「为什么现在点不动」/ 阶段 / 上次失败原文，逐字来自契约字段 */
+.start__note {
+  display: block;
+  max-width: min(520px, calc(100% - 48px));
+  margin: var(--sp-3) auto 0;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-read);
+  text-align: center;
+}
+
+/* --------------------------------------------------------------- 流量区 */
+
+.dash__traffic {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-4) var(--sp-7);
+  min-width: 0;
+  padding: var(--sp-5) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.dash__metric {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+}
+
+.dash__metric-arrow {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: var(--fs-lg);
+}
+
+/* 速率：等宽 + tabular，并给足定宽，数字跳动时不推挤后面的累计值 */
+.dash__metric-rate {
+  min-width: 96px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dash__metric-total {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- 提示横幅 */
+
+/* 只显示最急一条时，其余折成这一句可点的「还有 N 条提示」 */
+.dash__more {
+  appearance: none;
+  align-self: flex-start;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.dash__more:hover {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------ 折叠的诊断区 */
+
+.dash__details {
+  min-width: 0;
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--border);
+}
+
+.dash__details > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+.dash__details > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* 自绘三角：原生 marker 在不同 WebKit 版本里位置不一致 */
+.dash__details > summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  font-size: var(--fs-2xs);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.dash__details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.dash__details > summary:hover {
+  color: var(--text);
+}
+
+.dash__details > *:not(summary) {
+  margin-top: var(--sp-5);
+}
+
+/* 第 3 节的 .kv 已给出两列 grid 与 .kv__key / .kv__value；这里补 <dl> 语义：
+   dd 的浏览器默认缩进（margin-inline-start: 40px）必须清掉，否则被推出容器。 */
+.kv dt {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.kv dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+/* ---------------------------------------------------------- 探测结果徽章 */
+
+/* fast / ok / slow 都只是「已测量到 TTFB」。契约里没有阈值字段 ⇒ 不许按延迟数值
+   做红黄绿分级（口径同 §3.5 的 .probe--ok：用 --text，不是绿），三档共用正常文字色；
+   「未知 / 未探测」由既有的 .badge--unknown 虚线态承担。 */
+.badge--fast,
+.badge--ok,
+.badge--slow {
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* --------------------------------------------------------------- 窄窗 */
+
+@media (max-width: 480px) {
+  .topbar {
+    padding-inline: var(--sp-5);
+  }
+
+  /* 极窄时两个 metric 各占一行，定宽不再需要，反而会把「累计」那半句挤到下一行 */
+  .dash__metric-rate {
+    min-width: 0;
+  }
+}

@@ -319,7 +319,7 @@ describe.skipIf(!LIVE)('live: 真 daemon + 真 xray → 事件流驱动 UI 到�
           createElement(Fragment, null, createElement(StageProbe, { record: stageRenders }), createElement(App)),
         ),
       );
-      await waitFor(() => expect(screen.getByTestId('stage-badge').textContent).toBe('未连接'), {
+      await waitFor(() => expect(screen.getByTestId('dash-status-label').textContent).toBe('未连接'), {
         timeout: 15_000,
       });
 
@@ -339,18 +339,27 @@ describe.skipIf(!LIVE)('live: 真 daemon + 真 xray → 事件流驱动 UI 到�
       const settings = await client.getSettings();
       expect(settings.socks_listen).toBe(`127.0.0.1:${socksPort}`);
 
-      // 10) 经 UI 选节点（走 patchSettings.selected_node）→ 回仪表盘 → 经 UI 点连接
+      // 10) 经 UI 选节点（走 patchSettings.selected_node）→ 回仪表盘
       fireEvent.click(screen.getByTestId('nav-nodes'));
       const selectButton = await screen.findByTestId('select-button', {}, { timeout: 15_000 });
       fireEvent.click(selectButton);
       await waitFor(() => expect((screen.getByTestId('select-button') as HTMLButtonElement).disabled).toBe(true));
 
       fireEvent.click(screen.getByTestId('nav-dashboard'));
-      const connectButton = screen.getByTestId('connect-button') as HTMLButtonElement;
-      await waitFor(() => expect(connectButton.disabled).toBe(false), { timeout: 15_000 });
-      fireEvent.click(connectButton);
+      // 大启动按钮必须在位、且在这个环境下可点（daemon 现在宣告 tun_mode）。
+      await waitFor(
+        () => expect((screen.getByTestId('start-button') as HTMLButtonElement).disabled).toBe(false),
+        { timeout: 15_000 },
+      );
+      // ⚠️ v1.2.0：界面只提供 TUN（用户 2026-10-01 裁决）；而这条活体验收要证的是
+      // 「真事件流驱动界面」+「真 SOCKS 字节」，不能依赖 macOS 特权 helper。
+      // 所以连接这一步由 client 直接发 proxy 意图（daemon 的 proxy 通路仍在），
+      // 界面仍然只从事件流得到「已连接」—— 这条用例证的是界面，不是那颗按钮。
+      // UI 按钮 → TUN 的路径：受理断言在 crates/xt-daemon/tests/e2e_real_xray.rs（12.5），
+      // 门控与逐字文案在 tests/acceptance/truthfulness.test.tsx。
+      await client.connect(nodes[0].id, 'proxy');
 
-      await waitFor(() => expect(screen.getByTestId('stage-badge').textContent).toBe('已连接'), {
+      await waitFor(() => expect(screen.getByTestId('dash-status-label').textContent).toBe('已连接'), {
         timeout: 30_000,
       });
       // 事件流本身必须经过 connecting，且顺序是 connecting → connected（不是直接跳过去）。
@@ -392,19 +401,20 @@ describe.skipIf(!LIVE)('live: 真 daemon + 真 xray → 事件流驱动 UI 到�
 
       await waitFor(
         () => {
-          const text = screen.getByTestId('stats-downlink').textContent ?? '';
+          const text = screen.getByTestId('stats-downlink-total').textContent ?? '';
           const numbers = (text.match(/\d+/g) ?? []).map(Number);
           expect(numbers.some((n) => n >= ORIGIN_BYTES), `界面下行文本：${text}`).toBe(true);
         },
         { timeout: 15_000 },
       );
       console.log(
-        `[live] 界面 stats-downlink 文本：${screen.getByTestId('stats-downlink').textContent}`,
+        `[live] 界面 stats-downlink-total 文本：${screen.getByTestId('stats-downlink-total').textContent}`,
       );
 
-      // 13) 经 UI 断开，事件把界面送回未连接
-      fireEvent.click(screen.getByTestId('disconnect-button'));
-      await waitFor(() => expect(screen.getByTestId('stage-badge').textContent).toBe('未连接'), {
+      // 13) 经 UI 断开，事件把界面送回未连接。
+      // 大按钮在「已连接」时的动作就是 disconnect()，与模式无关，所以这一步仍然走界面。
+      fireEvent.click(screen.getByTestId('start-button'));
+      await waitFor(() => expect(screen.getByTestId('dash-status-label').textContent).toBe('未连接'), {
         timeout: 30_000,
       });
 

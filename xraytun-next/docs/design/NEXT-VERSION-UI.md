@@ -61,7 +61,7 @@
 | 1 | 状态区：圆点 + 状态词 + 节点名 + 延迟徽章 | `apps/ui/src/pages/Dashboard.tsx:253-295`；语义真源 `apps/ui/src/topbarStatus.ts:133-244` | 5 档 tone（on/partial/off/busy/failed）；**顶栏的线/点与这里的状态词必须同源** | `ConnectionView.stage/phase` + `node_id` + `NodeView.probe`（`ProbeResult`：`ttfb_ms` 与 `error` **恰好一个**为 `Some`，`model.rs:207-231`） |
 | 2 | meta 行：模式 · 分流预设 · 网卡名 · 已运行 | `Dashboard.tsx:297-313` | 一行串起多个事实，`·` 分隔 | `ConnectionView.mode` + `connected_since_ms`；**预设/网卡名 v1 无**（§2.2） |
 | 3 | 更新提示 chip（available/latest/failed/unknown 四态） | `Dashboard.tsx:325-372`、`updateNotice()` `:155-182` | 「客户端检查失败」**绝不**写成「已是最新」 | **v1 无更新检查** → 本版不显示（§2.2） |
-| 4 | 快捷按钮：添加订阅 / 选择节点 / 切换节点 + 测试延迟 | `Dashboard.tsx:389-404` | 无节点时主按钮变「添加订阅」；测延迟按钮由 `probing` 门控 | `ListNodes` + `ProbeNodes` + 现有导航（`Request::ProbeNodes`，`protocol.rs:40`） |
+| 4 | 快捷按钮：选择节点 / 切换节点 + 测试延迟 | `Dashboard.tsx:389-404` | 无节点时主按钮变「添加订阅」（本版落在**大启动按钮**上，快捷按钮不再重复）；测延迟按钮由 `probing` 门控 | `ListNodes` + `ProbeNodes` + 现有导航（`Request::ProbeNodes`，`protocol.rs:40`） |
 | 5 | 直连模式提示 | `Dashboard.tsx:407-411` | 说明「直连模式核心不接管流量」 | v1 无 direct 档 → 不显示该提示（§2.2） |
 | 6 | 流量区：↓ 速率 + 累计 ／ ↑ 速率 + 累计 | `Dashboard.tsx:415-426`；格式化 `apps/ui/src/types.ts:1047-1060` | 两个 metric：速率 + 「累计 X」 | `StatsView.uplink_bytes/downlink_bytes/sampled_at_ms`；**速率在 UI 里派生**（§4），**不照抄它的 0 缺陷**（§2.2） |
 | 7 | 提示横幅：按 severity 排序，只显最急一条 + 「还有 N 条提示」 | `Dashboard.tsx:429-445` + `collectNotices()` `:536-680` | `rank` 越小越急；`error` → `role="alert"`，其余 `role="status"`；破坏性动作带二次确认 | 骨架照抄；条目按 v1 契约重列（§2.3） |
@@ -94,13 +94,15 @@
 
 | rank | 条件 | 文案 | 动作 |
 | --- | --- | --- | --- |
-| 0 | `ConnectionView.last_error` 非空且当前未连接 | 「上次运行出错：<原文>」 | 「查看日志」（有对应能力时才给别的跳转） |
+| 0 | `ConnectionView.last_error` 非空且当前未连接 | 由 `ErrorBox` 原样渲染（**含 code**），不是横幅 | 「查看日志」 |
 | 1 | `Event::Notice`（`severity = error`） | daemon 给的原文，**不改写** | 按 `code` 给一个跳转或没有 |
 | 2 | `Event::Notice`（`warning` / `info`） | daemon 给的原文 | 无 |
-| 3 | `ListNodes` 为空（还没有任何节点） | 「还没有节点 —— 先去添加订阅」 | 跳订阅区（`Settings` 的订阅分区） |
+
+**「还没有节点」不单独出横幅**：那种情况下大启动按钮本身就是「添加订阅」，按钮下方还写着「节点目录为空 —— 启动前先添加订阅」；同屏再给一条同动作横幅，就是老版 task-72 收敛掉的那种重复。快捷按钮（选择 / 切换节点）也只做导航，不再复述这个动作。
 
 规则照抄老版：rank 越小越急；只显示第一条，其余折成「还有 N 条提示」；`error` → `role="alert"`，其余 `role="status"`。**不许**把 notice 改写成「已自动处理 / 正在重试 / 已为你切换」（I2、I3）。
-⚠️ 现状缺口：`store/daemon.ts:49-53` 已经缓冲了 `notices`，但**没有任何页面渲染**——本版把它接上。
+实现说明（2026-10-01）：`notices` 此前只被缓冲、没有任何页面渲染，本版接上了 —— 但**有界**：只取最近一条 `error` 与最近一条 `warning/info`（历史仍完整留在 store 里，什么都没丢）。
+rank 0 **不走横幅**：仪表板已经用 `ErrorBox` 完整陈述了同一条失败（含 `code`），同屏两处说同一件事正是老版 task-23 D1 修掉的重复。
 
 ### 2.4 状态词映射（老版 tone → v1 stage）
 
@@ -321,3 +323,23 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 1. **物理网卡名占位**（§3.3 缺口 1）：`TUN_PHYSICAL_IFACE = "en0"` 是写死的占位。**A**（做完整）让 helper 回报真实网卡名（动 `xt-helperproto` / `xt-helperd` / daemon 三处）；**B**（先接受）保留占位，把「物理网卡不是 en0 时 direct 出站可能失败」写进 release notes。默认 **B**（本版先开通路），但**只有你知道真机网卡名**，所以请你定。
 2. **网速节拍是否从 C 改成 D**（§4.1 补充）：既然本版已动 `xt-daemon`，把每秒采样放进 daemon（老版同构）比在 UI 里开 I1 白名单更干净。默认维持 **C**（你已裁决），除非你想顺手换。
 3. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作。
+
+---
+
+## 9. 实现状态（2026-10-01 落地记录）
+
+| 文档里的东西 | 落在哪 | 证据 |
+| --- | --- | --- |
+| 仪表板按老版重建（状态区 / meta / 流量 / 横幅 / 诊断） | `apps/ui/src/pages/Dashboard.tsx`、`components/notices.ts` | `tests/acceptance/truthfulness.test.tsx`（18 条）+ `tests/acceptance/v12-dashboard.test.tsx`（6 条） |
+| 大启动按钮 + 顶栏（无模式选择器） | `components/startButton.ts`、`components/Topbar.tsx`、`styles.css`（第 13 区块，+503 行） | `components/startButton.test.ts`（13 条）、`truthfulness.test.tsx` 的 `tun_mode` 门控用例 |
+| 网速 UI 派生（方案 C） | `components/trafficRate.ts` + `store/daemon.ts` 里唯一的采样节拍 | `components/trafficRate.test.ts`（10 条）、`v12-dashboard.test.tsx` 的「两个样本才出速率 / 断开清基准」用例 |
+| guard 的 I1 窄豁免 | `scripts/guard.sh` 的 `scan_code_exempt` + 行内标记 `GUARD-EXEMPT(I1-UI)` | `bash scripts/guard.sh` → `GUARD PASSED`，且**把豁免行打印出来**（恰一行） |
+| TUN 通路打开（T2） | `crates/xt-daemon/src/lib.rs`（去早退 + 宣告 `TunMode`） | `crates/xt-daemon/tests/e2e_real_xray.rs`：能力断言 + 新增 §12.5「`Connect(tun)` 必须被受理」（CI 编译并跑） |
+| 日志只保留两个功能 | **未改** `apps/ui/src/pages/Logs.tsx`（现状恰好就是目标范围） | §6 的读法 |
+| 意图 / 拓扑仍然不做 | 没新增页面；导航恰 4 项 | `v12-dashboard.test.tsx` 的源码级断言（`src/` 下无 intent/topology/globe 文件）+ `truthfulness.test.tsx` 的导航禁令 |
+
+**本版没做到的（不许含糊）**
+- TUN **真机接管**（helper 安装 / 回滚、utun、路由与 DNS）仍未经 S6 验收；本版能说的只有「通路已宣告 + 意图被受理」。
+- 开发机不是 macOS：本机只跑了 UI（`vitest` / `tsc --noEmit` / `vite build`）与 `scripts/guard.sh`；Rust 侧由 CI（`xraytun-next-release.yml`，分支推送触发）编译验证。
+- §8 仍待裁决的两条（`en0` 占位、C→D 节拍）本版按默认值（B、C）实现，未改。
+- `components/StatusBadge.tsx` 在新仪表板里不再被使用（状态词改由 `topbarStatus.ts` + 顶栏/仪表板渲染）；本版**没有删它**，留待下一次清理时一并处理（删它要同时清 `styles.css` 的 `badge--disconnected/connecting/…` 与 `docs/design/DESIGN-SYSTEM.md` 的对应段落）。

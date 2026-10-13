@@ -147,7 +147,8 @@ function renderApp(client: DaemonClient) {
   );
 }
 
-const CAPS_ALL: Capability[] = ['proxy_mode', 'stats', 'probe', 'subscriptions'];
+// v1.2.0：daemon 宣告 tun_mode（用户裁决本版打开 TUN），所以「全能力」基线含它。
+const CAPS_ALL: Capability[] = ['proxy_mode', 'tun_mode', 'stats', 'probe', 'subscriptions'];
 
 // ------------------------------------------------------------------ 禁语 / 0 字节扫描器
 
@@ -200,10 +201,11 @@ describe('A1 stats 缺失 → 未采样，且不出现 0 字节', () => {
     });
     renderApp(client);
 
-    const uplink = await screen.findByTestId('stats-uplink');
-    expect(uplink.textContent).toBe('未采样');
-    expect(screen.getByTestId('stats-downlink').textContent).toBe('未采样');
-    expect(screen.getByTestId('stats-sampled-at').textContent).toBe('未采样');
+    // v1.2.0：从未采样成功时只渲染一条「未采样」，不摆两行 0。
+    const unsampled = await screen.findByTestId('stats-unsampled');
+    expect(unsampled.textContent).toBe('未采样');
+    expect(screen.queryByTestId('stats-uplink-rate')).toBeNull();
+    expect(screen.queryByTestId('stats-uplink-total')).toBeNull();
 
     // 整页不得把未知说成 0 字节。
     expect(scanZeroBytes(document.body.textContent ?? '')).toEqual([]);
@@ -221,15 +223,17 @@ describe('A1 stats 缺失 → 未采样，且不出现 0 字节', () => {
     });
     renderApp(client);
 
-    const uplink = await screen.findByTestId('stats-uplink');
-    expect(uplink.textContent).not.toBe('未采样');
-    expect(uplink.textContent).toContain('0');
+    const total = await screen.findByTestId('stats-uplink-total');
+    expect(total.textContent).toContain('0 B');
+    expect(screen.queryByTestId('stats-unsampled')).toBeNull();
+    // 只有一个样本 ⇒ 速率不许给数字（契约里只有累计字节）。这就是「不编 0 B/s」的判据。
+    expect(screen.getByTestId('stats-uplink-rate').textContent).toBe('未采样');
   });
 });
 
 // ------------------------------------------------------------------ A2 connecting 阶段
 
-describe('A2 stage=connecting → 连接按钮 disabled 且有阶段文案', () => {
+describe('A2 stage=connecting → 大启动按钮 disabled 且有阶段文案', () => {
   const PHASES = [
     ['preparing_config', '正在生成配置'],
     ['starting_core', '正在启动核心进程'],
@@ -238,7 +242,7 @@ describe('A2 stage=connecting → 连接按钮 disabled 且有阶段文案', () 
   ] as const;
 
   for (const [phase, label] of PHASES) {
-    it(`phase=${phase} → 按钮 disabled，文案「${label}」，code 原样`, async () => {
+    it(`phase=${phase} → 大启动按钮 disabled，说明里带「${label}」`, async () => {
       // 反向验证：破坏值让 stage 落在 disconnected（此时按钮可点、阶段文案消失）。
       const stage = mutated<Stage>(M.stageDisconnected, 'connecting', 'disconnected');
       const { client } = makeClient({
@@ -249,12 +253,15 @@ describe('A2 stage=connecting → 连接按钮 disabled 且有阶段文案', () 
       });
       renderApp(client);
 
-      const button = (await screen.findByTestId('connect-button')) as HTMLButtonElement;
+      const button = (await screen.findByTestId('start-button')) as HTMLButtonElement;
       expect(button.disabled).toBe(true);
 
-      const phaseLabel = await screen.findByTestId('phase-label');
-      expect(phaseLabel.textContent).toBe(label);
-      expect(screen.getByTestId('phase-code').textContent).toBe(phase);
+      // 阶段文案在按钮下方的说明里（「连接进行中：<阶段>」）；状态词与顶栏同源：
+      // committing_routes 是 TUN 两阶段启动里「隧道已建、路由未接管」那一档（partial），
+      // 其余子阶段都还是「连接中」。
+      expect((await screen.findByTestId('start-button-note')).textContent).toContain(label);
+      const expectedStatus = phase === 'committing_routes' ? '隧道已建立，默认路由尚未接管' : '连接中';
+      expect(screen.getByTestId('dash-status-label').textContent).toBe(expectedStatus);
     });
   }
 });
@@ -277,8 +284,8 @@ describe('A3 last_error → code 与 message 原样显示', () => {
     const box = await screen.findByTestId('last-error');
     expect(box.textContent).toContain('core_exited_early');
     expect(box.textContent).toContain(MESSAGE);
-    // 徽章仍是 stage 的逐字文案，不被错误块替换。
-    expect(screen.getByTestId('stage-badge').textContent).toContain('未连接');
+    // 状态词按 v1.2.0 的映射：disconnected + last_error ⇒ failed 档「上次运行出错」。
+    expect(screen.getByTestId('dash-status-label').textContent).toContain('上次运行出错');
   });
 });
 
@@ -298,9 +305,9 @@ describe('A4 每个显示的字节数/延迟都能追溯到注入的契约字段
       settings: SETTINGS,
     });
     renderApp(first.client);
-    const uplinkA = await screen.findByTestId('stats-uplink');
+    const uplinkA = await screen.findByTestId('stats-uplink-total');
     expect(uplinkA.textContent).toContain(String(EXPECTED_UP_A));
-    expect(screen.getByTestId('stats-downlink').textContent).toContain(String(expectedDownA));
+    expect(screen.getByTestId('stats-downlink-total').textContent).toContain(String(expectedDownA));
 
     // TTFB 来自 NodeView.probe.ttfb_ms（137），必须逐字出现在节点页。
     fireEvent.click(screen.getByTestId('nav-nodes'));
@@ -320,10 +327,10 @@ describe('A4 每个显示的字节数/延迟都能追溯到注入的契约字段
       settings: SETTINGS,
     });
     renderApp(second.client);
-    const uplinkB = await screen.findByTestId('stats-uplink');
+    const uplinkB = await screen.findByTestId('stats-uplink-total');
     expect(uplinkB.textContent).toContain(String(upB));
     expect(uplinkB.textContent).not.toContain(String(EXPECTED_UP_A));
-    expect(screen.getByTestId('stats-downlink').textContent).toContain(String(downB));
+    expect(screen.getByTestId('stats-downlink-total').textContent).toContain(String(downB));
 
     fireEvent.click(screen.getByTestId('nav-nodes'));
     const probeB = await screen.findByTestId('node-probe');
@@ -355,7 +362,7 @@ describe('A5 界面不存在没有字段证据的话术', () => {
       subscriptions: SUBSCRIPTIONS,
     });
     renderApp(client);
-    await screen.findByTestId('stage-badge');
+    await screen.findByTestId('dash-status-label');
     // 遍历全部页面，避免只扫了首屏。
     for (const page of ['nav-nodes', 'nav-logs', 'nav-settings', 'nav-dashboard']) {
       fireEvent.click(screen.getByTestId(page));
@@ -383,7 +390,7 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
       subscriptions: SUBSCRIPTIONS,
     });
     renderApp(client);
-    await screen.findByTestId('stage-badge');
+    await screen.findByTestId('dash-status-label');
 
     // 设置页：等 hello 真的落地（能力字段被渲染出来）再断言，避免「还没加载」被当成「没有」。
     fireEvent.click(screen.getByTestId('nav-settings'));
@@ -402,7 +409,8 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
 
     // 仪表盘：没有 stats 能力 → 整个统计卡不渲染（而不是渲染一张「未采样」的假卡）。
     fireEvent.click(screen.getByTestId('nav-dashboard'));
-    expect(screen.queryByTestId('stats-uplink')).toBeNull();
+    // 没宣告 stats ⇒ 整个流量区都不渲染（而不是渲染一张「未采样」的假卡）。
+    expect(screen.queryByTestId('dash-traffic')).toBeNull();
   });
 
   it('capabilities 含 probe → 探测入口出现（正向对照）', async () => {
@@ -453,8 +461,9 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
     expect(screen.getByTestId('subscription-url-input')).toBeTruthy();
   });
 
-  it('TUN 开关同样由 tun_mode 门控（不含 → 无，含 → 出现）', async () => {
-    // 不含：本轮 daemon 的真实情况 —— 页面上找不到任何 TUN 控件或文案。
+  it('大启动按钮由 tun_mode 门控（不含 → 禁用并说清真因，含 → 可点）', async () => {
+    // v1.2.0：产品面只有 TUN 一种模式，界面上**不存在任何模式选择器**。
+    // tun_mode 不是「出现一个开关」的条件，而是「启动按钮能不能点」的条件。
     const withoutTun = makeClient({
       hello: hello(['proxy_mode', 'stats', 'probe', 'subscriptions', 'subscription_fetch']),
       view: DISCONNECTED,
@@ -462,12 +471,13 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
       settings: SETTINGS,
     });
     renderApp(withoutTun.client);
-    await screen.findByTestId('stage-badge');
+    const disabled = (await screen.findByTestId('start-button')) as HTMLButtonElement;
+    expect(disabled.disabled).toBe(true);
+    expect((await screen.findByTestId('start-button-note')).textContent).toContain('不提供 TUN 模式');
     expect(screen.queryByTestId('run-mode-select')).toBeNull();
-    expect(document.body.textContent ?? '').not.toContain('TUN');
     cleanup();
 
-    // 含：能力宣告 = 唯一事实源 —— 入口必须出现（否则无法区分门控与「功能根本没写」）。
+    // 含：能力宣告 = 唯一事实源 —— 按钮必须可点（否则无法区分门控与「功能根本没写」）。
     const withTun = makeClient({
       hello: hello(['proxy_mode', 'stats', 'tun_mode']),
       view: DISCONNECTED,
@@ -475,7 +485,11 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
       settings: SETTINGS,
     });
     renderApp(withTun.client);
-    expect(await screen.findByTestId('run-mode-select')).toBeTruthy();
+    const enabled = (await screen.findByTestId('start-button')) as HTMLButtonElement;
+    expect(enabled.disabled).toBe(false);
+    // 有节点、已选节点、能力齐全 ⇒ 说明栏不该再有任何阻塞话术。
+    expect(screen.queryByTestId('start-button-note')).toBeNull();
+    expect(screen.queryByTestId('run-mode-select')).toBeNull();
   });
 
   it('hello 尚未到达（能力未知）→ 不默认宣告任何能力', async () => {
@@ -486,8 +500,8 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
       settings: SETTINGS,
     });
     renderApp(client);
-    // 连状态快照都还没有时，徽章只能是「未知」。
-    expect((await screen.findByTestId('stage-badge')).textContent).toBe('未知');
+    // 连状态快照都还没有时，只能如实说「正在读取状态…」——不许显示成「未连接」，更不许绿色。
+    expect((await screen.findByTestId('dash-status-label')).textContent).toBe('正在读取状态…');
 
     fireEvent.click(screen.getByTestId('nav-settings'));
     expect(screen.getByTestId('daemon-version').textContent).toBe('未知');
@@ -497,7 +511,7 @@ describe('规则 B 能力宣告 = 唯一事实源（DaemonHello.capabilities）'
     expect(screen.queryByTestId('probe-button')).toBeNull();
 
     fireEvent.click(screen.getByTestId('nav-dashboard'));
-    expect(screen.queryByTestId('stats-uplink')).toBeNull();
+    expect(screen.queryByTestId('dash-traffic')).toBeNull();
   });
 });
 
@@ -515,7 +529,9 @@ describe('IA 导航禁令与空态', () => {
     expect(navTestIds.sort()).toEqual(['nav-dashboard', 'nav-logs', 'nav-nodes', 'nav-settings']);
 
     const bodyText = document.body.textContent ?? '';
-    for (const forbiddenEntry of ['TUN', '特权助手', '拓扑', '地球', '定位']) {
+    // v1.2.0：TUN 已经是唯一且被宣告的模式，不再是「未实现能力的入口」；
+    // 现在要禁的是**被砍掉的两种模式名**（直连 / 代理模式），以及仍未实现的特权助手与拓扑/地理。
+    for (const forbiddenEntry of ['特权助手', '拓扑', '地球', '定位', '代理模式', '直连']) {
       expect(bodyText).not.toContain(forbiddenEntry);
     }
   });

@@ -362,17 +362,18 @@ async fn real_xray_end_to_end() {
         "[e2e] daemon {} pid={} 能力={:?}",
         hello.daemon_version, hello.pid, hello.capabilities
     );
-    // 能力表是唯一事实来源：本轮必须宣告 proxy/stats/probe/subscriptions，
-    // 且不能宣告 tun / 远端拉取（未实现的能力不许出现在界面上）。
+    // 能力表是唯一事实来源。2026-10-01（T2）起 TunMode 也宣告（用户裁决本版打开 TUN）；
+    // 远端拉取仍未实现，继续断言「不许宣告」。
+    // ⚠️ 宣告 ≠ 已验证：TUN 真机接管（helper 安装、utun、路由/DNS）仍只有 S6 能证。
     for expected in [
         Capability::ProxyMode,
+        Capability::TunMode,
         Capability::Stats,
         Capability::Probe,
         Capability::Subscriptions,
     ] {
         assert!(hello.capabilities.contains(&expected), "缺少能力 {expected:?}");
     }
-    assert!(!hello.capabilities.contains(&Capability::TunMode));
     assert!(!hello.capabilities.contains(&Capability::SubscriptionFetch));
 
     let mut events = client.events();
@@ -539,6 +540,25 @@ async fn real_xray_end_to_end() {
         assert!(!process_alive(pid), "第 {round} 轮断开后 pid={pid} 必须消失");
         previous_pid = pid;
     }
+
+    // ---- 12.5 T2：Tun 意图必须被受理（不再被「只开放 proxy」早退拒绝）---------
+    //
+    // 用户 2026-10-01 裁决（T2）：本版打开 TUN —— 能力表宣告 TunMode，且
+    // `begin_connect_intent` 不再用 `mode != Proxy` 把 tun 意图拒掉。
+    //
+    // 这里只断言**受理**（Response::Accepted）：终态取决于运行环境 ——
+    // 没有特权 helper 的机器上它会以真实错误（helper 连不上）收尾，
+    // 所以不断言「连上」。收尾尽力而为（此时可能已经自己失败回到 Disconnected）。
+    let response = client
+        .request(Request::Connect { node_id: node1.clone(), mode: RunMode::Tun })
+        .await
+        .expect("Connect(tun) 应答");
+    assert!(
+        matches!(response, Response::Accepted),
+        "Tun 意图必须被受理（T2），收到 {response:?}"
+    );
+    eprintln!("[e2e] Connect(tun) 已受理（终态由环境决定：无 helper 时以真实错误收尾）");
+    let _ = client.request(Request::Disconnect).await;
 
     // ---- 13. 收尾 -----------------------------------------------------------
     shutdown_tx.send(()).expect("发送关闭信号");

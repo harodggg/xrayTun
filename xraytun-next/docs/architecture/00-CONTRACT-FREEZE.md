@@ -17,7 +17,7 @@
 | I2 | **没有回落**：一条意图只有一条路径；失败就是如实上报的终态 | `ErrorCode` 是封闭枚举且无 `Retry/Fallback/Degraded`；guard 扫 `fallback`/`retry`/`backoff` 标识符 |
 | I3 | **没有假话**：显示项必须能追到真实字段；未知就是 `None`/「未采样」 | 契约里没有「默认 0 字节」「默认延迟」这类字段；UI 守卫测试逐条断言溯源 |
 | I4 | **单向依赖**：底层不知道上层；UI 不认识 Rust 内部类型 | `cargo tree` + crate 分层表（§2） |
-| I5 | **权限最小面**：只有 helper 改系统网络，且它只认识封闭指令集 | helper 本轮**不实现**（§8），因此任何「TUN 已工作」的说法都是假话 |
+| I5 | **权限最小面**：只有 helper 改系统网络，且它只认识封闭指令集 | 判据仍成立。**2026-10-01 更新（T2）**：「helper 本轮**不实现**」已被用户裁决更新——helper 存在（发布包内 `xt-helperd`），本版 TUN 通路已打开（daemon 去掉早退并宣告 `Capability::TunMode`）。但真机接管（helper 安装/回滚、utun、路由/DNS）**仍未验收**，因此「TUN 已工作」的说法**依旧不许说** |
 
 ## 1. 进程图
 
@@ -33,7 +33,7 @@
 │  settings │ subs │ nodes │ lifecycle(xt-state) │ datapath    │
 │  stats    │ probe │ bus   │ ipc-server                       │
 └──────┬──────────────────────────────────────────┬───────────┘
-       │ spawn / stop / kill（父子进程）             │ 封闭指令集（本轮未实现）
+       │ spawn / stop / kill（父子进程）             │ 封闭指令集（本版已打开 TUN 通路；真机未验收）
 ┌──────▼───────────────┐                  ┌───────▼──────────────────┐
 │ xray（数据面，上游）    │                  │ xraytun-helperd（root）    │
 │  真实进程、真实字节数    │                  │  utun/route/DNS/快照       │
@@ -118,6 +118,10 @@ daemon 负责算 `api_listen = socks 端口 + 1`（对用户不暴露成设置�
   `Subscriptions`（**本地订阅原文解析**）= 要宣告；
   `SubscriptionFetch`（http/https 拉取）与 `TunMode` = 本轮不宣告。
   `AddSubscription` / `RefreshSubscription` 属于拉取语义 → 返回 `Unsupported`。
+* **2026-10-01 更新（T2）**：上面那句「`TunMode` = 本轮不宣告」已被用户裁决更新——daemon
+  能力表现已**宣告** `Capability::TunMode`（`crates/xt-daemon/src/lib.rs` 的 `hello()`），
+  本版 TUN 通路已打开。**宣告 =「本版本提供这条通路」（代码事实），不等于「TUN 已验证可用」**；
+  `SubscriptionFetch` 仍不宣告。旧结论保留，仅作 2026-10-01 之前的历史口径。
 * 能力粒度必须与**用户可做的动作**对齐：`Subscriptions` 与 `SubscriptionFetch` 之所以分开，
   是因为合成一个会让界面只剩两个坏选择——显示一个按不动的"刷新"（假控件），
   或者把本地解析也一起藏掉。
@@ -172,7 +176,9 @@ Disconnected ──connect──▶ Connecting{PreparingConfig→StartingCore→
 * 启动失败不自动重连、不重试、不降级到直连。
 * 不写「兼容旧版」分支；版本不符就拒绝。
 * 允许的**回滚**只有一种：崩溃/退出时把已经改掉的本机状态还原（helper 快照）——
-  那是清理，不是「换一条路成功」。本轮 helper 未实现，因此这条只是设计约束。
+  那是清理，不是「换一条路成功」。**2026-10-01 更新（T2）**：「本轮 helper 未实现」已不成立——
+  helper 已在发布包内（`xt-helperd`），这条从「只是设计约束」变成**已落代码、但真机未验收**：
+  helper 安装/回滚与快照还原仍无真机证据（S6 未做）。
 
 ## 7. 真实数据（I3）细则
 
@@ -186,8 +192,16 @@ Disconnected ──connect──▶ Connecting{PreparingConfig→StartingCore→
 
 **范围**：`proxy` 模式下的 连接 / 断开 / 切节点 / 真实流量统计 + UI 真实绑定。
 
-**明确不做（并因此不作任何声明）**：macOS TUN、特权 helper、订阅之外的账号体系、
-审计上传、地理可视化。旧仓库 `xray-tun/` 一行都不改。
+> **2026-10-01 更新（T2）**：本节原先的「明确不做：macOS TUN、特权 helper」已被用户
+> 2026-10-01 裁决（T2）更新——**本版打开 TUN 通路**（daemon 去掉「非 proxy 一律
+> `unsupported`」的早退、能力表宣告 `Capability::TunMode`；helper 存在，发布包内 `xt-helperd`）。
+> **被推翻的只是「不做」，不是「不许声称已验证」**：真机接管（helper 安装/回滚、utun、
+> 路由与 DNS 提交）仍未经 S6 验收 ⇒ **仍然不做的是「声称 TUN 已验证 / 已可用」**。
+> 产品面只保留 TUN；`RunMode::Proxy` 与 proxy 通路本身保留——它是 CI 里唯一能跑的真数据面，
+> `xt-cli` 继续用它。其余各项（账号体系、审计上传、地理可视化）不变。
+
+**明确不做（并因此不作任何声明）**：订阅之外的账号体系、审计上传、地理可视化。
+旧仓库 `xray-tun/` 一行都不改。
 
 **端到端验收（本机 Linux，真实进程、真实字节）**：
 
