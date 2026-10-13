@@ -7,7 +7,7 @@
 > 4. **不要动 xraytun v3**（分支 `xraytun3` 与目录 `xraytun3/**`，那是第三个版本，设计文档保持空白）；
 > 5. **后端逻辑不要改**。
 >
-> 一句话：**这是纯 UI 版本** —— `crates/**` 一行不改，仪表板用 v1 契约里**真实存在**的字段重建老版的形状与判据；没有契约字段支撑的老版元素**一律不显示**（不许造控件，I3）。
+> 一句话：**这一版 = UI 改版 + 一处后端打开**。仪表板用 v1 契约里**真实存在**的字段重建老版的形状与判据（没有字段支撑的老版元素一律不显示，不许造控件，I3）；同时按 §3.3（T2）把 daemon 的 TUN 通路打开 —— **`crates/xt-contract` 的类型一行不改**。
 
 本文件位置：`xraytun-next/docs/design/NEXT-VERSION-UI.md`（xraytun-next 真源树；仓库快照同步到分支 `xraytun-next-v1`）。
 老版只读参照：仓库里 `apps/**`（v0.9.2，main 线）——**只读**，且**不许**把其中的意图/拓扑页复制进来（§5）。
@@ -19,14 +19,14 @@
 | 项 | 值 |
 | --- | --- |
 | 目标版本 | **xraytun-next v1.2.0**（用户 2026-10-01 裁决）；当前基线 v1.1.5 = 分支 `xraytun-next-v1` |
-| 可以改 | `xraytun-next/apps/ui/**`（`src/**`、`tests/**`、`styles.css`）、`xraytun-next/scripts/guard.sh`（**只容许 §4.1 那一处 I1 豁免**）、本设计文档 |
-| 不许改 | `xraytun-next/crates/**`（`xt-contract`/`xt-daemon`/`xt-cli`/…）、`xt-ipc` 帧格式、协议与事件、能力宣告 |
+| 可以改 | `xraytun-next/apps/ui/**`；`xraytun-next/scripts/guard.sh`（只容许 §4.1 那一处 I1 豁免）；**`crates/xt-daemon/**`（只为 §3.3 打开 TUN：去掉早退 + 宣告 `TunMode` + 改被它钉住的旧断言）**；必要时 `crates/xt-helperproto/**`、`crates/xt-helperd/**`（物理网卡名回传，§3.3 缺口 1）；相关 docs |
+| 不许改 | `crates/xt-contract/**`（类型不动：`RunMode::Tun`、`Capability::TunMode` 本来就在）、`xt-ipc` 帧格式、协议与事件、**proxy 通路**（CI 里唯一的真数据面证据）、分支 `xraytun3` 与 `xraytun3/**` |
 | 明令不动 | 分支 `xraytun3` 与 `xraytun3/**`（裁决 4） |
 | 老版参照 | `apps/ui/src/**`（v0.9.2，只读；含 `pages/Dashboard.tsx` 等） |
 
 **判据**
 
-1. `git diff --name-only <base>..HEAD -- xraytun-next/crates` **输出必须为空**（「后端零改动」的机器判据，不靠跑 CI 自证）。`xraytun-next/scripts/guard.sh` 允许**唯一一处**改动：§4.1 的 I1 窄白名单，且它必须打印豁免行。
+1. `git diff --name-only <base>..HEAD -- xraytun-next/crates/xt-contract xraytun-next/crates/xt-ipc` **必须为空**（冻结契约与帧格式不动）；`crates/**` 里**只允许 §3.3 清单**列出的改动（去早退 / 宣告 `TunMode` / 被它钉住的旧断言 / 必要时网卡名回传）。`scripts/guard.sh` 只容许 §4.1 那一处改动，且它必须打印豁免行。
 2. `bash xraytun-next/scripts/guard.sh` 仍绿（五条不变量的判据）。
 3. `cd xraytun-next/apps/ui && npm test && npx tsc --noEmit && npm run build` 全绿。
 4. `apps/ui/src/transport/contract.guard.test.ts` 仍绿（UI 不得越过契约认 Rust 内部类型）。
@@ -71,13 +71,13 @@
 | 11 | 样式与配色 | 老版 `apps/ui/src/styles.css`（`dash__*` / `banner--{error,warn,info}` / `badge--{fast,ok,slow,unknown}` / `dot--*` / `topbar--*`） | 线、点、状态词三处同色 | 搬进 `xraytun-next/apps/ui/src/styles.css`（design 所有） |
 | 12 | 导航第一项标签 | 老版：`仪表盘`（`App.tsx:43`） | — | v1 现为「状态」（`App.tsx:16`）；本版改为**「仪表盘」**，顺带消除 `docs/ux/IA.md:166` 与实现的漂移 |
 
-### 2.2 绑不上契约的项（后端不改 ⇒ **明确不显示**；以及老版自身的缺陷不许照抄）
+### 2.2 绑不上契约的项（契约里没有对应字段 ⇒ **明确不显示**；以及老版自身的缺陷不许照抄）
 
 | 老版字段 / 行为 | v1 契约 | 本版处理 |
 | --- | --- | --- |
 | `settings.routing_preset`（分流预设） | `SettingsView` 只有 `socks_listen`/`selected_node`/`log_level`（`model.rs:262-269`） | 不显示 |
 | `settings.mode = direct`（直连档）+ 直连提示 | 没有 direct；只有 `RunMode::{Proxy,Tun}` + 断开 | **不显示**该档与那条提示；空态由 `stage=disconnected` 表达 |
-| **代理模式（SOCKS 入站）** 与「入站模式」选择器 | 契约里 `RunMode::{Proxy,Tun}` 仍在（后端不改）；v1 的 `run-mode-select` 是它的 UI 面 | **整档移除**（用户 2026-10-01 裁决：放弃直连与代理，只保留 TUN）：UI 不渲染任何模式选择器，`Connect` 只发 `tun`（§3.2、§3.3） |
+| **代理模式（SOCKS 入站）** 与「入站模式」选择器 | 契约类型不动（`RunMode::{Proxy,Tun}` 本来就在，§3.3）；v1 的 `run-mode-select` 是它的 UI 面 | **整档移除**（用户 2026-10-01 裁决：放弃直连与代理，只保留 TUN）：UI 不渲染任何模式选择器，`Connect` 只发 `tun`（§3.2、§3.3） |
 | `core.path / version / supports_native_tun / min_native_tun_version` | 只有 `DatapathView.version`（真实 `xray version` 输出） | 诊断区只显示 pid/version/ready_at；**不显示核心路径与「是否支持原生 TUN」** |
 | `helper.*`（reachable/version/protocol/tun_active/socket_present/stale_session） | 契约里**没有** helper 视图（I5：本轮 helper 未实现） | 不显示（连带老版 rank 1/2/3 三条横幅一并删除） |
 | `update.*`（app/core/geo 三路检查） | 无 | 不显示 |
@@ -168,25 +168,37 @@
 - 可访问性：`aria-busy`、状态变化经 `role="status"` live region 播报；`data-testid="start-button"`；Enter/Space 可触发；全屏只有这一处启动控件。
 - **诚实门控**：`tun_mode` 未宣告时按钮禁用并说清真因 —— 这不是假控件（它说的是事实），也**不是**把按钮藏起来假装功能不存在。
 
-### 3.3 只保留 TUN：一条必须先裁决的硬冲突
+### 3.3 只保留 TUN —— 已裁决走 T2：这一版就把 TUN 打开
 
-**裁决**：放弃直连与代理模式，只保留 TUN 模式。
+**裁决（2026-10-01）**：放弃直连与代理（**产品面只留 TUN**）；**同时放开「后端逻辑不要改」**，这一版就让 daemon 打开 TUN 通路。
 
-**事实（v1.1.5 现状，后端不改跨不过去）**
-- daemon 的能力表只宣告 `ProxyMode / Stats / Probe / Subscriptions`（`crates/xt-daemon/src/lib.rs:317-332`，注释写明「没实现的能力不宣告，界面因此不会出现按不动的按钮」）；
-- `Connect` 只要带 `RunMode::Tun`，daemon **直接拒绝**：`unsupported("tun 模式需真机验收通过后才宣告 TunMode 能力（S6）；当前只开放 proxy")`（`crates/xt-daemon/src/lib.rs:352-357`）；
-- 即：TUN 的 daemon 通路是**刻意锁在 S6 真机验收之后**的。
+**好消息：TUN 的后端通路已经写完，只被一道闸拦着**
+- `crates/xt-daemon/src/flow.rs:325` 已有完整的 `connect_tun_flow`：helper `TunUp` → `TakeTunFd`（SCM_RIGHTS 取 utun fd）→ 以 `XRAY_TUN_FD` 拉起 xray → 等就绪 → `CommitRoutes`；断开走 `tun_down`（`flow.rs:63-66`、`helper.rs:122-185`）。`flow.rs:327` 的注释自己写着「当前**不可达**：`begin_connect_intent` 在真机验收（S6）通过前拒绝 tun 模式」。
+- 拦住它的只有两处：`lib.rs:352-357` 的「当前只开放 proxy」早退；`lib.rs:323-328` 的能力表没宣告 `Capability::TunMode`。
+- **契约类型不用改**：`RunMode::Tun` 与 `Capability::TunMode` 本来就在（`model.rs:50-57,303-318`）⇒ 不碰冻结项（I4 不受影响）。
 
-**⇒ 「只保留 TUN」+「后端不改」做出来的大按钮，在 v1.1.5 上连不上**（每次点都是 `Unsupported`）。两条路，必须由用户裁决：
+**本版必须动的后端（清单，逐条给判据）**
 
-| 路径 | 做法 | 结果 |
-| --- | --- | --- |
-| **T1（UI-only，先做这个）** | 本版只做 UI：TUN-only + 大按钮 + 未宣告时的诚实禁用态；等 **S6 真机验收通过**、daemon 宣告 `TunMode` 后按钮自然可用 | 本版在 v1.1.5 上**不可连接**（按钮如实说原因）；后端零改动、既有纪律不破 |
-| **T2（放开裁决 5）** | 这一版就让后端宣告 `TunMode`（并完成 TUN 通路的后端工作） | 立刻可用；但**推翻「S6 真机验收后才宣告」的纪律**，且要动 `crates/**` —— 需要你明确同意 |
+| # | 文件:行 | 改什么 | 判据 |
+| --- | --- | --- | --- |
+| 1 | `crates/xt-daemon/src/lib.rs:352-357` | 去掉 `mode != RunMode::Proxy → unsupported` 的早退 | `Connect{mode: Tun}` 返回 `Accepted`，终态经 `Event::State` |
+| 2 | `crates/xt-daemon/src/lib.rs:323-328` | 能力表加 `Capability::TunMode` | UI 的大启动按钮因此变为可点（capability 是唯一真源） |
+| 3 | `crates/xt-daemon/tests/e2e_real_xray.rs:375` | 旧断言 `assert!(!hello.capabilities.contains(&TunMode))` 钉的就是「S6 前不宣告」，必须改 | 新断言：宣告 `TunMode`；**proxy 通路断言原样保留** |
+| 4 | `apps/ui/tests/acceptance/truthfulness.test.tsx:456-475` | 「TUN 由 tun_mode 门控 → 出现开关」这条随模式选择器一起改 | 改为：界面无模式选择器；`tun_mode` 缺失时**大按钮禁用并说真因** |
+| 5 | `apps/ui/tests/acceptance/live-daemon.test.ts:349,406` | 现在点的是 `connect-button`/`disconnect-button`（proxy）；改版后要点 `start-button`（tun） | 见「证据边界」 |
+| 6 | `docs/architecture/00-CONTRACT-FREEZE.md`（§8、I5）、`docs/product/NON-GOALS.md`、`docs/product/SCOPE.md`、`docs/ux/IA.md` | 「本轮不做 TUN / helper」的结论要改成「本版开放 TUN」 | 由各文件所有者改（lead / product / ux），不越权 |
 
-**两条路共有的副作用（要写进 release notes 的诚实声明）**
-1. UI 不再提供 proxy ⇒ Linux/CI 上的「活体验收」（`apps/ui/tests/acceptance/live-daemon.test.ts` 现在用真 daemon + proxy 连接）无法再经界面连接，只能降级为渲染层验收；
-2. 非 macOS 平台没有任何可用连接方式（TUN 依赖 helper，v1 的 helper 仅 macOS）。
+**动了后端以后，「宣告 ≠ 已验证」这条线要守住**
+- 旧纪律（`lib.rs:355` 原文）：真机验收（S6）通过后才宣告 `TunMode`。T2 明确推翻它 ⇒ 这一版宣告的是「**本版本提供 TUN 通路**」（代码事实），**不是**「TUN 已经能接管流量」（仍未经真机验收，`docs/release-notes/v1.1.5.md` 也这么写着）。
+- 所以界面与 release notes 必须保持这个区分：失败时**如实报错**（helper 没装 / socket 连不上 / 路由提交失败都给真原因），**不许**把「已宣告」写成「已可用」。真正「TUN 接管成功」的证据仍然只有 S6 真机。
+
+**已知缺口（T2 会把它们变成用户可见的风险）**
+1. `crates/xt-daemon/src/flow.rs:74-77`：`TUN_PHYSICAL_IFACE = "en0"` 是**占位**（原文注释：「待真机/待 helper 上报：daemon 目前不知道物理网卡名…先用占位 `en0`」）⇒ 物理网卡不是 `en0` 的机器上，direct 出站可能失败。两条处理路，见 §8·1。
+2. helper 安装/回滚、utun 真正接管、DNS 与路由提交**仍然只有真机能验**；macOS CI（`ci.yml` @ `macos-14`）只覆盖构建 / lint / 单测 / UI，**不覆盖** TUN 接管。
+
+**证据边界（改版后）**
+- 真实数据面（真进程 / 真字节）继续由 `crates/xt-daemon/tests/e2e_real_xray.rs` 在 **proxy** 通路上覆盖 ⇒ **`RunMode::Proxy` 与 proxy 通路必须保留**（它是 CI 里唯一能跑的真数据面，`xt-cli` 也继续用它），只是**产品界面不再提供**。
+- UI 侧 `live-daemon.test.ts` 只有在 TUN-capable 环境（macOS + 已装 helper + 相应权限）才可能连上；否则该用例降级为「渲染 + 失败路径如实」的断言，**并在 CI 输出里标明降级**（不许把 skip 说成通过）。
 
 ---
 
@@ -206,7 +218,7 @@
 - 老版的速率来自**后端 1 秒定时器**（`apps/desktop/src/traffic.rs:30` `SAMPLE_INTERVAL = 1s`、`:58-98` 的 `sleep` 循环 + `previous` 差分）；
 - v1 的 daemon **只在收到 `Request::Status` 时才采样**（`crates/xt-daemon/src/lib.rs:52` `STATS_GATE = 100ms`、`:287-315`），且 `Event::State` 只随状态**变化**发出（`:235`、`:340`）；
 - `scripts/guard.sh:96-97` **明令 UI 不许 `setInterval` / `setTimeout` / `sleep`**（I1）；
-- 裁决 5 又要求后端不改。
+- 裁决 5 原本要求后端不改（T2 已为 TUN 打开，见 §4.1 补充）。
 ⇒ 在没有新节拍的前提下，**「老版那种持续跳动的网速」当前无法实现**。四个选项的**实际后果**（不是文字游戏，逐条说清）：
 
 | 方案 | 做法 | 实际拿到什么 | 代价 / 约束 |
@@ -214,7 +226,7 @@
 | **A** | 事件驱动：收到任意事件（state/log/probe/notice）时顺带取一次 `Status`，用「距上次采样 ≥ N ms」的时间戳节流（无定时器） | **只有事件来的时候数字才动**。而 v1 生成的 xray 配置把 access log 关掉了（`crates/xt-xrayconf/src/*.rs:200,440` 都是 `"access": ""`）⇒ **流量期间没有日志事件**；连接成功后通常一个事件都不来 ⇒ 速率基本是一条死线 | 完全合规，但「网速」名存实亡 |
 | **B** | 用户显式点一次「测速」按钮刷新累计字节 | 一次点击 = 一个采样点；速率需要**两个时刻不同的样本**（`Δbytes/Δms`）⇒ B **只能显示累计字节 + 采样时刻，给不出速率** | 最保守，但裁决 3 的「网速」被实质砍掉 |
 | **C（推荐）** | 放开 I1 的一个**窄口子**：允许 UI 里**一处**纯展示用的采样节拍（每 ~1s 调一次 `Status`），同步在 `scripts/guard.sh:96-97` 加白名单（只放行这一处，不关掉整条 I1） | **真正的持续速率**，与老版观感一致；**后端一行不改**（`Status` 是契约里已有的请求） | 动的是**仓库不变量判据**（`scripts/guard.sh` 属 lead，不是后端）；commit 必须写清「为什么这次允许」，例外只限这一处展示采样 |
-| **D** | 后端加周期性 stats 事件（daemon 侧 tick，照老版 `apps/desktop/src/traffic.rs:30,58-98` 的做法） | 持续速率，且节拍归 daemon（与老版同构，架构最干净） | **违反裁决 5「后端逻辑不要改」** |
+| **D** | 后端加周期性 stats 事件（daemon 侧 tick，照老版 `apps/desktop/src/traffic.rs:30,58-98` 的做法） | 持续速率，且节拍归 daemon（与老版同构，架构最干净） | 原先违反裁决 5；**T2 之后不再违反**（§4.1 补充） |
 
 **已裁决（2026-10-01）：选 C。** 它是唯一「不动后端、又能真正交付网速」的路径，代价是 I1 判据要开一个被记录在案的窄口子。
 
@@ -226,7 +238,8 @@
 - **guard 的窄白名单（怎么写才不是空头承诺）**：`scripts/guard.sh` 的 I1 UI 扫描（`:96-97`）只放行这一处 —— 该行带显式标记（例如 `// GUARD-I1-EXEMPT: 展示用采样节拍，不参与同步（§4 C）`），guard 命中标记时**跳过该行并打印豁免行**。**不许**把整个文件或整个 UI 目录排除在扫描之外（那正是 `guard.sh:26-29` 记过的「空头承诺」教训）。
 - **不许用别的 API 绕过正则**：`requestAnimationFrame` 之类同样能定期回调，但那只是躲 grep，不改变「这是一个节拍」的事实 —— 要走明面：标记 + 白名单 + 理由。
 - **契约与 daemon 零改动**：`Status` 是契约里已有的请求（`protocol.rs:32`），采样仍由 daemon 侧 `sample_stats()` 完成（`xt-daemon/src/lib.rs:287-315`）。
-- **代价必须进 release notes**：I1 原文是「不许轮询 / 固定延时**用来同步**」；本例外是**展示采样**，不参与任何状态推进。机器判据：guard 的豁免输出恰一行 + `crates/**` 的 diff 为空。
+- **代价必须进 release notes**：I1 原文是「不许轮询 / 固定延时**用来同步**」；本例外是**展示采样**，不参与任何状态推进。机器判据：guard 的豁免输出恰一行 + `crates/**` 的 diff 只落在 §3.3 清单里。
+- **⚠️ T2 之后这条的前提变了（2026-10-01 补充）**：既然本版已经允许动 `xt-daemon`（§3.3），方案 **D（daemon 每秒推一次 stats）不再违背「后端不改」**，而且**比 C 干净** —— 不用给 I1 开白名单，也不会留下「UI 里有定时器」这个例外。C 是用户在原前提下选的；若愿意在本版顺手把节拍放进 daemon，建议改选 D（同一次后端改动做掉）。见 §8·2。
 
 ---
 
@@ -255,7 +268,7 @@
 | 节点 | `apps/ui/src/pages/Nodes.tsx`（175 行）：探测（`ProbeNodes`，能力门控）/「切换并立即使用」/「选为当前节点」；`probe == null` → 「未探测」，不自洽 → 「未知」，**从不显示 0 ms** | 不动；仪表板的「选择/切换节点」按钮跳这一页 |
 | 订阅 | 在 `apps/ui/src/pages/Settings.tsx:167-246`：标题「订阅」；`subscriptions` 能力才渲染只读列表，`subscription_fetch` 能力才渲染「添加订阅/刷新」（v1.1.5 daemon **不宣告**后者 ⇒ 只剩只读列表）；空态「暂无订阅 / 订阅列表来自 daemon 的真实记录。」 | 不动，**不独立成页**（远端拉取需要后端能力，契约不改） |
 | 开始面板 | 见 §3（v1 现在没有顶栏，本版补回） | 新增 |
-| 网速 | 见 §4（v1 现在没有速率，只有累计字节） | 新增（UI 派生，后端不改） |
+| 网速 | 见 §4（v1 现在没有速率，只有累计字节） | 新增（UI 派生；若改选 D 则由 daemon 提供节拍） |
 
 ---
 
@@ -278,9 +291,10 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 7. 导航恰为 4 项且第一项标签是「仪表盘」；源码与导航不含 `Intent|Topology|Globe|…`（§5.3）。
 8. `Event::Notice` 被真实渲染（修复「缓冲了但不显示」的现状缺口），文案与 daemon 原文一致。
 9. 能力门控不回退：`tun_mode` 未宣告 ⇒ 没有入站模式选择器；`probe` 未宣告 ⇒ 没有探测按钮；`stats` 未宣告 ⇒ 没有流量卡。
-10. `scripts/guard.sh` 的 I1 豁免输出**恰好一行**（§4.1 那一处节拍），`xraytun-next/crates` 的 diff 为空。
+10. `scripts/guard.sh` 的 I1 豁免输出**恰好一行**（§4.1 那一处节拍）；`crates/xt-contract` 与 `crates/xt-ipc` 的 diff **为空**，`crates/**` 的改动只出现在 §3.3 清单列出的文件里。
 11. 界面上**不存在任何模式选择器**（`run-mode-select` 消失），也不出现「代理模式 / 直连」字样。
 12. `hello.capabilities` 不含 `tun_mode` ⇒ 大按钮**禁用**，说明逐字「当前 daemon 不提供 TUN 模式（未宣告 `tun_mode` 能力）」；且用假 client 断言 `Connect` 请求里的 `mode` **恒为 `tun`**。
+13. TUN 通路（§3.3）：daemon 单测断言 `Connect{mode: Tun}` 被受理、能力表含 `tun_mode`；UI 侧大按钮可点。**真实接管仍归 S6 真机**，CI 不得声称验证过接管。
 
 **只有用户真机能判的**：仪表板观感与老版的一致性（截图对比）；顶栏在真实 macOS 窗口里的布局。发布流水线已有的 app 启动探针目前只截两页（状态/设置），本版应扩到四页 + 顶栏可见性。
 
@@ -299,9 +313,11 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 - **版本号 = `1.2.0`**（§0）。
 - **开始面板 = 顶栏连接面板 + macOS 菜单栏托盘，两个都保留**（§3、§3.1）；托盘本版保持现状（只有「显示主窗口 / 退出」）。
 - **保留的粒度 = 保持 v1 现状、不照老版重建**（「不需要额外的功能」）；**日志只保留两个功能**：如实流动 + 分类显示（§6）。
-- **网速节拍 = 方案 C**（§4.1）：UI 里唯一一处展示用采样节拍 + `scripts/guard.sh` 的 I1 窄白名单；后端零改动。
+- **网速节拍 = 方案 C**（§4.1）：UI 里唯一一处展示用采样节拍 + `scripts/guard.sh` 的 I1 窄白名单。**注**：T2 之后可改选 D（§4.1 补充、§8·2）。
 - **模式：放弃直连与代理，只保留 TUN**（§3.3）；仪表板顶部改为**一个大启动按钮**（§3.2），全屏只有这一处启动/停止控件。
+- **TUN 路径 = T2**（§3.3）：放开「后端不改」，本版就去掉早退并宣告 `Capability::TunMode`；`RunMode::Proxy` 与 proxy 通路**保留**（CI 的真数据面证据 + `xt-cli` 用），只是产品界面不提供。
 
 **仍待裁决**
-1. **TUN 可用性路径**（§3.3）：**T1**（UI-only，等 S6 真机验收后 daemon 宣告 `TunMode`；本版按钮在 v1.1.5 上如实禁用）还是 **T2**（这一版就放开裁决 5、让 daemon 宣告 `TunMode`）？**默认 T1。**
-2. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作，且复用节拍裁决（C）。
+1. **物理网卡名占位**（§3.3 缺口 1）：`TUN_PHYSICAL_IFACE = "en0"` 是写死的占位。**A**（做完整）让 helper 回报真实网卡名（动 `xt-helperproto` / `xt-helperd` / daemon 三处）；**B**（先接受）保留占位，把「物理网卡不是 en0 时 direct 出站可能失败」写进 release notes。默认 **B**（本版先开通路），但**只有你知道真机网卡名**，所以请你定。
+2. **网速节拍是否从 C 改成 D**（§4.1 补充）：既然本版已动 `xt-daemon`，把每秒采样放进 daemon（老版同构）比在 UI 里开 I1 白名单更干净。默认维持 **C**（你已裁决），除非你想顺手换。
+3. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作。
