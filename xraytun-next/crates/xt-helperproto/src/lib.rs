@@ -18,13 +18,20 @@
 //! 指令就忽略」的路径。数据面可执行文件路径的白名单是 helperd 的运行时约束
 //! （本 crate 只负责线上词汇，不负责校验运行时路径）。
 
+use std::net::IpAddr;
+
 use serde::{Deserialize, Serialize};
 
 use xt_contract::error::{bad_request, ErrorBody};
 use xt_contract::MAX_FRAME_BYTES;
 
 /// helper 协议版本。与 daemon 的 `PROTOCOL_VERSION` 无关，独立演进。
-pub const HELPER_PROTOCOL_VERSION: u32 = 1;
+///
+/// 为什么从 1 升到 2：新增 `Request::DiscoverPhysical`（daemon 在生成 xray 配置之前
+/// 要拿到真实物理网卡名）。机器上装了旧 helperd 时它不认识这条指令，只会给出一个
+/// 「帧不合法」的解码错误；版本号让 daemon 的 `Status` 握先把这种情况说成
+/// **明确的版本不匹配**（`HelperUnavailable` + 两侧版本号），而不是让现场去猜帧为什么坏。
+pub const HELPER_PROTOCOL_VERSION: u32 = 2;
 
 /// `TunUp` 的入参。字段形状与 `xt_macosnet::model::TunRequest` 一致，但这里是
 /// **线上词汇**：helperproto 不依赖 xt-macosnet（两者都是 helperd 的下游），
@@ -60,6 +67,16 @@ pub enum Request {
     TunDown { session: SessionRef },
     /// 启动时回滚上一次崩溃留下的半残状态。
     RestoreStale { state_dir: String },
+    /// 发现当前物理上行（默认路由指向的网卡）。
+    ///
+    /// 为什么单独一条、而且必须在 `TunUp` **之前**：daemon 得在生成 xray 配置时就写对
+    /// 物理网卡名（`settings.autoOutboundsInterface` 与 direct 出站的 `sockopt.interface`），
+    /// 而那份配置在 `TunUp` 之前就要落盘并校验 —— 靠 `TunUp` 的响应回传已经太晚。
+    /// 以前 daemon 侧写死占位 `en0`：物理网卡不是 en0 的机器上，direct 出站会绑到
+    /// 一张不存在的网卡，表现为「能连上但出口不对」，比直接失败更难查。
+    ///
+    /// 无副作用（只读 `route -n get default`），不改变任何系统状态。
+    DiscoverPhysical,
 }
 
 /// 服务端（helper）→ 客户端（daemon）的响应。
@@ -74,6 +91,11 @@ pub enum Response {
     Ok,
     /// 回滚结果：被回滚的接口名；`None` = 没有残留。
     RestoreStale { interface: Option<String> },
+    /// 物理上行：`route -n get default` 的 `interface:` 与 `gateway:`。
+    ///
+    /// `gateway` 为 `None` 是**正常的**（接口路由没有 `gateway:` 行），不是错误；
+    /// 真正「找不到默认路由」由 `Response::Error` 表达。
+    PhysicalUplink { interface: String, gateway: Option<IpAddr> },
     /// **服务端的错误通道**。
     ///
     /// helper 的 `Response` 原本没有错误变体，于是「指令被拒」只能靠关连接
@@ -170,6 +192,7 @@ mod tests {
             Request::CommitRoutes { session: session.clone() },
             Request::TunDown { session: session.clone() },
             Request::RestoreStale { state_dir: "/Library/Application Support/XrayTun".into() },
+            Request::DiscoverPhysical,
         ];
         for req in requests {
             let bytes = encode_request(&req).unwrap();
@@ -188,6 +211,11 @@ mod tests {
             Response::Ok,
             Response::RestoreStale { interface: Some("utun4".into()) },
             Response::RestoreStale { interface: None },
+            Response::PhysicalUplink { interface: "en0".into(), gateway: None },
+            Response::PhysicalUplink {
+                interface: "en7".into(),
+                gateway: Some("192.168.1.1".parse().unwrap()),
+            },
             // 错误通道：`code` / `message` 必须原样往返 —— helperd 的 dispatch
             // 失败时写的就是这一变体，它对端要靠它区分失败原因。
             Response::Error {

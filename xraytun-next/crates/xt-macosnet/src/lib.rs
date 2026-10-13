@@ -16,7 +16,7 @@ mod imp;
 #[cfg(not(target_os = "macos"))]
 mod stub;
 
-pub use model::{Cidr, InstalledRoute, RouteVia, Snapshot, TunRequest, TunSession};
+pub use model::{Cidr, InstalledRoute, PhysicalUplink, RouteVia, Snapshot, TunRequest, TunSession};
 
 use std::os::fd::RawFd;
 use std::path::Path;
@@ -80,5 +80,22 @@ pub fn restore_stale(state_dir: &Path) -> Result<Option<String>, ErrorBody> {
     #[cfg(not(target_os = "macos"))]
     {
         stub::restore_stale(state_dir)
+    }
+}
+
+/// 发现当前物理上行（默认路由指向的网卡 [+ 网关]）。
+///
+/// 为什么它属于公开 API：daemon 要把物理网卡名写进 xray 配置（direct 出站的
+/// `sockopt.interface` / `settings.autoOutboundsInterface`），而读真实路由表是特权面的事 ——
+/// helper 通过 `Request::DiscoverPhysical` 把结果回传。**没有 `en0` 这类占位默认值**：
+/// 查不到就是错误，宁可连不上，也不要让 direct 出站绑到一张不存在的网卡。
+pub fn discover_physical() -> Result<PhysicalUplink, ErrorBody> {
+    #[cfg(target_os = "macos")]
+    {
+        imp::discover_physical()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        stub::discover_physical()
     }
 }

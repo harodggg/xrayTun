@@ -19,7 +19,7 @@
 | 项 | 值 |
 | --- | --- |
 | 目标版本 | **xraytun-next v1.2.0**（用户 2026-10-01 裁决）；当前基线 v1.1.5 = 分支 `xraytun-next-v1` |
-| 可以改 | `xraytun-next/apps/ui/**`；`xraytun-next/scripts/guard.sh`（只容许 §4.1 那一处 I1 豁免）；**`crates/xt-daemon/**`（只为 §3.3 打开 TUN：去掉早退 + 宣告 `TunMode` + 改被它钉住的旧断言）**；必要时 `crates/xt-helperproto/**`、`crates/xt-helperd/**`（物理网卡名回传，§3.3 缺口 1）；相关 docs |
+| 可以改 | `xraytun-next/apps/ui/**`；`xraytun-next/scripts/guard.sh`（只容许 §4.1 那一处 I1 豁免）；**`crates/xt-daemon/**`（只为 §3.3 打开 TUN：去掉早退 + 宣告 `TunMode` + 改被它钉住的旧断言）**；必要时 `crates/xt-helperproto/**`、`crates/xt-helperd/**`、`crates/xt-macosnet/**`（物理上行发现：§3.3 缺口 1，已裁决 A）；相关 docs |
 | 不许改 | `crates/xt-contract/**`（类型不动：`RunMode::Tun`、`Capability::TunMode` 本来就在）、`xt-ipc` 帧格式、协议与事件、**proxy 通路**（CI 里唯一的真数据面证据）、分支 `xraytun3` 与 `xraytun3/**` |
 | 明令不动 | 分支 `xraytun3` 与 `xraytun3/**`（裁决 4） |
 | 老版参照 | `apps/ui/src/**`（v0.9.2，只读；含 `pages/Dashboard.tsx` 等） |
@@ -175,7 +175,7 @@ rank 0 **不走横幅**：仪表板已经用 `ErrorBox` 完整陈述了同一条
 **裁决（2026-10-01）**：放弃直连与代理（**产品面只留 TUN**）；**同时放开「后端逻辑不要改」**，这一版就让 daemon 打开 TUN 通路。
 
 **好消息：TUN 的后端通路已经写完，只被一道闸拦着**
-- `crates/xt-daemon/src/flow.rs:325` 已有完整的 `connect_tun_flow`：helper `TunUp` → `TakeTunFd`（SCM_RIGHTS 取 utun fd）→ 以 `XRAY_TUN_FD` 拉起 xray → 等就绪 → `CommitRoutes`；断开走 `tun_down`（`flow.rs:63-66`、`helper.rs:122-185`）。`flow.rs:327` 的注释自己写着「当前**不可达**：`begin_connect_intent` 在真机验收（S6）通过前拒绝 tun 模式」。
+- `crates/xt-daemon/src/flow.rs:325` 已有完整的 `connect_tun_flow`：helper `TunUp` → `TakeTunFd`（SCM_RIGHTS 取 utun fd）→ 以 `XRAY_TUN_FD` 拉起 xray → 等就绪 → `CommitRoutes`；断开走 `tun_down`（`flow.rs:63-66`、`helper.rs:122-185`）。`flow.rs:327` 那段注释当时写着「当前**不可达**：`begin_connect_intent` 在真机验收（S6）通过前拒绝 tun 模式」——本版已连同入口一起改掉（现在写的是「已可达 + 真机接管仍未经 S6 验收」）。
 - 拦住它的只有两处：`lib.rs:352-357` 的「当前只开放 proxy」早退；`lib.rs:323-328` 的能力表没宣告 `Capability::TunMode`。
 - **契约类型不用改**：`RunMode::Tun` 与 `Capability::TunMode` 本来就在（`model.rs:50-57,303-318`）⇒ 不碰冻结项（I4 不受影响）。
 
@@ -195,7 +195,15 @@ rank 0 **不走横幅**：仪表板已经用 `ErrorBox` 完整陈述了同一条
 - 所以界面与 release notes 必须保持这个区分：失败时**如实报错**（helper 没装 / socket 连不上 / 路由提交失败都给真原因），**不许**把「已宣告」写成「已可用」。真正「TUN 接管成功」的证据仍然只有 S6 真机。
 
 **已知缺口（T2 会把它们变成用户可见的风险）**
-1. `crates/xt-daemon/src/flow.rs:74-77`：`TUN_PHYSICAL_IFACE = "en0"` 是**占位**（原文注释：「待真机/待 helper 上报：daemon 目前不知道物理网卡名…先用占位 `en0`」）⇒ 物理网卡不是 `en0` 的机器上，direct 出站可能失败。两条处理路，见 §8·1。
+1. ~~`TUN_PHYSICAL_IFACE = "en0"` 占位~~ **已按裁决 A 做掉（2026-10-01）**：
+   helper 协议新增只读指令 `Request::DiscoverPhysical`（`xt-helperproto`，`HELPER_PROTOCOL_VERSION` 1→2），
+   helperd 回 `Response::PhysicalUplink { interface, gateway }`（内部走
+   `xt_macosnet::discover_physical()` → `route -n get default`）；daemon 的 `connect_tun_flow`
+   把 `HelperClient::connect` 提前到**生成 xray 配置之前**，用发现的真实网卡名写
+   `settings.autoOutboundsInterface` / direct 出站的 `sockopt.interface`，并删掉了后面重复的那次连接。
+   **查不到默认路由就失败**（`fail_connect`），不退回到 `en0` —— 绑错网卡会表现为「连上了但出口不对」，
+   比一条明确的失败更难查。协议版本升级是为了让「旧 helperd 不认识这条指令」被 `Status` 握先说成
+   明确的版本不匹配，而不是一个「帧不合法」的解码错误。
 2. helper 安装/回滚、utun 真正接管、DNS 与路由提交**仍然只有真机能验**；macOS CI（`ci.yml` @ `macos-14`）只覆盖构建 / lint / 单测 / UI，**不覆盖** TUN 接管。
 
 **证据边界（改版后）**
@@ -320,7 +328,7 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 - **TUN 路径 = T2**（§3.3）：放开「后端不改」，本版就去掉早退并宣告 `Capability::TunMode`；`RunMode::Proxy` 与 proxy 通路**保留**（CI 的真数据面证据 + `xt-cli` 用），只是产品界面不提供。
 
 **仍待裁决**
-1. **物理网卡名占位**（§3.3 缺口 1）：`TUN_PHYSICAL_IFACE = "en0"` 是写死的占位。**A**（做完整）让 helper 回报真实网卡名（动 `xt-helperproto` / `xt-helperd` / daemon 三处）；**B**（先接受）保留占位，把「物理网卡不是 en0 时 direct 出站可能失败」写进 release notes。默认 **B**（本版先开通路），但**只有你知道真机网卡名**，所以请你定。
+（物理网卡名占位已在 2026-10-01 裁决为 **A** 并实现，见 §3.3 缺口 1；本条不再是待裁决项。）
 2. **网速节拍是否从 C 改成 D**（§4.1 补充）：既然本版已动 `xt-daemon`，把每秒采样放进 daemon（老版同构）比在 UI 里开 I1 白名单更干净。默认维持 **C**（你已裁决），除非你想顺手换。
 3. **托盘是否也要连接/状态/速率**（§3.1）：本版默认**不加**（托盘已存在，保持「显示主窗口 / 退出」）；要加属于 `apps/desktop/**` 壳层工作。
 
@@ -337,9 +345,10 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 | TUN 通路打开（T2） | `crates/xt-daemon/src/lib.rs`（去早退 + 宣告 `TunMode`） | `crates/xt-daemon/tests/e2e_real_xray.rs`：能力断言 + 新增 §12.5「`Connect(tun)` 必须被受理」（CI 编译并跑） |
 | 日志只保留两个功能 | **未改** `apps/ui/src/pages/Logs.tsx`（现状恰好就是目标范围） | §6 的读法 |
 | 意图 / 拓扑仍然不做 | 没新增页面；导航恰 4 项 | `v12-dashboard.test.tsx` 的源码级断言（`src/` 下无 intent/topology/globe 文件）+ `truthfulness.test.tsx` 的导航禁令 |
+| 物理上行发现（裁决 A） | `xt-helperproto`（新指令 + 版本 2）、`xt-helperd/dispatch.rs`、`xt-macosnet`（`discover_physical` 公开 API + imp/stub）、`xt-daemon/helper.rs`、`xt-daemon/flow.rs` | helperproto 的 roundtrip 测试（新变体）、Rust 侧由 CI 编译与测试 |
 
 **本版没做到的（不许含糊）**
 - TUN **真机接管**（helper 安装 / 回滚、utun、路由与 DNS）仍未经 S6 验收；本版能说的只有「通路已宣告 + 意图被受理」。
 - 开发机不是 macOS：本机只跑了 UI（`vitest` / `tsc --noEmit` / `vite build`）与 `scripts/guard.sh`；Rust 侧由 CI（`xraytun-next-release.yml`，分支推送触发）编译验证。
-- §8 仍待裁决的两条（`en0` 占位、C→D 节拍）本版按默认值（B、C）实现，未改。
+- 物理上行发现按裁决 **A** 实现（helper `DiscoverPhysical` + 协议版本 1→2，daemon 不再写死 `en0`）；§8 仍待裁决的只剩「网速节拍 C→D」。
 - `components/StatusBadge.tsx` 在新仪表板里不再被使用（状态词改由 `topbarStatus.ts` + 顶栏/仪表板渲染）；本版**没有删它**，留待下一次清理时一并处理（删它要同时清 `styles.css` 的 `badge--disconnected/connecting/…` 与 `docs/design/DESIGN-SYSTEM.md` 的对应段落）。

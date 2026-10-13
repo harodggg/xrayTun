@@ -74,6 +74,14 @@ struct ActiveSession {
 
 static ACTIVE: Mutex<Option<ActiveSession>> = Mutex::new(None);
 
+/// 发现物理上行（默认路由指向的网卡 [+ 网关]）。
+///
+/// 只读：跑一次 `route -n get default`，不改任何系统状态。失败（例如没有默认路由）
+/// 原样上报 —— 调用方**不许**退回到写死的网卡名（那会让 direct 出站绑错网卡）。
+pub(crate) fn discover_physical() -> Result<crate::model::PhysicalUplink, ErrorBody> {
+    route::discover_physical()
+}
+
 pub(crate) fn tun_up(req: &TunRequest) -> Result<TunSession, ErrorBody> {
     // 会话级排他：同一时刻只能有一张 TUN。
     {

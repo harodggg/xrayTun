@@ -118,6 +118,19 @@ impl HelperClient {
         }
     }
 
+    /// 问 helper：当前物理上行是谁（daemon 用它写 xray 的 direct 出站绑定）。
+    ///
+    /// 为什么不让 daemon 自己读默认路由：那是特权面的事（helper 权限边界），而且 helper
+    /// 在 `TunUp` 里本来就要用它 —— 这里只是把同一个事实**提前**取回来。
+    /// **失败即失败**：不退回任何写死的网卡名。绑错网卡的 direct 出站会表现为
+    /// 「连得上但出口不对」，比一条明确的失败更难查。
+    pub async fn discover_physical(&self) -> Result<(String, Option<std::net::IpAddr>), ErrorBody> {
+        match self.exchange(Request::DiscoverPhysical).await? {
+            Response::PhysicalUplink { interface, gateway } => Ok((interface, gateway)),
+            other => Err(unexpected_response("DiscoverPhysical", &other)),
+        }
+    }
+
     /// 建立 TUN 会话（两阶段启动的第一步）。
     pub async fn tun_up(&self, args: TunUpArgs) -> Result<SessionRef, ErrorBody> {
         match self.exchange(Request::TunUp { args }).await? {

@@ -152,6 +152,18 @@ pub fn dispatch(state: &State, request: Request) -> Result<Outcome, ErrorBody> {
             version: HELPER_PROTOCOL_VERSION,
             active_session: state.active_session(),
         })),
+        // 只读查询：当前默认路由指向哪张物理网卡。
+        //
+        // 为什么放在 `TunUp` 之前单独发：daemon 要在生成 xray 配置时就写对物理网卡名
+        // （direct 出站的 `sockopt.interface`），而配置在 `TunUp` 之前就落盘校验了。
+        // 这条指令不改任何系统状态。
+        Request::DiscoverPhysical => {
+            let uplink = xt_macosnet::discover_physical()?;
+            Ok(Outcome::reply(Response::PhysicalUplink {
+                interface: uplink.interface,
+                gateway: uplink.gateway,
+            }))
+        }
         Request::TunUp { args } => tun_up(state, args),
         Request::TakeTunFd { session } => take_tun_fd(state, session),
         Request::CommitRoutes { session } => {

@@ -148,7 +148,7 @@ pub fn restore_stale(state_dir: &std::path::Path) -> Result<Option<String>, Erro
 ```
 
 新增 **`xt-helperproto`**（helper 的封闭指令集，P2 冻结）：帧格式复用 `xt-ipc`；
-指令只有 `Status` / `TunUp` / `TakeTunFd` / `CommitRoutes` / `TunDown` / `RestoreStale`。
+指令只有 `Status` / `TunUp` / `TakeTunFd` / `CommitRoutes` / `TunDown` / `RestoreStale` / `DiscoverPhysical`（2026-10-01 新增：只读地报告默认路由指向的物理网卡，daemon 要在生成 xray 配置前拿到它；`HELPER_PROTOCOL_VERSION` 随之 1→2）。
 **不接受**任意命令、任意路径、任意文件写入；数据面可执行文件路径必须落在白名单目录内。
 
 daemon 侧（S3）只认一个能力开关：`Capability::TunMode` —— **只有 S3 完成且真机验收通过才宣告**。

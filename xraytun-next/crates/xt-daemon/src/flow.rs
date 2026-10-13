@@ -71,9 +71,6 @@ const TUN_ADDRESS: &str = "198.18.0.1/15";
 const TUN_GATEWAY: &str = "198.18.0.1";
 const TUN_MTU: u16 = 1420;
 const TUN_DNS_SERVER: &str = "198.18.0.2";
-/// direct 出站绑定的物理网卡。**待真机/待 helper 上报**：daemon 目前不知道
-/// 物理网卡名（helper 的 discover_physical 结果还没回传），先用占位 `en0`。
-const TUN_PHYSICAL_IFACE: &str = "en0";
 const TUN_DEFAULT_ROUTES: &[&str] = &["0.0.0.0/1", "128.0.0.0/1"];
 /// helperd 的 AF_UNIX socket 路径（与 helperd 的默认 `--socket` 一致）。
 const HELPER_SOCKET: &str = "/var/run/xraytun-helper.sock";
@@ -322,10 +319,16 @@ impl Shared {
         Ok(PreparedConfig { socks_addr, api_addr, config_path })
     }
 
-    /// TUN 连接：helper.TunUp → TakeTunFd → spawn xray(XRAY_TUN_FD) → 就绪 → CommitRoutes。
+    /// TUN 连接：helper.DiscoverPhysical → 生成/校验配置 → helper.TunUp → TakeTunFd →
+    /// spawn xray(XRAY_TUN_FD) → 就绪 → CommitRoutes。
     ///
-    /// 当前**不可达**：`begin_connect_intent` 在真机验收（S6）通过前拒绝 tun 模式。
-    /// 这里把两阶段流程写完并编译，真机验收后去掉入口拒绝即可启用。
+    /// 2026-10-01（T2）：入口已打开（`begin_connect_intent` 不再拒绝 tun），所以这条路径
+    /// 现在是**可达**的；真机接管（helper 安装/回滚、utun、路由与 DNS）仍未经 S6 验收。
+    ///
+    /// 为什么物理网卡名要先问 helper：xray 的 direct 出站要绑到物理网卡
+    /// （`settings.autoOutboundsInterface` / `sockopt.interface`），而配置在 `TunUp`
+    /// 之前就要落盘校验 —— 所以先发一条只读的 `DiscoverPhysical`。
+    /// **查不到就失败**：不退回写死的 `en0`。
     async fn connect_tun_flow(self: &Arc<Self>, node_id: NodeId) {
         let _op = self.op_lock.lock().await;
         let connect_started_ms = now_ms();
@@ -354,6 +357,24 @@ impl Shared {
             Ok(s) => s,
             Err(e) => return self.fail_connect(e).await,
         };
+        // ---- helper 连接 + 物理上行发现（必须在生成配置之前）-----------------
+        let helper = match HelperClient::connect(std::path::Path::new(HELPER_SOCKET)).await {
+            Ok(h) => h,
+            Err(e) => return self.fail_connect(e).await,
+        };
+        let (physical_interface, physical_gateway) = match helper.discover_physical().await {
+            Ok(uplink) => uplink,
+            // 不退回 `en0`：绑错网卡的 direct 出站会表现为「连上了但出口不对」，比失败更难查。
+            Err(e) => return self.fail_connect(e).await,
+        };
+        self.log_daemon(
+            LogLevel::Info,
+            match physical_gateway {
+                Some(gateway) => format!("物理上行：{physical_interface}（网关 {gateway}）"),
+                None => format!("物理上行：{physical_interface}（无 gateway 行，按接口路由处理）"),
+            },
+        )
+        .await;
         let json = match xt_xrayconf::generate_tun(&xt_xrayconf::TunConfigInputs {
             api_listen: api_addr,
             selected,
@@ -362,7 +383,7 @@ impl Shared {
             gateway: TUN_GATEWAY.to_string(),
             mtu: TUN_MTU,
             dns_server_addr: TUN_DNS_SERVER.to_string(),
-            physical_interface: TUN_PHYSICAL_IFACE.to_string(),
+            physical_interface,
         }) {
             Ok(j) => j,
             Err(e) => return self.fail_connect(e).await,
@@ -389,11 +410,7 @@ impl Shared {
             Err(e) => return self.fail_connect(e).await,
         }
 
-        // ---- helper：TunUp → TakeTunFd（拿 utun fd）--------------------------
-        let helper = match HelperClient::connect(std::path::Path::new(HELPER_SOCKET)).await {
-            Ok(h) => h,
-            Err(e) => return self.fail_connect(e).await,
-        };
+        // ---- helper：TunUp → TakeTunFd（沿用上面那条只读查询用过的连接）-------
         let session = match helper
             .tun_up(TunUpArgs {
                 addresses: vec![TUN_ADDRESS.to_string()],
