@@ -138,10 +138,14 @@ jobs:
           TAG="xraytun-next-v${VERSION}"
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; fi
           if ! gh release view "$TAG" >/dev/null 2>&1; then
+            NOTES="docs/release-notes/v${VERSION}.md"
+            # 发布说明由**版本号推导**：写死文件名会让下一次发版把旧说明挂到新 tag 上
+            # （v1.2.0 那次就差点这样）。缺失就拒绝发版，而不是附一份错的说明。
+            if [ ! -f "$NOTES" ]; then echo "缺少发布说明 $NOTES，拒绝发版"; exit 1; fi
             gh release create "$TAG" \
               --title "xraytun-next v${VERSION}（Linux x86_64 核心 · proxy 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.5.md \
+              --notes-file "$NOTES" \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
@@ -262,12 +266,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          VERSION="$(awk '/^\[workspace.package\]/{f=1;next} f&&/^version/{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)"
+          NOTES="docs/release-notes/v${VERSION}.md"
+          if [ ! -f "$NOTES" ]; then echo "缺少发布说明 $NOTES，拒绝发版"; exit 1; fi
           TAG="${GITHUB_REF_NAME}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "xraytun-next（Linux + macOS 核心 · proxy 模式）" \
+              --title "xraytun-next v${VERSION}（Linux + macOS 核心 · proxy 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.5.md \
+              --notes-file "$NOTES" \
               --target "$GITHUB_SHA"
           fi
           gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS-macos.txt --clobber
@@ -605,12 +612,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          VERSION="$(awk '/^\[workspace.package\]/{f=1;next} f&&/^version/{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)"
+          NOTES="docs/release-notes/v${VERSION}.md"
+          if [ ! -f "$NOTES" ]; then echo "缺少发布说明 $NOTES，拒绝发版"; exit 1; fi
           TAG="${GITHUB_REF_NAME}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "xraytun-next v1.1.5（macOS 应用 · TUN 模式）" \
+              --title "xraytun-next v${VERSION}（macOS 应用 · TUN 模式）" \
               --prerelease \
-              --notes-file docs/release-notes/v1.1.5.md \
+              --notes-file "$NOTES" \
               --target "$GITHUB_SHA"
           fi
           # DMG 与 .app.zip 各自独立、存在才传：「DMG 打包失败」不该等于
