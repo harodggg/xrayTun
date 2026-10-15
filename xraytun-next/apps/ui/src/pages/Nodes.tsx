@@ -16,12 +16,15 @@ export function Nodes() {
   const [probePending, setProbePending] = useState<Record<string, boolean>>({});
   const [actionPending, setActionPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<DisplayError | null>(null);
+  const [importText, setImportText] = useState('');
+  const [importPending, setImportPending] = useState(false);
 
   const stage = connection?.stage ?? null;
   const connected = stage === 'connected';
   const currentId = connection?.node_id ?? null;
   const selectedId = settings?.selected_node ?? null;
   const canProbe = hasCapability(hello, 'probe');
+  const canImport = hasCapability(hello, 'node_import');
 
   const onProbe = async (nodeId: string) => {
     setProbePending((pending) => ({ ...pending, [nodeId]: true }));
@@ -52,6 +55,19 @@ export function Nodes() {
     }
   };
 
+  const runImport = async () => {
+    setImportPending(true);
+    setActionError(null);
+    try {
+      await client.importNodes(importText.trim());
+      setImportText('');
+    } catch (error) {
+      setActionError(toDisplayError(error));
+    } finally {
+      setImportPending(false);
+    }
+  };
+
   return (
     <div className="page nodes" data-testid="page-nodes">
       <h1 className="page__title">节点</h1>
@@ -61,11 +77,42 @@ export function Nodes() {
 
       {actionError != null && <ErrorBox error={actionError} testId="nodes-action-error" />}
 
+      {canImport && (
+        <section className="nodes__import" data-testid="import-nodes">
+          <p className="page__hint">
+            粘贴订阅原文（base64 / 链接列表 / Clash YAML / Xray JSON 都可）或一串分享链接，点「导入」把它们加进节点目录。只在本机解析，不联网。
+          </p>
+          <textarea
+            className="nodes__import-input mono"
+            data-testid="import-nodes-input"
+            aria-label="订阅原文或分享链接"
+            rows={6}
+            value={importText}
+            placeholder="vless://… 或 base64 订阅原文"
+            onChange={(event) => setImportText(event.target.value)}
+          />
+          <button
+            type="button"
+            className="btn btn--primary"
+            data-testid="import-nodes-button"
+            disabled={importText.trim() === '' || importPending}
+            onClick={() => void runImport()}
+          >
+            {importPending ? '导入中…' : '导入'}
+          </button>
+        </section>
+      )}
+
       {nodes.length === 0 ? (
         <div className="page__empty" data-testid="nodes-empty">
           <p className="page__empty-title">暂无节点</p>
           <p className="page__empty-hint">
             节点目录为空。本页不会填充示例节点，也不会给出无法兑现的操作。
+          </p>
+          <p className="page__empty-hint" data-testid="nodes-import-empty-hint">
+            {canImport
+              ? '把订阅原文或分享链接粘在上面的输入框里，导入后节点会出现在这里。'
+              : '当前 daemon 没有宣告 node_import 能力，本页无法导入。'}
           </p>
         </div>
       ) : (

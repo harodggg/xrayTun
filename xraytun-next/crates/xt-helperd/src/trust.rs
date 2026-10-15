@@ -161,8 +161,14 @@ pub struct PeerIdentity {
 /// helper 只从这里读身份，**绝不接受请求参数给的路径** —— 否则攻击者只要让
 /// helper 去比对他自己那个二进制就行。
 ///
-/// **待真机**：最终路径要与 S3/S4 的 `.app` 打包结果对齐（见模块文档）。
-pub const INSTALLED_APP_BINARY: &str = "/Applications/XrayTun.app/Contents/MacOS/xt-daemon";
+/// **2026-10-01 修正**：这里原来写的是 `Contents/MacOS/xt-daemon`，但打包布局把
+/// `xt-daemon` 放在 **`Contents/Resources/`**（`apps/desktop/tauri.conf.json` 的
+/// `bundle.resources`，发布工作流也按 `Contents/Resources/*` 验签）⇒ 文件永远不存在，
+/// `policy_for` 必然落到 `RefuseService`：**helper 装了也不干活**。现按实际布局对齐。
+///
+/// 它仍然是**固定位置**：helper 不接受请求参数给的路径，否则攻击者只要让 helper 去比对他
+/// 自己那个二进制就行。
+pub const INSTALLED_APP_BINARY: &str = "/Applications/XrayTun.app/Contents/Resources/xt-daemon";
 
 /// daemon 的 bundle id（代码签名要求串用）。**待真机**：打包时对齐。
 pub const FALLBACK_DAEMON_BUNDLE_ID: &str = "com.xraytun.xt-daemon";

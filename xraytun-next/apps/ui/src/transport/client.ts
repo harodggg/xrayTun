@@ -56,6 +56,8 @@ export interface DaemonClient {
   patchSettings(patch: SettingsPatch): Promise<void>;
   listSubscriptions(): Promise<SubscriptionView[]>;
   addSubscription(url: string): Promise<void>;
+  /** 导入节点：解析粘贴的订阅原文/分享链接。成功后节点列表会变，需要重新 listNodes。 */
+  importNodes(payload: string): Promise<void>;
   refreshSubscription(id: string): Promise<void>;
   tailLogs(lines: number): Promise<LogLine[]>;
   /** 关闭传输。不等待、不重连：连接没了就没了（I2）。 */

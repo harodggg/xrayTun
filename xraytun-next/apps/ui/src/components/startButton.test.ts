@@ -37,12 +37,12 @@ describe('startButtonView 判定优先级', () => {
     expect(v.note).toBe('当前 daemon 不提供 TUN 模式（未宣告 tun_mode 能力）');
   });
 
-  it('第 3 行：节点目录为空 —— 引导去添加订阅', () => {
+  it('第 3 行：节点目录为空 —— 引导去节点页导入', () => {
     const v = view({ nodeCount: 0 });
-    expect(v.label).toBe('添加订阅');
-    expect(v.action).toBe('subscribe');
+    expect(v.label).toBe('导入节点');
+    expect(v.action).toBe('import');
     expect(v.disabled).toBe(false);
-    expect(v.note).toBe('节点目录为空 —— 启动前先添加订阅');
+    expect(v.note).toBe('节点目录为空 —— 先在「节点」页导入订阅原文或分享链接');
   });
 
   it('第 4 行：请求已受理且已连接 —— 停止中', () => {

@@ -134,7 +134,10 @@ export type Capability =
   | 'stats'
   | 'probe'
   | 'subscriptions'
-  | 'subscription_fetch';
+  | 'subscription_fetch'
+  // 解析**用户粘贴的**订阅原文 / 分享链接并写进本地目录（`Request::ImportNodes`）。
+  // 与 subscriptions（列出已有）/ subscription_fetch（联网拉取）是三个不同动作。
+  | 'node_import';
 
 export interface DaemonHello {
   daemon_version: string;
@@ -176,6 +179,7 @@ export type Request =
   | { op: 'list_subscriptions' }
   | { op: 'add_subscription'; url: string }
   | { op: 'refresh_subscription'; id: SubscriptionId }
+  | { op: 'import_nodes'; payload: string }
   | { op: 'tail_logs'; lines: number };
 
 // `nodes` / `subscriptions` / `logs` 三个载荷的键名不是我们挑的：Rust 侧原本是

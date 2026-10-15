@@ -3,7 +3,7 @@
 //
 // 这里的优先级顺序就是产品语义，先命中先返回：
 // 「状态未知」与「daemon 没有 TUN 能力」都不可启动（不是暂时不可用，是本版本不提供入口）；
-// 「节点目录为空」优先引导去添加订阅，而不是给一个注定失败的启动按钮；
+// 「节点目录为空」优先引导去「节点」页导入，而不是给一个注定失败的启动按钮；
 // 「请求已受理」期间一律禁用，等事件流把终态推回来 —— 不排队、不猜测、不自动重放。
 //
 // 未知就是未知：没有阶段资料时文案写「阶段未知」，不编一个默认阶段。
@@ -23,7 +23,7 @@ export interface StartButtonInput {
 
 export interface StartButtonView {
   label: string;
-  action: 'start' | 'stop' | 'subscribe' | 'none';
+  action: 'start' | 'stop' | 'import' | 'none';
   disabled: boolean;
   danger: boolean; // true 仅当 action === 'stop'
   note: string | null; // 按钮下方说明（逐字）
@@ -54,14 +54,14 @@ export function startButtonView(input: StartButtonInput): StartButtonView {
     };
   }
 
-  // 3. 没有节点可选：启动之前先得有一个目录。
+  // 3. 没有节点可选：启动之前先得有一个目录，入口在「节点」页的导入区。
   if (nodeCount === 0) {
     return {
-      label: '添加订阅',
-      action: 'subscribe',
+      label: '导入节点',
+      action: 'import',
       disabled: false,
       danger: false,
-      note: '节点目录为空 —— 启动前先添加订阅',
+      note: '节点目录为空 —— 先在「节点」页导入订阅原文或分享链接',
     };
   }
 

@@ -156,7 +156,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (target: DashboardTarget
   const onStartButton = () => {
     if (button.action === 'start') void runStart();
     else if (button.action === 'stop') void runStop();
-    else if (button.action === 'subscribe') onNavigate('settings');
+    else if (button.action === 'import') onNavigate('nodes');
   };
 
   const meta: string[] = [];
@@ -238,7 +238,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (target: DashboardTarget
             data-testid="dashboard-node-action"
             onClick={() => onNavigate('nodes')}
           >
-            {/* 不在这里再给「添加订阅」：无节点时大启动按钮已经是那条主路径。
+            {/* 不在这里再给「导入节点」：无节点时大启动按钮已经是那条主路径。
                 这一颗只做导航（选择 / 切换节点），不会与主控件抢同一个动作。 */}
             {connected ? '切换节点' : '选择节点'}
           </button>

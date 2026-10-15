@@ -126,6 +126,7 @@ function makeClient(cfg: FakeClientConfig): FakeClient {
     patchSettings: () => Promise.resolve(),
     listSubscriptions: () => Promise.resolve(cfg.subscriptions ?? []),
     addSubscription: () => Promise.resolve(),
+    importNodes: () => Promise.resolve(),
     refreshSubscription: () => Promise.resolve(),
     tailLogs: () => Promise.resolve([]),
     close: () => {},

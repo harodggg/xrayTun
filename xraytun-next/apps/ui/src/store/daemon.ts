@@ -307,6 +307,10 @@ export function DaemonProvider(props: { client: DaemonClient; children?: ReactNo
         await client.addSubscription(url);
         await refresh('subscriptions');
       },
+      importNodes: async (payload) => {
+        await client.importNodes(payload);
+        await refresh('subscriptions');
+      },
       refreshSubscription: async (id) => {
         await client.refreshSubscription(id);
         await refresh('subscriptions');

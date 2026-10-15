@@ -78,6 +78,7 @@ function makeRig(): Rig {
     patchSettings: () => Promise.resolve(),
     listSubscriptions: () => Promise.resolve([]),
     addSubscription: () => Promise.resolve(),
+    importNodes: () => Promise.resolve(),
     refreshSubscription: () => Promise.resolve(),
     tailLogs: () => Promise.resolve([]),
     close: () => {},

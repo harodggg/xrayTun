@@ -327,6 +327,10 @@ export function createUnixSocketClient(socketPath: string, options: UnixSocketCl
       pickSettledResponse(await request({ op: 'add_subscription', url }));
     },
 
+    async importNodes(payload: string): Promise<void> {
+      pickSettledResponse(await request({ op: 'import_nodes', payload }));
+    },
+
     async refreshSubscription(id: string): Promise<void> {
       pickSettledResponse(await request({ op: 'refresh_subscription', id }));
     },

@@ -81,6 +81,14 @@ impl DaemonConfig {
     pub fn probe_config_path(&self) -> PathBuf {
         self.state_dir.join("probe.json")
     }
+    /// 手工导入的节点（`Request::ImportNodes` 的落盘位置）。
+    ///
+    /// 与订阅文件分开：订阅是「机场给的正文」，手工导入是「用户自己粘的」，
+    /// 两者在目录里是**两个来源**（`NodeSource::Subscription` / `NodeSource::Manual`），
+    /// 一个坏了不该牵连另一个。
+    pub fn imported_nodes_path(&self) -> PathBuf {
+        self.state_dir.join("imported-nodes.json")
+    }
 }
 
 /// daemon 句柄。
@@ -332,6 +340,9 @@ impl Shared {
                 Capability::Stats,
                 Capability::Probe,
                 Capability::Subscriptions,
+                // 手工导入（只做本地解析）。**为什么必须宣告**：界面靠能力表决定要不要
+                // 渲染「导入」入口 —— 没有它，真人打开 App 只能看到「暂无节点」而无处可贴。
+                Capability::NodeImport,
             ],
             pid: std::process::id(),
             started_at_ms: self.started_at_ms,
@@ -352,6 +363,33 @@ impl Shared {
         let logs = self.logs.lock().await;
         let want = (lines as usize).min(logs.len());
         logs.iter().skip(logs.len() - want).cloned().collect()
+    }
+
+    /// 导入节点：解析用户粘贴的订阅原文 / 分享链接 → 与已导入的合并（按 id 去重）→
+    /// 原子落盘 → 替换目录里的 `Manual` 来源。
+    ///
+    /// 只做**本地解析**，不联网（远端拉取是 `SubscriptionFetch`，那条能力仍未宣告）。
+    /// 失败原样上报（`InvalidRequest` / `Io`），**绝不静默导入 0 个**。
+    async fn import_nodes(&self, payload: String) -> Outcome {
+        let parsed = match xt_subs::parse(&payload) {
+            Ok(subscription) => subscription,
+            Err(error) => return Outcome::error(error),
+        };
+        let path = self.config.imported_nodes_path();
+        let (merged, added) = merge_imported(read_imported_nodes(&path).await, parsed.nodes);
+        if let Err(error) = save_imported_nodes(&path, &merged).await {
+            return Outcome::error(error);
+        }
+        let total = merged.len();
+        let nodes: Vec<xt_subs::ParsedNode> =
+            merged.into_iter().map(xt_subs::ParsedNode::from).collect();
+        self.catalog.lock().await.replace_source(NodeSource::Manual, nodes);
+        self.log_daemon(
+            LogLevel::Info,
+            format!("导入节点：本次新增 {added} 个，手工来源共 {total} 个"),
+        )
+        .await;
+        Outcome::ok(Response::Ok)
     }
 
     // -------------------------------------------------------------- 意图受理
@@ -468,6 +506,7 @@ impl Daemon {
         let mut catalog = Catalog::new();
         let mut subscription = None;
         load_subscription(&config, &mut catalog, &mut subscription).await;
+        load_imported_nodes_into(&config, &mut catalog).await;
 
         let shared = Arc::new(Shared {
             config,
@@ -566,6 +605,122 @@ impl BoundDaemon {
         shared.log_daemon(LogLevel::Info, "daemon 已停止").await;
         Ok(())
     }
+}
+
+/// 手工导入的节点在磁盘上的形状。
+///
+/// 为什么不直接序列化 `xt_subs::ParsedNode`：那是解析器的输出、只实现了 `Serialize`
+/// （它不是持久化格式）。这里显式列出我们真正要存的东西，让磁盘格式与解析器内部形状解耦。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct StoredNode {
+    id: String,
+    name: String,
+    protocol: String,
+    endpoint: String,
+    outbound: serde_json::Value,
+}
+
+impl From<&xt_subs::ParsedNode> for StoredNode {
+    fn from(node: &xt_subs::ParsedNode) -> Self {
+        Self {
+            id: node.id.as_str().to_string(),
+            name: node.name.clone(),
+            protocol: node.protocol.clone(),
+            endpoint: node.endpoint.clone(),
+            outbound: node.outbound.clone(),
+        }
+    }
+}
+
+impl From<StoredNode> for xt_subs::ParsedNode {
+    fn from(node: StoredNode) -> Self {
+        Self {
+            id: NodeId::new(node.id),
+            name: node.name,
+            protocol: node.protocol,
+            endpoint: node.endpoint,
+            outbound: node.outbound,
+        }
+    }
+}
+
+/// 合并「已经导入的」与「这次解析出来的」：按节点 id 去重（先到的保留），
+/// 返回 `(合并结果, 本次新增数)`。纯函数，便于单测。
+fn merge_imported(
+    existing: Vec<StoredNode>,
+    parsed: Vec<xt_subs::ParsedNode>,
+) -> (Vec<StoredNode>, usize) {
+    let mut seen: std::collections::HashSet<String> =
+        existing.iter().map(|node| node.id.clone()).collect();
+    let mut merged = existing;
+    let mut added = 0usize;
+    for node in parsed {
+        if seen.insert(node.id.as_str().to_string()) {
+            merged.push(StoredNode::from(&node));
+            added += 1;
+        }
+    }
+    (merged, added)
+}
+
+/// 读手工导入的节点文件。**读不到 = 空**（首次导入是正常状态）；**损坏 = 空 + 一条
+/// error 日志**：不让 daemon 起不来，也不把「读坏了」悄悄说成「你没导入过」。
+async fn read_imported_nodes(path: &Path) -> Vec<StoredNode> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => match serde_json::from_slice::<Vec<StoredNode>>(&bytes) {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    path = %path.display(),
+                    "手工导入的节点文件损坏，本次按空处理；重新导入会覆盖它"
+                );
+                Vec::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            tracing::error!(error = %error, path = %path.display(), "读取手工导入的节点文件失败");
+            Vec::new()
+        }
+    }
+}
+
+/// 落盘：`tmp` + `rename`（与设置同一个原子替换约定：崩在中间不会留下半个 JSON）。
+async fn save_imported_nodes(path: &Path, nodes: &[StoredNode]) -> Result<(), ErrorBody> {
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir).await.map_err(|error| {
+            ErrorBody::new(
+                ErrorCode::Io,
+                format!("创建状态目录 {} 失败: {error}", dir.display()),
+            )
+        })?;
+    }
+    let body = serde_json::to_vec_pretty(nodes).map_err(|error| {
+        ErrorBody::new(ErrorCode::Internal, format!("序列化导入节点失败: {error}"))
+    })?;
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, &body)
+        .await
+        .map_err(|error| ErrorBody::new(ErrorCode::Io, format!("写入 {} 失败: {error}", tmp.display())))?;
+    tokio::fs::rename(&tmp, path).await.map_err(|error| {
+        ErrorBody::new(ErrorCode::Io, format!("原子替换 {} 失败: {error}", path.display()))
+    })?;
+    Ok(())
+}
+
+/// 启动时把上次导入的节点装回目录。与订阅文件是**两个独立来源**。
+async fn load_imported_nodes_into(config: &DaemonConfig, catalog: &mut Catalog) {
+    let nodes: Vec<xt_subs::ParsedNode> = read_imported_nodes(&config.imported_nodes_path())
+        .await
+        .into_iter()
+        .map(xt_subs::ParsedNode::from)
+        .collect();
+    if nodes.is_empty() {
+        return;
+    }
+    tracing::info!(count = nodes.len(), "装载手工导入的节点");
+    catalog.replace_source(NodeSource::Manual, nodes);
 }
 
 /// 读本地订阅文件并灌进目录。
@@ -752,6 +907,8 @@ async fn dispatch(
                 false,
             )
         }
+        // 手工导入：只做**本地解析**（不联网），解析结果落盘并替换 `Manual` 来源。
+        Request::ImportNodes { payload } => (shared.import_nodes(payload).await, false),
         // 远端拉取本轮不做：它是「本版本不提供的能力」，不是「试了但失败」。
         Request::AddSubscription { .. } | Request::RefreshSubscription { .. } => (
             Outcome::error(unsupported(
@@ -787,4 +944,50 @@ pub(crate) fn api_addr_for(socks: SocketAddr) -> Result<SocketAddr, ErrorBody> {
         .checked_add(1)
         .ok_or_else(|| bad_request("socks 端口 +1 溢出，请换一个更低端口"))?;
     Ok(SocketAddr::new(socks.ip(), port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored(id: &str) -> StoredNode {
+        StoredNode {
+            id: id.to_string(),
+            name: format!("node-{id}"),
+            protocol: "vless".to_string(),
+            endpoint: "a.example.com:443".to_string(),
+            outbound: serde_json::json!({ "protocol": "vless" }),
+        }
+    }
+
+    /// 用真实解析器造节点（避免夹具与生产形状漂移）。
+    fn parsed(host: &str) -> xt_subs::ParsedNode {
+        let line = format!("vless://uuid-{host}@{host}:443?encryption=none&security=none#{host}");
+        xt_subs::parse_links(&line).expect("构造测试节点").remove(0)
+    }
+
+    #[test]
+    fn merge_imported_keeps_existing_and_dedupes_by_id() {
+        let node = parsed("new.example.com");
+        let (merged, added) = merge_imported(vec![stored("keep")], vec![node.clone()]);
+        assert_eq!(added, 1, "新节点必须计入新增");
+        assert_eq!(merged.len(), 2, "已导入的不能被冲掉");
+
+        // 同一个 id 再导入一次：不重复、不计新增。
+        let (again, added_again) = merge_imported(merged, vec![node.clone()]);
+        assert_eq!(added_again, 0, "重复导入同一条不该算新增");
+        assert_eq!(again.len(), 2);
+        assert!(again.iter().any(|n| n.id == node.id.as_str()));
+    }
+
+    #[test]
+    fn stored_node_round_trips_through_parsed_node() {
+        let node = parsed("roundtrip.example.com");
+        let back = xt_subs::ParsedNode::from(StoredNode::from(&node));
+        assert_eq!(back.id, node.id);
+        assert_eq!(back.name, node.name);
+        assert_eq!(back.protocol, node.protocol);
+        assert_eq!(back.endpoint, node.endpoint);
+        assert_eq!(back.outbound, node.outbound);
+    }
 }

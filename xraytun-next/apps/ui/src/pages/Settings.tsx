@@ -168,6 +168,11 @@ export function Settings() {
         <section className="card" data-testid="subscriptions-section">
           <div className="card__title">订阅</div>
           <div className="card__body">
+            {canReadSubscriptions && !canFetchSubscriptions && (
+              <p className="page__hint" data-testid="subscription-import-hint">
+                远端拉取本版本不提供。要到「节点」页粘贴订阅原文或分享链接导入。
+              </p>
+            )}
             {canFetchSubscriptions && (
               <form
                 className="row"

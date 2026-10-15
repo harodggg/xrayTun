@@ -884,6 +884,35 @@ a:hover {
   gap: var(--sp-5);
 }
 
+/* 导入区：这是用户把节点弄进目录的唯一入口，所以它必须站满宽度、看得见、
+   能贴长文本（订阅原文常是几 KB 的一行 base64）。 */
+.nodes__import {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.nodes__import-input {
+  width: 100%;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  resize: vertical;
+}
+
+.nodes__import-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .nodes__list {
   display: flex;
   flex-direction: column;

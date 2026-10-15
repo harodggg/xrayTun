@@ -43,6 +43,14 @@ pub enum Request {
     ListSubscriptions,
     AddSubscription { url: String },
     RefreshSubscription { id: SubscriptionId },
+    /// 导入节点：解析用户**粘贴**的订阅原文 / 分享链接，写进本地目录（`NodeSource::Manual`）。
+    ///
+    /// 为什么要有它：产品界面里没有别的入口能让用户把节点弄进来（远端拉取是另一条能力
+    /// `SubscriptionFetch`），而用户手里最常见的就是机场给的订阅原文或一串分享链接。
+    /// 这条指令**只做本地解析**（`xt-subs` 的四种格式自动嗅探），不联网。
+    ///
+    /// `payload` 为空、或解析不出任何节点 → `InvalidRequest`（不静默导入 0 个）。
+    ImportNodes { payload: String },
     TailLogs { lines: u32 },
 }
 

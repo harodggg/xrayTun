@@ -69,6 +69,8 @@ const SOCKET_ENV: &str = "XT_SOCKET";
 const BIN_ENV: &str = "XT_DAEMON_BIN";
 /// 传给 daemon 的状态目录（可选）。
 const STATE_DIR_ENV: &str = "XT_DAEMON_STATE_DIR";
+/// 覆盖 xray 核心路径（daemon 的查找顺序里它就是第二个来源）。
+const XRAY_ENV: &str = "XT_XRAY_BIN";
 /// daemon 日志文件路径（可选）。
 const LOG_ENV: &str = "XT_DAEMON_LOG";
 
@@ -119,6 +121,18 @@ pub async fn ensure_daemon(socket: &Path) -> Launch {
         if !state_dir.is_empty() {
             command.arg("--state-dir").arg(state_dir);
         }
+    }
+    // 为什么壳必须管这件事：daemon 的查找顺序是 `--xray` > `XT_XRAY_BIN` > `PATH`，
+    // 而 GUI 启动的进程 PATH 里没有 xray ⇒ 打包后必然报
+    // 「xray 二进制不存在或不是文件：xray」，**连接永远失败**（真人走查发现）。
+    // 这里与 `resolve_binary` 用同一套布局判断。
+    match resolve_xray() {
+        Some(xray) => {
+            command.arg("--xray").arg(xray);
+        }
+        None => eprintln!(
+            "xt shell: 没找到 xray（设 {XRAY_ENV}，或把核心放到 bundle 的 Contents/Resources/xray）"
+        ),
     }
     command.stdin(Stdio::null());
     attach_stderr_log(&mut command);
@@ -253,6 +267,32 @@ pub fn resolve_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     [dir.join("..").join("Resources").join("xt-daemon"), dir.join("xt-daemon")]
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(absolute)
+}
+
+/// 找 xray 核心：`XT_XRAY_BIN` → bundle 的 `Contents/Resources/xray` → 与可执行文件同级。
+///
+/// 与 [`resolve_binary`] 同一套布局判断。打包后它与 `xt-daemon` 同在 `Contents/Resources/`，
+/// 所以「daemon 二进制旁边」就是最稳的判据（开发形态下是 `target/<profile>/xray`）。
+pub fn resolve_xray() -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os(XRAY_ENV) {
+        if !raw.is_empty() {
+            let candidate = PathBuf::from(raw);
+            if candidate.is_file() {
+                return Some(absolute(candidate));
+            }
+            eprintln!(
+                "xt shell: {XRAY_ENV}={} 不是文件，继续按 bundle 布局查找",
+                candidate.display()
+            );
+        }
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join("..").join("Resources").join("xray"), dir.join("xray")]
         .into_iter()
         .find(|candidate| candidate.is_file())
         .map(absolute)

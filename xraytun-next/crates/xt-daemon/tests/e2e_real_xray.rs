@@ -14,7 +14,9 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
-use xt_contract::model::{Capability, ConnectionView, LogLevel, ProbeResult, RunMode, Stage};
+use xt_contract::model::{
+    Capability, ConnectionView, LogLevel, NodeSource, ProbeResult, RunMode, Stage,
+};
 use xt_contract::protocol::{Event, Request, Response};
 use xt_daemon::{Daemon, DaemonConfig};
 use xt_datapath::DatapathSpec;
@@ -385,6 +387,30 @@ async fn real_xray_end_to_end() {
     let node1 = nodes.iter().find(|n| n.name == "n1").expect("n1").id.clone();
     let node2 = nodes.iter().find(|n| n.name == "n2").expect("n2").id.clone();
     eprintln!("[e2e] 节点 {node1} / {node2}");
+
+    // ---- 4.5 手工导入节点（`ImportNodes`）------------------------------------
+    //
+    // 为什么这条必须在 CI 里（不需要真机、不需要网络）：它是**真人唯一的导入入口**
+    // （远端拉取 `SubscriptionFetch` 仍未宣告）。只证明「界面上有个输入框」不够 ——
+    // 这里证明「用户粘贴的分享链接真的进了目录，且来源标成 Manual」。
+    let payload = "vless://11111111-2222-3333-4444-555555555555@imported.example.com:443?encryption=none&security=tls#导入节点";
+    let response = client
+        .request(Request::ImportNodes { payload: payload.to_string() })
+        .await
+        .expect("ImportNodes 应答");
+    assert!(matches!(response, Response::Ok), "导入必须成功，收到 {response:?}");
+    let imported = match client.request(Request::ListNodes).await.expect("ListNodes") {
+        Response::Nodes { nodes } => nodes,
+        other => panic!("ListNodes 期望 Nodes，收到 {other:?}"),
+    };
+    assert!(
+        imported
+            .iter()
+            .any(|node| node.name == "导入节点" && node.source == NodeSource::Manual),
+        "导入的节点必须出现在目录里、来源为 Manual：{imported:?}"
+    );
+    assert_eq!(imported.len(), 3, "本地订阅 2 个 + 手工导入 1 个：{imported:?}");
+    eprintln!("[e2e] 手工导入后节点数：{}", imported.len());
 
     // ---- 5. connect → 等 Connected（事件驱动）------------------------------
     let response = client
