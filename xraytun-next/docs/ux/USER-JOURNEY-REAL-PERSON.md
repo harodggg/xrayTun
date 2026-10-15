@@ -107,6 +107,20 @@
 | B | **订阅 URL 拉取**：daemon 侧实现 `AddSubscription` / `RefreshSubscription` + 宣告 `SubscriptionFetch` + UI 解除门控 | **要新增 HTTPS 依赖**（工作区现在**一个 TLS/HTTP 客户端都没有**：只有 `h2/http/bytes` 给 h2c gRPC）⇒ 要选 `reqwest(rustls)` 还是 `ureq(rustls)` 还是自建 hyper+rustls |
 | C | **helper 安装**：`xt-helperd` 安装（拷贝到固定位置 + launchd plist + 用户授权）+ 卸载/回滚 + 界面引导 | 最大的一块；`MACOS-APP-PLAN` S2；**只有真机能验**（CI 装 launchd 不可靠，设计文档已写明） |
 
+### 第 1 轮进展（2026-10-01 · commit `4951a2e` + `ea45303` · CI 全绿）
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| **A 导入入口** | ✅ **已打通** | 节点页新增导入区（粘贴订阅原文 / 分享链接，由 `capability = node_import` 门控）；daemon `ImportNodes`：`xt-subs` 四格式自动嗅探 → 按节点 id 合并去重 → `<state-dir>/imported-nodes.json` 原子落盘 → 启动装载。Rust e2e 新增 §4.5：CI（Linux 真 xray）上断言「2 个订阅节点 + 1 个手工导入 = 3，且来源为 `Manual`」；两条新单测（合并去重 / 磁盘形状往返）在 CI 里 ok。UI 新增 7 条验收断言；本机 `vitest` 79 passed / `tsc` 0 错 / `vite build` 成功 / `guard.sh` PASSED |
+| **D6 包里的 xray** | ✅ 已修 | `apps/desktop` 新增 `resolve_xray()`，把 `--xray <bundle>/Resources/xray` 传给 daemon（GUI 进程 PATH 里没有 xray，打包后必然 `datapath_unavailable`） |
+| **D5 helper 信任路径** | ✅ 路径部分已修 | `trust.rs` 的 `INSTALLED_APP_BINARY` 改为 `Contents/Resources/xt-daemon`（与 `tauri.conf.json` 的资源布局、发布工作流验签路径一致）。**Team ID 注入仍未做**（要 Developer ID，属 S5） |
+| **C helper 安装链路** | ⛔ 未做（下一轮） | 没有它 TUN 仍然连不上；只有真机能验 |
+| **B 订阅 URL 拉取** | ⛔ 未做 | 需先选 HTTP/TLS 依赖 |
+| **D4 失败时给下一步** | ⛔ 未做 | 现在失败仍只给「查看日志 / 重新连接」 |
+
+**进度口径（别自我美化）**：一个真人现在能做到「导入节点 → 选节点」，但按下「启动」**仍然会撞上「helper 没装」**。
+所以这一轮把「界面里根本没有入口」变成了「有入口、能进来」，**离「能翻墙」还差 C 那一步**。
+
 **顺序建议（已被体验官复核修正）**：
 **A（导入入口）→ D6（把包里的 xray 指给 daemon）→ D5（helper 信任对齐）→ C（helper 安装链路）→ D4（失败时给下一步）→ B（订阅 URL 拉取）。**
 
