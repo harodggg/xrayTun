@@ -547,6 +547,7 @@ fn capability_str(capability: Capability) -> &'static str {
         Capability::Probe => "probe",
         Capability::Subscriptions => "subscriptions",
         Capability::SubscriptionFetch => "subscription_fetch",
+        Capability::NodeImport => "node_import",
     }
 }
 
@@ -658,6 +659,7 @@ mod tests {
     fn capability_names_match_the_wire_spelling() {
         assert_eq!(capability_str(Capability::SubscriptionFetch), "subscription_fetch");
         assert_eq!(capability_str(Capability::Subscriptions), "subscriptions");
+        assert_eq!(capability_str(Capability::NodeImport), "node_import");
         assert_eq!(capability_str(Capability::ProxyMode), "proxy_mode");
     }
 
