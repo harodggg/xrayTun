@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ErrorBox } from '../components/ErrorBox';
 import {
   LOG_LEVELS,
@@ -8,8 +8,145 @@ import {
   toDisplayErrorBody,
 } from '../components/format';
 import type { DisplayError } from '../components/format';
+import {
+  canInstallHelper,
+  helperStatus,
+  installHelper,
+  restartHelper,
+  uninstallHelper,
+} from '../shell';
+import type { HelperStatus } from '../shell';
 import { useDaemon } from '../store/daemon';
 import type { LogLevel } from '../transport/contract';
+
+/** helper 状态行：四件客观事实之一定档，不做任何推断。 */
+function helperStateText(status: HelperStatus): string {
+  if (status.reachable) return '已安装 · 正在服务';
+  if (status.installed) return '已安装，但连不上（socket 没有在服务）';
+  return '未安装 —— TUN 模式无法使用';
+}
+
+/** helper 细节行：把三个文件级事实逐项摊开，方便用户/排障看清缺的是哪一件。 */
+function helperDetailText(status: HelperStatus): string {
+  const binary = status.installed ? '已装' : '未装';
+  const plist = status.plist_present ? '在' : '不在';
+  const socket = status.socket_present ? '在' : '不在';
+  return `二进制：${binary} · launchd 配置：${plist} · socket：${socket}`;
+}
+
+type HelperAction = 'install' | 'uninstall' | 'restart';
+
+/**
+ * 特权助手卡片：只在壳注入了 `__XT_HELPER_INSTALL__` 时渲染（由调用方门控）。
+ *
+ * TUN 模式要建 VPN 网卡、改路由与 DNS，这两件事必须由 root 做 —— 没有装 helper 时
+ * 界面必须给出**真正的下一步**，而不是只报 `helper_unavailable`（死路 D4）。
+ * 三个动作都直接打到壳命令上；成功后重新拉一次 status，显示以壳的事实为准。
+ */
+function HelperCard() {
+  const [status, setStatus] = useState<HelperStatus | null>(null);
+  const [pending, setPending] = useState<HelperAction | null>(null);
+  const [error, setError] = useState<DisplayError | null>(null);
+  const [confirming, setConfirming] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void helperStatus().then(
+      (next) => {
+        if (active) setStatus(next);
+      },
+      (cause: unknown) => {
+        if (active) setError(toDisplayError(cause));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const run = async (key: HelperAction, action: () => Promise<void>) => {
+    setPending(key);
+    setError(null);
+    try {
+      await action();
+      // 动作成功不等于状态就是自己想象的那样：以壳重新给出的客观事实为准。
+      setStatus(await helperStatus());
+    } catch (cause) {
+      // 壳 reject 的是字符串，原样交给 ErrorBox，不改写、不翻译。
+      setError(toDisplayError(cause));
+    } finally {
+      setPending(null);
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <section className="card helper-card" data-testid="helper-card">
+      <div className="card__title">特权助手（TUN 需要）</div>
+      <div className="card__body">
+        <p className="card__desc">
+          TUN 模式需要它来创建 VPN 网卡、改路由与 DNS —— 这两件事必须由 root 做，所以 App
+          会请求一次管理员授权，把它装成一个后台服务。它只认识固定指令集（连接/断开/回滚），不接受任意命令；卸载会把它和它的
+          launchd 配置一起删掉。
+        </p>
+        {status != null && (
+          <div className="helper__status">
+            <div className="helper__state" data-testid="helper-status">
+              {helperStateText(status)}
+            </div>
+            <div className="helper__detail" data-testid="helper-detail">
+              {helperDetailText(status)}
+            </div>
+          </div>
+        )}
+        <div className="helper__actions">
+          {status?.installed === false && (
+            <button
+              type="button"
+              className="btn btn--primary"
+              data-testid="helper-install-button"
+              disabled={pending != null}
+              onClick={() => void run('install', installHelper)}
+            >
+              {pending === 'install' ? '安装中…' : '安装特权助手'}
+            </button>
+          )}
+          {status?.installed === true && status.reachable === false && (
+            <button
+              type="button"
+              className="btn btn--primary"
+              data-testid="helper-restart-button"
+              disabled={pending != null}
+              onClick={() => void run('restart', restartHelper)}
+            >
+              {pending === 'restart' ? '重启中…' : '重启助手'}
+            </button>
+          )}
+          {status?.installed === true && (
+            <button
+              type="button"
+              className={`btn${confirming ? ' btn--danger helper__confirm' : ''}`}
+              data-testid={confirming ? 'helper-uninstall-confirm' : 'helper-uninstall-button'}
+              disabled={pending != null}
+              onClick={() => {
+                // 第一次只是把这一颗变成确认态：卸载会把服务与它的 launchd 配置一起删掉，
+                // 不该因为一次误触就发生。
+                if (!confirming) {
+                  setConfirming(true);
+                  return;
+                }
+                void run('uninstall', uninstallHelper);
+              }}
+            >
+              {pending === 'uninstall' ? '卸载中…' : confirming ? '确认卸载？' : '卸载助手'}
+            </button>
+          )}
+        </div>
+        {error != null && <ErrorBox error={error} testId="helper-error" />}
+      </div>
+    </section>
+  );
+}
 
 // 设置页的每个控件都对应契约里真实存在的字段：
 // socks_listen / log_level → SettingsPatch（本轮真实现，保存后以 daemon 的值为准）。
@@ -51,6 +188,10 @@ export function Settings() {
       <h1 className="page__title">设置</h1>
 
       {actionError != null && <ErrorBox error={actionError} testId="settings-error" />}
+
+      {/* 第一张卡片：TUN 死路 D4 的修复点。壳没注入标记时整块不出现 ——
+          装不了的壳不该摆一个按不动的假控件。 */}
+      {canInstallHelper() && <HelperCard />}
 
       <section className="card">
         <div className="card__title">daemon</div>

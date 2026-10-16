@@ -1737,3 +1737,45 @@ a:hover {
     min-width: 0;
   }
 }
+
+/* ------------------------------------------------ 特权助手（TUN 需要） */
+
+/* 说明文字是这一块唯一的「它是什么 / 为什么需要它」出口，按阅读排版给足行高。 */
+.helper-card .card__desc {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-read);
+}
+
+.helper__status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.helper__state {
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+/* 细节行是三个文件级事实，用等宽字体便于逐字核对；它不承担主状态的分量。 */
+.helper__detail {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.helper__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+/* 二次确认态：危险配色由既有的 .btn--danger 提供，这里只把这一颗加重一点，
+   让人一眼分清「确认卸载？」与旁边的常规动作。 */
+.helper__confirm {
+  font-weight: var(--fw-semibold);
+}
+

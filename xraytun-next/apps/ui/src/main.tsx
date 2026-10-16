@@ -18,6 +18,12 @@ declare global {
      * 取值不合法时 `App` 会回落到默认页。
      */
     __XT_INITIAL_PAGE__?: string;
+    /**
+     * 「这个壳能装特权助手」。**仅当 App 包里确实带 helper 二进制时**壳才注入它
+     * （apps/desktop/src/lib.rs）；开发 / 无头环境下一个字都没有，所以缺省是 `undefined`
+     * 而不是 `false` —— 判据只能是 `=== true`（见 shell.ts 的 canInstallHelper）。
+     */
+    __XT_HELPER_INSTALL__?: boolean;
   }
 }
 

@@ -337,6 +337,16 @@ jobs:
         working-directory: xraytun-next/apps/ui
         run: npm ci && npm install --no-save @tauri-apps/cli@^2 && npm run build
 
+      # 壳自己的单元测试。
+      #
+      # 为什么必须单独加：`cargo test --workspace` **覆盖不到** `apps/desktop`
+      # （它是独立工作空间、只在 macOS 上构建），于是壳里的纯函数 —— helper 安装脚本
+      # 与 launchd plist 的生成 —— 从来没有任何 CI 跑过。那两段文本会**以 root 执行**，
+      # 「没测过」在这里等于「没证据」。这些测试只测纯函数：不建窗口、不动系统。
+      - name: 壳单元测试（helper 安装脚本 / plist 生成）
+        working-directory: xraytun-next/apps/desktop
+        run: cargo test -p xraytun-desktop --lib
+
       - name: 清理 FinderInfo xattr（codesign --strict 会拒带该 xattr 的二进制）
         run: xattr -cr xraytun-next/apps/desktop/binaries/ 2>/dev/null || true
 

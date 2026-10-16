@@ -53,6 +53,7 @@
 
 pub mod bridge;
 pub mod daemon_launch;
+pub mod helper_install;
 pub mod tray;
 
 use std::path::Path;
@@ -139,7 +140,14 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .invoke_handler(tauri::generate_handler![bridge::xt_daemon_request])
+        .invoke_handler(tauri::generate_handler![
+            bridge::xt_daemon_request,
+            // 特权助手的安装/卸载/重启/状态：只有壳能做（要 root），daemon 无特权。
+            helper_install::helper_status,
+            helper_install::install_helper,
+            helper_install::uninstall_helper,
+            helper_install::restart_helper
+        ])
         .build(tauri::generate_context!());
 
     match built {
@@ -200,6 +208,15 @@ fn create_main_window(app: &tauri::AppHandle, socket: &Path) {
         if let Ok(json) = serde_json::to_string(&page) {
             script.push_str(&format!("window.__XT_INITIAL_PAGE__ = {json};"));
         }
+    }
+
+    // 「这个壳能不能装特权助手」也告诉界面 —— 但**只有包里真有那份二进制**才注入。
+    //
+    // 为什么必须门控：TUN 需要 root 助手，界面上没有安装入口时用户只能看到
+    // `helper_unavailable` 而不知去哪修（真人走查的第三条死路）；可要是包里没这个
+    // 二进制却注入 true，界面就会渲染一个按不动的「安装」按钮 —— 假控件，本仓库的红线。
+    if helper_install::helper_binary_path().is_some() {
+        script.push_str("window.__XT_HELPER_INSTALL__ = true;");
     }
 
     let builder = match tauri::WebviewWindowBuilder::from_config(app, &config) {

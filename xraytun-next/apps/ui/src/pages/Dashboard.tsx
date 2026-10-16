@@ -15,6 +15,7 @@ import { startButtonView } from '../components/startButton';
 import { DASH_TONE_CLASS, DOT_TONE_CLASS, appStatus } from '../components/topbarStatus';
 import { INITIAL_RATE, deriveRate, sampleFrom } from '../components/trafficRate';
 import type { RateState } from '../components/trafficRate';
+import { canInstallHelper } from '../shell';
 import { useDaemon } from '../store/daemon';
 
 /** 延迟分档：只影响配色；文字始终是真实毫秒数（拿不到就整块不渲染，不显示 0 ms）。 */
@@ -266,6 +267,18 @@ export function Dashboard({ onNavigate }: { onNavigate: (target: DashboardTarget
             <button type="button" className="btn btn--ghost" onClick={() => onNavigate('logs')}>
               查看日志
             </button>
+            {/* helper_unavailable 是**可修**的一类失败：壳能装特权助手时，界面必须给出
+                真正的下一步动作，而不是只留下一条「去读日志」。壳装不了就保持原样。 */}
+            {lastError.code === 'helper_unavailable' && canInstallHelper() && (
+              <button
+                type="button"
+                className="btn btn--primary"
+                data-testid="helper-install-cta"
+                onClick={() => onNavigate('settings')}
+              >
+                去安装特权助手
+              </button>
+            )}
           </div>
         </>
       )}
