@@ -121,6 +121,10 @@ impl Shared {
             self.connect_tun_flow(node_id).await;
             return;
         }
+        // 走到这里说明这是一次**代理（SOCKS）会话**。产品面只做 TUN（用户 2026-10-16 裁决），
+        // 所以这条路径现在只服务两类调用方：CI 的端到端验证（`tests/e2e_real_xray.rs`
+        // 用真 xray + 真 SOCKS 取字节，那是 TUN 在 CI 上做不到的事）与无头调试。
+        // **不要**再在界面或 CLI 上给它开入口 —— 那正是「界面说 TUN、实际跑 SOCKS」的土壤。
         let _op = self.op_lock.lock().await;
         // 「就绪耗时」的起点：文档里说的启动耗时必须能追到这一个真实时刻。
         let connect_started_ms = now_ms();

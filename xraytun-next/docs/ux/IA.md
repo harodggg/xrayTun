@@ -51,7 +51,7 @@
 
 | 能力 | 门控的界面入口 | 本轮是否会被宣告 |
 | --- | --- | --- |
-| `proxy_mode` | 连接 / 断开（仪表盘与顶栏） | 是（本轮纵切面） |
+| `proxy_mode` | 连接 / 断开（仪表盘与顶栏）（**2026-10-16 更新**：这一行已不符合现在的口径——产品面只做 TUN，连接 / 断开由下一行的 `tun_mode` 门控，入口收敛为仪表盘顶部的大启动按钮（顶栏只报状态、无按钮，`apps/ui/src/components/Topbar.tsx`）；`proxy_mode` **不是产品入口**，只服务 CI 端到端验证与无头调试，见 `crates/xt-contract/src/model.rs:311` 的 `Capability::ProxyMode` 文档与 `apps/ui/src/pages/Settings.tsx:262` 的 `capability-scope-note`） | 是（本轮纵切面）（**2026-10-16 更新**：daemon 仍宣告它，但不再对应任何产品入口；「本轮纵切面」是 2026-09-29 的当时口径，保留） |
 | `stats` | 上下行字节统计卡 | 是 |
 | `probe` | 节点页「探测」按钮 | 是（`xt-probe` 在范围内） |
 | `subscriptions` | 设置页「订阅」**只读**二级区（列表 / 空态 / 每条的真实 `node_count`、`last_error`）（**2026-10-16 更新**：本行只管**读列表**；写入口由下一行的 `subscription_fetch` 门控） | 是（本地订阅文件解析，lead 认可） |
@@ -62,6 +62,9 @@
 （连接、节点目录、日志、设置）里，只有 `proxy_mode` 与 `subscriptions` 有对应能力位；
 `logs` 与 `settings` 契约里**没有能力位**，属于 daemon 恒有的控制面，因此不做门控。
 门控落在**能力位存在的那几个入口**上（连接按钮、模式选择、探测按钮、订阅区、统计卡），
+（**2026-10-16 更新**：产品面只做 TUN —— 连接 / 断开由 `tun_mode` 门控，入口收敛为仪表盘顶部那颗
+大启动按钮；**模式选择已不存在**；`proxy_mode` 不再对应任何产品入口，只服务 CI 端到端验证。
+上面这句里的「连接按钮、模式选择」是 2026-09-29 的当时口径，保留。）
 不落在「页面」这个容器上。这是我 lint 到的解释边界，已报 lead；若 lead 要求连页面也门控，
 先改本文再改测试。
 
@@ -72,7 +75,8 @@
 │ 顶栏（全局常驻，不属于任何页面）                                        │
 │   · 连接状态徽章   ← ConnectionView.stage                             │
 │   · 当前节点       ← ConnectionView.node_id → NodeView.name           │
-│   · 连接 / 断开按钮 ← stage 与 selected_node                          │
+│   · 状态徽章 + 节点名 ← stage / node_id（**2026-10-16 更新**：顶栏只报状态、      │
+│     不放按钮 —— 启动 / 停止全屏只有仪表盘顶部那一处，见 Topbar.tsx）                │
 ├───────────────┬──────────────────────────────────────────────────────┤
 │ 侧栏导航（4 项）│ 页面内容                                              │
 │  仪表盘         │                                                      │
@@ -90,10 +94,10 @@
 
 | 入口 | 回答用户的哪个问题 | 首屏必须有的信息 | 可退到二级 | 数据来源（契约字段 / 请求） | 能力门控 |
 | --- | --- | --- | --- | --- | --- |
-| **仪表盘** | 现在通不通？走的是哪个节点？有多少真实流量？最近为什么失败？ | ① `stage` 徽章；② `connecting` 时的 `phase` 文案；③ `node_id` → 节点名；④ 连接/断开按钮及其可用性；⑤ `stats.uplink_bytes`/`downlink_bytes` 或「未采样」；⑥ `last_error` 原文 | `datapath.pid` / `version` / `ready_at_ms`；`stats.sampled_at_ms` | `Event::State{view: ConnectionView}`、`Request::Status` | `proxy_mode`（连接）；`stats`（字节卡） |
+| **仪表盘** | 现在通不通？走的是哪个节点？有多少真实流量？最近为什么失败？ | ① `stage` 徽章；② `connecting` 时的 `phase` 文案；③ `node_id` → 节点名；④ 连接/断开按钮及其可用性；⑤ `stats.uplink_bytes`/`downlink_bytes` 或「未采样」；⑥ `last_error` 原文 | `datapath.pid` / `version` / `ready_at_ms`；`stats.sampled_at_ms` | `Event::State{view: ConnectionView}`、`Request::Status` | `proxy_mode`（连接）（**2026-10-16 更新**：连接改由 `tun_mode` 门控，对应仪表盘顶部的大启动按钮；`proxy_mode` 不是产品入口，只服务 CI 端到端验证与无头调试，见 `crates/xt-contract/src/model.rs:311`）；`stats`（字节卡） |
 | **节点** | 有哪些节点？哪个测过、多快？我要用哪一个？ | ① 每行 `name`/`protocol`/`endpoint`/`source`；② 每行 `probe.ttfb_ms` 或 `probe.error` 或「未探测」；③ 每行「选择并使用」动作；④ 固定说明「选择就用……不会自动换下一个」 | 「探测」（用户主动发起 `Request::ProbeNodes`） | `Request::ListNodes` → `NodeView[]`、`Event::Probe{result}` | `subscriptions`（节点目录）；`probe`（探测按钮） |
 | **日志** | 刚刚发生了什么？失败的确切原因是什么？ | 真实日志行的尾部 N 行（`ts_ms`/`level`/`target`/`message`） | 更早的历史行 | `Request::TailLogs{n}` → `LogLine[]`、`Event::Log{line}` | 无能力位（daemon 恒有） |
-| **设置** | daemon 是谁？SOCKS 入口在哪？日志级别？订阅从哪来？ | ① `DaemonHello.daemon_version`/`pid`（无 hello 时「未知」）；② `SettingsView.socks_listen`；③ `SettingsView.log_level` | **订阅管理**（`SubscriptionView.url`/`node_count`/`fetched_at_ms`/`last_error`；`AddSubscription`/`RefreshSubscription`）；传输错误原文 | `Request::Hello`→`Response::Hello`、`GetSettings`/`PatchSettings`、`ListSubscriptions`/`AddSubscription`/`RefreshSubscription` | `subscriptions`（仅订阅区） |
+| **设置** | daemon 是谁？本机 API 地址？日志级别？订阅从哪来？ | ① `DaemonHello.daemon_version`/`pid`（无 hello 时「未知」）；② `SettingsView.socks_listen`（**2026-10-16 更新**：界面文案是「本机 API 监听地址」而不是「SOCKS 入口」——产品只做 TUN，daemon 不再提供 SOCKS 入站，见 `apps/ui/src/pages/Settings.tsx` 的「本机 API」卡）；③ `SettingsView.log_level` | **订阅管理**（`SubscriptionView.url`/`node_count`/`fetched_at_ms`/`last_error`；`AddSubscription`/`RefreshSubscription`）；传输错误原文 | `Request::Hello`→`Response::Hello`、`GetSettings`/`PatchSettings`、`ListSubscriptions`/`AddSubscription`/`RefreshSubscription` | `subscriptions`（仅订阅区） |
 
 ### 2.1 顶栏为什么是全局的而不是仪表盘的一部分
 

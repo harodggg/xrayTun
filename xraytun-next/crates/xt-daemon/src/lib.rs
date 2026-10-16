@@ -341,6 +341,9 @@ impl Shared {
             // 订阅拉取（SubscriptionFetch）本轮宣告：实现是 `/usr/bin/curl`（零新增依赖），
             // 端到端行为由 `tests/e2e_real_xray.rs` 对着本地 HTTP 服务验证 —— 不是「宣称」。
             capabilities: vec![
+                // `ProxyMode` 仍然宣告，但**产品面不提供它**（用户 2026-10-16：只做 TUN）：
+                // daemon 留着这条 SOCKS 数据面，是因为 CI 只能用它证明「真有字节穿过隧道」
+                // （TUN 要 root/helper）。界面没有模式选择器，CLI 的 connect 也固定发 tun。
                 Capability::ProxyMode,
                 Capability::TunMode,
                 Capability::Stats,

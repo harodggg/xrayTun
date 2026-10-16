@@ -111,13 +111,13 @@
 
 | 界面位置 | 可见信息 | 契约字段路径 | 可空 | `null` / 缺失时 | 禁止 |
 | --- | --- | --- | --- | --- | --- |
-| 表单 | SOCKS 监听地址（已保存值） | `SettingsView.socks_listen` | 否 | — | 把输入框里未提交的草稿当作已保存值 |
+| 表单 | 本机 API 监听地址（已保存值）（**2026-10-16 更新**：原界面文案为「SOCKS 监听地址」，字段名与契约路径不变；产品只做 TUN、daemon 不再提供 SOCKS 入站，该地址只是 xray 本机 API 的监听基址，见 `apps/ui/src/pages/Settings.tsx:275` 的 `api-listen-card` / `:284` 的标签文案） | `SettingsView.socks_listen` | 否 | — | 把输入框里未提交的草稿当作已保存值 |
 | 表单 | 选中节点 | `SettingsView.selected_node` | 是 | 「未选择」 | 显示 `0` / 默认选中第一项 |
 | 表单 | 日志级别 | `SettingsView.log_level` | 否 | — | 本地默认值顶替 |
 | 保存 | 保存结果 | `PatchSettings` 的响应：`Response(Settings)`（新 `SettingsView`）或 `Outcome::Error.error` | — | — | 乐观更新（请求没回来就先改界面）；改写 `error.message` |
 | daemon | 版本 | `DaemonHello.daemon_version` | 否 | — | 写死版本号 |
 | daemon | 协议版本 | `DaemonHello.protocol_version` | 否 | — | 隐藏（不匹配时协议本身会拒绝连接） |
-| daemon | 能力 | `DaemonHello.capabilities[]`（`proxy_mode`/`tun_mode`/`stats`/`probe`/`subscriptions`） | 否 | — | 能力缺失时仍展示对应功能；必须禁用并写明「daemon 未声明 X 能力」 |
+| daemon | 能力（**2026-10-16 更新**：其中 `proxy_mode` **不是产品入口**，只服务 CI 端到端验证与无头调试，见 `crates/xt-contract/src/model.rs:311` 的 `Capability::ProxyMode` 文档；产品连接模式只有 TUN，界面另用一行解释它，`apps/ui/src/pages/Settings.tsx:262` 的 `capability-scope-note`） | `DaemonHello.capabilities[]`（`proxy_mode`/`tun_mode`/`stats`/`probe`/`subscriptions`/`node_import`/`subscription_fetch`；**2026-10-16 更新**：后两项是 v1.2.1 起新增的能力位） | 否 | — | 能力缺失时仍展示对应功能；必须禁用并写明「daemon 未声明 X 能力」 |
 | daemon | 进程 pid | `DaemonHello.pid` | 否 | — | 与 `datapath.pid` 混用（一个是控制面，一个是数据面） |
 | daemon | 启动时刻 | `DaemonHello.started_at_ms` | 否 | — | 显示运行时长之外的时间却不知道起点来源 |
 | 契约外 | 订阅 URL token | `SubscriptionView.url`（脱敏后显示） | 否 | — | 明文 token；复制整串含 token 的 URL |

@@ -160,6 +160,10 @@ function HelperCard() {
 
 // 设置页的每个控件都对应契约里真实存在的字段：
 // socks_listen / log_level → SettingsPatch（本轮真实现，保存后以 daemon 的值为准）。
+//
+// `socks_listen` 这一栏在**本版本**里已经不再是「SOCKS 入站」：产品只做 TUN（用户 2026-10-16 裁决），
+// TUN 会话里 daemon 只把它当作 xray 本机 API 的监听基址（统计用）。字段名沿契约冻结不动，
+// 但**界面文案必须说的是它现在真做的事**。
 // 订阅按能力粒度分两层：'subscriptions' 才显示只读列表，
 // 'subscription_fetch' 才显示「添加 / 刷新」入口 —— 没宣告就不渲染，也不写占位文案。
 //
@@ -251,17 +255,33 @@ export function Settings() {
                     : hello.capabilities.join('、')}
                 </span>
               </div>
+              {/* 能力行保持**线上原文**（它是 daemon 的事实，不许美化）——但真人会问
+                  「我只做 TUN，为什么这里有 proxy_mode」。所以另起一行解释它是什么：
+                  CI 端到端验证用的通路，不是产品入口。 */}
+              {hello.capabilities.includes('proxy_mode') && (
+                <p className="row__hint muted" data-testid="capability-scope-note">
+                  能力行是 daemon 的原始声明。其中 proxy_mode 是给 CI 端到端验证留的通路
+                  （TUN 需要 root/助手，CI 上跑不了），本产品的连接模式只有 TUN。
+                </p>
+              )}
             </>
           )}
         </div>
       </section>
 
-      <section className="card">
-        <div className="card__title">代理入口</div>
+      {/* 这张卡以前叫「代理入口」—— 本版本产品只做 TUN，那个说法本身就是句过期的话
+          （真人会在设置页找「代理」，然后发现根本没有模式选择器）。现在说的是它真做的事：
+          给 xray 的本机 API 一个环回地址。 */}
+      <section className="card" data-testid="api-listen-card">
+        <div className="card__title">本机 API</div>
         <div className="card__body">
+          <p className="card__desc" data-testid="api-listen-hint">
+            本版本只做 TUN，这个地址不是代理入口：daemon 不再提供 SOCKS 入站，
+            它只是 xray 本机 API 的监听基址（统计与控制用），请填回环地址（例如 127.0.0.1:1080）。
+          </p>
           <div className="field">
             <label className="field__label" htmlFor="socks-listen">
-              SOCKS 监听地址
+              本机 API 监听地址
             </label>
             <input
               id="socks-listen"
@@ -286,7 +306,7 @@ export function Settings() {
               )
             }
           >
-            保存监听地址
+            保存 API 地址
           </button>
         </div>
       </section>

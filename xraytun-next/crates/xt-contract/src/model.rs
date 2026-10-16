@@ -47,12 +47,17 @@ impl std::fmt::Display for SubscriptionId {
 }
 
 /// 运行模式。两种入站，一个控制面；TUN 需要特权 helper，proxy 不需要。
+///
+/// **产品面只做 TUN**（用户 2026-10-16 裁决）：App 里没有模式选择器，CLI 的 `connect`
+/// 也固定发 tun。`Proxy` 保留在契约里，因为 daemon 那条 SOCKS 数据面仍然是 **CI 唯一能
+/// 跑的真实端到端通路**（TUN 要 root/helper，CI 上装不了）。它是「验证/无头调试通路」，
+/// 不是产品能力 —— 谁把它当成产品入口，谁就又把死路做回来了。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
-    /// 本机 SOCKS 入站（无特权，可在 CI 上端到端验证）。
+    /// 本机 SOCKS 入站（无特权，可在 CI 上端到端验证）。**不是产品入口**。
     Proxy,
-    /// utun 入站（macOS + 特权 helper）。
+    /// utun 入站（macOS + 特权 helper）。产品唯一的模式。
     Tun,
 }
 
@@ -261,7 +266,10 @@ pub struct SubscriptionView {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsView {
-    /// SOCKS 监听地址（proxy 模式的入口）。
+    /// 本机回环监听地址。**字段名为历史冻结**：它曾是 SOCKS 入站的地址，
+    /// 但产品面已裁决只做 TUN（2026-10-16），TUN 会话里它只是 xray 本机 API 的监听基址
+    /// （统计与控制用）。界面文案必须说它现在真做的事（见 `apps/ui/src/pages/Settings.tsx`
+    /// 的「本机 API」卡），不许再写成「SOCKS 入口」。
     pub socks_listen: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_node: Option<NodeId>,
@@ -303,6 +311,12 @@ pub struct DaemonHello {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
+    /// daemon 仍实现 SOCKS 数据面（`RunMode::Proxy`）—— **专门留给 CI 的端到端验证**与无头调试。
+    ///
+    /// 为什么还宣告它：契约规定「未宣告的能力，对应请求必须返回 `Unsupported`」，
+    /// 而 CI 的 `cargo test --workspace` 正是用 proxy 模式去证明「真有字节穿过隧道」。
+    /// 撤掉宣告就等于撤掉那条证据。它**不表示产品提供代理入口**：界面没有任何模式选择器，
+    /// CLI 的 `connect` 固定发 tun（见 `xt-cli` 的 `CONNECT_MODE`）。
     ProxyMode,
     TunMode,
     Stats,

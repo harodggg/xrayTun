@@ -409,6 +409,10 @@ PASS UI tsc · PASS UI vitest(29) · PASS UI build
 
 **本机环境事实**（决定了验证边界）：开发机是 Linux x86_64，无 macOS、无真机 TUN。
 因此：proxy 模式可以端到端验证；**TUN/helper 路径本轮不写、不测、不声明**。
+（**2026-10-16 更新**：这后半句已过期 —— daemon 宣告了 `Capability::TunMode`、helper 安装链路已实现
+（真机仍未经 S6 验收）；产品面裁决**只做 TUN**，而 proxy 模式保留下来专作 **CI 的端到端验证通路**
+（`crates/xt-daemon/tests/e2e_real_xray.rs`，TUN 要 root/助手，CI 跑不了）。"不写、不测、不声明"
+现在只对**真机接管那一段**仍然成立：不据此声称真机可用。）
 `rustup target add aarch64-apple-darwin` 可做 macOS 侧 `cargo check`，
 但那只是"能编译"，不等于"能工作"——这条区分必须写进每一份报告。
 
@@ -429,7 +433,7 @@ PASS UI tsc · PASS UI vitest(29) · PASS UI build
 
 | 不做的事 | 为什么 | 用户会失去什么（诚实说法） |
 | --- | --- | --- |
-| macOS TUN + 特权 helper | 开发机不是 macOS；没有真机就没有证据，而"没有证据"不等于"能用" | v1 本阶段只有 SOCKS 代理模式，不能接管全系统流量 |
+| macOS TUN + 特权 helper | 开发机不是 macOS；没有真机就没有证据，而"没有证据"不等于"能用" | v1 本阶段只有 SOCKS 代理模式，不能接管全系统流量（**2026-10-16 更新**：产品面已裁决**只做 TUN、放弃 SOCKS 代理**——daemon 宣告 `Capability::TunMode`（`crates/xt-daemon/src/lib.rs:348`），CLI 的 `connect` 固定发 tun（`crates/xt-cli/src/lib.rs:35` 的 `CONNECT_MODE = RunMode::Tun`）；`Capability::ProxyMode`／`RunMode::Proxy` 保留但**不是产品入口**，只服务 CI 端到端验证与无头调试（`crates/xt-contract/src/model.rs:311`、`crates/xt-daemon/tests/e2e_real_xray.rs`）。「无真机 TUN 证据」的验证边界不变：不据此声称真机已可用） |
 | 自动重连 / 回落 / 看门狗 | 用户已明确否决（📄 `0ef7ac3`、`fd4e83f`） | 失败后需要用户手动再点一次 |
 | 审计上传 / 地理可视化 / 拓扑图 | 与"最小可用"无关；旧仓库的过度建设清单已证明其复杂度收益比 | 没有这些面板 |
 | 兼容 v0.9.2 的旧设置/旧协议 | 兼容分支正是 I2 要消灭的东西；版本不符直接拒绝 | 旧用户需要重新配置 |

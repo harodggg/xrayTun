@@ -383,3 +383,22 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 | **订阅错误更像人话**：4xx/5xx 由 `--fail` 归因到 HTTP；curl 6/7/28 附「推断：先确认网络」+ 脱敏 host | `crates/xt-daemon/src/subs.rs`（`--fail`、`network_hint`） | `network_hint` 单测（含「22 不许说成网络问题」） |
 | **卸载范围与脚本一致**：逐字列出三样 + 留下的状态目录 | `apps/ui/src/pages/Settings.tsx`（`helper-uninstall-scope`） | 验收用例断言四段路径逐字出现 |
 | **首次打开指引进 DMG**（未公证是第 1 个卡死点，而那时 App 还没跑起来） | `docs/install/FIRST-LAUNCH.txt` + 发布工作流的 DMG 步骤 + README + v1.2.2 说明 | 文档 + 工作流 diff；**没有**代码判据（Gatekeeper 只能真机验） |
+
+### 9.3 第 5 轮落地记录（2026-10-16）：产品面只做 TUN（用户裁决）
+
+用户裁决：「放弃掉 sockets 代理，只做 tun 代理。」这一版把**每一个出口**对齐到这句话上，
+因为上一个会说假话的 bug（连着 TUN 切节点却掉回 SOCKS）正是「界面说 TUN、底下跑代理」长出来的。
+
+| 出口 | 改法 | 判据 |
+| --- | --- | --- |
+| 设置页 | 「代理入口」卡 → 「本机 API」（`api-listen-card`）；栏位从「SOCKS 监听地址」→「本机 API 监听地址」；说明逐字写明「本版本只做 TUN、daemon 不再提供 SOCKS 入站」 | `tests/acceptance/tun-only.test.tsx`（整段文本相等，故那句正当的否定句不会被误判） |
+| 设置页能力行 | **保持线上原文**（不许美化），旁边加一句「`proxy_mode` 是给 CI 端到端验证留的通路，本产品的连接模式只有 TUN」 | 同上（第 2 条）；已有用例继续钉住原文 |
+| CLI | `xt-cli connect` 从 `proxy` 改成 `tun`（`CONNECT_MODE`） | `connect_uses_tun_because_the_product_is_tun_only` 单测 |
+| 契约 | `RunMode::{Proxy,Tun}` 与 `Capability::ProxyMode` 的文档就地写明「Proxy 不是产品入口」 | 注释即口径，防下一个人再开产品入口 |
+| 文档 | README 口径、DMG 内说明补一句；ARCHITECTURE / TRUE-INFORMATION / IA 的就地更新见各自文件 | — |
+
+**为什么 daemon 里的 SOCKS 数据面不删**（这是这一轮唯一「不删」的地方，必须写清）：CI 上唯一能证明
+「真有字节穿过隧道」的端到端用例走的就是它（`crates/xt-daemon/tests/e2e_real_xray.rs`），TUN 需要
+root + 特权助手，CI 跑不了；契约又要求「未宣告的能力必须回 `Unsupported`」，所以删掉数据面等于
+连那条证据一起删。用户选择了「产品面 TUN-only + 内部保留验证通路」，口径写进了
+`crates/xt-contract/src/model.rs` 与 `crates/xt-daemon/src/flow.rs` 的注释。

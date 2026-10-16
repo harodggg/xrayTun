@@ -26,6 +26,14 @@ use xt_contract::model::{
 use xt_contract::protocol::{Event, Request, Response};
 use xt_ipc::Client;
 
+/// `connect` 固定使用的运行模式。
+///
+/// 用户 2026-10-16 裁决：**产品只做 TUN**（SOCKS/proxy 不再是对外能力）。daemon 里那条 SOCKS
+/// 数据面仍然存在，但它只服务 CI 的端到端验证与无头调试，不是产品入口 —— 所以 CLI 这个
+/// 「无头等价入口」发的也是 tun，和 App 完全一致；助手没装时它会像 App 一样如实报
+/// `helper_unavailable`，不会偷偷换成一条能连上的路。
+const CONNECT_MODE: RunMode = RunMode::Tun;
+
 /// 客户端上报给 daemon 的版本，取自 Cargo 包版本（不是手写常量）。
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -66,7 +74,7 @@ pub enum CliCommand {
     Status,
     /// 节点目录。
     Nodes,
-    /// 连接指定节点（终态以事件到达）。
+    /// 连接指定节点（终态以事件到达）。**本版本只有 TUN**：需要机器上装好特权助手。
     Connect {
         /// 节点 id（`xt-cli nodes` 里的 id）。
         node: String,
@@ -268,7 +276,10 @@ async fn execute(cli: &Cli) -> Result<i32, ErrorBody> {
             let node_id = NodeId::new(node.clone());
             // 先建事件订阅再发意图：否则意图被受理后、订阅建立前的事件会丢。
             let events = client.events();
-            match client.request(Request::Connect { node_id: node_id.clone(), mode: RunMode::Proxy }).await? {
+            match client
+                .request(Request::Connect { node_id: node_id.clone(), mode: CONNECT_MODE })
+                .await?
+            {
                 Response::Accepted => {}
                 other => return Err(unexpected("connect", &other)),
             }
@@ -733,6 +744,13 @@ mod tests {
         assert_eq!(run(add).await, 2);
         let refresh = parse(&["xt-cli", "refresh-subscription", "sub-1"]);
         assert_eq!(run(refresh).await, 2);
+    }
+
+    /// 产品只做 TUN：`connect` 发的模式**必须**是 tun。以前这里写死 proxy —— 那是
+    /// 「界面只做 TUN、CLI 偷偷走 SOCKS」的等价性裂缝，也是 v1.2.2 那条静默降级 bug 的同类。
+    #[test]
+    fn connect_uses_tun_because_the_product_is_tun_only() {
+        assert_eq!(CONNECT_MODE, RunMode::Tun);
     }
 
     #[test]

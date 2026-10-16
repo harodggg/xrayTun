@@ -18,6 +18,11 @@ xraytun 的**平行重写**。旧版 `../xray-tun`（v0.9.2，已发布）保持
 同一份说明也在 DMG 里的 `首次打开请看这里.txt`；完整版见
 [`docs/install/FIRST-LAUNCH.txt`](docs/install/FIRST-LAUNCH.txt)。
 
+> 口径：**产品面只做 TUN**（用户 2026-10-16 裁决，放弃 SOCKS 代理）—— 界面上没有模式选择器，
+> 设置页那一栏是 xray 的本机 API 地址，不是 SOCKS 入口；CLI 的 `connect` 也只发 `tun`。
+> daemon 内部那条 SOCKS 数据面**保留**，但它只服务 CI 的端到端验证（TUN 要 root/助手，CI 跑不了），
+> 不是产品能力。
+>
 > 口径：TUN 的**真机接管**（授权弹窗、utun、路由与 DNS）仍未验收；本 README 的"状态"一节
 > 只写有证据的事，不说「能翻墙了」。
 
