@@ -29,7 +29,8 @@ use crate::{
     api_addr_for, now_ms, parse_loopback_addr, Shared, CORE_STOP_DEADLINE, PROBE_BASE_PORT,
 };
 
-/// 用户意图的形状。`Connect` 携带 mode，`Switch` 沿用当前 mode（proxy）。
+/// 用户意图的形状。`Connect` 携带 mode；`Switch` **沿用当前会话的 mode** ——
+/// TUN 会话下切节点必须继续走 TUN 流程（见 [`switch_needs_tun_flow`] 的说明）。
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Intent {
     Connect(RunMode),
@@ -81,10 +82,40 @@ struct PreparedConfig {
     config_path: PathBuf,
 }
 
+/// 这次「切节点」落在 TUN 会话上吗？决定它走 TUN 流程还是代理流程。
+///
+/// **为什么必须存在这条判断**：`begin_switch` 会把旧会话的 `mode` 原样带进新会话，
+/// 而 TUN 会话的完成信号是 `RoutesCommitted`（来自 helper 提交路由）——代理流程永远不会
+/// 发它。于是「连上 TUN 之后在节点页点切换」的结果是：跑了代理流程（生成 SOCKS 配置、
+/// `tun_fd: None`），状态机却停在 `Connecting{CommittingRoutes, mode: Tun}`，而旧的
+/// utun/默认路由可能还挂着 —— 界面在说一件没发生的事，用户的全机流量还可能被扔进黑洞。
+///
+/// 正确语义就写在 `begin_switch` 的文档里：「切换 = 停掉旧的，按新节点重新走一遍连接」。
+/// 所以这里返回 `true` 时，调用方先 `disconnect_flow()`（含 `helper.tun_down` 回滚路由/DNS）
+/// 再 `connect_tun_flow(新节点)`。
+///
+/// 抽成纯函数是为了能单测：这条判断写错，界面就会撒谎（显示 TUN 已连接而实际只有本机 SOCKS）。
+pub(crate) fn switch_needs_tun_flow(state: &xt_state::State) -> bool {
+    match state {
+        xt_state::State::Connected { mode: RunMode::Tun, .. }
+        | xt_state::State::Connecting { mode: RunMode::Tun, .. }
+        | xt_state::State::Disconnecting { mode: RunMode::Tun, .. } => true,
+        _ => false,
+    }
+}
+
 impl Shared {
     /// 连接（或切节点后重连）的完整流程。
     pub(crate) async fn connect_flow(self: &Arc<Self>, node_id: NodeId, intent: Intent) {
         if matches!(intent, Intent::Connect(RunMode::Tun)) {
+            self.connect_tun_flow(node_id).await;
+            return;
+        }
+        // TUN 会话下切节点：先真正断开（`disconnect_flow` 会停核心并调 helper.tun_down
+        // 回滚路由/DNS），再按 TUN 连新节点。切换期间界面会如实看到
+        // Disconnected → Connecting → Connected，而不是「一直显示已连接 TUN」。
+        if matches!(intent, Intent::Switch) && switch_needs_tun_flow(&self.snapshot_state().await) {
+            self.disconnect_flow().await;
             self.connect_tun_flow(node_id).await;
             return;
         }
@@ -724,5 +755,55 @@ async fn pump_logs(
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xt_state::State;
+
+    fn node() -> NodeId {
+        NodeId::new("node-1")
+    }
+
+    fn connecting(mode: RunMode) -> State {
+        State::Connecting {
+            phase: xt_contract::model::ConnectPhase::AwaitingReady,
+            mode,
+            node_id: node(),
+            pid: Some(1),
+            ready_at_ms: Some(1),
+        }
+    }
+
+    /// 这条判断是「界面说的 mode 是不是真的」的守门人，所以每个分支都要钉住。
+    #[test]
+    fn only_tun_sessions_route_a_switch_through_the_tun_flow() {
+        assert!(switch_needs_tun_flow(&State::Connected {
+            mode: RunMode::Tun,
+            node_id: node(),
+            pid: 1,
+            ready_at_ms: 1,
+            connected_since_ms: 2,
+        }));
+        assert!(switch_needs_tun_flow(&connecting(RunMode::Tun)));
+        assert!(switch_needs_tun_flow(&State::Disconnecting {
+            mode: RunMode::Tun,
+            node_id: node(),
+            pid: Some(1),
+        }));
+
+        // 代理会话走代理流程（老行为不变）。
+        assert!(!switch_needs_tun_flow(&State::Connected {
+            mode: RunMode::Proxy,
+            node_id: node(),
+            pid: 1,
+            ready_at_ms: 1,
+            connected_since_ms: 2,
+        }));
+        assert!(!switch_needs_tun_flow(&connecting(RunMode::Proxy)));
+        // 空闲时 `Switch` 本来就该报 conflict（`begin_switch` 负责），不在这里换流程。
+        assert!(!switch_needs_tun_flow(&State::Disconnected { last_error: None }));
     }
 }

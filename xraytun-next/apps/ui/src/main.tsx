@@ -24,6 +24,11 @@ declare global {
      * 而不是 `false` —— 判据只能是 `=== true`（见 shell.ts 的 canInstallHelper）。
      */
     __XT_HELPER_INSTALL__?: boolean;
+    /**
+     * 「这个壳能报告 daemon 启动结论」（`daemon_launch_report` 命令）。
+     * 只有 Tauri 壳会注入；无头 / 浏览器环境一个字都没有，判据只能是 `=== true`。
+     */
+    __XT_LAUNCH_REPORT__?: boolean;
   }
 }
 

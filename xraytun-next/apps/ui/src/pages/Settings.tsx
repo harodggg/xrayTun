@@ -86,8 +86,18 @@ function HelperCard() {
       <div className="card__body">
         <p className="card__desc">
           TUN 模式需要它来创建 VPN 网卡、改路由与 DNS —— 这两件事必须由 root 做，所以 App
-          会请求一次管理员授权，把它装成一个后台服务。它只认识固定指令集（连接/断开/回滚），不接受任意命令；卸载会把它和它的
-          launchd 配置一起删掉。
+          会请求一次管理员授权，把它装成一个后台服务。它只认识固定指令集（连接/断开/回滚），
+          不接受任意命令。
+        </p>
+        {/* 卸载到底删什么：逐字对齐 `helper_install::uninstall_script()`（删 launchd 配置、
+            助手二进制、socket），并说清**留下什么**（它记路由/DNS 快照用的状态目录）。
+            以前这里只写「它和它的 launchd 配置」，比脚本少一样、也没提留下的那个目录。 */}
+        <p className="card__desc" data-testid="helper-uninstall-scope">
+          卸载会删掉三样：launchd 配置（<span className="mono">/Library/LaunchDaemons</span>
+          ）、助手二进制（<span className="mono">/Library/PrivilegedHelperTools</span>）和
+          <span className="mono">/var/run/xraytun-helper.sock</span>。它还会留下一个状态目录
+          <span className="mono">/Library/Application Support/XrayTun</span>
+          （助手记下的路由/DNS 快照，用来在网络被改乱后还原）；要清掉它得自己在终端里删。
         </p>
         {status != null && (
           <div className="helper__status">

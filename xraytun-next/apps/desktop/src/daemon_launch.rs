@@ -90,6 +90,56 @@ pub enum Launch {
     Unavailable(String),
 }
 
+/// 一次启动的结论，**给界面看**的版本（serde 序列化给 WebView，字段就是 snake_case）。
+///
+/// 为什么要把壳的内部结论交给界面：daemon 没起来时，界面只能看到「连接 socket 失败」——
+/// 那句话对用户毫无用处，而对面的原因（没找到二进制 / spawn 被拒 / 报就绪前就退了）
+/// **只有壳知道**。壳如实交出来，界面就不必猜、也不许编。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct LaunchReport {
+    /// `already_listening` / `spawned` / `not_listening` / `unavailable`。
+    pub outcome: &'static str,
+    /// 人话的原因。`already_listening` / `spawned` 时是 `None`（没有坏消息要说）。
+    pub reason: Option<String>,
+    /// 拉起来的进程号；没拉起就是 `None`。
+    pub pid: Option<u32>,
+    /// daemon 二进制路径（找得到的话）。
+    pub bin: Option<String>,
+    /// 壳与 UI 约定的 socket 路径 —— 界面把它显示出来，用户才可能拿去核对。
+    pub socket: String,
+    /// daemon 的 stdout/stderr 落在这里；连不上时它就是唯一的一手现场。
+    pub log_path: Option<String>,
+}
+
+impl Launch {
+    /// 转成给界面的报告。**不美化**：`not_listening` 的 `reason` 原文是
+    /// 「为什么没能确认它在监听」，不是「它失败了」—— 这两件事的把握不同，
+    /// 措辞也不许混（见 [`Launch::NotListening`] 的说明）。
+    pub fn report(&self, socket: &Path) -> LaunchReport {
+        let (outcome, reason, pid, bin) = match self {
+            Launch::AlreadyListening => ("already_listening", None, None, None),
+            Launch::Spawned { pid, bin } => {
+                ("spawned", None, *pid, Some(bin.display().to_string()))
+            }
+            Launch::NotListening { pid, bin, reason } => (
+                "not_listening",
+                Some(reason.clone()),
+                *pid,
+                Some(bin.display().to_string()),
+            ),
+            Launch::Unavailable(reason) => ("unavailable", Some(reason.clone()), None, None),
+        };
+        LaunchReport {
+            outcome,
+            reason,
+            pid,
+            bin,
+            socket: socket.display().to_string(),
+            log_path: log_path().map(|path| path.display().to_string()),
+        }
+    }
+}
+
 /// socket 路径：`XT_SOCKET` → [`DEFAULT_SOCKET_PATH`]。
 pub fn socket_path() -> PathBuf {
     match std::env::var_os(SOCKET_ENV) {
@@ -305,7 +355,10 @@ fn absolute(path: PathBuf) -> PathBuf {
 }
 
 /// 日志文件：`XT_DAEMON_LOG` → `$HOME/Library/Logs/XrayTun/xt-daemon.log`。
-fn log_path() -> Option<PathBuf> {
+///
+/// `pub` 的理由：连不上 daemon 时，用户该看的就是这个文件；报告（[`LaunchReport`]）
+/// 把它一起交给界面，界面才能给出「去哪看」而不是「连不上」。
+pub fn log_path() -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os(LOG_ENV) {
         if !raw.is_empty() {
             return Some(PathBuf::from(raw));

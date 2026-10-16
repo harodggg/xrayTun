@@ -21,6 +21,23 @@ export interface HelperStatus {
   binary_in_bundle: boolean;
 }
 
+/**
+ * 壳启动 daemon 的结论（`daemon_launch::LaunchReport` 的逐字镜像）。
+ *
+ * `outcome` 的四个值是壳里的真实分支，不是这里另起的名字：
+ * `already_listening` / `spawned` / `not_listening` / `unavailable`。
+ */
+export interface LaunchReport {
+  outcome: 'already_listening' | 'spawned' | 'not_listening' | 'unavailable';
+  /** 人话的原因；`already_listening` / `spawned` 时没有坏消息，是 `null`。 */
+  reason: string | null;
+  pid: number | null;
+  bin: string | null;
+  socket: string;
+  /** daemon 的 stdout/stderr 落在这里 —— 连不上时该看的就是它。 */
+  log_path: string | null;
+}
+
 /** 这个壳能不能装特权助手（由 App 启动时注入；开发 / 无头环境下为 false）。 */
 export function canInstallHelper(): boolean {
   return typeof window !== 'undefined' && window.__XT_HELPER_INSTALL__ === true;
@@ -45,4 +62,21 @@ export async function uninstallHelper(): Promise<void> {
 
 export async function restartHelper(): Promise<void> {
   await invokeShell<null>('restart_helper');
+}
+
+/** 这个壳能不能报 daemon 启动结论（只有 Tauri 壳注入；无头环境为 false）。 */
+export function canReadLaunchReport(): boolean {
+  return typeof window !== 'undefined' && window.__XT_LAUNCH_REPORT__ === true;
+}
+
+/**
+ * 取壳的启动结论。取不到就 `null`：界面**不回落到猜测**，只是这一段不显示。
+ * （命令缺失、壳还没写过报告都会落到这里 —— 两者都不是「启动失败」，不许当成失败说。）
+ */
+export async function daemonLaunchReport(): Promise<LaunchReport | null> {
+  try {
+    return await invokeShell<LaunchReport | null>('daemon_launch_report');
+  } catch {
+    return null;
+  }
 }

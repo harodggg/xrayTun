@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { DaemonLogHint } from '../components/DaemonLogHint';
 import { ErrorBox } from '../components/ErrorBox';
 import {
   MODE_TEXT,
@@ -265,6 +266,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (target: DashboardTarget
       {lastError != null && (
         <>
           <ErrorBox error={lastError} testId="last-error" />
+          {/* 「查看日志」那颗按钮得先让用户知道日志在哪 —— 路径只有壳知道（daemon_launch
+              的 log_path），壳没给就不显示，不编默认路径。 */}
+          <DaemonLogHint testId="last-error-log" />
           <div className="row row--actions">
             <button type="button" className="btn btn--ghost" onClick={() => onNavigate('logs')}>
               查看日志

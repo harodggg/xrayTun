@@ -2,6 +2,25 @@
 
 xraytun 的**平行重写**。旧版 `../xray-tun`（v0.9.2，已发布）保持冻结，本目录是 v1 架构的落地。
 
+## 给想装它的人（macOS）
+
+发布包在 [Releases](https://github.com/harodggg/xrayTun/releases)（`xraytun-next-v*`，预发布）。
+
+**它没有 Apple 开发者签名（未公证）**，所以第一次双击会被 Gatekeeper 拦，弹「无法打开，
+因为 Apple 无法检查其是否包含恶意软件」。那是系统对「没公证」的默认拦截，不是文件损坏。三种打开方式：
+
+1. 在「应用程序」里按住 **Control** 点（或右键）XrayTun.app →「打开」→ 再点一次「打开」；
+2. 或「系统设置 → 隐私与安全性」→ 找到 XrayTun →「仍要打开」；
+3. 或终端：`xattr -dr com.apple.quarantine /Applications/XrayTun.app`
+
+打开后的最短路径：**节点页**粘订阅原文/分享链接导入（或**设置 → 订阅**填 URL）→ 节点页
+「选为当前节点」→ **仪表板**按「启动」（第一次会让你装特权助手，需一次管理员授权）。
+同一份说明也在 DMG 里的 `首次打开请看这里.txt`；完整版见
+[`docs/install/FIRST-LAUNCH.txt`](docs/install/FIRST-LAUNCH.txt)。
+
+> 口径：TUN 的**真机接管**（授权弹窗、utun、路由与 DNS）仍未验收；本 README 的"状态"一节
+> 只写有证据的事，不说「能翻墙了」。
+
 先读顺序：
 
 1. [`docs/architecture/00-CONTRACT-FREEZE.md`](docs/architecture/00-CONTRACT-FREEZE.md) —— 契约、五条不变量、文件所有权（动手前必读）

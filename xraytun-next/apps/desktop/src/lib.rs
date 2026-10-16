@@ -58,6 +58,24 @@ pub mod tray;
 
 use std::path::Path;
 
+use tauri::Manager;
+
+/// 壳启动 daemon 的结论，留给界面查（形状见 [`daemon_launch::LaunchReport`]）。
+///
+/// 为什么要有它：daemon 没起来时界面只会看到「连接 socket 失败」；真正的原因只有壳知道。
+/// 这不是「壳替 daemon 编状态」—— 它只陈述**壳自己做过的那一步**的结果。
+#[derive(Default)]
+struct LaunchReportState(std::sync::Mutex<Option<daemon_launch::LaunchReport>>);
+
+/// 把壳的启动结论交给界面。没启动过（或锁中毒）时返回 `null`，界面就不显示这一段 ——
+/// 宁可不说，也不许编一个结论出来。
+#[tauri::command]
+fn daemon_launch_report(
+    state: tauri::State<'_, LaunchReportState>,
+) -> Option<daemon_launch::LaunchReport> {
+    state.0.lock().ok().and_then(|guard| guard.clone())
+}
+
 /// 应用入口。`main.rs` 只有一行，真正逻辑在这里（便于将来加集成测试）。
 pub fn run() {
     // socket 是壳与 UI 的**唯一**约定值：壳用它拉起 daemon，并通过
@@ -68,6 +86,8 @@ pub fn run() {
     let built = tauri::Builder::default()
         // 桥的全局状态：懒连接 + 事件序号。见 bridge 模块。
         .manage(bridge::BridgeState::new())
+        // 壳启动 daemon 的结论（连不上时界面靠它说清「为什么」）。
+        .manage(LaunchReportState::default())
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -96,7 +116,9 @@ pub fn run() {
             //    Tokio 1.x runtime`）。老仓库 0.8.39 正是踩了裸 spawn 的 SIGABRT。
             let launch_socket = socket.clone();
             tauri::async_runtime::spawn(async move {
-                match daemon_launch::ensure_daemon(&launch_socket).await {
+                // 匹配**引用**而不是把 `launch` 移进各分支：下面还要用它生成报告。
+                let launch = daemon_launch::ensure_daemon(&launch_socket).await;
+                match &launch {
                     daemon_launch::Launch::AlreadyListening => eprintln!(
                         "xt shell: 已有 daemon 在 {} 上监听，复用（不再启动第二个）",
                         launch_socket.display()
@@ -113,6 +135,12 @@ pub fn run() {
                     daemon_launch::Launch::Unavailable(reason) => eprintln!(
                         "xt shell: 未能拉起 xt-daemon：{reason}（界面连不上时会如实报错，壳不伪造连接）"
                     ),
+                }
+
+                // 把这次启动的结论留给界面：连不上时它是「为什么」的唯一来源。
+                // 写不进去（锁中毒）就什么都不留 —— 界面会退回只显示原始连接错误。
+                if let Ok(mut guard) = handle.state::<LaunchReportState>().0.lock() {
+                    *guard = Some(launch.report(&launch_socket));
                 }
 
                 // 无论上面是哪种结局都建窗口：连不上也必须让界面把原因显示出来，
@@ -146,7 +174,9 @@ pub fn run() {
             helper_install::helper_status,
             helper_install::install_helper,
             helper_install::uninstall_helper,
-            helper_install::restart_helper
+            helper_install::restart_helper,
+            // 壳启动 daemon 的结论：连不上时界面用它说清「为什么」+ 日志在哪。
+            daemon_launch_report
         ])
         .build(tauri::generate_context!());
 
@@ -218,6 +248,10 @@ fn create_main_window(app: &tauri::AppHandle, socket: &Path) {
     if helper_install::helper_binary_path().is_some() {
         script.push_str("window.__XT_HELPER_INSTALL__ = true;");
     }
+
+    // 「这个壳能报告 daemon 启动结论」——只有 Tauri 壳里才有这条命令。
+    // 无头/浏览器环境没有它，界面就不该去问（问了只会 reject）。
+    script.push_str("window.__XT_LAUNCH_REPORT__ = true;");
 
     let builder = match tauri::WebviewWindowBuilder::from_config(app, &config) {
         Ok(builder) => builder,

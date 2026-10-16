@@ -369,3 +369,17 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 
 **口径**：本轮把「订阅」从「不做」变成「做完了但只在本机验过 UI 那半」，Rust 半边的编译与端到端**以 CI 为唯一判据**；
 真机（helper 授权、`utun` 接管）仍然只有用户能验 —— 所以「能翻墙」这句话依然不说。
+
+### 9.2 第 4 轮落地记录（2026-10-16）：一次独立体验官走查之后的修补
+
+第 3 轮发布后请了一个独立 fresh-context agent 当体验官（只读源码与发布说明）。它给的 10 条与逐条处置
+记在 `docs/ux/USER-JOURNEY-REAL-PERSON.md` §7。落到**代码/界面**上的有六处，按危害排序：
+
+| 改了什么 | 落在哪 | 判据 |
+| --- | --- | --- |
+| **修掉「连着 TUN 时切节点会静默降级成 SOCKS」**：旧路径先跑代理流程（`tun_fd: None`），状态机却沿用 `mode: Tun`，等一个永远不会来的 `RoutesCommitted` —— 界面卡在「提交路由中」而实际是本机 SOCKS，旧 utun/默认路由还可能挂着 | `crates/xt-daemon/src/flow.rs`（`switch_needs_tun_flow` + `connect_flow` 的 TUN 分支：先 `disconnect_flow()` 再 `connect_tun_flow(新节点)`） | 纯函数单测（三个 TUN 分支为真、Proxy/Disconnected 为假） |
+| **连不上 daemon 时给出「为什么」+ 日志路径**：壳的 `LaunchReport` 以前只进 `eprintln` | `apps/desktop/src/daemon_launch.rs`（`LaunchReport` / `Launch::report`）、`lib.rs`（状态 + `daemon_launch_report` 命令 + 注入标记）、`apps/ui/src/components/launchReport.ts`、`App.tsx`（只在 `code === 'io'` 时问一次） | `src/components/launchReport.test.ts`（8 条）、`tests/acceptance/transport-diagnosis.test.tsx`（4 条：显示 / 无标记不发命令 / 壳没报告就不显示 / 非 io 不显示） |
+| **失败时知道一手现场在哪**：仪表板失败下方显示 daemon 日志路径 | `apps/ui/src/components/DaemonLogHint.tsx` + `Dashboard.tsx` | `tests/acceptance/error-next-step.test.tsx` |
+| **订阅错误更像人话**：4xx/5xx 由 `--fail` 归因到 HTTP；curl 6/7/28 附「推断：先确认网络」+ 脱敏 host | `crates/xt-daemon/src/subs.rs`（`--fail`、`network_hint`） | `network_hint` 单测（含「22 不许说成网络问题」） |
+| **卸载范围与脚本一致**：逐字列出三样 + 留下的状态目录 | `apps/ui/src/pages/Settings.tsx`（`helper-uninstall-scope`） | 验收用例断言四段路径逐字出现 |
+| **首次打开指引进 DMG**（未公证是第 1 个卡死点，而那时 App 还没跑起来） | `docs/install/FIRST-LAUNCH.txt` + 发布工作流的 DMG 步骤 + README + v1.2.2 说明 | 文档 + 工作流 diff；**没有**代码判据（Gatekeeper 只能真机验） |

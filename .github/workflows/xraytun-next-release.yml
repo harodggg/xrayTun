@@ -473,6 +473,10 @@ jobs:
           # ditto 而不是 cp -R：.app 是 bundle，ditto 保留扩展属性与符号链接，签名不会被复制破坏
           ditto "$B/macos/XrayTun.app" "$STAGE/XrayTun.app"
           ln -s /Applications "$STAGE/Applications"
+          # 未公证的 app 第一次双击会被 Gatekeeper 拦 —— 这是真人走查里的**第一个**卡死点，
+          # 而 App 在那一步根本还没跑起来，所以指引只能放在用户卡住的地方：磁盘映像里。
+          # （同一份文字也在发布说明里；DMG 打包失败时的 zip 交付靠发布说明。）
+          cp xraytun-next/docs/install/FIRST-LAUNCH.txt "$STAGE/首次打开请看这里.txt"
           mkdir -p "$B/dmg"
           OUT="$B/dmg/XrayTun_${V}_universal.dmg"
           TMP_RW="$B/dmg/.XrayTun_rw.dmg"

@@ -201,6 +201,26 @@ fn redact_text(text: &str, url: &str) -> String {
     text.replace(url, &redact_url(url))
 }
 
+/// curl 的退出码 → 一句「下一步该怀疑什么」。只处理**网络类**退出码，
+/// 其余一律返回空字符串（不多嘴）：HTTP 4xx/5xx 归 `--fail` 的 22，那是「地址/订阅本身」的问题，
+/// 不该被说成网络问题。
+///
+/// 判据是 curl 定义好的退出码，不是猜测；文案里也如实写明这是**推断**，
+/// 并且只带脱敏后的 `scheme://host/…`（URL 里可能带令牌）。
+fn network_hint(code: Option<i32>, url: &str) -> String {
+    let what = match code {
+        Some(6) => "解析不了订阅地址里的主机名",
+        Some(7) => "连不上订阅服务器",
+        Some(28) => "连接订阅服务器超时",
+        Some(35) => "与订阅服务器建立 TLS 连接失败",
+        _ => return String::new(),
+    };
+    format!(
+        "（推断：{what} —— 先确认这台机器能打开别的网站，再确认订阅地址还有效；地址 {}）",
+        redact_url(url)
+    )
+}
+
 /// 拉取订阅正文。成功返回正文；任何失败都带**脱敏后**的原因。
 pub(crate) async fn fetch_body(url: &str) -> Result<String, ErrorBody> {
     // 三个数字参数都先转成 `&str`：让 `.args([...])` 的元素类型**统一**是 `&str`，
@@ -248,7 +268,10 @@ pub(crate) async fn fetch_body(url: &str) -> Result<String, ErrorBody> {
         };
         return Err(ErrorBody::new(
             ErrorCode::Io,
-            format!("拉取订阅失败：{}", redact_text(&reason, url)),
+            // 原文（curl 自己说的话）一字不改，后面只加一句**标明是推断**的提示：
+            // 「连不上」与「地址写错了」对用户是完全不同的下一步，而 curl 的退出码
+            // 足以区分这两类（见 `network_hint`）。
+            format!("拉取订阅失败：{}{}", redact_text(&reason, url), network_hint(output.status.code(), url)),
         ));
     }
     if output.stdout.len() > MAX_BODY_BYTES {
@@ -305,6 +328,22 @@ mod tests {
             "https://a.com/p?token=SECRET"
         )
         .contains("SECRET"));
+    }
+
+    /// 网络类退出码给一句提示（带脱敏 host），HTTP 类与未知码不多嘴。
+    #[test]
+    fn network_hint_only_speaks_for_network_exit_codes() {
+        let url = "https://user:token@example.com/sub";
+        let hint = network_hint(Some(7), url);
+        assert!(hint.contains("连不上订阅服务器"), "{hint}");
+        assert!(hint.contains("https://example.com/…"), "{hint}");
+        assert!(!hint.contains("token"), "提示里不许出现令牌：{hint}");
+        assert!(network_hint(Some(28), url).contains("超时"));
+        assert!(network_hint(Some(6), url).contains("主机名"));
+        // 22 = HTTP 4xx/5xx（`--fail`）：那是地址/订阅本身的问题，不许说成网络问题。
+        assert_eq!(network_hint(Some(22), url), "");
+        // 退出码缺失（例如被信号杀掉）：不知道就不多说。
+        assert_eq!(network_hint(None, url), "");
     }
 
     /// userinfo 也要剥掉：`validate_url` 允许 `https://user:token@host/…`，

@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ErrorBox } from './components/ErrorBox';
 import { Topbar } from './components/Topbar';
+import { launchLogLine, launchReportText } from './components/launchReport';
 import { toDisplayErrorBody } from './components/format';
+import { canReadLaunchReport, daemonLaunchReport } from './shell';
 import { Dashboard } from './pages/Dashboard';
 import { Logs } from './pages/Logs';
 import { Nodes } from './pages/Nodes';
@@ -30,6 +32,42 @@ const NAV_ITEMS: { id: PageId; label: string }[] = [
 function toPageId(raw: string | undefined): PageId {
   const matched = NAV_ITEMS.find((item) => item.id === raw);
   return matched === undefined ? 'dashboard' : matched.id;
+}
+
+/**
+ * 连不上 daemon 时的「为什么」。
+ *
+ * 壳在拉起 daemon 那一步会拿到一个结论（没找到二进制 / spawn 被拒 / 报就绪前就退了），
+ * 以前它只进 `eprintln`，界面上只剩下一句「连接 socket 失败」——对用户毫无用处。
+ * 这里把那句结论原样带出来，并给出 daemon 日志路径。
+ *
+ * 只在**壳注入了标记**、且**确实拿到了报告**时渲染；取不到就什么都不显示 ——
+ * 界面不许替壳编一个「启动失败」。
+ */
+function TransportDiagnosis() {
+  const [report, setReport] = useState<Awaited<ReturnType<typeof daemonLaunchReport>>>(null);
+
+  useEffect(() => {
+    if (!canReadLaunchReport()) return undefined;
+    let active = true;
+    // 只问一次：这是「上次启动的结论」，不是需要盯着看的状态（不轮询、不重试）。
+    void daemonLaunchReport().then((next) => {
+      if (active) setReport(next);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const text = launchReportText(report);
+  if (text == null) return null;
+  const log = launchLogLine(report);
+  return (
+    <div className="page__hint" data-testid="launch-report">
+      <span>{text}</span>
+      {log != null && <span className="mono"> · {log}</span>}
+    </div>
+  );
 }
 
 function Shell({ initialPage }: { initialPage: PageId }) {
@@ -72,6 +110,9 @@ function Shell({ initialPage }: { initialPage: PageId }) {
             onUserAction={reconnect}
           />
         )}
+        {/* 只有「连不上（io）」才可能和壳启动 daemon 那一步有关；别把这件事挂在
+            任何其它错误上，否则用户会顺着它查一条无关的线索。 */}
+        {transportFailure != null && transportFailure.code === 'io' && <TransportDiagnosis />}
         {page === 'dashboard' && <Dashboard onNavigate={setPage} />}
         {page === 'nodes' && <Nodes />}
         {page === 'logs' && <Logs />}
