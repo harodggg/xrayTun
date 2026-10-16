@@ -249,6 +249,11 @@ CI 上唯一能证明「真有字节穿过隧道」的端到端用例走的就�
 一行 SOCKS 代码」。这句话写进了 `xt-contract` 与 `xt-daemon/flow.rs` 的注释，防止下一个人
 又给它开一个产品入口。
 
+还有一处本机 SOCKS 端口要说全：**「测试延迟」**给每个节点临时起一个本机 xray 实例、用
+**每节点一个环回 SOCKS 端口**量真实 TTFB（`xt-xrayconf::generate_probe`，`listen: 127.0.0.1`）。
+那是**测量路径**，不是产品连接模式（只绑回环、只在探测期间存在、用户看不到也连不上）；
+本轮**没有**改它 —— 换掉它就得换一种量真实 TTFB 的办法。
+
 **验收判据**：`apps/ui/tests/acceptance/tun-only.test.tsx`（4 条：没有「代理入口/SOCKS 监听地址」、
 那一栏说的是它真做的事、能力行保持原文且旁边有解释、那一栏仍然可用）；
 `xt-cli` 的 `CONNECT_MODE == RunMode::Tun` 单测。

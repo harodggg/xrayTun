@@ -397,6 +397,10 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 | 契约 | `RunMode::{Proxy,Tun}` 与 `Capability::ProxyMode` 的文档就地写明「Proxy 不是产品入口」 | 注释即口径，防下一个人再开产品入口 |
 | 文档 | README 口径、DMG 内说明补一句；ARCHITECTURE / TRUE-INFORMATION / IA 的就地更新见各自文件 | — |
 
+**还有一处本机 SOCKS 端口（不是连接模式）**：「测试延迟」用 `xt_xrayconf::generate_probe` 给每个节点
+起一个 `listen: 127.0.0.1` 的环回 SOCKS 端口来量真实 TTFB。它是**测量路径**，本轮没有改；
+要改就得换一种量真实 TTFB 的办法（TUN 探测需要 root/助手）。
+
 **为什么 daemon 里的 SOCKS 数据面不删**（这是这一轮唯一「不删」的地方，必须写清）：CI 上唯一能证明
 「真有字节穿过隧道」的端到端用例走的就是它（`crates/xt-daemon/tests/e2e_real_xray.rs`），TUN 需要
 root + 特权助手，CI 跑不了；契约又要求「未宣告的能力必须回 `Unsupported`」，所以删掉数据面等于
