@@ -309,7 +309,8 @@ pub enum Capability {
     Probe,
     /// 能解析订阅原文（本地文件）并把节点列出来。**不含**远端拉取。
     Subscriptions,
-    /// 能从 http/https URL 拉取订阅并刷新（本轮不宣告）。
+    /// 能从 http/https URL 拉取订阅并刷新（**已宣告**：实现在 `xt-daemon` 的
+    /// `add_subscription` / `refresh_subscription`，用 `/usr/bin/curl`，零新增依赖）。
     ///
     /// 为什么把它和 `Subscriptions` 分开：如果合成一个粗粒度能力，
     /// 界面就只能二选一——要么显示一个按不动的"刷新"入口（假控件），

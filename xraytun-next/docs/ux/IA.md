@@ -54,8 +54,8 @@
 | `proxy_mode` | 连接 / 断开（仪表盘与顶栏） | 是（本轮纵切面） |
 | `stats` | 上下行字节统计卡 | 是 |
 | `probe` | 节点页「探测」按钮 | 是（`xt-probe` 在范围内） |
-| `subscriptions` | 设置页「订阅」**只读**二级区（列表 / 空态 / 每条的真实 `node_count`、`last_error`） | 是（本地订阅文件解析，lead 认可） |
-| `subscription_fetch` | 「添加订阅 / 刷新」**写入口**（`AddSubscription`/`RefreshSubscription`） | **否**——lead 明确远端拉取本轮不做；因此输入框与刷新按钮一律不渲染 |
+| `subscriptions` | 设置页「订阅」**只读**二级区（列表 / 空态 / 每条的真实 `node_count`、`last_error`）（**2026-10-16 更新**：本行只管**读列表**；写入口由下一行的 `subscription_fetch` 门控） | 是（本地订阅文件解析，lead 认可） |
+| `subscription_fetch` | 「添加订阅 / 刷新」**写入口**（`AddSubscription`/`RefreshSubscription`） | **否**——lead 明确远端拉取本轮不做；因此输入框与刷新按钮一律不渲染（**2026-10-16 更新**：daemon **已宣告**该能力，`crates/xt-daemon/src/lib.rs:354` ⇒ 本行答案改为**是**，输入框与刷新按钮按门控渲染，`apps/ui/src/pages/Settings.tsx:171`（输入框 `:317`、刷新按钮 `:376`）；「否」保留为 2026-09-29 口径） |
 | `tun_mode` | 仪表板顶部的**大启动按钮**（全屏唯一启动/停止控件）；**没有模式选择器** | 是（**2026-10-01 更新（T2）**：本版打开 TUN 通路并宣告；未宣告则大按钮禁用并说真因） |
 
 **导航本身的处理**：四个一级导航项是「页面」，其中仪表盘/节点/日志/设置各自的主体能力
@@ -144,6 +144,9 @@ T1 打开应用默认落在仪表盘、T2 换节点两步到底）。把它放�
 **诚实标注**：这条路径的「添加并拉取」只在 `subscription_fetch` 已宣告时才成立；
 本轮不宣告它，因此**首跑路径在界面上走不通**（节点只能靠 daemon 侧的订阅文件）。
 这不是可以含糊过去的取舍，是必须上报的产品后果。
+**2026-10-16 更新**：daemon **已宣告** `subscription_fetch`（`crates/xt-daemon/src/lib.rs:354`）⇒
+「不宣告 ⇒ 首跑路径走不通」这一条**不再成立**：设置页订阅区有添加输入框（`Settings.tsx:317`），
+节点页也给出指向它的提示（`apps/ui/src/pages/Nodes.tsx:86-90`）。上面两句是 2026-09-29 的当时状态，保留。
 
 ## 5. 导航禁令（本轮明确不出现的入口）
 
@@ -157,7 +160,7 @@ T1 打开应用默认落在仪表盘、T2 换节点两步到底）。把它放�
 | 重试 / 自动换节点按钮 | 契约里没有「重试」这个 Request | 切节点失败即终态（I2） | 禁语扫描 + 无「重试」按钮 |
 | 探测入口（当未宣告 `probe`） | `Request::ProbeNodes` 存在，但能力未宣告 | 由 daemon 决定 | `capabilities` 不含 `probe` → `probe-button` 不存在 |
 | 订阅只读区（当未宣告 `subscriptions`） | `ListSubscriptions` 存在 | 由 daemon 决定 | `capabilities` 不含 `subscriptions` → `subscriptions-section` 不存在 |
-| 订阅写入口（当未宣告 `subscription_fetch`） | `AddSubscription`/`RefreshSubscription` 存在，但远端拉取本轮不做 | 由 daemon 决定 | `capabilities` 不含 `subscription_fetch` → `add-subscription-button`/`refresh-subscription-button`/`subscription-url-input` 全不存在 |
+| 订阅写入口（当未宣告 `subscription_fetch`） | `AddSubscription`/`RefreshSubscription` 存在，但远端拉取本轮不做（**2026-10-16 更新**：远端拉取已实现并宣告，`crates/xt-daemon/src/lib.rs:354`） | 由 daemon 决定 | `capabilities` 不含 `subscription_fetch` → `add-subscription-button`/`refresh-subscription-button`/`subscription-url-input` 全不存在 |
 | 统计卡（当未宣告 `stats`） | `StatsView` 存在 | 由 daemon 决定 | `capabilities` 不含 `stats` → 不渲染统计卡 |
 
 **订阅为什么没有独立导航项**：本轮订阅的唯一作用是**生成节点目录**（`xt-nodes` 消费
@@ -171,6 +174,10 @@ T1 打开应用默认落在仪表盘、T2 换节点两步到底）。把它放�
 本轮只宣告前者，所以正确形态是：**只读区在、写入口一个都没有**。
 不给出「添加订阅」按钮（哪怕灰色/点了报 `unsupported`）——那是一个假控件。
 代价（用户无法在界面里导入新订阅）是真实的产品后果，要如实写进最终报告。
+**2026-10-16 更新**：daemon 现在**两个都宣告**（`Capability::SubscriptionFetch`，
+`crates/xt-daemon/src/lib.rs:354`）⇒ 正确形态是「只读区在，**写入口也在**」，写入口仍由
+`capabilities` 门控（`apps/ui/src/pages/Settings.tsx:171`）。上面「只宣告前者 / 写入口一个都没有」
+是 2026-09-29 的当时状态，保留。
 
 ## 6. 与旧版（v0.9.2）IA 的差异及理由
 

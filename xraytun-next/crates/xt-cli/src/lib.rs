@@ -20,8 +20,8 @@ use clap::{Parser, Subcommand};
 use tokio::sync::broadcast;
 use xt_contract::error::{bad_request, internal, ErrorBody, ErrorCode};
 use xt_contract::model::{
-    Capability, ConnectionView, LogLevel, NodeId, NoticeSeverity, ProbeResult, RunMode,
-    SettingsPatch, SettingsView, Stage,
+    Capability, ConnectionView, LogLevel, NodeId, NodeSource, NoticeSeverity, ProbeResult, RunMode,
+    SettingsPatch, SettingsView, Stage, SubscriptionId,
 };
 use xt_contract::protocol::{Event, Request, Response};
 use xt_ipc::Client;
@@ -36,7 +36,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
     name = "xt-cli",
     version,
     about = "xraytun-next 无头客户端：用与 UI 相同的契约驱动 daemon",
-    long_about = "本轮支持本地订阅原文解析（`subscriptions`）；远端拉取（`add-subscription` / `refresh-subscription`）属于 subscription_fetch 能力，本轮未宣告，会以非 0 退出。"
+    long_about = "订阅三条路都真发请求：`subscriptions` 列出订阅、`add-subscription` / `refresh-subscription` 让 daemon 联网拉取、`import-nodes` 导入你粘贴的节点原文。能力没宣告时子命令会如实失败，不会假装成功。"
 )]
 pub struct Cli {
     /// daemon 的 AF_UNIX socket 路径。
@@ -98,27 +98,34 @@ pub enum CliCommand {
         #[arg(long)]
         log_level: Option<String>,
     },
-    /// 本地订阅目录（只读展示；远端拉取不在本轮）。
+    /// 列出 daemon 已知的订阅（本地文件那条 + 已添加的远端订阅）。
     Subscriptions,
-    /// 本轮不支持：新增订阅属于远端拉取语义（`subscription_fetch` 未宣告）。
+    /// 添加订阅：daemon 联网拉取正文、解析后落盘（URL 里的令牌不进日志）。
     AddSubscription {
+        /// 订阅 URL（必须 http:// 或 https://）。
         url: String,
     },
-    /// 本轮不支持：刷新订阅属于远端拉取语义（`subscription_fetch` 未宣告）。
+    /// 刷新一条订阅：重新联网拉取并按 id 覆盖它的节点。
     RefreshSubscription {
+        /// 订阅 id（`xt-cli subscriptions` 里的第一列）。
         id: String,
+    },
+    /// 导入你粘贴的节点原文 / 分享链接（**只做本地解析，不联网**）。
+    ImportNodes {
+        /// 节点原文；传 `-` 表示从 stdin 读（订阅原文太长时用管道喂，绕开命令行长度限制）。
+        ///
+        /// `allow_hyphen_values`：正文可能是 base64，也可能就是单词 `-`；
+        /// 不打开它，clap 会把 `-` 当成「未知选项」直接报用法错误。
+        #[arg(allow_hyphen_values = true)]
+        payload: String,
     },
 }
 
 /// 解析参数并以进程退出码返回：0 = 成功，1 = daemon/IO 报错，2 = 用法或能力不支持。
 pub async fn run(cli: Cli) -> i32 {
     // `--socket` 缺失属用法错误：不是「连不上」，也不该被当成 io 错报。
-    // 只有纯本地拒绝的 `add-subscription` / `refresh-subscription` 不需要 socket。
-    let needs_socket = !matches!(
-        cli.command,
-        CliCommand::AddSubscription { .. } | CliCommand::RefreshSubscription { .. }
-    );
-    if needs_socket && cli.socket.is_none() {
+    // 所有子命令都要连 daemon —— 订阅拉取执行在 daemon 侧（CLI 自己不联网）。
+    if cli.socket.is_none() {
         eprintln!("必须指定 --socket <path>（用 --help 看用法）");
         return 2;
     }
@@ -175,14 +182,42 @@ async fn execute(cli: &Cli) -> Result<i32, ErrorBody> {
             client.close().await;
             Ok(0)
         }
-        // 拉取语义（`SubscriptionFetch`）未宣告 → 子命令必须失败，
-        // 而不是留一个看起来能用的入口（契约 §3.1）。
-        CliCommand::AddSubscription { .. } | CliCommand::RefreshSubscription { .. } => {
-            eprintln!(
-                "本版本不提供订阅远端拉取（capability subscription_fetch 未宣告）；\
-                 请用 daemon 的 --subscription-file 提供本地订阅原文。"
-            );
-            Ok(2)
+        // 订阅拉取（`subscription_fetch`）已宣告 → 这里真发请求。
+        // CLI 是「无头等价入口」：它比 UI 少一条路，就等于把等价性破坏了。
+        // 打印时只出现 host（URL 里通常带令牌），失败原因由 daemon 原样返回。
+        CliCommand::AddSubscription { url } => {
+            let client = connect(cli).await?;
+            let outcome = client.request(Request::AddSubscription { url: url.clone() }).await?;
+            expect_ok(outcome)?;
+            println!("已添加订阅 {}，用 `xt-cli subscriptions` 看节点数", redact_url(url));
+            client.close().await;
+            Ok(0)
+        }
+        CliCommand::RefreshSubscription { id } => {
+            let client = connect(cli).await?;
+            let outcome = client
+                .request(Request::RefreshSubscription { id: SubscriptionId::new(id.clone()) })
+                .await?;
+            expect_ok(outcome)?;
+            println!("已刷新订阅 {id}，用 `xt-cli subscriptions` 看节点数");
+            client.close().await;
+            Ok(0)
+        }
+        CliCommand::ImportNodes { payload } => {
+            let payload = read_payload(payload)?;
+            let client = connect(cli).await?;
+            let outcome = client.request(Request::ImportNodes { payload }).await?;
+            expect_ok(outcome)?;
+            // 只报从 daemon 真拿到的数字，不凭「发送成功」推断导入了几个。
+            let nodes = match client.request(Request::ListNodes).await? {
+                Response::Nodes { nodes } => nodes,
+                other => return Err(unexpected("nodes", &other)),
+            };
+            let manual =
+                nodes.iter().filter(|node| matches!(node.source, NodeSource::Manual)).count();
+            println!("已导入：手工来源共 {manual} 个，节点总数 {}", nodes.len());
+            client.close().await;
+            Ok(0)
         }
         CliCommand::Hello => {
             let client = connect(cli).await?;
@@ -489,6 +524,42 @@ fn parse_log_level(text: &str) -> Result<LogLevel, ErrorBody> {
     }
 }
 
+/// 只接受同步完成的 `Ok`。`Accepted` 是「已受理、终态等事件」，不是这里要的语义。
+fn expect_ok(response: Response) -> Result<(), ErrorBody> {
+    match response {
+        Response::Ok => Ok(()),
+        other => Err(unexpected("ok", &other)),
+    }
+}
+
+/// `payload` 参数 → 要发给 daemon 的正文；`-` 表示从 stdin 读。
+fn read_payload(payload: &str) -> Result<String, ErrorBody> {
+    if payload != "-" {
+        return Ok(payload.to_string());
+    }
+    use std::io::Read;
+    let mut body = String::new();
+    std::io::stdin()
+        .read_to_string(&mut body)
+        .map_err(|err| internal(format!("从 stdin 读取节点原文失败: {err}")))?;
+    Ok(body)
+}
+
+/// 把 URL 压成 `scheme://host/…`：CLI 的输出会进日志文件与聊天记录，令牌不能跟着走。
+fn redact_url(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if authority.is_empty() {
+                format!("{scheme}://…")
+            } else {
+                format!("{scheme}://{authority}/…")
+            }
+        }
+        None => "订阅 URL".to_string(),
+    }
+}
+
 fn unexpected(what: &str, response: &Response) -> ErrorBody {
     internal(format!("{what} 收到了非预期的应答: {response:?}"))
 }
@@ -615,6 +686,8 @@ mod tests {
         parse(&["xt-cli", "--socket", "/tmp/x.sock", "subscriptions"]);
         parse(&["xt-cli", "--socket", "/tmp/x.sock", "add-subscription", "https://example.com/sub"]);
         parse(&["xt-cli", "--socket", "/tmp/x.sock", "refresh-subscription", "sub-1"]);
+        parse(&["xt-cli", "--socket", "/tmp/x.sock", "import-nodes", "vless://a@b:443"]);
+        parse(&["xt-cli", "--socket", "/tmp/x.sock", "import-nodes", "-"]);
         let cli = parse(&["xt-cli", "--socket", "/tmp/x.sock", "--json", "status"]);
         assert!(cli.json);
         assert_eq!(cli.timeout_ms, DEFAULT_TIMEOUT_MS);
@@ -635,13 +708,43 @@ mod tests {
         assert!(parse_log_level("loud").is_err());
     }
 
-    /// 拉取语义的子命令必须失败（`subscription_fetch` 未宣告），而不是看起来能用。
+    /// 能力宣告了就必须**真发请求**：没有 daemon 时这三个子命令一律 io 失败（exit 1），
+    /// 而不是像「不支持」那样固定 exit 2 —— 否则 CLI 会谎报「本版本不提供」。
     #[tokio::test]
-    async fn fetch_semantics_commands_exit_non_zero() {
+    async fn subscription_commands_need_a_daemon_and_report_io() {
+        let dir = std::env::temp_dir().join(format!("xt-cli-fetch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let socket = dir.join("nope.sock");
+        let socket = socket.to_str().expect("路径");
+        for args in [
+            vec!["xt-cli", "--socket", socket, "add-subscription", "https://example.com/sub"],
+            vec!["xt-cli", "--socket", socket, "refresh-subscription", "sub-1"],
+            vec!["xt-cli", "--socket", socket, "import-nodes", "vless://a@b:443"],
+        ] {
+            assert_eq!(run(parse(&args)).await, 1, "应报 io 错：{args:?}");
+        }
+    }
+
+    /// 缺 `--socket` 仍是用法错误（exit 2）：连不上与写错命令是两回事。
+    #[tokio::test]
+    async fn subscription_commands_still_need_the_socket_flag() {
         let add = parse(&["xt-cli", "add-subscription", "https://example.com/sub"]);
         assert_eq!(run(add).await, 2);
         let refresh = parse(&["xt-cli", "refresh-subscription", "sub-1"]);
         assert_eq!(run(refresh).await, 2);
+    }
+
+    #[test]
+    fn read_payload_passes_literal_through_and_only_dash_means_stdin() {
+        assert_eq!(read_payload("vless://a@b:443").expect("直传"), "vless://a@b:443");
+    }
+
+    #[test]
+    fn redact_url_keeps_only_scheme_and_host() {
+        assert_eq!(redact_url("https://a.com/p?token=SECRET"), "https://a.com/…");
+        assert!(!redact_url("https://a.com/p?token=SECRET").contains("SECRET"));
+        assert_eq!(redact_url("不是 URL"), "订阅 URL");
     }
 
     /// `subscriptions` 是真实现：没有 daemon 时它应报 io 失败（exit 1），

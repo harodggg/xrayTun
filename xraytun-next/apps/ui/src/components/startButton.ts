@@ -23,7 +23,7 @@ export interface StartButtonInput {
 
 export interface StartButtonView {
   label: string;
-  action: 'start' | 'stop' | 'import' | 'none';
+  action: 'start' | 'stop' | 'import' | 'select' | 'none';
   disabled: boolean;
   danger: boolean; // true 仅当 action === 'stop'
   note: string | null; // 按钮下方说明（逐字）
@@ -111,13 +111,15 @@ export function startButtonView(input: StartButtonInput): StartButtonView {
   }
 
   // 8. 未连接且没有选中节点。
+  // 这一步最容易变成死路：按钮灰着、只有一句「未选择节点」，真人不知道该去哪点。
+  // 所以说明必须带**下一步在哪**（D4）：下面的导航按钮 + 节点页那一行的按钮名都写出来。
   if (nodeId === null) {
     return {
-      label: '启动',
-      action: 'none',
-      disabled: true,
+      label: '选择节点',
+      action: 'select',
+      disabled: false,
       danger: false,
-      note: '未选择节点',
+      note: '还没选节点 —— 点这里或下面的「选择节点」，在节点页点某一行的「选为当前节点」',
     };
   }
 

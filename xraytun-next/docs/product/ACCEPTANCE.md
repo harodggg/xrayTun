@@ -81,16 +81,16 @@
 | **UI-03** | 未知不许显示成默认值 | `stats=None` → 「未采样」（不是 0）；`datapath.pid=None` → 界面不出现 pid 文本；`selected_node=None` → 不出现任何节点名 | ui / ux | **待验证** |
 | **UI-04** | daemon 身份不写死 | 用契约构造的 `Response::Hello{daemon_version:"9.9.9-test"}` 驱动界面，断言该字符串出现在界面上；同时 grep 生产源码里没有硬编码版本常量 | frontend + ui / ux | **待验证** |
 | **UI-05** | seq 跳号对用户可见（不静默漂移） | 注入 `seq = 5` 后下一帧 `seq = 7`：断言 CLI/界面产出可见报告（通知或日志），不得静默续流（`protocol.rs:11-12`） | backend-1 + frontend / ux | **待验证** |
-| **CAP-01** | **能力必须由 `capabilities` 宣告；界面只渲染已宣告的入口**（未实现 = 入口不存在，不是灰按钮/禁用态） | 用契约构造的三个 `DaemonHello` fixture 驱动界面：① 含 `Capability::{Subscriptions,Probe}` → 订阅区块与探测入口都存在；② 只含 `Subscriptions`（本轮默认形态，`SubscriptionFetch` 不宣告）→ 探测入口 `querySelector` 为 `null`；③ 三者共同断言：**「添加订阅 / 刷新订阅」入口在任何 fixture 下都不存在**（远端拉取本轮不做），且不存在 `disabled` 的替代控件 | frontend + ui / ux | **待验证** |
+| **CAP-01** | **能力必须由 `capabilities` 宣告；界面只渲染已宣告的入口**（未实现 = 入口不存在，不是灰按钮/禁用态） | 用契约构造的三个 `DaemonHello` fixture 驱动界面：① 含 `Capability::{Subscriptions,Probe}` → 订阅区块与探测入口都存在；② 只含 `Subscriptions`（本轮默认形态，`SubscriptionFetch` 不宣告 → **2026-10-16 更新**：本轮的默认形态已含 `SubscriptionFetch`，`crates/xt-daemon/src/lib.rs:354`）→ 探测入口 `querySelector` 为 `null`；③ 三者共同断言：**「添加订阅 / 刷新订阅」入口在任何 fixture 下都不存在**（远端拉取本轮不做 → **2026-10-16 更新**：该断言已作废——`SubscriptionFetch` 已宣告，入口在含 `subscription_fetch` 的 fixture 下**出现**，`apps/ui/src/pages/Settings.tsx:317` / `:376`；旧断言保留为 2026-09-29 口径），且不存在 `disabled` 的替代控件 | frontend + ui / ux | **待验证** |
 | **CAP-02** | 不存在第二套开关来绕过 `capabilities` | `grep -rn "capabilities" apps/ui/src/`：capability → 入口的映射是唯一判据；不得有独立的 feature flag / 环境变量 / 版本号比较来控制入口 | frontend / lead | **待验证** |
-| **CAP-03** | `Unsupported` **只能**表示「本版本不提供该能力」，绝不包装真实失败 | 审 daemon 里每个 `ErrorCode::Unsupported` / `unsupported(` 调用点（`error.rs:33/52/105-106`）：每处都必须对应一个**未宣告的能力**（`AddSubscription`/`RefreshSubscription`/TunMode 等）；反向造例——让核心退出/配置非法/IO 失败各触发一次，断言错误码是 `core_exited_early`/`config_invalid`/`io` 而**不是** `unsupported`。规则依据：契约冻结 §3.1 | backend-3 / lead | **待验证** |
+| **CAP-03** | `Unsupported` **只能**表示「本版本不提供该能力」，绝不包装真实失败 | 审 daemon 里每个 `ErrorCode::Unsupported` / `unsupported(` 调用点（`error.rs:33/52/105-106`）：每处都必须对应一个**未宣告的能力**（`AddSubscription`/`RefreshSubscription`/TunMode 等 → **2026-10-16 更新**：`AddSubscription`/`RefreshSubscription` 已不再走 `Unsupported`——daemon 真拉取，`crates/xt-daemon/src/lib.rs:1071-1072`；当前生产路径上的 `Unsupported` 调用点只剩 `crates/xt-macosnet/src/stub.rs:14-36`，即非 macOS 上的 TUN 通路）；反向造例——让核心退出/配置非法/IO 失败各触发一次，断言错误码是 `core_exited_early`/`config_invalid`/`io` 而**不是** `unsupported`。规则依据：契约冻结 §3.1 | backend-3 / lead | **待验证** |
 
 ### 2.6 本地订阅文件（D8）
 
 | ID | 一句话判据 | 怎么验 | 负责（实现 / 独立验证） | 状态 |
 | --- | --- | --- | --- | --- |
 | **SUB-01** | 本地订阅原文能被解析成真实节点，且来源如实 | 把一份测试用订阅原文放到 `$state_dir/subscription.txt`（或 `--subscription-file` 指定），启动后 `ListNodes`：断言节点数 > 0、每个 `endpoint` 可解析、`source == subscription{id}`；4 种格式的用例覆盖 `xt-subs` 的既有解析路径 | backend-2 / ux | **待验证** |
-| **SUB-02** | 不接受远端拉取，也不假装接受 | 界面/CLI **不得**出现订阅 URL 输入框或「刷新订阅」入口；对 `Request::AddSubscription{url}` / `RefreshSubscription{id}`，daemon 必须回 `Outcome::Error{code: Unsupported}`（不许 `Accepted` 后无终态）。前置依赖**已解除**：`ErrorCode::Unsupported` 已落地（`error.rs:33/52/105-106`）、`Capability::SubscriptionFetch` 已落地（`model.rs:317`），见 §7 | backend-2 + frontend / ux | **待验证** |
+| **SUB-02** | 不接受远端拉取，也不假装接受 | 界面/CLI **不得**出现订阅 URL 输入框或「刷新订阅」入口；对 `Request::AddSubscription{url}` / `RefreshSubscription{id}`，daemon 必须回 `Outcome::Error{code: Unsupported}`（不许 `Accepted` 后无终态）。前置依赖**已解除**：`ErrorCode::Unsupported` 已落地（`error.rs:33/52/105-106`）、`Capability::SubscriptionFetch` 已落地（`model.rs:317`），见 §7。**2026-10-16 更新**：本判据的前提已被实现推翻——`SubscriptionFetch` 已由 daemon 宣告（`crates/xt-daemon/src/lib.rs:354`），对这两个请求 daemon **真拉取**（`lib.rs:1071-1072`），界面订阅区**有** URL 输入框与「刷新」按钮（`apps/ui/src/pages/Settings.tsx:317` / `:376`），`xt-cli add-subscription` / `refresh-subscription` 也真连 daemon（`crates/xt-cli/src/lib.rs:184` / `:192`，缺 `--socket` 才是 exit 2、连不上是 exit 1）；旧口径保留为 2026-09-29 语义 | backend-2 + frontend / ux | **待验证**（按 2026-10-16 更新后的语义） |
 
 ### 2.7 失败诚实归因（D7）
 
@@ -155,7 +155,7 @@
 | **NV-04** | 地理 / 拓扑可视化（流向图、地球仪、规则链） | 本轮不做；数据源（访问日志/规则链/位置查询）不存在 | 数据源落地之后 |
 | **NV-05** | 自动重连 / 回落 / 重试 / 看门狗 | **永不做**（I2 + v0.9.2 用户裁决）；不是「待验证」——`ErrorCode` 里连成员都没有 | 需先在 `ErrorCode` 加成员并过评审，再做 |
 | **NV-06** | 真机 macOS 交互：`⌘,`、托盘、Esc、helper 弹窗、真实切换耗时 | 无 macOS 机器（`0.9-USER-TEST.md §3.2` 人工清单；`HANDOFF.md §2.2` 真机验收只有用户能做） | 用户在真机上点一遍并回填证据 |
-| **NV-07** | 订阅远端拉取（http/https）/ 分流 / 开机自启 / 自更新 / 托盘 | 本轮不做（`NON-GOALS.md §1.7`）；订阅区块只读，无添加/刷新入口 | lead 裁定并写入范围之后 |
+| **NV-07** | 订阅远端拉取（http/https）/ 分流 / 开机自启 / 自更新 / 托盘 | 本轮不做（`NON-GOALS.md §1.7`）；订阅区块只读，无添加/刷新入口。**2026-10-16 更新**：其中「订阅远端拉取（http/https）」已被实现推翻——daemon 宣告 `Capability::SubscriptionFetch`（`crates/xt-daemon/src/lib.rs:354`）、`/usr/bin/curl` 拉取（`crates/xt-daemon/src/subs.rs:196`）、界面有添加/刷新入口（`Settings.tsx:317` / `:376`）；本条**余下各项**（分流 / 开机自启 / 自更新 / 托盘）仍不验证 | 本条余下各项：lead 裁定并写入范围之后（订阅远端拉取一项见 SUB-02 的 2026-10-16 更新） |
 | **NV-08** | 延迟探测（probe）的完整验收 | 条件交付（§4） | `Capability::Probe` 被宣告之后 |
 | **NV-09** | 像素级布局判据（旧 PRD 的 `top < 636` 之类） | 新仓库没有 `?preview=1`（契约冻结 §7 禁止运行时 mock）；jsdom 无布局（`0.9-USER-TEST.md §5.2`） | 有真实渲染环境的 UI 测试通道；在那之前只用 DOM 顺序/文本/字段判据 |
 | **NV-10** | 旧仓库 v0.9.2 的所有既有行为在重写后的**等价性** | 重写不复用旧实现（旧仓库只读参考）；逐项等价性不是本轮目标 | 按功能逐轮补回时各自建立判据 |
@@ -187,7 +187,7 @@ lead 2026-09-29 的裁定需要动冻结契约（`crates/xt-contract/**` 是 lea
 
 | # | 变更 | 落地位置（已复核） | 影响的判据 |
 | --- | --- | --- | --- |
-| P1 | 新增 `Capability::SubscriptionFetch`（本轮**不宣告**） | `model.rs:317`，与 `Subscriptions` 并列；粒度理由在变体注释里（粗粒度会逼界面显示按不动的「刷新」假控件） | CAP-01、SUB-02 |
+| P1 | 新增 `Capability::SubscriptionFetch`（本轮**不宣告** → **2026-10-16 更新：已由 daemon 宣告**，`crates/xt-daemon/src/lib.rs:354`） | `model.rs:317`，与 `Subscriptions` 并列；粒度理由在变体注释里（粗粒度会逼界面显示按不动的「刷新」假控件） | CAP-01、SUB-02 |
 | P2 | 新增 `ErrorCode::Unsupported` + `as_str` + 便捷构造 | 变体 `error.rs:33`；`as_str` `error.rs:52`（`"unsupported"`）；`unsupported(msg)` `error.rs:105-106`。现共 **11** 个成员 | SUB-02、CAP-03 |
 | P3 | 能力宣告 + `Unsupported` 使用纪律成文 | 契约冻结 **§3.1**：`capabilities` 是唯一事实来源；未宣告能力的请求返回 `Unsupported`；该码**只能**表示「本版本不提供」，**不得**包装「试了但失败」 | CAP-01、CAP-02、CAP-03、ERR-03 |
 

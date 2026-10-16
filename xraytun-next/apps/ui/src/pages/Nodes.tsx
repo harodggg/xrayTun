@@ -25,6 +25,7 @@ export function Nodes() {
   const selectedId = settings?.selected_node ?? null;
   const canProbe = hasCapability(hello, 'probe');
   const canImport = hasCapability(hello, 'node_import');
+  const canFetchSubscriptions = hasCapability(hello, 'subscription_fetch');
 
   const onProbe = async (nodeId: string) => {
     setProbePending((pending) => ({ ...pending, [nodeId]: true }));
@@ -82,6 +83,11 @@ export function Nodes() {
           <p className="page__hint">
             粘贴订阅原文（base64 / 链接列表 / Clash YAML / Xray JSON 都可）或一串分享链接，点「导入」把它们加进节点目录。只在本机解析，不联网。
           </p>
+          {canFetchSubscriptions && (
+            <p className="page__hint" data-testid="import-nodes-fetch-hint">
+              手里只有订阅链接？到「设置 → 订阅」把 URL 填进去，daemon 会联网拉取，节点同样会出现在这里。
+            </p>
+          )}
           <textarea
             className="nodes__import-input mono"
             data-testid="import-nodes-input"

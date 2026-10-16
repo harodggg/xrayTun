@@ -23,6 +23,7 @@
 
 pub mod flow;
 mod helper;
+mod subs;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -32,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 use xt_bus::{Bus, EventStream};
-use xt_contract::error::{bad_request, internal, unsupported, ErrorBody, ErrorCode};
+use xt_contract::error::{bad_request, internal, not_found, ErrorBody, ErrorCode};
 use xt_contract::model::{
     Capability, ConnectionView, DaemonHello, LogLevel, LogLine, NodeId, NodeSource, NodeView,
     Notice, NoticeSeverity, RunMode, SettingsView, StatsView, SubscriptionId, SubscriptionView,
@@ -89,6 +90,10 @@ impl DaemonConfig {
     pub fn imported_nodes_path(&self) -> PathBuf {
         self.state_dir.join("imported-nodes.json")
     }
+    /// 订阅状态（**含完整 URL 的令牌**，落盘权限 0600，见 `subs::save`）。
+    pub fn subscriptions_path(&self) -> PathBuf {
+        self.state_dir.join("subscriptions.json")
+    }
 }
 
 /// daemon 句柄。
@@ -116,7 +121,7 @@ pub(crate) struct Shared {
     op_lock: Mutex<()>,
     /// 探测独立串行化：它用自己临时实例，不该被主连接状态挡住。
     probe_lock: Mutex<()>,
-    subscription: Mutex<Option<SubscriptionView>>,
+    subscriptions: Mutex<Vec<subs::SubscriptionRecord>>,
     started_at_ms: u64,
 }
 
@@ -333,7 +338,8 @@ impl Shared {
             // 不再等 S6 真机验收。**宣告的是「本版本提供这条通路」（代码事实），
             // 不是「TUN 已经能接管流量」**：真机验收（helper 安装/回滚、utun 接管、
             // 路由与 DNS 提交）仍然没有证据，所以界面与 release notes 一律不许写成「已可用」。
-            // 远端拉取（SubscriptionFetch）仍未宣告。
+            // 订阅拉取（SubscriptionFetch）本轮宣告：实现是 `/usr/bin/curl`（零新增依赖），
+            // 端到端行为由 `tests/e2e_real_xray.rs` 对着本地 HTTP 服务验证 —— 不是「宣称」。
             capabilities: vec![
                 Capability::ProxyMode,
                 Capability::TunMode,
@@ -343,6 +349,9 @@ impl Shared {
                 // 手工导入（只做本地解析）。**为什么必须宣告**：界面靠能力表决定要不要
                 // 渲染「导入」入口 —— 没有它，真人打开 App 只能看到「暂无节点」而无处可贴。
                 Capability::NodeImport,
+                // 远端订阅拉取（`/usr/bin/curl`，零新增依赖）。与 `NodeImport` 分开宣告：
+                // 前者联网、后者只本地解析 —— 界面上的两个入口与门控也随之不同。
+                Capability::SubscriptionFetch,
             ],
             pid: std::process::id(),
             started_at_ms: self.started_at_ms,
@@ -368,7 +377,7 @@ impl Shared {
     /// 导入节点：解析用户粘贴的订阅原文 / 分享链接 → 与已导入的合并（按 id 去重）→
     /// 原子落盘 → 替换目录里的 `Manual` 来源。
     ///
-    /// 只做**本地解析**，不联网（远端拉取是 `SubscriptionFetch`，那条能力仍未宣告）。
+    /// 只做**本地解析**，不联网（远端拉取是 `SubscriptionFetch`，见 `add_subscription`）。
     /// 失败原样上报（`InvalidRequest` / `Io`），**绝不静默导入 0 个**。
     async fn import_nodes(&self, payload: String) -> Outcome {
         let parsed = match xt_subs::parse(&payload) {
@@ -390,6 +399,135 @@ impl Shared {
         )
         .await;
         Outcome::ok(Response::Ok)
+    }
+
+    /// 新增订阅：校验 URL → 拉取 → 解析 → 落盘 → 进目录。
+    ///
+    /// 任一步失败都**原样上报**（`InvalidRequest` / `Io` / 解析错误），
+    /// 绝不静默存一条空订阅 —— 那会让用户以为「加上了」。
+    async fn add_subscription(&self, raw_url: String) -> Outcome {
+        let url = match subs::validate_url(&raw_url) {
+            Ok(url) => url,
+            Err(error) => return Outcome::error(error),
+        };
+        let body = match subs::fetch_body(&url).await {
+            Ok(body) => body,
+            Err(error) => return Outcome::error(error),
+        };
+        let parsed = match xt_subs::parse(&body) {
+            Ok(parsed) => parsed,
+            Err(error) => return Outcome::error(error),
+        };
+        let node_count = parsed.nodes.len();
+        let path = self.config.subscriptions_path();
+        {
+            let mut records = self.subscriptions.lock().await;
+            let id = subs::next_id(records.as_slice());
+            let mut next = records.clone();
+            next.push(subs::SubscriptionRecord {
+                id: id.clone(),
+                url: url.clone(),
+                fetched_at_ms: Some(now_ms()),
+                nodes: parsed.nodes.iter().map(StoredNode::from).collect(),
+                last_error: None,
+            });
+            if let Err(error) = subs::save(&path, &next) {
+                return Outcome::error(error);
+            }
+            *records = next;
+            drop(records);
+            self.catalog.lock().await.replace_source(
+                NodeSource::Subscription { id: SubscriptionId::new(id) },
+                parsed.nodes,
+            );
+        }
+        self.log_daemon(
+            LogLevel::Info,
+            // 只记 host：订阅 URL 里通常带账号令牌。
+            format!("新增订阅 {}：{node_count} 个节点", subs::redact_url(&url)),
+        )
+        .await;
+        Outcome::ok(Response::Ok)
+    }
+
+    /// 刷新一条订阅：重新拉取 → 替换它的节点。
+    ///
+    /// 失败时**既存 `last_error` 也原样上报**：存下来是为了下次打开界面还能看到原因，
+    /// 上报是为了这次点击立刻有反馈。
+    async fn refresh_subscription(&self, id: SubscriptionId) -> Outcome {
+        if id.as_str() == "local" {
+            return Outcome::error(bad_request(
+                "本地文件订阅不受「刷新」管理：它每次启动都由 --subscription-file 重新读取",
+            ));
+        }
+        // 先取出 URL 就放开锁：拉取最长 20 秒，不能把 `ListSubscriptions` 一起堵住。
+        let url = {
+            let records = self.subscriptions.lock().await;
+            match records.iter().find(|record| record.id == id.as_str()) {
+                Some(record) => record.url.clone(),
+                None => return Outcome::error(not_found(format!("订阅 {id} 不存在"))),
+            }
+        };
+        let path = self.config.subscriptions_path();
+        let body = match subs::fetch_body(&url).await {
+            Ok(body) => body,
+            Err(error) => return self.record_subscription_error(&path, &id, error).await,
+        };
+        let parsed = match xt_subs::parse(&body) {
+            Ok(parsed) => parsed,
+            Err(error) => return self.record_subscription_error(&path, &id, error).await,
+        };
+        let node_count = parsed.nodes.len();
+        {
+            let mut records = self.subscriptions.lock().await;
+            let Some(index) = records.iter().position(|record| record.id == id.as_str()) else {
+                return Outcome::error(not_found(format!("订阅 {id} 不存在")));
+            };
+            // clone-swap：**先落盘、写成功后**才改内存。反过来（先改内存）一旦写盘失败，
+            // 内存说「刷新成功、有 N 个节点」、磁盘还是旧值，而下面的目录更新被跳过 ——
+            // 界面与节点列表立刻互相矛盾，重启后磁盘那份又赢。`add_subscription`
+            // 与 `record_subscription_error` 用的都是这个写法。
+            let mut next = records.clone();
+            next[index].nodes = parsed.nodes.iter().map(StoredNode::from).collect();
+            next[index].fetched_at_ms = Some(now_ms());
+            next[index].last_error = None;
+            // `save` 是同步的、几 KiB，拿锁期间不跨 await。
+            if let Err(error) = subs::save(&path, next.as_slice()) {
+                return Outcome::error(error);
+            }
+            *records = next;
+        }
+        self.catalog.lock().await.replace_source(
+            NodeSource::Subscription { id: id.clone() },
+            parsed.nodes,
+        );
+        self.log_daemon(
+            LogLevel::Info,
+            format!("刷新订阅 {}：{node_count} 个节点", subs::redact_url(&url)),
+        )
+        .await;
+        Outcome::ok(Response::Ok)
+    }
+
+    /// 把一条订阅标记成失败（存 `last_error`），并**原样**把错误交给调用方。
+    async fn record_subscription_error(
+        &self,
+        path: &Path,
+        id: &SubscriptionId,
+        error: ErrorBody,
+    ) -> Outcome {
+        {
+            let mut records = self.subscriptions.lock().await;
+            if let Some(index) = records.iter().position(|record| record.id == id.as_str()) {
+                records[index].last_error = Some(error.clone());
+                let next = records.clone();
+                if let Err(save_error) = subs::save(path, &next) {
+                    return Outcome::error(save_error);
+                }
+                *records = next;
+            }
+        }
+        Outcome::error(error)
     }
 
     // -------------------------------------------------------------- 意图受理
@@ -504,8 +642,24 @@ impl Daemon {
         }
 
         let mut catalog = Catalog::new();
-        let mut subscription = None;
-        load_subscription(&config, &mut catalog, &mut subscription).await;
+        let mut subscriptions = subs::load(&config.subscriptions_path()).await;
+        // ① 先用 `--subscription-file` 的**当前内容**校正列表：`load_subscription` 会摘掉
+        //    上次留下的 `local` 记录，再按文件现状重新登记（文件被删了就不该有这条）。
+        load_subscription(&config, &mut catalog, &mut subscriptions).await;
+        // ② 再把列表里**每条订阅已保存的节点**灌进目录：重启不该依赖网络才能有节点。
+        //
+        //    顺序不能反。反过来的话，`local` 的旧节点会先被灌进目录，而
+        //    `load_subscription` 在文件缺失/解析失败时不会清目录 —— 界面就会出现
+        //    「列表里没有这条订阅，目录里却一直是它的节点」，且每次重启都复现。
+        for record in &subscriptions {
+            if record.nodes.is_empty() {
+                continue;
+            }
+            let source =
+                NodeSource::Subscription { id: SubscriptionId::new(record.id.clone()) };
+            let nodes = record.nodes.iter().cloned().map(xt_subs::ParsedNode::from).collect();
+            catalog.replace_source(source, nodes);
+        }
         load_imported_nodes_into(&config, &mut catalog).await;
 
         let shared = Arc::new(Shared {
@@ -522,7 +676,7 @@ impl Daemon {
             datapath_version: Mutex::new(None),
             op_lock: Mutex::new(()),
             probe_lock: Mutex::new(()),
-            subscription: Mutex::new(subscription),
+            subscriptions: Mutex::new(subscriptions),
             started_at_ms: now_ms(),
         });
 
@@ -530,12 +684,24 @@ impl Daemon {
         shared
             .log_daemon(LogLevel::Info, format!("daemon 装配完成：{node_count} 个节点"))
             .await;
-        if let Some(sub) = shared.subscription.lock().await.as_ref() {
-            if let Some(error) = &sub.last_error {
-                shared
-                    .log_daemon(LogLevel::Error, format!("本地订阅解析失败：{}", error.message))
-                    .await;
-            }
+        // 先把要记的日志收齐再放锁：持锁 await 是死锁的温床（`log_daemon` 自己也要拿锁）。
+        let broken: Vec<String> = {
+            let records = shared.subscriptions.lock().await;
+            records
+                .iter()
+                .filter_map(|record| {
+                    record.last_error.as_ref().map(|error| {
+                        format!(
+                            "订阅 {} 有问题：{}",
+                            subs::redact_url(&record.url),
+                            error.message
+                        )
+                    })
+                })
+                .collect()
+        };
+        for line in broken {
+            shared.log_daemon(LogLevel::Error, line).await;
         }
         Ok(Daemon { shared })
     }
@@ -612,7 +778,7 @@ impl BoundDaemon {
 /// 为什么不直接序列化 `xt_subs::ParsedNode`：那是解析器的输出、只实现了 `Serialize`
 /// （它不是持久化格式）。这里显式列出我们真正要存的东西，让磁盘格式与解析器内部形状解耦。
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct StoredNode {
+pub(crate) struct StoredNode {
     id: String,
     name: String,
     protocol: String,
@@ -725,25 +891,28 @@ async fn load_imported_nodes_into(config: &DaemonConfig, catalog: &mut Catalog) 
 
 /// 读本地订阅文件并灌进目录。
 ///
-/// 远端拉取本轮不做（能力表里也没有 `SubscriptionFetch`）；解析失败**不阻止
-/// daemon 启动**，但必须如实记在 `SubscriptionView.last_error` 与日志里 ——
+/// 它是**文件驱动**的：每次启动都以文件为准（先摘掉上次的 `local` 记录再重读），
+/// 因为「用户改了那个文件」和「文件被删了」都必须立刻反映出来。
+/// 解析失败**不阻止 daemon 启动**，但必须如实记在 `last_error` 与日志里 ——
 /// 悄悄当作「没有节点」会让用户以为订阅是空的。
 async fn load_subscription(
     config: &DaemonConfig,
     catalog: &mut Catalog,
-    subscription: &mut Option<SubscriptionView>,
+    subscriptions: &mut Vec<subs::SubscriptionRecord>,
 ) {
-    let id = SubscriptionId::new("local");
+    let id = "local".to_string();
     let url = config.subscription_file.display().to_string();
+    subscriptions.retain(|record| record.id != id);
+
     let body = match tokio::fs::read_to_string(&config.subscription_file).await {
         Ok(body) => body,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
         Err(err) => {
-            *subscription = Some(SubscriptionView {
+            subscriptions.push(subs::SubscriptionRecord {
                 id,
                 url,
-                node_count: 0,
                 fetched_at_ms: None,
+                nodes: Vec::new(),
                 last_error: Some(ErrorBody::new(
                     ErrorCode::Io,
                     format!("读取订阅文件失败: {err}"),
@@ -755,22 +924,25 @@ async fn load_subscription(
 
     match xt_subs::parse(&body) {
         Ok(parsed) => {
-            let node_count = parsed.nodes.len() as u32;
-            catalog.replace_source(NodeSource::Subscription { id: id.clone() }, parsed.nodes);
-            *subscription = Some(SubscriptionView {
+            let fetched_at_ms = file_mtime_ms(&config.subscription_file);
+            catalog.replace_source(
+                NodeSource::Subscription { id: SubscriptionId::new(id.clone()) },
+                parsed.nodes.clone(),
+            );
+            subscriptions.push(subs::SubscriptionRecord {
                 id,
                 url,
-                node_count,
-                fetched_at_ms: file_mtime_ms(&config.subscription_file),
+                fetched_at_ms,
+                nodes: parsed.nodes.iter().map(StoredNode::from).collect(),
                 last_error: None,
             });
         }
         Err(error) => {
-            *subscription = Some(SubscriptionView {
+            subscriptions.push(subs::SubscriptionRecord {
                 id,
                 url,
-                node_count: 0,
                 fetched_at_ms: file_mtime_ms(&config.subscription_file),
+                nodes: Vec::new(),
                 last_error: Some(error),
             });
         }
@@ -899,23 +1071,15 @@ async fn dispatch(
             Err(error) => (Outcome::error(error), false),
         },
         Request::ListSubscriptions => {
-            let list = shared.subscription.lock().await.clone();
-            (
-                Outcome::ok(Response::Subscriptions {
-                    subscriptions: list.into_iter().collect(),
-                }),
-                false,
-            )
+            let list: Vec<SubscriptionView> =
+                shared.subscriptions.lock().await.iter().map(subs::view).collect();
+            (Outcome::ok(Response::Subscriptions { subscriptions: list }), false)
         }
         // 手工导入：只做**本地解析**（不联网），解析结果落盘并替换 `Manual` 来源。
         Request::ImportNodes { payload } => (shared.import_nodes(payload).await, false),
-        // 远端拉取本轮不做：它是「本版本不提供的能力」，不是「试了但失败」。
-        Request::AddSubscription { .. } | Request::RefreshSubscription { .. } => (
-            Outcome::error(unsupported(
-                "本版本不提供远端订阅拉取；节点来自本地订阅文件（--subscription-file）",
-            )),
-            false,
-        ),
+        // 订阅远端拉取：走 `/usr/bin/curl`（零新增依赖；理由见 subs 模块文档）。
+        Request::AddSubscription { url } => (shared.add_subscription(url).await, false),
+        Request::RefreshSubscription { id } => (shared.refresh_subscription(id).await, false),
         Request::TailLogs { lines } => (
             Outcome::ok(Response::Logs { logs: shared.tail_logs(lines).await }),
             false,

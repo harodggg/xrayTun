@@ -108,6 +108,23 @@ impl Server {
         }
         let listener = UnixListener::bind(path)
             .map_err(|e| io_error(format!("绑定 {} 失败", path.display()), e))?;
+        // 权限收紧到 0600。为什么：unix socket 的**文件权限**就是 connect() 的门禁，
+        // 而这条连接上会回传含订阅令牌的 URL（`ListSubscriptions`）。按 umask 默认
+        // 往往是 0755，同机其他用户就能连上来读。
+        //
+        // **best-effort 而不是硬失败**：拿不到权限时宁可照常启动（并如实告警），
+        // 也不要让「一个 chmod 失败」把 daemon 挡在启动之外 —— 那才是更大的故障。
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o600);
+            if let Err(error) = std::fs::set_permissions(path, mode) {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "socket 权限收紧到 0600 失败：同机其他用户可能连上它并读到订阅 URL"
+                );
+            }
+        }
         Ok(Server { listener, path: path.to_path_buf() })
     }
 

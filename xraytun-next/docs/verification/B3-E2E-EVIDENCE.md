@@ -59,7 +59,8 @@ request to tcp:127.0.0.1:22889 via 127.0.0.1:22723`。
 | disconnect 后进程真的没了 | `/proc/<pid>` 不存在（pid 957442 已消失），`last_error` 为 `null` |
 | TailLogs 是真日志 | 36 行里含 `target=xray.stdout/stderr` 的核心行 |
 | probe 是真 TTFB | 6ms / 5ms（临时实例 + 每节点独立 socks 入站端口，靶点是本机源站） |
-| 能力表 | `[ProxyMode, Stats, Probe, Subscriptions]`，不含 `TunMode` / `SubscriptionFetch` |
+| 能力表（**当时快照**，本次运行输出） | `[ProxyMode, Stats, Probe, Subscriptions]`，不含 `TunMode` / `NodeImport` / `SubscriptionFetch` |
+| 能力表（**2026-10-16 现状**，读代码所得，**不是**一次新运行） | `ProxyMode, TunMode, Stats, Probe, Subscriptions, NodeImport, SubscriptionFetch`（`crates/xt-daemon/src/lib.rs:343-355`，`SubscriptionFetch` 在 `:354`）。本机不能编译、CI 未跑，故只写「代码现状」，不写「已验证」 |
 
 ### 竞态回归（task-9，ux 独立发现）
 
@@ -158,9 +159,9 @@ GUARD PASSED                              # exit=0
 ## 5. 未验证 / 边界
 
 * **TUN 模式未实现**：`Connect{mode: tun}` 返回 `Unsupported`；能力表不宣告 `TunMode`。
-  本轮任何「TUN 已工作」的说法都是假话。
+  本轮任何「TUN 已工作」的说法都是假话。**2026-10-16 更新**：以上为当时快照——daemon 能力表**已宣告** `TunMode`（`crates/xt-daemon/src/lib.rs:345`）、`Connect{mode: tun}` 不再早退；但真机接管（helper 安装/回滚、utun、路由/DNS）仍未经 S6 验收 ⇒ 「TUN 已工作」的说法**依旧禁止**。
 * **远端订阅拉取未实现**：`AddSubscription` / `RefreshSubscription` 返回 `Unsupported`；
-  节点只来自 `--subscription-file`（默认 `<state-dir>/subscription.txt`）。
+  节点只来自 `--subscription-file`（默认 `<state-dir>/subscription.txt`）。**2026-10-16 更新**：已被实现更新——`Capability::SubscriptionFetch` 已宣告（`crates/xt-daemon/src/lib.rs:354`），两条请求由 `add_subscription`（`:408`）/ `refresh_subscription`（`:457`）真执行（`/usr/bin/curl`，`crates/xt-daemon/src/subs.rs:196`）；生产路径上 `Unsupported` 只剩 `crates/xt-macosnet/src/stub.rs`。新增 e2e 用例 `remote_subscription_add_list_and_refresh`（`crates/xt-daemon/tests/e2e_real_xray.rs:734`）与 `remote_subscription_failure_never_leaks_the_url`（`:834`）**已存在**，本机不能编译、CI 未跑 —— 是否通过看 CI，本文件不据此声称「已验证」。
 * E2E 的探测靶点是本机源站（离线可跑）。默认联网靶点 `http://cp.cloudflare.com/generate_204`
   未在本次证据中真跑；daemon 只把它当 URL 使用，链路与环回靶点相同。
 * `/proc/<pid>` 探活在 Linux 上成立；E2E 按契约只在本机 Linux 运行（macOS 需换 `kill(pid,0)`）。

@@ -157,7 +157,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (target: DashboardTarget
   const onStartButton = () => {
     if (button.action === 'start') void runStart();
     else if (button.action === 'stop') void runStop();
-    else if (button.action === 'import') onNavigate('nodes');
+    // 'import'（没有节点）与 'select'（有节点但没选）都导航到节点页 ——
+    // 这是同一条「先去目录里准备一个节点」的路径，不在这里复制导入/选择逻辑。
+    else if (button.action === 'import' || button.action === 'select') onNavigate('nodes');
   };
 
   const meta: string[] = [];

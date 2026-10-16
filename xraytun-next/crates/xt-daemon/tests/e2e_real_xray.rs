@@ -8,14 +8,17 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::error::RecvError;
+use xt_contract::error::{ErrorBody, ErrorCode};
 use xt_contract::model::{
-    Capability, ConnectionView, LogLevel, NodeSource, ProbeResult, RunMode, Stage,
+    Capability, ConnectionView, LogLevel, NodeSource, ProbeResult, RunMode, Stage, SubscriptionId,
+    SubscriptionView,
 };
 use xt_contract::protocol::{Event, Request, Response};
 use xt_daemon::{Daemon, DaemonConfig};
@@ -134,6 +137,56 @@ async fn start_origin() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         }
     });
     (addr, handle)
+}
+
+/// 订阅源站：最小 HTTP/1.1，只用 `std::net::TcpListener` + `std::thread`（**零新增依赖**）。
+///
+/// 为什么不用 tokio（本文件上面那个 `start_origin` 就是 tokio 版）：订阅拉取走的是
+/// `/usr/bin/curl` —— 一个**真子进程**。服务端跑在独立的 OS 线程上，测试的重心就只剩
+/// 「daemon 真的把正文拉回来了」这一件事，不需要再往运行时里塞一个服务任务。
+///
+/// 返回 `(地址, 命中计数)`。计数是「真的联网拉了一次」的证据：断言它 1 → 2，
+/// 才能区分「刷新重新拉了」和「刷新只是把内存里的旧节点又写了一遍」。
+///
+/// 前提：运行环境没有给 curl 设 `http_proxy`（CI 的 Linux/macOS 默认不设）。
+/// 生产代码 `fetch_body` 不传 `--noproxy` —— 测试不替它绕开，否则证的不是同一条路径。
+fn start_subscription_server(body: String) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定订阅源站");
+    let addr = listener.local_addr().expect("订阅源站地址");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+
+        for stream in listener.incoming() {
+            let Ok(mut socket) = stream else { break };
+            // 读到请求头结束就够：我们只认「有一次请求到达」这个事实。
+            let mut head = Vec::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                match socket.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        head.extend_from_slice(&chunk[..n]);
+                        if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            counter.fetch_add(1, Ordering::SeqCst);
+            // `Content-Length` 必须按**字节数**算，`Connection: close` 让 curl 知道读到尾。
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes());
+            let _ = socket.flush();
+        }
+    });
+    (addr, hits)
 }
 
 /// 一次真 SOCKS5 GET：最小握手 + CONNECT + HTTP，返回响应体字节。
@@ -275,6 +328,88 @@ fn process_alive(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// 只跑**控制面**的 daemon 夹具：从不 `Connect`，因此不需要真 xray 二进制。
+///
+/// 为什么不复用 `real_xray_end_to_end` 里的 daemon：那条路径证的是数据面，前提是真 xray
+/// 存在；而「远端订阅拉取」证的是控制面 + `/usr/bin/curl`。把两者揉在一起，会让
+/// 「订阅拉取坏了」和「CI 机器上没装 xray」变成同一条红 —— 排查时没有信息量。
+struct ControlHarness {
+    dir: PathBuf,
+    client: xt_ipc::Client,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    serve: tokio::task::JoinHandle<Result<(), ErrorBody>>,
+}
+
+impl ControlHarness {
+    /// `local_subscription` 传 `Some` 时会写成 `--subscription-file`：daemon 启动时把它
+    /// 读成 id = `"local"` 的那条订阅（用来证明「local 存在也不许刷新」，而不是
+    /// 「local 不存在所以报错」这种假通过）。
+    async fn start(tag: &str, local_subscription: Option<&str>) -> ControlHarness {
+        ControlHarness::start_with_saved_subscriptions(tag, local_subscription, None).await
+    }
+
+    /// `saved_subscriptions` 会先落成 `subscriptions.json` —— 模拟「上次运行留下的状态」。
+    /// 用来验证启动时的**校正**：`--subscription-file` 已经不在时，那份 `local` 记录必须
+    /// 被摘掉，它的节点也不许留在目录里（否则界面会「列表里没有、目录里一直有」）。
+    async fn start_with_saved_subscriptions(
+        tag: &str,
+        local_subscription: Option<&str>,
+        saved_subscriptions: Option<&str>,
+    ) -> ControlHarness {
+        let dir = temp_dir(tag);
+        let subscription_file = dir.join("subscription.txt");
+        if let Some(body) = local_subscription {
+            std::fs::write(&subscription_file, body).expect("写本地订阅文件");
+        }
+        if let Some(state) = saved_subscriptions {
+            std::fs::write(dir.join("subscriptions.json"), state).expect("写订阅状态文件");
+        }
+        let socket_path = dir.join("daemon.sock");
+        let daemon = Daemon::bootstrap(DaemonConfig {
+            socket_path: socket_path.clone(),
+            state_dir: dir.clone(),
+            // 本夹具从不 Connect：这个字段只有真的拉起核心进程时才会被读。
+            xray_bin: dir.join("xray-not-installed"),
+            log_level: LogLevel::Info,
+            subscription_file,
+            // 本夹具从不 ProbeNodes：同理，给它一个不会有人访问的环回地址。
+            probe_url: "http://127.0.0.1:1/generate_204".to_string(),
+        })
+        .await
+        .expect("daemon 装配");
+        // bind() 返回即监听已建立 —— 与主测试同一条可观测事实，不需要等文件出现。
+        let bound = daemon.bind().await.expect("绑定 AF_UNIX socket");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let serve = tokio::spawn(async move { bound.serve(shutdown_rx).await });
+        let client = xt_ipc::Client::connect(&socket_path, "subs-e2e")
+            .await
+            .expect("IPC 连接 daemon");
+        ControlHarness { dir, client, shutdown_tx: Some(shutdown_tx), serve }
+    }
+
+    /// 收尾：发关闭信号 → 等 serve 真的返回（有上限，不是轮询）→ 删临时目录。
+    /// 断言中途失败时不会走到这里（临时目录留给排查），与主测试口径一致。
+    async fn shutdown(self) {
+        // 一次解构，避免「部分移动的 self 跨 await」这类没有价值的编译期麻烦。
+        let ControlHarness { dir, client, shutdown_tx, serve } = self;
+        // 先放开 IPC 连接：之后不再发请求，让 daemon 那边那条连接自然结束。
+        drop(client);
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+        let _ = tokio::time::timeout(STOP_DEADLINE, serve).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 取一次订阅列表。形状断言集中在这里，测试体只关心用户可见的事实。
+async fn list_subscriptions(client: &xt_ipc::Client) -> Vec<SubscriptionView> {
+    match client.request(Request::ListSubscriptions).await.expect("ListSubscriptions 应答") {
+        Response::Subscriptions { subscriptions } => subscriptions,
+        other => panic!("ListSubscriptions 期望 Subscriptions，收到 {other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_xray_end_to_end() {
     let xray = xray_bin();
@@ -364,19 +499,22 @@ async fn real_xray_end_to_end() {
         "[e2e] daemon {} pid={} 能力={:?}",
         hello.daemon_version, hello.pid, hello.capabilities
     );
-    // 能力表是唯一事实来源。2026-10-01（T2）起 TunMode 也宣告（用户裁决本版打开 TUN）；
-    // 远端拉取仍未实现，继续断言「不许宣告」。
-    // ⚠️ 宣告 ≠ 已验证：TUN 真机接管（helper 安装、utun、路由/DNS）仍只有 S6 能证。
+    // 能力表是唯一事实来源。2026-10-01（T2）起 TunMode 也宣告（用户裁决本版打开 TUN）。
+    // `SubscriptionFetch`（远端拉取）与 `NodeImport`（手工导入）现在也是**代码事实**，
+    // 必须宣告：界面靠能力表决定渲染「添加订阅 / 导入」入口，不宣告就等于把入口藏掉。
+    // ⚠️ 宣告 ≠ 已验证：TUN 真机接管（helper 安装、utun、路由/DNS）仍只有 S6 能证；
+    // 订阅拉取的端到端证据在本文件 `remote_subscription_*` 两个测试里（对着本地 HTTP 服务，不需要外网）。
     for expected in [
         Capability::ProxyMode,
         Capability::TunMode,
         Capability::Stats,
         Capability::Probe,
         Capability::Subscriptions,
+        Capability::NodeImport,
+        Capability::SubscriptionFetch,
     ] {
         assert!(hello.capabilities.contains(&expected), "缺少能力 {expected:?}");
     }
-    assert!(!hello.capabilities.contains(&Capability::SubscriptionFetch));
 
     let mut events = client.events();
     let nodes = match client.request(Request::ListNodes).await.expect("ListNodes") {
@@ -390,8 +528,9 @@ async fn real_xray_end_to_end() {
 
     // ---- 4.5 手工导入节点（`ImportNodes`）------------------------------------
     //
-    // 为什么这条必须在 CI 里（不需要真机、不需要网络）：它是**真人唯一的导入入口**
-    // （远端拉取 `SubscriptionFetch` 仍未宣告）。只证明「界面上有个输入框」不够 ——
+    // 为什么这条必须在 CI 里（不需要真机、不需要网络）：它是用户把节点弄进来的两条入口
+    // 之一（另一条是远端拉取 `SubscriptionFetch`，见本文件末尾那两个测试），且**完全不联网**。
+    // 只证明「界面上有个输入框」不够 ——
     // 这里证明「用户粘贴的分享链接真的进了目录，且来源标成 Manual」。
     let payload = "vless://11111111-2222-3333-4444-555555555555@imported.example.com:443?encryption=none&security=tls#导入节点";
     let response = client
@@ -596,4 +735,193 @@ async fn real_xray_end_to_end() {
     server.stop().await.expect("停掉真 xray 服务端");
     origin_handle.abort();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 远端订阅的完整往返：`AddSubscription` → `ListSubscriptions` → `RefreshSubscription`。
+///
+/// 每条断言都对应一个用户可见的事实：
+///   1. 添加之后列表里真的多了一条，节点数与成功时刻来自**真实拉取**；
+///   2. 刷新**真的再拉了一次**（HTTP 命中计数 1 → 2），不是把旧节点又写一遍；
+///   3. 本地文件订阅（id = `"local"`）不许被「刷新」管 —— 它每次启动由文件重读，
+///      根本没有远程拉取这个动作。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_subscription_add_list_and_refresh() {
+    // 本地文件订阅真实存在（1 个节点）：这样第 3 条断言不是「记录不存在」的假通过。
+    let local = format!(
+        "vless://{UUID_1}@127.0.0.1:443?encryption=none&security=none#local-node\n"
+    );
+    let harness = ControlHarness::start("subs", Some(&local)).await;
+
+    // 起始事实：只有本地文件那一条，且它的 id 就是 "local"。
+    let before = list_subscriptions(&harness.client).await;
+    assert_eq!(before.len(), 1, "启动时只应有本地文件订阅：{before:?}");
+    assert_eq!(before[0].id.as_str(), "local", "{before:?}");
+
+    // ---- 本地 HTTP 源站返回一段**真订阅正文**（两个 vless 节点）------------
+    let body = format!(
+        "vless://{UUID_1}@127.0.0.1:443?encryption=none&security=none#remote-1\n\
+         vless://{UUID_2}@127.0.0.1:8443?encryption=none&security=none#remote-2\n"
+    );
+    let (origin, hits) = start_subscription_server(body);
+    let url = format!("http://{origin}/sub");
+
+    // ---- 1. AddSubscription -------------------------------------------------
+    let response = harness
+        .client
+        .request(Request::AddSubscription { url: url.clone() })
+        .await
+        .expect("AddSubscription 应答");
+    assert!(matches!(response, Response::Ok), "新增订阅必须成功，收到 {response:?}");
+    // 计数器没动，就说明正文不是这次网络拉回来的（缓存 / 旧文件都不算数）。
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "新增订阅必须真的发过一次 HTTP 请求");
+
+    let views = list_subscriptions(&harness.client).await;
+    assert_eq!(views.len(), 2, "本地 + 新订阅：{views:?}");
+    let remote = views
+        .iter()
+        .find(|view| view.id.as_str() == "sub-1")
+        .unwrap_or_else(|| panic!("新订阅必须是 sub-1（local 不参与编号）：{views:?}"));
+    assert_eq!(remote.url, url, "列表必须回显用户填的 URL");
+    assert_eq!(remote.node_count, 2, "源站正文里有两个 vless 链接：{remote:?}");
+    let fetched_at_ms = remote.fetched_at_ms.expect("成功拉取必须带真实时刻，不能是 None");
+    assert!(
+        fetched_at_ms > 1_700_000_000_000,
+        "fetched_at_ms 必须来自真实时钟（不是 0、不是写死值）：{fetched_at_ms}"
+    );
+    assert!(remote.last_error.is_none(), "成功拉取不许留错误：{remote:?}");
+
+    // 拉下来的节点必须真的进目录，并且来源标成这条订阅（界面据此分组）。
+    let nodes = match harness.client.request(Request::ListNodes).await.expect("ListNodes") {
+        Response::Nodes { nodes } => nodes,
+        other => panic!("ListNodes 期望 Nodes，收到 {other:?}"),
+    };
+    let source = NodeSource::Subscription { id: SubscriptionId::new("sub-1") };
+    for name in ["remote-1", "remote-2"] {
+        assert!(
+            nodes.iter().any(|node| node.name == name && node.source == source),
+            "远端节点 {name} 必须进目录且来源是 sub-1：{nodes:?}"
+        );
+    }
+    assert!(
+        nodes.iter().any(|node| node.name == "local-node"),
+        "本地文件订阅的节点不许被远端拉取顶掉：{nodes:?}"
+    );
+    assert_eq!(nodes.len(), 3, "本地 1 + 远端 2：{nodes:?}");
+
+    // ---- 2. RefreshSubscription：再次成功、且真的又拉了一次 ---------------
+    let response = harness
+        .client
+        .request(Request::RefreshSubscription { id: SubscriptionId::new("sub-1") })
+        .await
+        .expect("RefreshSubscription 应答");
+    assert!(matches!(response, Response::Ok), "刷新必须成功，收到 {response:?}");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "刷新必须重新发一次 HTTP 请求（计数不涨 = 刷新只读了内存）"
+    );
+    let views = list_subscriptions(&harness.client).await;
+    let remote = views
+        .iter()
+        .find(|view| view.id.as_str() == "sub-1")
+        .expect("刷新后 sub-1 仍必须在列表里");
+    assert_eq!(remote.node_count, 2, "刷新后节点数仍应是 2：{remote:?}");
+    assert!(remote.fetched_at_ms.is_some(), "刷新成功必须更新 fetched_at_ms：{remote:?}");
+    assert!(remote.last_error.is_none(), "刷新成功不许留错误：{remote:?}");
+
+    // ---- 3. local 不许刷新：它是文件驱动的，没有「重新拉取」这个动作 --------
+    let error = harness
+        .client
+        .request(Request::RefreshSubscription { id: SubscriptionId::new("local") })
+        .await
+        .expect_err("本地文件订阅刷新必须被拒");
+    assert_eq!(error.code, ErrorCode::InvalidRequest, "{error:?}");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "被拒的刷新不许碰网络（计数器不该变）");
+
+    harness.shutdown().await;
+}
+
+/// 拉不到正文时：必须如实失败（不许假装成功），而且错误消息里**不许出现 URL 的
+/// path/query** —— 订阅 URL 通常带账号令牌。口径是 `subs::redact_url`：只允许
+/// `scheme://host/…`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_subscription_failure_never_leaks_the_url() {
+    let harness = ControlHarness::start("subs-fail", None).await;
+    assert!(
+        list_subscriptions(&harness.client).await.is_empty(),
+        "既没有本地文件、也没加过订阅时应为空"
+    );
+
+    // 127.0.0.1:1 上没有任何监听者，也不需要外网：curl 必然连不上。
+    // 令牌故意放在 path/query 里 —— 它绝不允许出现在错误消息里。
+    let url = "http://127.0.0.1:1/sub?token=SECRET-TOKEN-1234";
+    let error = harness
+        .client
+        .request(Request::AddSubscription { url: url.to_string() })
+        .await
+        .expect_err("拉不到正文的 URL 必须失败");
+    assert_eq!(error.code, ErrorCode::Io, "拉取失败必须落到 Io：{error:?}");
+
+    // 口径：错误里只允许 `scheme://host/…`。注意 curl 的连接失败 stderr 通常只带
+    // host:port、本来就没有 path，所以这条当下可能「轻松」通过；它的价值是**回归守卫** ——
+    // 哪天一更换拉取实现（或 curl 改了措辞）把完整 URL 写进错误，它会立刻变红。
+    assert!(!error.message.contains(url), "错误消息不许出现完整 URL：{error:?}");
+    assert!(
+        !error.message.contains("SECRET-TOKEN-1234"),
+        "错误消息不许出现 query 里的令牌：{error:?}"
+    );
+    assert!(!error.message.contains("/sub"), "错误消息不许出现 path：{error:?}");
+
+    // 失败不许留下半条订阅：否则界面会出现一条永远拉不到的僵尸条目。
+    assert!(
+        list_subscriptions(&harness.client).await.is_empty(),
+        "拉取失败不许落盘任何订阅记录"
+    );
+
+    harness.shutdown().await;
+}
+
+/// 上次运行留下过 `local` 记录、这次 `--subscription-file` 指向的文件已经不在了：
+/// **列表里不许有它，目录里也不许留着它的节点**。
+///
+/// 这条专门盯一个真 bug：启动时如果先把「已保存的节点」灌进目录、再读订阅文件，
+/// 那么文件缺失（或解析失败）的分支不会清目录 —— 界面于是变成「订阅列表里没有这条，
+/// 节点列表里却一直是它的节点」，而且每次重启都复现。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn saved_local_subscription_is_pruned_when_the_file_is_gone() {
+    // 逐字写一份 daemon 自己的磁盘格式（`subs::SubscriptionRecord` + `StoredNode`）。
+    let saved = r#"[
+      {
+        "id": "local",
+        "url": "/tmp/这条路径已经不存在/subscription.txt",
+        "fetched_at_ms": 1700000000000,
+        "nodes": [
+          {
+            "id": "stale-node",
+            "name": "stale-node",
+            "protocol": "vless",
+            "endpoint": "127.0.0.1:443",
+            "outbound": { "protocol": "vless" }
+          }
+        ],
+        "last_error": null
+      }
+    ]"#;
+    let harness =
+        ControlHarness::start_with_saved_subscriptions("subs-stale", None, Some(saved)).await;
+
+    assert!(
+        list_subscriptions(&harness.client).await.is_empty(),
+        "订阅文件已经不在了，这条 local 记录必须被摘掉"
+    );
+    let nodes = match harness.client.request(Request::ListNodes).await.expect("ListNodes") {
+        Response::Nodes { nodes } => nodes,
+        other => panic!("ListNodes 期望 Nodes，收到 {other:?}"),
+    };
+    assert!(
+        nodes.is_empty(),
+        "目录里不许留下「没有订阅记录」的节点（否则界面自相矛盾）：{nodes:?}"
+    );
+
+    harness.shutdown().await;
 }

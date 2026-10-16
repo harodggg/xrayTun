@@ -11,6 +11,7 @@
 1. 本轮唯一承诺：**proxy 模式下的 连接 / 断开 / 切节点 / 真实流量统计 + 界面真实绑定**（契约冻结 §8）。
 2. 判定「做完」的不是页面数量，而是：**一条真实数据通路（真 xray 进程、真字节）能被无头 CLI 与界面同时驱动，且界面上每个字都能追到契约字段**（契约冻结 §7 / I3）。
 3. 本轮**不做**：macOS TUN、特权 helper、审计上传、地理/拓扑可视化、自动重连/回落/重试、订阅之外的账号体系、**订阅远端拉取（http/https）**（契约冻结 §8；I2/I5；lead 2026-09-29 裁决）。
+   **2026-10-16 更新**：其中**订阅远端拉取（http/https）**一项已被实现推翻（daemon 能力表**已宣告** `Capability::SubscriptionFetch`），见下方更新段；本条其余各项不变。
 4. 延迟探测（probe）是**条件交付**：做成才在 `DaemonHello.capabilities` 宣告，没做成就不宣告、界面不出现入口（lead 2026-09-29 裁决）。
 5. 旧仓库 v0.9.2 里**有**而本轮不重建的东西 ≠ 本轮有。禁止把「旧版有 / 计划过」写成「本轮已有」（见 `NON-GOALS.md` §4）。
 
@@ -20,8 +21,19 @@
 > **被推翻的只是「不做」，不是「不许声称已验证」**：真机接管（helper 安装/回滚、utun、
 > 路由与 DNS 提交）仍未经 S6 验收 ⇒ **「TUN 已验证 / 已可用」依旧不许说**。
 > 第 3 条其余各项**仍然不做**：审计上传、地理/拓扑可视化、自动重连/回落/重试、
-> 订阅之外的账号体系、订阅远端拉取（http/https）。产品面只保留 TUN；`RunMode::Proxy` 与
+> 订阅之外的账号体系、订阅远端拉取（http/https）——**2026-10-16 更新**：本行末项已被推翻，见下段。
+> 产品面只保留 TUN；`RunMode::Proxy` 与
 > proxy 通路本身保留——它是 CI 里唯一能跑的真数据面，`xt-cli` 继续用它。
+
+> **2026-10-16 更新（订阅远端拉取）**：上面第 3 条里「订阅远端拉取（http/https）」的
+> 「不做」结论已被本轮实现更新——daemon 能力表**已宣告** `Capability::SubscriptionFetch`
+> （`crates/xt-daemon/src/lib.rs:354`），实现是 `/usr/bin/curl`（绝对路径 + argv，零新增依赖）
+> （`crates/xt-daemon/src/subs.rs:196` `fetch_body`，状态文件 `subscriptions.json`、权限 0600、
+> 日志与错误里只出现 `scheme://host/…`，`subs.rs:109` / `subs.rs:173`）；UI 的「添加订阅 /
+> 刷新」入口按 `subscription_fetch` 能力门控渲染（`apps/ui/src/pages/Settings.tsx:171`，
+> 输入框 `:317`、刷新按钮 `:376`）。本文件其余处标了「**2026-10-16 更新**」的行，均按本段读。
+> **被推翻的只是「不做」，不是「没跑过的不许写成已通过」**：本段不新增任何验证结论，
+> 第 3 条与本表的其余各项**仍然不做**。
 
 ## 1. 证据口径（先说清楚什么算证据）
 
@@ -67,8 +79,8 @@
 | **D5** | 真实界面（绑定，不是新功能） | `Request::{Hello,Subscribe,Status}`；`Response::{Hello(DaemonHello),Subscribed,Status}`；`Event::{State,Log,Probe,Notice}`；`Topic`（`model.rs:313-323`）；`Frame{kind,id,seq}`（`protocol.rs:106-127`） | 每个显示项可溯源；**没有 mock/preview 作为运行时数据源**（契约冻结 §7） | 界面成为「另一份真相」，比没有界面更危险 |
 | **D6** | 无头等价入口（`xt-cli`） | 与 UI 同一份契约（`Request`/`Response`/`Event`/`Outcome`） | 「UI 能做的，无头也能做」（契约冻结 §1 理由 3）；也是本轮 E2E 入口（§8 用 `cargo run -p xt-cli`） | 业务逻辑只能靠点界面验证 ⇒ 无法在 CI 里跑真实验证 |
 | **D7** | 失败的诚实归因 | `ErrorCode` 封闭枚举（`error.rs:10-33`）、`ErrorBody{code,message,detail}`（`error.rs:61-67`）、`Event::Notice` + `NoticeSeverity` | 失败是「如实上报的终态」，不是悄悄换一条路（I2） | 用户不知道刚才发生了什么（v0.9.2 §1 三层理由） |
-| **D8** | 本地订阅文件 → 节点清单（**只读**） | `xt-subs` 解析订阅原文；来源 `--subscription-file`（默认 `$state_dir/subscription.txt`）（`[裁决]` lead 2026-09-29）；产出 `NodeView.source: NodeSource::Subscription{id}`（`model.rs:185-205`）；订阅视图 `SubscriptionView{id,url,node_count,fetched_at_ms,last_error}`（`model.rs:250-260`） | 用户能看到自己那份订阅里的节点与订阅状态；**没有「添加订阅 / 刷新」入口**（远端拉取本轮不做，见 §4 与 §5.1 N1） | 切节点无从谈起（没有节点来源） |
-| **D9** | 能力自我宣告（含订阅口径拆分） | `DaemonHello.capabilities: Vec<Capability>`（`model.rs:293-311`）；`Capability::{Subscriptions,SubscriptionFetch}` **已落地**（`model.rs:317`，粒度理由写在变体注释里）；硬规则见契约冻结 **§3.1**（「`capabilities` 是唯一的能力事实来源」；未宣告能力的请求返回 `ErrorCode::Unsupported`，且该码**只能**表示"本版本不提供"，不得包装真实失败） | 界面只渲染**已宣告**能力的入口（未实现 = 入口不存在，不是灰按钮）。订阅区块因此**只读**：`id` / `url` / `node_count` / `fetched_at_ms` / `last_error`；**没有「添加 / 刷新」入口** | 出现「假控件」：能点但什么都没发生（旧仓库反复修过这一类，见 `NON-GOALS.md` §2） |
+| **D8** | 本地订阅文件 → 节点清单（**只读**） | `xt-subs` 解析订阅原文；来源 `--subscription-file`（默认 `$state_dir/subscription.txt`）（`[裁决]` lead 2026-09-29）；产出 `NodeView.source: NodeSource::Subscription{id}`（`model.rs:185-205`）；订阅视图 `SubscriptionView{id,url,node_count,fetched_at_ms,last_error}`（`model.rs:250-260`） | 用户能看到自己那份订阅里的节点与订阅状态；**没有「添加订阅 / 刷新」入口**（远端拉取本轮不做 → **2026-10-16 更新**：`SubscriptionFetch` 已宣告并实现，该「没有入口」只适用于未宣告它的 daemon，见 §0 更新段；旧结论保留，见 §4 与 §5.1 N1） | 切节点无从谈起（没有节点来源） |
+| **D9** | 能力自我宣告（含订阅口径拆分） | `DaemonHello.capabilities: Vec<Capability>`（`model.rs:293-311`）；`Capability::{Subscriptions,SubscriptionFetch}` **已落地**（`model.rs:317`，粒度理由写在变体注释里）；硬规则见契约冻结 **§3.1**（「`capabilities` 是唯一的能力事实来源」；未宣告能力的请求返回 `ErrorCode::Unsupported`，且该码**只能**表示"本版本不提供"，不得包装真实失败） | 界面只渲染**已宣告**能力的入口（未实现 = 入口不存在，不是灰按钮）。订阅区块因此**只读**：`id` / `url` / `node_count` / `fetched_at_ms` / `last_error`；**没有「添加 / 刷新」入口**（**2026-10-16 更新**：`SubscriptionFetch` 已宣告 ⇒ 按同一条门控规则，界面**有**「添加订阅 / 刷新」入口，`apps/ui/src/pages/Settings.tsx:317` / `:376`；「没有入口」只适用于未宣告它的 daemon） | 出现「假控件」：能点但什么都没发生（旧仓库反复修过这一类，见 `NON-GOALS.md` §2） |
 | **D10** | 日志绑定真实输出 | `Request::TailLogs{lines}` → `Response::Logs(Vec<LogLine>)`；`Event::Log{line}`；`LogLine{ts_ms,level,target,message}`（`model.rs:176-183`）、`LogLevel`（`model.rs:156-174`） | 排障时能看到**核心自己**说的话（真 xray 的 stdout/stderr 行），不是我们编的摘要 | 失败时用户只能看到一句结论，无法自救（T5 的证据正是 v0.9.2 §4 的承诺） |
 | **D11** | 设置读写真生效 | `Request::GetSettings` → `Response::Settings(SettingsView{socks_listen,selected_node,log_level})`；`Request::PatchSettings{patch}` → `Response::Ok`；`SettingsPatch` 语义是「`None` = 不改这一项」（`model.rs:262-291`） | 改了监听地址/选中节点/日志等级后，**行为真的跟着变**（或给出明确的「需要重连才生效」说明）——不许「界面显示新值、实际没变」 | proxy 入口不可配置 ⇒ 端口冲突时用户无路可走；「改完没生效」正是旧仓库 v0.9.0 专门修过的一类问题（`release-notes/v0.9.0.md §1`） |
 
@@ -88,7 +100,7 @@
 | daemon 身份 | `DaemonHello.daemon_version` / `pid` / `protocol_version` | 连接建立时 |
 | 能力清单 | `DaemonHello.capabilities` | 连接建立时（决定哪些入口存在） |
 | 节点清单 | `Response::Nodes(Vec<NodeView>)` | 用户要看节点时 |
-| 订阅状态（只读） | `SubscriptionView{id,url,node_count,fetched_at_ms,last_error}` | 用户要看订阅时（**无添加/刷新入口**） |
+| 订阅状态（只读） | `SubscriptionView{id,url,node_count,fetched_at_ms,last_error}` | 用户要看订阅时（**无添加/刷新入口** → **2026-10-16 更新**：`subscription_fetch` 已宣告 ⇒ 订阅区另渲染添加输入框与「刷新」按钮，`Settings.tsx:317` / `:376`；未宣告它的 daemon 才无入口） |
 | 日志行 | `LogLine{ts_ms,level,target,message}`、`Event::Log` | 排障时（`TailLogs{lines}` 取最近 N 条） |
 | 设置值 | `SettingsView{socks_listen,selected_node,log_level}` | 用户要看/改设置时 |
 
@@ -100,6 +112,9 @@
 > 「什么时候才该做」里的真机证据仍是硬门槛，S6 真机验收（helper 安装/回滚、utun、路由/DNS）
 > **仍待做 ⇒ 真机接管仍未有证据，「TUN 已工作 / 已可用」依旧不许说**。
 > 其余各行（审计上传、地理/拓扑、自动重连/回落/重试、账号体系、订阅远端拉取）**仍然不做**。
+> **2026-10-16 更新**：末项「订阅远端拉取」的「不做」结论已被实现推翻（daemon 宣告
+> `Capability::SubscriptionFetch`，`crates/xt-daemon/src/lib.rs:354`）——见 §0 更新段与下表该行；
+> 本段其余各项仍然不做。
 
 | 不做 | 一句话理由 | 用户会看到 / 失去什么 | 什么时候才该做 |
 | --- | --- | --- | --- |
@@ -109,7 +124,7 @@
 | **地理 / 拓扑可视化** | 契约冻结 §8；其数据源（访问日志、规则链、位置查询）在 proxy 纵切面里还不存在 | 失去流向图与地球仪；**诚实地说：用户确实用过它**（PRD §3.3 决策 C 记录他要求过放大倍数） | proxy 主通路真机验证通过、且日志/规则数据源存在之后 |
 | **自动重连 / 回落 / 重试** | I2 + `[裁决]` v0.9.2 §1 用户原话「自动重连和看门狗本来就没什么用…每一次都是我去连」；`ErrorCode` 里连成员都没有（`error.rs:8-9`） | 换网/唤醒后**必须手动重连**；失败时不会自动换到别的节点 | 永不作为默认；若要做必须先在 `ErrorCode` 加成员并过评审 |
 | **订阅之外的账号体系** | 契约里**没有任何**账号/用户类型（`model.rs` 全文）；无证据表明用户需要跨设备同步 | 失去跨设备同步；每台机器重新配订阅与设置 | 用户有多设备需求并明确要求时 |
-| **订阅远端拉取（http/https）** | `[裁决]` lead 2026-09-29：不在纵切面关键路径上，引 TLS 客户端会扩大依赖与验证面；`xt-subs` 只实现「解析订阅原文」 | **失去「贴一条订阅 URL 就自动更新」**；必须手动把订阅文本落到 `$state_dir/subscription.txt`。订阅区块只读，没有「添加 / 刷新」入口 | 主通路稳定、且愿意承担 TLS 客户端依赖面之后 |
+| **订阅远端拉取（http/https）**（**2026-10-16 更新**：已实现并宣告，「不做」结论被推翻） | `[裁决]` lead 2026-09-29：不在纵切面关键路径上，引 TLS 客户端会扩大依赖与验证面；`xt-subs` 只实现「解析订阅原文」。**2026-10-16 更新**：该顾虑以 `/usr/bin/curl`（绝对路径 + argv，零新增依赖）绕开，`crates/xt-daemon/src/subs.rs:196` `fetch_body` | **失去「贴一条订阅 URL 就自动更新」** → **2026-10-16 更新：这条已能做**：设置页订阅区可填 URL，`xt-cli add-subscription` / `refresh-subscription` 也真发请求；订阅区块仍只列 `id` / `url` / `node_count` / `fetched_at_ms` / `last_error` | 主通路稳定、且愿意承担 TLS 客户端依赖面之后（**2026-10-16 更新**：`/usr/bin/curl` 绝对路径方案未新增依赖面，该前提已满足） |
 
 ## 5. 边界与裁定记录（已裁定 ≠ 已实现；未决 ≠ 已做）
 
@@ -119,11 +134,11 @@
 
 | ID | 事项 | 裁定 | 对契约 / 界面的要求 |
 | --- | --- | --- | --- |
-| **N1** | 订阅远端拉取的契约面 | `AddSubscription` / `RefreshSubscription` 属**拉取语义** ⇒ daemon 返回 `Unsupported`（`ErrorCode::Unsupported` 已落地 `error.rs:33/52/105-106`）；`Capability::SubscriptionFetch`（`model.rs:317`）本轮**不宣告** | 界面订阅区块**只读**：`id` / `url` / `node_count` / `fetched_at_ms` / `last_error`（`model.rs:250-260`），没有添加/刷新入口 |
-| **N2** | 延迟探测（probe） | **条件交付**（维持）：做成才宣告 `Capability::Probe`；本轮能力现状以契约冻结 §3.1 为准（proxy+stats、Subscriptions、**TunMode** 宣告；probe 成功才宣告；SubscriptionFetch 不宣告）——其中 `TunMode` 已按 **2026-10-01（T2）** 裁决改为宣告，见契约冻结 §3.1 更新段 | 未宣告 = 界面无入口（不是灰按钮）；`ACCEPTANCE.md` COND-PROBE-01/-02 |
+| **N1** | 订阅远端拉取的契约面 | `AddSubscription` / `RefreshSubscription` 属**拉取语义** ⇒ daemon 返回 `Unsupported`（`ErrorCode::Unsupported` 已落地 `error.rs:33/52/105-106`）；`Capability::SubscriptionFetch`（`model.rs:317`）本轮**不宣告**。**2026-10-16 更新**：该裁定已被实现推翻——`SubscriptionFetch` 已宣告（`crates/xt-daemon/src/lib.rs:354`），`AddSubscription`/`RefreshSubscription` 在 daemon 侧真拉取（`lib.rs:1071-1072` 路由到 `add_subscription`/`refresh_subscription`）；旧裁定保留为 2026-09-29 口径 | 界面订阅区块**只读**：`id` / `url` / `node_count` / `fetched_at_ms` / `last_error`（`model.rs:250-260`），没有添加/刷新入口（**2026-10-16 更新**：只读列表仍在，但**另有**添加输入框与「刷新」按钮，`Settings.tsx:317` / `:376`） |
+| **N2** | 延迟探测（probe） | **条件交付**（维持）：做成才宣告 `Capability::Probe`；本轮能力现状以契约冻结 §3.1 为准（proxy+stats、Subscriptions、**TunMode** 宣告；probe 成功才宣告；SubscriptionFetch 不宣告）——其中 `TunMode` 已按 **2026-10-01（T2）** 裁决改为宣告，见契约冻结 §3.1 更新段。**2026-10-16 更新**：`SubscriptionFetch` 也已宣告（`crates/xt-daemon/src/lib.rs:354`）⇒ 本行「SubscriptionFetch 不宣告」口径作废；probe 的条件交付不变 | 未宣告 = 界面无入口（不是灰按钮）；`ACCEPTANCE.md` COND-PROBE-01/-02 |
 | **N3** | 日志（`TailLogs` / `Event::Log`） | **本轮做**（契约冻结 §8 未列已由本次裁定覆盖） | 界面绑定真数据：日志行必须来自核心真实输出；`LogLine.target` 是发出日志的组件，不是 UI 页签名（`model.rs:180`） |
 | **N4** | 设置（`GetSettings` / `PatchSettings`） | **本轮做** | 改动必须**真的生效**（或给出明确的「需要重连才生效」说明）；不许「界面显示新值、实际没变」 |
-| **N6** | `Capability::Subscriptions` 的宣告口径 | `Capability` 拆分**已落地**（`model.rs:317`）：`Subscriptions`（本地订阅原文解析，**本轮宣告**）＋ `SubscriptionFetch`（http/https 拉取，**本轮不宣告**） | 界面入口一律由 `capabilities` 决定；未宣告的能力**不存在**而不是被禁用 |
+| **N6** | `Capability::Subscriptions` 的宣告口径 | `Capability` 拆分**已落地**（`model.rs:317`）：`Subscriptions`（本地订阅原文解析，**本轮宣告**）＋ `SubscriptionFetch`（http/https 拉取，**本轮不宣告** → **2026-10-16 更新：已宣告**，`crates/xt-daemon/src/lib.rs:354`） | 界面入口一律由 `capabilities` 决定；未宣告的能力**不存在**而不是被禁用 |
 
 ### 5.2 仍是归属问题，不是未决
 
@@ -135,7 +150,7 @@ lead 的两条裁定需要改**冻结的 `xt-contract`**（独占写入路径，
 
 | # | 变更 | 落地位置（已复核） | 影响的判据 |
 | --- | --- | --- | --- |
-| P1 | 新增 `Capability::SubscriptionFetch`（与 `Subscriptions` 并列；本轮**不宣告**） | `model.rs:317`（粒度理由写在变体注释里：粗粒度会逼界面显示按不动的「刷新」假控件） | CAP-01、SUB-02 |
+| P1 | 新增 `Capability::SubscriptionFetch`（与 `Subscriptions` 并列；本轮**不宣告** → **2026-10-16 更新：已由 daemon 宣告**，`crates/xt-daemon/src/lib.rs:354`） | `model.rs:317`（粒度理由写在变体注释里：粗粒度会逼界面显示按不动的「刷新」假控件） | CAP-01、SUB-02 |
 | P2 | 新增 `ErrorCode::Unsupported` + `as_str` + 便捷构造 | 变体 `error.rs:33`；`as_str` `error.rs:52`（→ `"unsupported"`）；构造 `unsupported(msg)` `error.rs:105-106`。现共 **11** 个成员 | SUB-02、CAP-03 |
 | P3 | 能力宣告硬规则成文 | 契约冻结 **§3.1**：`capabilities` 是唯一事实来源；未宣告能力的请求返回 `Unsupported`；该码**只能**表示「本版本不提供」，**不得**包装「试了但失败」（后者必须落到具体失败码，否则它就是新的兜底） | CAP-01、CAP-03、ERR-03 |
 

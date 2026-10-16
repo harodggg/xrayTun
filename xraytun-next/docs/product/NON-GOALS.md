@@ -67,10 +67,18 @@
 
 ### 1.7 订阅远端拉取（http/https）
 
+> **2026-10-16 更新**：本条已被实现推翻（下面的原文保留为 2026-09-29 的历史口径）——
+> daemon 已宣告 `Capability::SubscriptionFetch` 并**真执行**远端拉取：`hello()` 能力表见
+> `crates/xt-daemon/src/lib.rs:343-355`（`SubscriptionFetch` 在 `:354`），实现为 `/usr/bin/curl`
+> 绝对路径 + argv（`crates/xt-daemon/src/subs.rs:196` `fetch_body`，零新增依赖）；`AddSubscription` /
+> `RefreshSubscription`（`crates/xt-contract/src/protocol.rs:44/45`）由 `lib.rs:408` / `:457` 执行，
+> 生产路径不再返回 `Unsupported`。**「已宣告」≠「已验证」**：订阅 e2e 用例已存在
+> （`crates/xt-daemon/tests/e2e_real_xray.rs:734` / `:834`），本机不能编译、CI 未跑 —— 是否通过看 CI。
+
 * **为什么不做**：`[裁决]` lead 2026-09-29（team-message-5f45ef69）：不在纵切面的关键路径上，且引入 TLS 客户端会扩大依赖与验证面。本轮 `xt-subs` 只实现「解析订阅原文」，节点来源是本地 `--subscription-file`（默认 `$state_dir/subscription.txt`）。
-* **本轮做的是它的另一半**（别把它读成「订阅整块不做」）：本地解析**做**并宣告 `Capability::Subscriptions`；拉取侧**不宣告** `Capability::SubscriptionFetch`（lead 2026-09-29 拆分裁定）。界面订阅区块**只读**：`id` / `url` / `node_count` / `fetched_at_ms` / `last_error`，**没有「添加订阅 / 刷新」入口**；`AddSubscription` / `RefreshSubscription` 属拉取语义 ⇒ daemon 返回 `Unsupported`（该错误码**已落地**：`error.rs:33/52/105-106`；能力宣告与使用纪律见契约冻结 §3.1）。
-* **用户会看到 / 失去什么**：**失去「贴一条订阅 URL 就自动更新」**。用户必须自己把订阅文本保存到 `$state_dir/subscription.txt`；服务端换了线路，App 不会自己发现。对习惯「订阅地址=自动更新」的用户，这是明确的退步。
-* **什么时候才该做**：主通路稳定、且愿意承担 TLS 客户端（依赖 + 证书/超时/错误分类）之后。
+* **本轮做的是它的另一半**（别把它读成「订阅整块不做」）：本地解析**做**并宣告 `Capability::Subscriptions`；拉取侧**不宣告** `Capability::SubscriptionFetch`（lead 2026-09-29 拆分裁定）。界面订阅区块**只读**：`id` / `url` / `node_count` / `fetched_at_ms` / `last_error`，**没有「添加订阅 / 刷新」入口**；`AddSubscription` / `RefreshSubscription` 属拉取语义 ⇒ daemon 返回 `Unsupported`（该错误码**已落地**：`error.rs:33/52/105-106`；能力宣告与使用纪律见契约冻结 §3.1）。 **2026-10-16 更新**：以上三个结论均已过时——拉取侧**已宣告** `SubscriptionFetch`（`lib.rs:354`）；`AddSubscription` / `RefreshSubscription` 已由 daemon 真执行（`lib.rs:408` / `:457`），不再返回 `Unsupported`（当前生产路径上的 `Unsupported` 仅存于 `crates/xt-macosnet/src/stub.rs`）；界面「添加订阅 / 刷新」入口由 `subscription_fetch` 能力门控渲染（`apps/ui/src/pages/Settings.tsx:174` / `:358` / `:399`）。是否通过 CI 未验证。
+* **用户会看到 / 失去什么**：**失去「贴一条订阅 URL 就自动更新」**。用户必须自己把订阅文本保存到 `$state_dir/subscription.txt`；服务端换了线路，App 不会自己发现。对习惯「订阅地址=自动更新」的用户，这是明确的退步。 **2026-10-16 更新**：远端拉取已落代码，用户现在可以贴 URL 添加并手动「刷新」（`lib.rs:408` / `:457`）；但**仍没有定时自动刷新**（无轮询/定时器，见 I1）——所以「服务端换了线路，App 不会自己发现」这半句仍然成立，只是从「完全不能」变成「要用户点一下刷新」。
+* **什么时候才该做**：主通路稳定、且愿意承担 TLS 客户端（依赖 + 证书/超时/错误分类）之后。 **2026-10-16 更新**：该门槛已达成——用系统自带 `/usr/bin/curl`（`subs.rs:39` `CURL_BIN`、绝对路径 + argv，`:196` `fetch_body`），没有引入新的 HTTP/TLS 客户端库，`xt-subs` 仍是纯解析。
 
 ### 1.8 延迟探测是「条件交付」而不是「不做」
 
@@ -132,12 +140,12 @@
 | R5 | 延迟探测入口（若条件交付未达成） | 选节点前无法对比延迟，只能连上才知道 | 无（本轮不宣告 = 界面无入口） | 中：直接影响 T3 体验 |
 | R6 | 自动重连 / 自愈 | **换网、合盖唤醒、节点抖动后必须手动重连**；失败就是失败 | 用户手动点「连接」或换节点 | **大**：每一次网络变化都要用户出手（用户已明确接受，但成本真实存在） |
 | R7 | 失败自动换节点（回落） | 连不上时不会自动换到能用的节点；用户得自己找 | 用户自己在节点列表里换（前提：有节点来源） | 中：换来「出口永远是你选的那台」 |
-| R8 | 订阅 URL 自动更新 | 不能贴一条 URL 就自动更新；服务端换线路后 App 不会自己发现 | 手动把订阅文本落到 `$state_dir/subscription.txt` | **大**：对订阅用户是日常退步 |
+| R8 | 订阅 URL 自动更新 | 不能贴一条 URL 就自动更新；服务端换线路后 App 不会自己发现（**2026-10-16 更新**：贴 URL 添加 + 手动「刷新」已可用，`lib.rs:408`/`:457`；**定时自动刷新仍没有**，故「不会自己发现」这半句仍成立） | 手动把订阅文本落到 `$state_dir/subscription.txt`（**2026-10-16 更新**：也可直接贴 URL 添加、点「刷新」） | **大**：对订阅用户是日常退步（**2026-10-16 更新**：部分收回——有拉取、无定时刷新） |
 | R9 | 跨设备同步（账号） | 换机器/重装要重新配订阅与设置 | 无（本机文件可手工拷） | 小到中：取决于用户设备数（`[假设·未验证]`） |
 | R10 | 旧版全部既有能力的**归零**（重写的固有代价） | 新仓库要重新建 TUN、helper、审计、位置、分流、拓扑、日志页、订阅页、开机自启、自更新、托盘等——**本轮用户看到的是「功能比旧版少」** | 无（只能靠时间逐轮补回） | **大**：这是重写最诚实、也最容易被隐瞒的代价 |
 | R11 | 浅色主题 / 国际化 / 流量曲线 | 失去少数审美与语言需求的满足 | 无 | 小：与用户提出的痛点零重叠（PRD §4） |
 
-**一句总账**：本轮交付的是一个**能真实跑通、每句话都有出处**的 proxy 最小纵切面；代价是功能总量**倒退**（R10），并且其中 R1/R6/R8 是用户每天都会碰到的。这个账必须由 lead 在对外口径里如实表达，不许用「v1.0.0」这个版本号暗示功能完整。
+**一句总账**：本轮交付的是一个**能真实跑通、每句话都有出处**的 proxy 最小纵切面；代价是功能总量**倒退**（R10），并且其中 R1/R6/R8 是用户每天都会碰到的。**2026-10-16 更新**：R8 已部分收回——订阅可贴 URL 添加并手动刷新（`crates/xt-daemon/src/lib.rs:408`/`:457`），但无定时自动更新；R1/R6 仍成立。这个账必须由 lead 在对外口径里如实表达，不许用「v1.0.0」这个版本号暗示功能完整。
 
 ---
 
@@ -154,9 +162,9 @@
 | 「`restore_system_proxy_on_exit` 是功能」 | 旧仓库有开关**从未实现**；`0.9-PLAN.md §2 裁决 1` 决定隐藏 | IA §1.2 C7 |
 | 「规则可视化编辑器计划中=将有」 | 旧 roadmap 阶段 4 计划过，PRD §4 明确裁为**不做** | PRD §4、`07-roadmap §R6` |
 | 「有每条连接的字节/时长/活跃连接数」 | 上游 `StatsService` 没有 per-connection 计数；契约也没有字段 | PRD §4 红线；`model.rs:110-118` |
-| 「订阅可以贴 URL 自动更新」 | 本轮明确不做远端拉取（1.7） | lead 2026-09-29 裁决；`SCOPE.md §4` |
+| 「订阅可以贴 URL 自动更新」 | 原判：本轮明确不做远端拉取（1.7）。**2026-10-16 更新**：贴 URL 添加与手动刷新已实现（`SubscriptionFetch` 已宣告，`lib.rs:354`/`:408`/`:457`）；但**没有定时自动刷新**，「自动更新」这半句仍不许说 | lead 2026-09-29 裁决；`SCOPE.md §4`；`crates/xt-daemon/src/lib.rs:354` |
 | 「延迟探测已有」 | **条件交付**：未宣告 `Capability::Probe` 就是没有 | `SCOPE.md §5.1 N2`、`ACCEPTANCE.md` COND-PROBE-01 |
-| 「订阅能添加/刷新」 | 本轮只做**本地订阅原文解析**（宣告 `Capability::Subscriptions`）；拉取不宣告 `Capability::SubscriptionFetch`，界面订阅区块只读、无添加/刷新入口 | lead 2026-09-29 裁定；`SCOPE.md §3 D8/D9`、`§5.1 N1` |
+| 「订阅能添加/刷新」 | 原判：本轮只做**本地订阅原文解析**（宣告 `Capability::Subscriptions`）；拉取不宣告 `Capability::SubscriptionFetch`，界面订阅区块只读、无添加/刷新入口。**2026-10-16 更新**：拉取已宣告并实现 ⇒ 「添加/刷新」现在是**真话**（`lib.rs:354` 宣告、`:408`/`:457` 执行；界面入口 `apps/ui/src/pages/Settings.tsx:174` 门控）；唯一仍禁止的是把「已宣告」写成「已验证」——e2e 用例在 `crates/xt-daemon/tests/e2e_real_xray.rs:734`/`:834`，CI 未跑 | lead 2026-09-29 裁定；`SCOPE.md §3 D8/D9`、`§5.1 N1` |
 | 「日志/设置不在本轮」 | 已裁定**本轮做**（`TailLogs`/`Event::Log`、`GetSettings`/`PatchSettings` 真实现 + 界面绑定真数据） | lead 2026-09-29 裁定；`SCOPE.md §5.1 N3/N4`、`ACCEPTANCE.md §2.8/§2.9` |
 
 **反向要求（同样硬）**：任何「不做」也不许被写成「已实现只是暂时关闭」——没有代码的开关就是假控件（旧仓库已经修过一轮这类问题，见 §2 O6）。
@@ -168,17 +176,17 @@
 1. **自动换路类行为**（重试/回落/降级/自愈）：必须先在 `ErrorCode` 加成员并过评审——`error.rs:8-9` 把这件事刻意做成「加成员要过评审」，`guard.sh` 扫 `fallback`/`retry`/`backoff` 标识符。加回来必须先改契约、再改代码、最后改本文档。
 2. **新的进程边界 / 微服务**：必须证明收益 > 代价（契约冻结 §1 已给本轮唯一一处边界的四条理由）；跨 TCP 的服务要解释为什么不是进程内模块。
 3. **兼容旧版本 / 分支式演进**：直接拒绝——`PROTOCOL_VERSION` 不符即 `invalid_request` 并关闭连接（`lib.rs:23-25`、契约冻结 §3），不许写「尽量兼容」。
-4. **任何新界面能力**：必须在 `DaemonHello.capabilities` 里先有可宣告的能力；界面只渲染已宣告项（未实现 = 入口不存在，不是灰按钮）。本轮的正例就是订阅：`Subscriptions`（本地解析）宣告、`SubscriptionFetch`（远端拉取）不宣告 ⇒ 界面没有「添加/刷新」入口。
+4. **任何新界面能力**：必须在 `DaemonHello.capabilities` 里先有可宣告的能力；界面只渲染已宣告项（未实现 = 入口不存在，不是灰按钮）。本轮的正例就是订阅：`Subscriptions`（本地解析）宣告、`SubscriptionFetch`（远端拉取）不宣告 ⇒ 界面没有「添加/刷新」入口。 **2026-10-16 更新**：该正例已变——`Subscriptions`（`lib.rs:348`）与 `SubscriptionFetch`（`lib.rs:354`）**都**已宣告，界面用两个独立门控分别渲染（`apps/ui/src/pages/Settings.tsx:174`），所以「添加/刷新」入口会出现；能力分粒度与「未宣告 = 入口不存在」的纪律本身不变。
 5. **任何「未知显示成 0/空」的字段**：直接拒绝——没有数据就是 `None`（`model.rs:3-5`）。
 
 ---
 
 ## 6. 裁定记录与仍未决（与 `SCOPE.md §5` 保持一致）
 
-**已裁定（lead 2026-09-29）**：`N1` 订阅拉取契约面（`AddSubscription`/`RefreshSubscription` → `Unsupported`）、`N2` probe 条件交付、`N3` 日志本轮做、`N4` 设置本轮做、`N6` `Capability` 拆分为 `Subscriptions`（宣告）+ `SubscriptionFetch`（不宣告）——详见 `SCOPE.md §5.1`。
+**已裁定（lead 2026-09-29）**：`N1` 订阅拉取契约面（`AddSubscription`/`RefreshSubscription` → `Unsupported`）、`N2` probe 条件交付、`N3` 日志本轮做、`N4` 设置本轮做、`N6` `Capability` 拆分为 `Subscriptions`（宣告）+ `SubscriptionFetch`（不宣告）——详见 `SCOPE.md §5.1`。 **2026-10-16 更新**：`N1`/`N6` 的实现口径已变——`SubscriptionFetch` 现已宣告（`crates/xt-daemon/src/lib.rs:354`），两条订阅请求由 `lib.rs:408`/`:457` 真执行，`Unsupported` 不再是它们的应答；原裁定作为历史保留。
 
 **仍是归属问题**：`N5` 页面/导航/文案/视觉归 ux/design。
 
-**契约变更已落地（2026-09-29 复核，不再是阻塞）**：`Capability::SubscriptionFetch`（`model.rs:317`）与 `ErrorCode::Unsupported`（`error.rs:33` / `:52` / `:105-106`）都已存在；能力宣告与 `Unsupported` 的使用纪律成文于契约冻结 **§3.1**（该码只能表示「本版本不提供」，不得包装真实失败）。实现者仍不得自造契约外的能力串或错误码。详见 `SCOPE.md §5.3`、`ACCEPTANCE.md §7`。
+**契约变更已落地（2026-09-29 复核，不再是阻塞）**：`Capability::SubscriptionFetch`（`model.rs:317`）与 `ErrorCode::Unsupported`（`error.rs:33` / `:52` / `:105-106`）都已存在；能力宣告与 `Unsupported` 的使用纪律成文于契约冻结 **§3.1**（该码只能表示「本版本不提供」，不得包装真实失败）。实现者仍不得自造契约外的能力串或错误码。详见 `SCOPE.md §5.3`、`ACCEPTANCE.md §7`。 **2026-10-16 更新**：`SubscriptionFetch` 现已由 daemon 宣告（`crates/xt-daemon/src/lib.rs:354`）；`ErrorCode::Unsupported` 在当前生产路径上只剩 `crates/xt-macosnet/src/stub.rs`（非 macOS 的 TUN 桩）在使用。
 
 处理规则：**已裁定 ≠ 已实现**（是否实现看 `ACCEPTANCE.md` 状态列）；**未决 ≠ 已做**，也不许写成「本轮不做」。lead 后续裁定由 product 回改 `SCOPE.md`。

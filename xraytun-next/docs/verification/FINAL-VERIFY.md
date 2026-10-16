@@ -93,7 +93,7 @@ UI → **29 passed / 1 skipped**（跳过的 1 条是 `XT_LIVE=1` 门控的活�
 | macOS TUN + 特权 helper | 本轮**根本没实现**（不在范围内）；开发机是 Linux | 有 macOS 真机 + helper + 真机验收 |
 | macOS 上的真实运行 | 只有 `aarch64-apple-darwin` 交叉 `check` 的**目标可用性**，没有跑过任何 macOS 二进制 | 真机 |
 | Tauri 生产传输（`tauri.ts`） | 无 Tauri/macOS 环境；活体验收走的是 `unixSocket.ts`；Rust 侧没有 `xt_daemon_request` 这个命令 | 打包应用 + 真机 |
-| 订阅远端拉取（http/https） | 本轮不做（不宣告 `subscription_fetch`） | 决定承担 TLS 客户端依赖面之后 |
+| 订阅远端拉取（http/https） | 本轮不做（不宣告 `subscription_fetch`）——**2026-10-16 更新**：该结论已被实现推翻：能力表已宣告 `Capability::SubscriptionFetch`（`crates/xt-daemon/src/lib.rs:354`），由 `/usr/bin/curl` 拉取（`crates/xt-daemon/src/subs.rs:196`，状态文件 `subscriptions.json` 权限 0600）；**本节不新增任何「跑过」的证据**，只是把事实口径改对 | 已不适用（**2026-10-16 更新**：以 `/usr/bin/curl` 绝对路径实现，未新增依赖面）；本节其余各项不变 |
 | probe 的默认联网靶点（cloudflare generate_204） | 只对**环回**靶点真跑过（避免测试依赖外网） | 允许测试联网时 |
 | 界面的观感 / 对比度 | 对比度是公式实算，没有浏览器渲染采样；没有截图 | 真机 + 截图 |
 | 非 Tauri 浏览器环境下的 unixSocket 通道 | 已知会以 `transportError(io)` 失败（代码里如实标注），没把它当"可用" | —（这是设计事实，不是缺陷） |
@@ -101,7 +101,7 @@ UI → **29 passed / 1 skipped**（跳过的 1 条是 `XT_LIVE=1` 门控的活�
 ## 6. 已知的、记录在案但未处理的小事
 
 * live 测试里有 2 处 React `act(...)` 警告（测试仪器问题，不影响断言，ux 已如实记录）。
-* `xt-cli` 的 `subscriptions` 是只读真实现；`add/refresh` 固定 exit 2 并说明能力未宣告。
+* `xt-cli` 的 `subscriptions` 是只读真实现；`add/refresh` 固定 exit 2 并说明能力未宣告。**2026-10-16 更新**：后半句已过期——`add-subscription` / `refresh-subscription` / 新增的 `import-nodes` 现在都**真连 daemon** 发请求（`crates/xt-cli/src/lib.rs:184` / `:192` / `:202`），缺 `--socket` 才是用法错误（exit 2，`lib.rs:124-127`），连不上是 io 错误（exit 1）；原句原样保留为 2026-09-29 的当时状态。
 * 本工作区已作为 `xraytun-next/` 子树提交到同一仓库的分支 `xraytun-next-v1`（见 §7.5），
   所以证据既在文件里、也在提交信息里；旧仓库 `xray-tun/`（v0.9.2）全程**一行未改**。
 

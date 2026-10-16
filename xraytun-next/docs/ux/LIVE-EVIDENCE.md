@@ -199,6 +199,10 @@ XT_TEST_MUTATE=<name> npx vitest run tests/acceptance/truthfulness.test.tsx
 3. **daemon 未宣告 `probe`/`tun_mode`/`subscription_fetch` 的真实运行时**：能力门控是用
    注入的 hello 验证的（真 daemon 确实只宣告 `proxy_mode/stats/probe/subscriptions`，
    与注入路径一致，但「未宣告时真实运行时入口消失」我只在注入路径上断言过）。
+   **2026-10-16 更新**：本条记的是 2026-09-29 的当时状态，现已过期——真 daemon 的能力表现在含
+   `Capability::TunMode` / `NodeImport` / `SubscriptionFetch`（`crates/xt-daemon/src/lib.rs:343-355`），
+   因此「未宣告时真实运行时入口消失」已经不可能再照上面那句在真 daemon 上复核；
+   上面那句原样保留，本条也没有新增任何跑过的证据。
 4. **React `act(...)` 警告**：live 里有两处，来自真实事件在测试轮询间隙到达。它不影响断言，
    但我没有消除它，也没证明它在真机浏览器里对应任何问题。
 5. **旧版 UX 遗产的回归**：`IA.md`/`INTERACTION.md` 里引用的旧仓库教训（如「两个断开按钮」）

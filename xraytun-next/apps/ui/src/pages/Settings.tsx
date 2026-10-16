@@ -161,6 +161,9 @@ export function Settings() {
   const [urlDraft, setUrlDraft] = useState('');
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<DisplayError | null>(null);
+  // 错误提示渲染在**出错的那个区块里**：设置页很长，订阅卡片在最下面，
+  // 把「添加订阅失败」写到页面顶部等于让用户看不到（真人走查发现的缺口）。
+  const [errorScope, setErrorScope] = useState<'page' | 'subscriptions'>('page');
 
   const socksValue = socksDraft ?? settings?.socks_listen ?? '';
   const levelValue = levelDraft ?? settings?.log_level ?? null;
@@ -170,9 +173,15 @@ export function Settings() {
   const canReadSubscriptions = hasCapability(hello, 'subscriptions');
   const canFetchSubscriptions = hasCapability(hello, 'subscription_fetch');
 
-  const run = async (key: string, action: () => Promise<unknown>, onSuccess?: () => void) => {
+  const run = async (
+    key: string,
+    action: () => Promise<unknown>,
+    onSuccess?: () => void,
+    scope: 'page' | 'subscriptions' = 'page',
+  ) => {
     setPending(key);
     setActionError(null);
+    setErrorScope(scope);
     try {
       await action();
       if (onSuccess != null) onSuccess();
@@ -187,7 +196,9 @@ export function Settings() {
     <div className="page settings" data-testid="page-settings">
       <h1 className="page__title">设置</h1>
 
-      {actionError != null && <ErrorBox error={actionError} testId="settings-error" />}
+      {actionError != null && errorScope === 'page' && (
+        <ErrorBox error={actionError} testId="settings-error" />
+      )}
 
       {/* 第一张卡片：TUN 死路 D4 的修复点。壳没注入标记时整块不出现 ——
           装不了的壳不该摆一个按不动的假控件。 */}
@@ -314,6 +325,9 @@ export function Settings() {
                 远端拉取本版本不提供。要到「节点」页粘贴订阅原文或分享链接导入。
               </p>
             )}
+            {actionError != null && errorScope === 'subscriptions' && (
+              <ErrorBox error={actionError} testId="settings-error" />
+            )}
             {canFetchSubscriptions && (
               <form
                 className="row"
@@ -325,6 +339,7 @@ export function Settings() {
                     'add-sub',
                     () => client.addSubscription(url),
                     () => setUrlDraft(''),
+                    'subscriptions',
                   );
                 }}
               >
@@ -379,8 +394,11 @@ export function Settings() {
                           data-testid="refresh-subscription-button"
                           disabled={pending === `refresh-${subscription.id}`}
                           onClick={() =>
-                            void run(`refresh-${subscription.id}`, () =>
-                              client.refreshSubscription(subscription.id),
+                            void run(
+                              `refresh-${subscription.id}`,
+                              () => client.refreshSubscription(subscription.id),
+                              undefined,
+                              'subscriptions',
                             )
                           }
                         >

@@ -94,12 +94,14 @@ describe('startButtonView 判定优先级', () => {
     expect(v.danger).toBe(true);
   });
 
-  it('第 8 行：未连接且未选择节点', () => {
-    const v = view({ stage: 'disconnected', nodeId: null });
-    expect(v.label).toBe('启动');
-    expect(v.action).toBe('none');
-    expect(v.disabled).toBe(true);
-    expect(v.note).toBe('未选择节点');
+  it('第 8 行：未连接且未选择节点 —— 给的是可执行的下一步，不是死路', () => {
+    const v = startButtonView({ ...base, nodeId: null });
+    // 按钮**可点**（点了会导航到节点页），并且说明里写清了「点哪里」。
+    expect(v.disabled).toBe(false);
+    expect(v.action).toBe('select');
+    expect(v.note).toContain('选为当前节点');
+    expect(v.note).toContain('选择节点');
+    expect(v.danger).toBe(false);
   });
 
   it('第 9 行：未连接、有节点、无上次错误 —— 可以启动', () => {

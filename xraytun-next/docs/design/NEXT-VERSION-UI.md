@@ -352,3 +352,20 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 - 开发机不是 macOS：本机只跑了 UI（`vitest` / `tsc --noEmit` / `vite build`）与 `scripts/guard.sh`；Rust 侧由 CI（`xraytun-next-release.yml`，分支推送触发）编译验证。
 - 物理上行发现按裁决 **A** 实现（helper `DiscoverPhysical` + 协议版本 1→2，daemon 不再写死 `en0`）；§8 仍待裁决的只剩「网速节拍 C→D」。
 - `components/StatusBadge.tsx` 在新仪表板里不再被使用（状态词改由 `topbarStatus.ts` + 顶栏/仪表板渲染）；本版**没有删它**，留待下一次清理时一并处理（删它要同时清 `styles.css` 的 `badge--disconnected/connecting/…` 与 `docs/design/DESIGN-SYSTEM.md` 的对应段落）。
+
+### 9.1 第 3 轮落地记录（2026-10-16）：订阅这条路 + 真人走查发现的三处「不告诉你去哪」
+
+这一轮不新增设计，只把**已经写在文档里但用户走不到**的东西接通，并把两处「看得见但没说下一步」的界面补上。
+
+| 东西 | 落在哪 | 证据（本机可验 / 只有 CI 能验） |
+| --- | --- | --- |
+| 订阅远端拉取（设计 §6 一直记着「保持 v1 现状」，本轮第一次真的做了） | `crates/xt-daemon/src/subs.rs`（`fetch_body` = **`/usr/bin/curl`** 绝对路径 + argv；校验、脱敏、0600 状态文件）、`lib.rs` 的 `add_subscription` / `refresh_subscription` / `record_subscription_error`、宣告 `Capability::SubscriptionFetch` | Rust：CI（`cargo clippy/test`）。**本机不能编译**，故本轮只能给出代码与用例指针，不给「已验证」 |
+| 订阅的端到端用例（真 HTTP + 真 curl，零新增依赖） | `crates/xt-daemon/tests/e2e_real_xray.rs`：`start_subscription_server`（`std::net::TcpListener`）、`ControlHarness`（只跑控制面，不需要真 xray）、`remote_subscription_add_list_and_refresh`、`remote_subscription_failure_never_leaks_the_url` | 同上：CI 编译并运行 |
+| 设置页订阅区（添加 / 刷新，仍由能力门控） | `apps/ui/src/pages/Settings.tsx`（`subscription_fetch` 才渲染；错误提示**渲染在订阅卡片内**） | `apps/ui/tests/acceptance/subscription.test.tsx`（4 条，本机 `vitest` 通过） |
+| CLI 等价入口（无头也能做同样的事） | `crates/xt-cli/src/lib.rs`：`add-subscription` / `refresh-subscription` / 新增 `import-nodes <原文｜->` | Rust：CI；本地只核对了 shape 与 `guard.sh` |
+| 真人走查发现 ①：**有节点但没选节点**时，大按钮灰着只写「未选择节点」，真人不知道该去哪点 | `components/startButton.ts`（第 8 行分支改成可点的**「选择节点」**，说明逐字给出「在节点页点某一行的『选为当前节点』」）+ `Dashboard.tsx` 的 `select` 动作导航 | `components/startButton.test.ts`、`tests/acceptance/node-import.test.tsx`（新增「选了节点之后才是『启动』」对照） |
+| 真人走查发现 ②：添加订阅失败的错误提示在**页面顶部**，订阅卡片在页面最下面，用户看不到 | `pages/Settings.tsx`：错误按来源分流，订阅动作的错误渲染在订阅卡片内（同一 testid，任何时刻只有一处） | `tests/acceptance/subscription.test.tsx`（第 4 条） |
+| 真人走查发现 ③：节点页没说「手里只有订阅链接怎么办」 | `pages/Nodes.tsx`：`subscription_fetch` 已宣告时，导入区明说「到『设置 → 订阅』填 URL」 | 本机 `tsc --noEmit` + 全量 `vitest`（92 passed / 1 skipped） |
+
+**口径**：本轮把「订阅」从「不做」变成「做完了但只在本机验过 UI 那半」，Rust 半边的编译与端到端**以 CI 为唯一判据**；
+真机（helper 授权、`utun` 接管）仍然只有用户能验 —— 所以「能翻墙」这句话依然不说。

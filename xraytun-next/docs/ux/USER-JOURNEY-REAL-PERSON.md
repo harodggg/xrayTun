@@ -104,7 +104,7 @@
 | 步 | 要做的 | 成本 / 依赖决策 |
 | --- | --- | --- |
 | A | **粘贴分享链接导入**（`xt-subs::parse_links` 已存在）→ 新区块 + daemon 加一条「导入文本」请求 + 落盘 + 刷新目录 | **零新增依赖**；UI + daemon 各一小块；可当天做完 |
-| B | **订阅 URL 拉取**：daemon 侧实现 `AddSubscription` / `RefreshSubscription` + 宣告 `SubscriptionFetch` + UI 解除门控 | **要新增 HTTPS 依赖**（工作区现在**一个 TLS/HTTP 客户端都没有**：只有 `h2/http/bytes` 给 h2c gRPC）⇒ 要选 `reqwest(rustls)` 还是 `ureq(rustls)` 还是自建 hyper+rustls |
+| B | **订阅 URL 拉取**：daemon 侧实现 `AddSubscription` / `RefreshSubscription` + 宣告 `SubscriptionFetch` + UI 解除门控 | **原计划：新增 HTTPS 依赖**（当时工作区一个 TLS/HTTP 客户端都没有）⇒ **2026-10-16 最终决定：用 `/usr/bin/curl`（绝对路径 + argv），零新增依赖** —— 这是老版 v0.9.2 对同一功能的结论，见 §4.1 |
 | C | **helper 安装**：`xt-helperd` 安装（拷贝到固定位置 + launchd plist + 用户授权）+ 卸载/回滚 + 界面引导 | 最大的一块；`MACOS-APP-PLAN` S2；**只有真机能验**（CI 装 launchd 不可靠，设计文档已写明） |
 
 ### 第 1 轮进展（2026-10-01 · commit `4951a2e` + `ea45303` · CI 全绿）
@@ -146,6 +146,29 @@
   不能因为「CI 装不了」就把这一步无限期推迟。
 - **B 最主流但依赖最重**：要新增 HTTPS 依赖（工作区现在一个 TLS 客户端都没有）。
 
+### 第 3 轮进展（2026-10-16 · commit `待推` · CI 待跑）
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| **B 订阅 URL 拉取** | ✅ **代码完成**（2026-10-16 改变方案：不引依赖） | daemon 新增 `crates/xt-daemon/src/subs.rs`：`fetch_body` 用 **`/usr/bin/curl`**（绝对路径 + argv，永不经过 shell；`--location` 限制重定向协议、`--proto-redir =https,http`、`--compressed`、`--max-time 20`、正文上限 5 MiB）；`validate_url` 只认 `http(s)` 且有主机名；**日志/错误里只出现 `scheme://host/…`**（`redact_url`/`redact_text`），完整 URL 只落在状态文件 `<state-dir>/subscriptions.json`（**权限 0600**，原子 tmp+rename）。`lib.rs` 新增 `add_subscription` / `refresh_subscription` / `record_subscription_error`，并**宣告** `Capability::SubscriptionFetch`。 |
+| 订阅的失败口径 | ✅ 不静默 | 添加失败 = 原样上报（`invalid_request`/`io`），**不存一条空订阅**；刷新失败 = 既写进该条的 `last_error`（下次打开界面还看得到），又原样上报（这一次点击立刻有反馈）。`refresh_subscription("local")` 明确报 `invalid_request`：本地文件订阅每次启动由 `--subscription-file` 重读，不归「刷新」管。 |
+| UI：添加 / 刷新入口 | ✅ | 设置页订阅区在 `subscription_fetch` 宣告后渲染「添加订阅」输入框与每条订阅的「刷新」按钮（`Settings.tsx:317`/`:376`，仍按能力门控 —— 没宣告就不渲染）。 |
+| CLI 等价入口 | ✅ | `xt-cli add-subscription <url>` / `refresh-subscription <id>` 从「固定 exit 2 说不支持」改成**真连 daemon 发请求**；并新增 `import-nodes <原文>`（传 `-` 表示从 stdin 读）。缺 `--socket` 仍是用法错误（exit 2），连不上是 io 错误（exit 1）。 |
+| 本机可验的证据 | ✅ | 新增 UI 验收 4 条 `apps/ui/tests/acceptance/subscription.test.tsx`（能力门控 / 完整 URL 逐字送到 daemon / 刷新送该条 id / 失败可见且输入不清空）；全量 `npx vitest run` = **92 passed · 1 skipped**，`npx tsc --noEmit` 0 错，`bash scripts/guard.sh` PASSED。Rust 的编译与 daemon e2e **只能由 CI 判定**（本机禁 cargo）。 |
+
+**真人走查又发现的三处「看得见但不告诉你去哪」的毛病（已在同一轮修掉）**：
+
+1. **有节点、但还没选节点**时，大启动按钮是灰的、只写「未选择节点」——真人就卡在这一屏。
+   现在按钮变成可点的**「选择节点」**（点了跳节点页），说明逐字写清「在节点页点某一行的『选为当前节点』」。
+2. **订阅添加失败的错误提示**原本渲染在设置页**顶部**，而订阅卡片在页面**最下面**，中间隔着好几张卡 —— 用户看不到自己在卡片里点出来的错误。
+   现在错误渲染在**订阅卡片内**（同一 testid，仍只有一处）。
+3. 节点页在 `subscription_fetch` 已宣告时，导入区明确写着「手里只有订阅链接？到『设置 → 订阅』填 URL」——
+   两种「把节点弄进来」的路（粘贴原文 / 订阅链接）现在都在屏幕上说得出来。
+
+**这一轮的口径（别自我美化）**：订阅这条路在**代码与本机 UI 验收**层面通了，但
+（a）Rust 侧结论要等 CI 跑完才算数；（b）真机那一步（授权弹窗、`utun` 接管、装/卸 helper）**仍然只有你能验**。
+所以「能翻墙了」这句话我仍然不说。
+
 ## 5. 真人模拟体验官（独立复核，2026-10-01）
 
 角色：fresh-context agent，按「刚下载完 App 的普通 Mac 用户」代入，只从 v1.2.0 源码（逐字引用）、
@@ -164,6 +187,7 @@
 
 ## 6. 待裁决
 1. **先做哪条**：A（手动导入，零依赖） / B（订阅 URL 拉取，需选 TLS 依赖） / C（helper 安装，只有真机能验）？
-2. 若做 B：选哪个 HTTP 客户端（`reqwest(rustls)` / `ureq(rustls)` / hyper+rustls）？本仓库此前**没有任何 TLS 依赖**，
-   这会实质改变构建时间与审计面。
+2. ~~若做 B：选哪个 HTTP 客户端（`reqwest(rustls)` / `ureq(rustls)` / hyper+rustls）？~~
+   **2026-10-16 已决**：都不选 —— 用系统自带的 `/usr/bin/curl`（绝对路径 + argv），零新增依赖，
+   与老版 v0.9.2 对同一功能的选择一致（代价是不能复用连接，对「一天拉几次订阅」无所谓）。
 3. 未公证（S5）与 helper 安装都要用户配合真机；是否接受「helper 安装只在本机验证、CI 不覆盖」？

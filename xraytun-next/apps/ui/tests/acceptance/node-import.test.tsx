@@ -60,8 +60,14 @@ function makeClient(options: {
   capabilities: Capability[];
   nodes?: NodeView[];
   importError?: ErrorBody;
+  /** daemon 里已选中的节点（不传 = 还没选）。 */
+  selectedNode?: string;
 }): Rig {
   const importCalls: string[] = [];
+  const settings: SettingsView =
+    options.selectedNode === undefined
+      ? SETTINGS
+      : { ...SETTINGS, selected_node: options.selectedNode };
   const client: DaemonClient = {
     hello: () => Promise.resolve(helloOf(options.capabilities)),
     subscribe: () => Promise.resolve(),
@@ -72,7 +78,7 @@ function makeClient(options: {
     switchNode: () => Promise.resolve(),
     listNodes: () => Promise.resolve(options.nodes ?? []),
     probeNodes: () => Promise.resolve(),
-    getSettings: () => Promise.resolve(SETTINGS),
+    getSettings: () => Promise.resolve(settings),
     patchSettings: () => Promise.resolve(),
     listSubscriptions: () => Promise.resolve([]),
     addSubscription: () => Promise.resolve(),
@@ -201,12 +207,34 @@ describe('无节点时的大启动按钮指向真实存在的导入入口', () =
     expect(await screen.findByTestId('import-nodes')).toBeTruthy();
   });
 
-  it('节点目录非空时启动按钮恢复成「启动」（对照，证明上面不是写死的文案）', async () => {
+  it('目录非空但还没选节点：大按钮是「选择节点」，点了真跳到节点页（不是灰着不说去哪）', async () => {
     const rig = makeClient({ capabilities: ['tun_mode', 'node_import'], nodes: [NODE_ONE] });
     renderApp(rig.client);
 
     const button = await screen.findByTestId('start-button');
+    await waitFor(() => expect(button.textContent).toBe('选择节点'));
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    // 说明里必须写清「到了节点页点哪一颗」——这是真人卡住的地方。
+    expect(screen.getByTestId('start-button-note').textContent).toContain('选为当前节点');
+
+    fireEvent.click(button);
+    expect(await screen.findByTestId('page-nodes')).toBeTruthy();
+  });
+
+  it('选好节点之后才是「启动」：点了停在仪表盘，不会跳页', async () => {
+    const rig = makeClient({
+      capabilities: ['tun_mode', 'node_import'],
+      nodes: [NODE_ONE],
+      selectedNode: NODE_ONE.id,
+    });
+    renderApp(rig.client);
+
+    const button = await screen.findByTestId('start-button');
     await waitFor(() => expect(button.textContent).toBe('启动'));
-    expect(screen.queryByTestId('page-nodes')).toBeNull();
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(button);
+    // 启动是异步意图：点了以后按钮进入「启动中…」，但**不会**把用户带走。
+    await waitFor(() => expect(screen.queryByTestId('page-nodes')).toBeNull());
   });
 });

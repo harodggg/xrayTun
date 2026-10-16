@@ -122,6 +122,16 @@ daemon 负责算 `api_listen = socks 端口 + 1`（对用户不暴露成设置�
   能力表现已**宣告** `Capability::TunMode`（`crates/xt-daemon/src/lib.rs` 的 `hello()`），
   本版 TUN 通路已打开。**宣告 =「本版本提供这条通路」（代码事实），不等于「TUN 已验证可用」**；
   `SubscriptionFetch` 仍不宣告。旧结论保留，仅作 2026-10-01 之前的历史口径。
+* **2026-10-16 更新**：上面「`SubscriptionFetch` 不宣告」与「`AddSubscription` / `RefreshSubscription`
+  → `Unsupported`」也已被实现更新——daemon `hello()` 能力表现含
+  `ProxyMode, TunMode, Stats, Probe, Subscriptions, NodeImport, SubscriptionFetch`
+  （`crates/xt-daemon/src/lib.rs:343-355`，`SubscriptionFetch` 在 `:354`）；两条订阅请求由
+  `lib.rs:408`（`add_subscription`）/ `:457`（`refresh_subscription`）**真执行**，当前生产路径上
+  `Unsupported` 只剩 `crates/xt-macosnet/src/stub.rs`（非 macOS 的 TUN 桩）。
+  上面两条纪律**不变**：`Unsupported` 仍只能表示「本版本不提供」、绝不能包装真实失败
+  （`lib.rs` 里订阅失败一律原样上报 `InvalidRequest`/`Io`/解析错误）；界面仍只渲染已宣告能力。
+  **「已宣告」≠「已验证」**：订阅 e2e 用例已存在（`crates/xt-daemon/tests/e2e_real_xray.rs:734` /
+  `:834`），本机不能编译、CI 未跑 —— 是否通过看 CI。旧结论保留，仅作 2026-10-16 之前的历史口径。
 * 能力粒度必须与**用户可做的动作**对齐：`Subscriptions` 与 `SubscriptionFetch` 之所以分开，
   是因为合成一个会让界面只剩两个坏选择——显示一个按不动的"刷新"（假控件），
   或者把本地解析也一起藏掉。
