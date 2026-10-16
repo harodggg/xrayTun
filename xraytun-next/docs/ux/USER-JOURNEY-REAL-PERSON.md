@@ -146,7 +146,7 @@
   不能因为「CI 装不了」就把这一步无限期推迟。
 - **B 最主流但依赖最重**：要新增 HTTPS 依赖（工作区现在一个 TLS 客户端都没有）。
 
-### 第 3 轮进展（2026-10-16 · commit `待推` · CI 待跑）
+### 第 3 轮进展（2026-10-16 · commit `be0beb6` · CI 全绿 `38885737929`）
 
 | 项 | 状态 | 证据 |
 | --- | --- | --- |
@@ -154,6 +154,7 @@
 | 订阅的失败口径 | ✅ 不静默 | 添加失败 = 原样上报（`invalid_request`/`io`），**不存一条空订阅**；刷新失败 = 既写进该条的 `last_error`（下次打开界面还看得到），又原样上报（这一次点击立刻有反馈）。`refresh_subscription("local")` 明确报 `invalid_request`：本地文件订阅每次启动由 `--subscription-file` 重读，不归「刷新」管。 |
 | UI：添加 / 刷新入口 | ✅ | 设置页订阅区在 `subscription_fetch` 宣告后渲染「添加订阅」输入框与每条订阅的「刷新」按钮（`Settings.tsx:317`/`:376`，仍按能力门控 —— 没宣告就不渲染）。 |
 | CLI 等价入口 | ✅ | `xt-cli add-subscription <url>` / `refresh-subscription <id>` 从「固定 exit 2 说不支持」改成**真连 daemon 发请求**；并新增 `import-nodes <原文>`（传 `-` 表示从 stdin 读）。缺 `--socket` 仍是用法错误（exit 2），连不上是 io 错误（exit 1）。 |
+| CI（唯一能编译 Rust 的地方） | ✅ **全绿** | 分支 `xraytun-next-v1` 推送 `be0beb6` → run `38885737929`：`workflow-lint` / `linux-core` / `macos-core` / `macos-app` 四个 job 全部 success（含 `cargo clippy -D warnings`、`cargo test --workspace` —— 三条新订阅 e2e 在 Linux 与 macOS 上真跑过）。 |
 | 本机可验的证据 | ✅ | 新增 UI 验收 4 条 `apps/ui/tests/acceptance/subscription.test.tsx`（能力门控 / 完整 URL 逐字送到 daemon / 刷新送该条 id / 失败可见且输入不清空）；全量 `npx vitest run` = **92 passed · 1 skipped**，`npx tsc --noEmit` 0 错，`bash scripts/guard.sh` PASSED。Rust 的编译与 daemon e2e **只能由 CI 判定**（本机禁 cargo）。 |
 
 **真人走查又发现的三处「看得见但不告诉你去哪」的毛病（已在同一轮修掉）**：
@@ -167,7 +168,7 @@
 
 **这一轮的口径（别自我美化）**：订阅这条路在**代码与本机 UI 验收**层面通了，但
 （a）Rust 侧结论要等 CI 跑完才算数；（b）真机那一步（授权弹窗、`utun` 接管、装/卸 helper）**仍然只有你能验**。
-所以「能翻墙了」这句话我仍然不说。
+所以「能翻墙了」这句话我仍然不说。**CI 全绿只证明「代码能编译、用例在真机上跑得通」，不证明「TUN 能接管流量」。**
 
 ## 5. 真人模拟体验官（独立复核，2026-10-01）
 

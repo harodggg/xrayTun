@@ -359,7 +359,7 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 
 | 东西 | 落在哪 | 证据（本机可验 / 只有 CI 能验） |
 | --- | --- | --- |
-| 订阅远端拉取（设计 §6 一直记着「保持 v1 现状」，本轮第一次真的做了） | `crates/xt-daemon/src/subs.rs`（`fetch_body` = **`/usr/bin/curl`** 绝对路径 + argv；校验、脱敏、0600 状态文件）、`lib.rs` 的 `add_subscription` / `refresh_subscription` / `record_subscription_error`、宣告 `Capability::SubscriptionFetch` | Rust：CI（`cargo clippy/test`）。**本机不能编译**，故本轮只能给出代码与用例指针，不给「已验证」 |
+| 订阅远端拉取（设计 §6 一直记着「保持 v1 现状」，本轮第一次真的做了） | `crates/xt-daemon/src/subs.rs`（`fetch_body` = **`/usr/bin/curl`** 绝对路径 + argv；校验、脱敏、0600 状态文件）、`lib.rs` 的 `add_subscription` / `refresh_subscription` / `record_subscription_error`、宣告 `Capability::SubscriptionFetch` | Rust：CI run `38885737929`（`be0beb6`）四个 job 全绿，含 `clippy -D warnings` 与 `cargo test --workspace` |
 | 订阅的端到端用例（真 HTTP + 真 curl，零新增依赖） | `crates/xt-daemon/tests/e2e_real_xray.rs`：`start_subscription_server`（`std::net::TcpListener`）、`ControlHarness`（只跑控制面，不需要真 xray）、`remote_subscription_add_list_and_refresh`、`remote_subscription_failure_never_leaks_the_url` | 同上：CI 编译并运行 |
 | 设置页订阅区（添加 / 刷新，仍由能力门控） | `apps/ui/src/pages/Settings.tsx`（`subscription_fetch` 才渲染；错误提示**渲染在订阅卡片内**） | `apps/ui/tests/acceptance/subscription.test.tsx`（4 条，本机 `vitest` 通过） |
 | CLI 等价入口（无头也能做同样的事） | `crates/xt-cli/src/lib.rs`：`add-subscription` / `refresh-subscription` / 新增 `import-nodes <原文｜->` | Rust：CI；本地只核对了 shape 与 `guard.sh` |
