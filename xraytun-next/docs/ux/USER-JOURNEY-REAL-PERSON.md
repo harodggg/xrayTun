@@ -118,6 +118,20 @@
 | **B 订阅 URL 拉取** | ⛔ 未做 | 需先选 HTTP/TLS 依赖 |
 | **D4 失败时给下一步** | ⛔ 未做 | 现在失败仍只给「查看日志 / 重新连接」 |
 
+### 第 2 轮进展（2026-10-01 · commit `fce5b94` · CI 全绿 `38881300652`）
+
+| 项 | 状态 | 证据 |
+| --- | --- | --- |
+| **C helper 安装链路** | ✅ **代码完成**（真机待验） | 壳新增 `apps/desktop/src/helper_install.rs`：launchd plist + 安装/卸载/重启脚本（方式 B：`/Library/PrivilegedHelperTools` + `/Library/LaunchDaemons` + **一次管理员授权**）；四个命令 `helper_status` / `install_helper` / `uninstall_helper` / `restart_helper`；设置页**第一张卡**「特权助手（TUN 需要）」说清为什么需要、只认识固定指令集、卸载会删干净 |
+| **D4 失败给下一步** | ✅ | 仪表板的「上次运行出错」在 `code = helper_unavailable` 时给出「去安装特权助手」→ 设置页那张卡 |
+| CI 补的洞 | ✅ | macos-app 新增 `cargo test -p xraytun-desktop --lib`：**壳里的纯函数（那两段会以 root 执行的脚本文本）以前没有任何 CI 跑过**。现在 5 条单测在 CI 上 `5 passed; 0 failed`（plist 逐字含 socket/RunAtLoad/KeepAlive；安装脚本 5 项要点；卸载删三样；无未替换占位符；AppleScript 转义） |
+| **B 订阅 URL 拉取** | ⛔ 未做 | 需要新增 HTTPS/TLS 依赖（工作区现在一个 TLS 客户端都没有），等选型 |
+| **真机验收（S6）** | ⏳ **只有你能做** | 授权弹窗、`launchctl bootstrap`、装完能不能真的接管网络 —— CI 上装 launchd daemon 不可靠，设计文档也这么写 |
+
+**现在的口径**：三条主路径在**代码层面**都通了（导入节点 → 选节点 → 点开始；没装助手时界面直接引导安装）。
+但「真人能用」这句话**还没有真机证据** —— 需要你真机装一次、过一次授权弹窗、连一次、再卸一次。
+在那之前我不会说「能翻墙了」。
+
 **进度口径（别自我美化）**：一个真人现在能做到「导入节点 → 选节点」，但按下「启动」**仍然会撞上「helper 没装」**。
 所以这一轮把「界面里根本没有入口」变成了「有入口、能进来」，**离「能翻墙」还差 C 那一步**。
 
