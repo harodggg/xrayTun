@@ -477,6 +477,9 @@ jobs:
           # 而 App 在那一步根本还没跑起来，所以指引只能放在用户卡住的地方：磁盘映像里。
           # （同一份文字也在发布说明里；DMG 打包失败时的 zip 交付靠发布说明。）
           cp xraytun-next/docs/install/FIRST-LAUNCH.txt "$STAGE/首次打开请看这里.txt"
+          # 断言它真的在映像里：少一个文件不会让 hdiutil 失败，那就成了「说了却没做」。
+          test -f "$STAGE/首次打开请看这里.txt"
+          ls -l "$STAGE"
           mkdir -p "$B/dmg"
           OUT="$B/dmg/XrayTun_${V}_universal.dmg"
           TMP_RW="$B/dmg/.XrayTun_rw.dmg"

@@ -96,12 +96,14 @@ struct PreparedConfig {
 ///
 /// 抽成纯函数是为了能单测：这条判断写错，界面就会撒谎（显示 TUN 已连接而实际只有本机 SOCKS）。
 pub(crate) fn switch_needs_tun_flow(state: &xt_state::State) -> bool {
-    match state {
+    // 用 `matches!`：CI 的 clippy 是 `-D warnings`，`match` 写成「只为了返回 true/false」
+    // 会被 `match_like_matches_macro` 判成错误（v1.2.2 的第一次 tag 运行就是这么红的）。
+    matches!(
+        state,
         xt_state::State::Connected { mode: RunMode::Tun, .. }
-        | xt_state::State::Connecting { mode: RunMode::Tun, .. }
-        | xt_state::State::Disconnecting { mode: RunMode::Tun, .. } => true,
-        _ => false,
-    }
+            | xt_state::State::Connecting { mode: RunMode::Tun, .. }
+            | xt_state::State::Disconnecting { mode: RunMode::Tun, .. }
+    )
 }
 
 impl Shared {

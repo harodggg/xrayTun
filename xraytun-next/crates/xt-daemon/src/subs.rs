@@ -341,9 +341,9 @@ mod tests {
         assert!(network_hint(Some(28), url).contains("超时"));
         assert!(network_hint(Some(6), url).contains("主机名"));
         // 22 = HTTP 4xx/5xx（`--fail`）：那是地址/订阅本身的问题，不许说成网络问题。
-        assert_eq!(network_hint(Some(22), url), "");
+        assert!(network_hint(Some(22), url).is_empty());
         // 退出码缺失（例如被信号杀掉）：不知道就不多说。
-        assert_eq!(network_hint(None, url), "");
+        assert!(network_hint(None, url).is_empty());
     }
 
     /// userinfo 也要剥掉：`validate_url` 允许 `https://user:token@host/…`，
