@@ -565,12 +565,12 @@ fn cfdata_bytes(data: CFDataRef) -> Option<Vec<u8>> {
     }
 }
 
-/// 从一个 `SecCode` 取 **cdhash**（签名信息里的 `kSecCodeInfoUnique`）。
+/// 从一个动态 `SecCode` 取**所有架构**的 cdhash 集合。
 ///
 /// 先把动态 `SecCode` 转成 `SecStaticCode`，再取签名信息：这是 Security.framework
 /// 文档给出的对象类型（`SecCodeCopySigningInformation` 的形参是 `SecStaticCodeRef`），
 /// 避免把动态对象硬塞给静态 API 的隐式转换。
-fn code_cdhash(code: SecCodeRef) -> Result<Vec<u8>, ErrorBody> {
+fn code_cdhashes(code: SecCodeRef) -> Result<Vec<Vec<u8>>, ErrorBody> {
     if code.is_null() {
         return Err(internal_error("SecCode 为空"));
     }
@@ -585,7 +585,7 @@ fn code_cdhash(code: SecCodeRef) -> Result<Vec<u8>, ErrorBody> {
             "SecCodeCopyStaticCode 失败（OSStatus {status}）"
         )));
     }
-    let result = code_cdhash_from_static(static_code);
+    let result = code_cdhashes_from_static(static_code);
     // SAFETY: `static_code` 是上面返回的、需要 Release 的 Security 对象。
     unsafe { CFRelease(static_code) };
     result
@@ -756,7 +756,7 @@ fn verify_installed_app_cdhash(fd: RawFd, app_binary: &Path) -> Result<(), Error
     // 先读「应该是谁」：读不到就拒绝（fail-closed），不许因为读不到而放行。
     let want = static_cdhashes(app_binary)?;
     let guest = peer_guest(fd)?;
-    let got = code_cdhash(guest);
+    let got = code_cdhashes(guest);
     // SAFETY: `peer_guest` 返回的是需要 Release 的 Security 对象。
     unsafe { CFRelease(guest) };
     let got = got?;
@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(read, 0, "child 未按预期 exec（pipe read={read}）");
 
         let guest = peer_guest(parent_socket).expect("合法 ad-hoc 对端必须能被定位");
-        let got = code_cdhash(guest).expect("对端 cdhash 必须可读");
+        let got = code_cdhashes(guest).expect("对端 cdhash 必须可读");
         unsafe { CFRelease(guest) };
         unsafe { libc::close(parent_socket) };
         assert!(
