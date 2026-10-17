@@ -63,6 +63,13 @@ pub struct HelperStatus {
     pub reachable: bool,
     /// 装它需要的那份二进制在 App 包里找不找得到（找不到 ⇒ 界面不给「安装」按钮）。
     pub binary_in_bundle: bool,
+    /// **客观事实**：已安装的助手二进制与当前 App 包里那份是否逐字节不同。
+    ///
+    /// 为什么需要它：helper 是独立 launchd 服务，App 升级**不会**自动替换已经装好的
+    /// helper；如果界面不提示，用户会「装了新版 App 但 helper 还是旧代码」——
+    /// 真机上 v1.2.4 的 audit-token 校验就是这样撞上的。
+    /// 只在「已安装 + 包内二进制存在」时有意义，其余情况为 false。
+    pub update_available: bool,
 }
 
 /// launchd 的 label（可用环境变量覆盖，仅开发/测试用）。
@@ -97,13 +104,27 @@ pub fn helper_binary_path() -> Option<PathBuf> {
 
 /// 读当前的四个客观事实。**不做任何推断**（例如不因为 plist 在就说「已生效」）。
 pub fn status() -> HelperStatus {
-    let binary_in_bundle = helper_binary_path().is_some();
+    let bundled = helper_binary_path();
+    let installed = Path::new(HELPER_INSTALLED_PATH).is_file();
+    let update_available = match (&bundled, installed) {
+        (Some(bundled), true) => !files_identical(bundled, Path::new(HELPER_INSTALLED_PATH)),
+        _ => false,
+    };
     HelperStatus {
-        installed: Path::new(HELPER_INSTALLED_PATH).is_file(),
+        installed,
         plist_present: Path::new(HELPER_PLIST_PATH).is_file(),
         socket_present: Path::new(HELPER_SOCKET_PATH).exists(),
         reachable: std::os::unix::net::UnixStream::connect(HELPER_SOCKET_PATH).is_ok(),
-        binary_in_bundle,
+        binary_in_bundle: bundled.is_some(),
+        update_available,
+    }
+}
+
+/// 两个文件是否逐字节相同。读不到任何一个都返回 `false`（推断不出相等，就不能说相同）。
+fn files_identical(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 

@@ -44,6 +44,7 @@ vi.mock('@tauri-apps/api/core', () => ({
         socket_present: false,
         reachable: false,
         binary_in_bundle: true,
+        update_available: false,
       });
     }
     return Promise.resolve(undefined);

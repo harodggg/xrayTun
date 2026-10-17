@@ -19,6 +19,8 @@ export interface HelperStatus {
   socket_present: boolean;
   reachable: boolean;
   binary_in_bundle: boolean;
+  /** 已安装助手与 App 包内那份是否逐字节不同（App 升级后通常为 true）。 */
+  update_available: boolean;
 }
 
 /**

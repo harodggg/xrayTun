@@ -21,6 +21,7 @@ import type { LogLevel } from '../transport/contract';
 
 /** helper 状态行：四件客观事实之一定档，不做任何推断。 */
 function helperStateText(status: HelperStatus): string {
+  if (status.update_available) return '已安装，但版本与当前 App 不一致（需要更新）';
   if (status.reachable) return '已安装 · 正在服务';
   if (status.installed) return '已安装，但连不上（socket 没有在服务）';
   return '未安装 —— TUN 模式无法使用';
@@ -119,6 +120,17 @@ function HelperCard() {
               onClick={() => void run('install', installHelper)}
             >
               {pending === 'install' ? '安装中…' : '安装特权助手'}
+            </button>
+          )}
+          {status?.update_available === true && (
+            <button
+              type="button"
+              className="btn btn--primary"
+              data-testid="helper-update-button"
+              disabled={pending != null}
+              onClick={() => void run('install', installHelper)}
+            >
+              {pending === 'install' ? '更新中…' : '更新助手'}
             </button>
           )}
           {status?.installed === true && status.reachable === false && (

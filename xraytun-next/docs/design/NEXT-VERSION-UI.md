@@ -421,3 +421,22 @@ root + 特权助手，CI 跑不了；契约又要求「未宣告的能力必须�
    但 spawn 核心前必须清掉；否则「helper 说交付成功、核心说没有 TUN 设备」。
    实现与单测在 `crates/xt-datapath/src/lib.rs`（`clear_cloexec`，用真实 `pipe(2)` 验证）。
    老仓库为同一个坑留过记录，这次是靠真机反馈又把这条经验学了一遍。
+
+### 9.5 第 7 轮：第二份真机反馈修掉 helper 对端校验（v1.2.5）
+
+用户装 v1.2.4 后点「启动」，daemon 日志变成
+`permission_denied: SecCodeCopyGuestWithAttributes 失败（OSStatus -67049）`。
+`-67049` = `errSecCSBadObjectFormat`：helper 在「用 audit token 取对端 SecCode」这一步就失败，
+不是 cdhash 不匹配。三处修复：
+
+1. `crates/xt-helperd/src/trust.rs`：首选 `SecCodeCreateWithAuditToken`（securityd 同款），
+   旧 `SecCodeCopyGuestWithAttributes` 作为兼容回退，最后才按 pid 回退；失败原因保留 OSStatus。
+2. cdhash 绑定从「单个 `kSecCodeInfoUnique`」改成「每个架构的 `kSecCodeInfoCdHashes` 集合求交集」；
+   universal 二进制不再因切片选择不同而误判。
+3. `apps/desktop/src/helper_install.rs` 的 `HelperStatus.update_available` + 设置页
+   「更新助手」按钮：App 升级后如果已安装 helper 与包内文件逐字节不同，界面必须说出来，
+   不能让「旧 helper + 新 App」组合静默运行。
+
+**新增 macOS 真机测试**：复制当前测试二进制、ad-hoc 签名、子进程运行、真实 AF_UNIX socket +
+`LOCAL_PEERTOKEN`，断言合法对端能被定位且 cdhash 集合相交。旧测试只断言「不受信对端被拒」，
+无法证明正路径。**边界仍不变**：这一版没有真机 utun/路由/DNS 证据。

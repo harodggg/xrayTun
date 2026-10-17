@@ -29,6 +29,7 @@ const shellMock = vi.hoisted(() => {
       socket_present: true,
       reachable: true,
       binary_in_bundle: true,
+      update_available: false,
     } as HelperStatus,
     installReject: null as string | null,
   };
@@ -70,6 +71,7 @@ const DEFAULT_STATUS: HelperStatus = {
   socket_present: true,
   reachable: true,
   binary_in_bundle: true,
+  update_available: false,
 };
 
 function makeClient(connection: ConnectionView): DaemonClient {
@@ -154,6 +156,20 @@ describe('v1.2.0 · 特权助手卡片由壳标记门控', () => {
     expect(screen.queryByTestId('helper-install-button')).toBeNull();
   });
 
+  it('已安装但包内版本不同 ⇒ 显示「需要更新」并给更新按钮，点它调 install_helper', async () => {
+    shellMock.state.status.update_available = true;
+    renderApp();
+    await openSettings();
+
+    expect((await screen.findByTestId('helper-status')).textContent).toBe(
+      '已安装，但版本与当前 App 不一致（需要更新）',
+    );
+    fireEvent.click(await screen.findByTestId('helper-update-button'));
+    await waitFor(() =>
+      expect(shellMock.calls).toEqual(['helper_status', 'install_helper', 'helper_status']),
+    );
+  });
+
   it('未安装 ⇒ 安装按钮；点它真的调 install_helper 并重新拉 status', async () => {
     shellMock.state.status = {
       installed: false,
@@ -161,6 +177,7 @@ describe('v1.2.0 · 特权助手卡片由壳标记门控', () => {
       socket_present: false,
       reachable: false,
       binary_in_bundle: true,
+      update_available: false,
     };
     renderApp();
     await openSettings();
@@ -196,6 +213,7 @@ describe('v1.2.0 · 特权助手卡片由壳标记门控', () => {
       socket_present: false,
       reachable: false,
       binary_in_bundle: true,
+      update_available: false,
     };
     shellMock.state.installReject = '管理员授权被取消（或系统未给出原因）';
     renderApp();

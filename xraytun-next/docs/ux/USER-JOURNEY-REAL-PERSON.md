@@ -291,3 +291,29 @@ where N is a number, e.g. utun9, utun11 and so on
 **教训（写进流程）**：预检的价值是「在 spawn 前抓住配置错误」；一旦预检本身需要 spawn 之后才存在的
 条件（fd、root、设备），它就从「守门」变成「说谎」。**凡是预检跑不到真实条件的地方，宁可不预检，
 让真正的执行者报错。**
+
+## 10. 第二份真机反馈（2026-10-18，用户装 v1.2.4 后点「启动」）
+
+用户截图里的错误（日志两行，第二条为红）：
+
+```
+2026-10-18 02:19:57 信息 xt-daemon 开始连接节点 …（tun）
+2026-10-18 02:19:57 错误 xt-daemon 对端不是已安装的 XrayTun 组件（cdhash 绑定, uid=501 pid=61700）：
+permission_denied: SecCodeCopyGuestWithAttributes 失败（OSStatus -67049）
+```
+
+**这是 v1.2.4 修掉预检之后的下一层：特权助手在验证 daemon 身份。**
+`-67049` = `errSecCSBadObjectFormat`；助手在「用 audit token 取对端 SecCode」这一步就失败了，
+根本没走到 cdhash 比较。查出来三件事（都已在 v1.2.5 修）：
+
+| # | 真因 | 证据 / 修法 |
+| --- | --- | --- |
+| 1 | 旧 helper 只有 `SecCodeCopyGuestWithAttributes` 一条路；旧测试只断言 `Unauthorized`，没断言失败点，所以正路径从未被覆盖 | 首选 `SecCodeCreateWithAuditToken`（securityd 同款入口），失败再回退旧路径，再失败才按 pid 兼容；每次保留真实 OSStatus |
+| 2 | 即便取到 SecCode，旧比较只比 `kSecCodeInfoUnique` 单个哈希；universal 文件与运行进程可能选到不同切片 | 用 `kSecCodeInfoCdHashes` 取每个架构的 cdhash，集合有交集才算同源；macOS CI 用 ad-hoc 签名的测试二进制副本走真实 socket 复现并断言成功 |
+| 3 | helper 是独立 launchd 服务，App 升级不会替换已安装的 helper；界面没有「版本不一致」提示 | `HelperStatus.update_available`（安装文件与包内文件逐字节比较）+ 设置页「更新助手」按钮 + 验收用例 |
+
+**这一屏的正面信息**：daemon 已经在「开始连接节点（tun）」并真的去连 helper 了；
+说明 v1.2.4 的「TUN 预检」修复生效，链路往前推进了一层。
+
+**仍然没验到的**：utun、路由/DNS、核心就绪与真实流量。这一轮只修身份校验链路，
+不把「能翻墙」写成已验证。
