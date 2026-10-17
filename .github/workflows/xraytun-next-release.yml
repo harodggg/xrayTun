@@ -13,6 +13,9 @@
 #   手动 workflow_dispatch  → 同上（tag 用工作区版本号拼）
 #
 # 顺序就是判据顺序：钉工具链 → guard → clippy → 测试（含真 xray 端到端）→ 构建 → 打包 → 发布。
+#
+# 三个产线都可以创建同一个 Release：**先完成者决定标题**。所以三处的 --title 必须逐字一致，
+# 且不能再说「proxy 模式」——产品面自 v1.2.3 起只做 TUN，proxy 只是 CI 的验证通路。
 name: xraytun-next build & release
 
 on:
@@ -143,7 +146,7 @@ jobs:
             # （v1.2.0 那次就差点这样）。缺失就拒绝发版，而不是附一份错的说明。
             if [ ! -f "$NOTES" ]; then echo "缺少发布说明 $NOTES，拒绝发版"; exit 1; fi
             gh release create "$TAG" \
-              --title "xraytun-next v${VERSION}（Linux x86_64 核心 · proxy 模式）" \
+              --title "xraytun-next v${VERSION}（macOS 应用 + 核心 · 产品面只做 TUN）" \
               --prerelease \
               --notes-file "$NOTES" \
               --target "$GITHUB_SHA"
@@ -272,7 +275,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "xraytun-next v${VERSION}（Linux + macOS 核心 · proxy 模式）" \
+              --title "xraytun-next v${VERSION}（macOS 应用 + 核心 · 产品面只做 TUN）" \
               --prerelease \
               --notes-file "$NOTES" \
               --target "$GITHUB_SHA"
@@ -635,7 +638,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
-              --title "xraytun-next v${VERSION}（macOS 应用 · TUN 模式）" \
+              --title "xraytun-next v${VERSION}（macOS 应用 + 核心 · 产品面只做 TUN）" \
               --prerelease \
               --notes-file "$NOTES" \
               --target "$GITHUB_SHA"
