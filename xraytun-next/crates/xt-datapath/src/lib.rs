@@ -141,6 +141,13 @@ pub async fn start(spec: &DatapathSpec) -> Result<RunningDatapath, ErrorBody> {
     // TUN 模式：把 helper 交来的 utun fd 经 XRAY_TUN_FD 传给 xray（xray 收到后
     // 跳过自己的地址/路由配置，配置责任在 helper）。proxy 模式 tun_fd 为 None。
     if let Some(fd) = spec.tun_fd {
+        // **必须先清掉 FD_CLOEXEC。** daemon 从 helper 收到 fd 时按安全习惯打了
+        // CLOEXEC（避免它泄漏给之后 exec 的进程），可核心**正是**那个「之后的进程」：
+        // 带 CLOEXEC 的 fd 不会随 exec 传下去，xray 只会拿到一个不存在的 fd 号，
+        // 然后报一句「没有 TUN 设备」——原因却在父进程这一行。
+        // （2026-10-16 老仓库为同一个坑留过记录：「supervisor 在 spawn xray 之前必须
+        //   显式清掉它」，见其 docs/02-tun-and-privileges.md。）
+        clear_cloexec(fd)?;
         cmd.env("XRAY_TUN_FD", fd.to_string());
     }
     cmd.stdin(Stdio::null())
@@ -636,6 +643,40 @@ fn now_ms() -> u64 {
         .max(1)
 }
 
+/// 清掉一个 fd 的 `FD_CLOEXEC`，让接下来的 `exec` 把**同一个 fd 号**继承给子进程。
+///
+/// 为什么失败要硬失败：带着 CLOEXEC 去 spawn，子进程只会在启动时报一句「拿不到
+/// TUN 设备」（或干脆自己去建卡），而真正的原因在父进程这一步 —— 那种错误现场
+/// 会把人引向完全错误的方向。
+///
+/// fd 的寿命由调用方负责：本函数只改标志位，不关闭、不接管所有权。
+fn clear_cloexec(fd: i32) -> Result<(), ErrorBody> {
+    if fd < 0 {
+        return Err(ErrorBody::new(
+            ErrorCode::DatapathUnavailable,
+            format!("utun fd 非法：{fd}"),
+        ));
+    }
+    // SAFETY: `fcntl(F_GETFD/F_SETFD)` 只读写这个 fd 的标志位，不涉及指针；
+    // fd 由调用方（daemon）持有，并在 spawn 期间保持有效。
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFD);
+        if flags < 0 {
+            return Err(ErrorBody::new(
+                ErrorCode::DatapathUnavailable,
+                format!("读取 fd {fd} 的标志位失败：{}", std::io::Error::last_os_error()),
+            ));
+        }
+        if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+            return Err(ErrorBody::new(
+                ErrorCode::DatapathUnavailable,
+                format!("清除 fd {fd} 的 FD_CLOEXEC 失败：{}", std::io::Error::last_os_error()),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 // 这里**刻意**跨 await 持有 std 锁：要的是「同一时刻只有一个用例在写夹具/ fork」，
 // 也就是 OS 线程级串行。换成 tokio 的异步锁解决不了 —— 它只在异步任务间让路，
@@ -1009,5 +1050,40 @@ mod tests {
         assert_eq!(detect_level("2025/01/01 [Debug] detail"), LogLevel::Debug);
         // 认不出来时按 Info：不能把普通一行标成错误。
         assert_eq!(detect_level("2025/01/01 started"), LogLevel::Info);
+    }
+
+    /// 这个原语是「核心能不能拿到 TUN」的唯一开关，必须自己证明一次：
+    /// 真实 pipe fd + 真实 fcntl，清完之后 `FD_CLOEXEC` 位必须为 0。
+    #[test]
+    fn clear_cloexec_makes_a_real_fd_inheritable() {
+        let mut fds = [0i32; 2];
+        // SAFETY: `pipe(2)` 把两个新 fd 写进我们提供的数组。
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe 创建失败");
+
+        // 先按 daemon 收 fd 的做法打上 CLOEXEC。
+        // SAFETY: 只读写 fds[0] 的标志位。
+        unsafe {
+            let flags = libc::fcntl(fds[0], libc::F_GETFD);
+            assert!(flags >= 0);
+            assert_eq!(libc::fcntl(fds[0], libc::F_SETFD, flags | libc::FD_CLOEXEC), 0);
+        }
+
+        clear_cloexec(fds[0]).expect("清 CLOEXEC 必须成功");
+
+        // SAFETY: 只读 fds[0] 的标志位，然后关掉两个 fd。
+        unsafe {
+            let flags = libc::fcntl(fds[0], libc::F_GETFD);
+            assert!(flags >= 0);
+            assert_eq!(flags & libc::FD_CLOEXEC, 0, "清完之后不该再有 CLOEXEC（否则核心继承不到）");
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
+
+    #[test]
+    fn clear_cloexec_rejects_an_invalid_fd() {
+        assert!(clear_cloexec(-1).is_err());
+        // 一个几乎不可能被打开过的 fd：报错，而不是静默成功。
+        assert!(clear_cloexec(1_000_000).is_err());
     }
 }

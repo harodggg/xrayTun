@@ -406,3 +406,18 @@ git diff --name-only <base>..HEAD -- xraytun-next/crates xraytun-next/scripts   
 root + 特权助手，CI 跑不了；契约又要求「未宣告的能力必须回 `Unsupported`」，所以删掉数据面等于
 连那条证据一起删。用户选择了「产品面 TUN-only + 内部保留验证通路」，口径写进了
 `crates/xt-contract/src/model.rs` 与 `crates/xt-daemon/src/flow.rs` 的注释。
+
+### 9.4 第 6 轮：第一份真机反馈修掉的两个 TUN 致命问题（v1.2.4）
+
+用户在真机上点「启动」，拿到 `config_invalid` + `interface name must be utunN`。查下来不是配置错，
+是**预检方式在 macOS 上不成立**，并且修掉它之后必然撞上第二个坑。两处都写在
+`docs/release-notes/v1.2.4.md` 与走查文档 §9，这里只记「设计上的教训」：
+
+1. **预检不能假装自己是执行者。** `xray run -test` 会真的创建入站（上游 `main/run.go` 先
+   `startXray()` 再判 `-test`），所以它需要「spawn 之后才存在的条件」（这里是 helper 交来的
+   utun fd）。TUN 从此不做这项预检，配置错误由核心自己报 —— 见 `crates/xt-daemon/src/flow.rs`
+   的 `connect_tun_flow`。
+2. **fd 交付的最后一公里是 `FD_CLOEXEC`。** 收 fd 时打 CLOEXEC 是对的（不泄漏），
+   但 spawn 核心前必须清掉；否则「helper 说交付成功、核心说没有 TUN 设备」。
+   实现与单测在 `crates/xt-datapath/src/lib.rs`（`clear_cloexec`，用真实 `pipe(2)` 验证）。
+   老仓库为同一个坑留过记录，这次是靠真机反馈又把这条经验学了一遍。

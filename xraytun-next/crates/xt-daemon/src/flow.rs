@@ -8,6 +8,7 @@
 //! 「换下一个节点试试」—— 那正是本项目要消除的回落。
 
 use std::net::SocketAddr;
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -438,9 +439,15 @@ impl Shared {
                 .fail_connect(ErrorBody::new(ErrorCode::Io, format!("写入配置失败: {e}")))
                 .await;
         }
-        if let Err(e) = xt_datapath::validate_config(&self.config.xray_bin, &config_path).await {
-            return self.fail_connect(e).await;
-        }
+        // ---- spawn 前的静态校验：**TUN 不做** ---------------------------------
+        // `xray run -test` 在「测试」阶段就真的会去创建 tun 入站（上游 main/run.go
+        // 里先 startXray()、再判断 -test），而 macOS 上创建 utun 要么需要 root、
+        // 要么需要 XRAY_TUN_FD —— 后者要等 helper TunUp 之后才存在。于是在 darwin 上
+        // 这条预检**证明不了任何事**，只会把「预检方式在这里不适用」报成「配置非法」。
+        //
+        // 2026-10-16 真机第一屏拿到的正是这句误导人的错误（`interface name must be
+        // utunN`）：不是配置写错了，是预检在自己的平台上不成立。TUN 的配置错误改由
+        // 核心进程自己报（[`xt_datapath`] 一直原样上报它的输出）—— 那是同一件事的真话。
         let state = self.snapshot_state().await;
         match apply(&state, Signal::ConfigReady, now_ms()) {
             Ok(t) => self.commit(t).await, // StartingCore
@@ -479,7 +486,15 @@ impl Shared {
             log_level: settings.log_level,
             tun_fd: Some(tun_fd),
         };
-        let mut datapath = match xt_datapath::start(&spec).await {
+        let spawn_result = xt_datapath::start(&spec).await;
+        // 父进程这一份 fd 到这里就没用了：核心继承的是它自己那份（`exec` 前已清掉
+        // CLOEXEC），接口靠「helper 一份 + 核心一份」活着。不关就每次连接泄漏一个 fd，
+        // 而且漏掉的那份会在 tun_down 之后继续把接口吊着。
+        //
+        // SAFETY: 这个 fd 是 helper 经 SCM_RIGHTS 交付、此前无人接管；交给 `OwnedFd`
+        // 之后由它负责关闭，且只关这一次。spawn 成功时子进程已持有自己那份副本。
+        let _daemon_fd_copy = unsafe { OwnedFd::from_raw_fd(tun_fd) };
+        let mut datapath = match spawn_result {
             Ok(d) => d,
             Err(e) => {
                 let _ = helper.tun_down(&session).await;

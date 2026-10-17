@@ -258,3 +258,36 @@ CI 上唯一能证明「真有字节穿过隧道」的端到端用例走的就�
 那一栏说的是它真做的事、能力行保持原文且旁边有解释、那一栏仍然可用）；
 `xt-cli` 的 `CONNECT_MODE == RunMode::Tun` 单测。
 真机验收（helper 授权 / utun / 路由与 DNS）仍然只有你能做，这一轮同样没有真机证据。
+
+## 9. 第一份真机反馈（2026-10-16，用户装 v1.2.3 后点「启动」）
+
+用户截图里的错误原文（仪表板「上次运行出错」+ ErrorBox 两处，完全相同）：
+
+```
+config_invalid
+xray 判定配置非法: Xray 26.3.27 (Xray, Penetrates Everything.) d2758a0 (go1.26.1 darwin/arm64)
+… [Info] infra/conf/serial: Reading config: &{Name=/Users/…/.local/share/xraytun/xray.json Format=json}
+Failed to start: main: failed to create server > interface name must be utunN,
+where N is a number, e.g. utun9, utun11 and so on
+```
+
+**这不是配置写错，是预检方式在 macOS 上不成立。** 顺着这一屏查出来两件事（都已在 v1.2.4 修）：
+
+| # | 真因 | 证据（上游源码 / 仓库代码） | 修法 |
+| --- | --- | --- | --- |
+| 1 | 预检 `xray run -test` 在「测试」阶段就真的创建 tun 入站；macOS 上建 utun 要 root 或 `XRAY_TUN_FD`，而 fd 要等 helper `TunUp` 之后才有 → 预检拿空名字建卡 → `interface name must be utunN` → 被我们报成「配置非法」 | xray `main/run.go`：`server, err := startXray()` 在 `if *test` **之前**；`proxy/tun/tun_darwin.go`：`NewTun` 先看 `XRAY_TUN_FD`，为空才 `open(options.Name)`，`open` 用 `Sscanf(name,"utun%d")` 校验；我们的 `flow.rs` 在 helper 之前调 `validate_config` | TUN 不做 `run -test` 预检（darwin 上它证明不了任何事）；配置错误改由核心自己报 |
+| 2 | 核心继承不到 helper 交来的 utun fd：daemon 收到 fd 时按安全习惯打了 `FD_CLOEXEC`，而核心正是「之后 exec 的进程」——带 CLOEXEC 的 fd 不会传下去 | `crates/xt-daemon/src/helper.rs` 的 `set_cloexec`；老仓库 `docs/02-tun-and-privileges.md` 明确写过「supervisor 在 spawn xray 之前必须显式清掉它」 | `xt-datapath` spawn 前清 `FD_CLOEXEC`（失败硬失败）；spawn 后关掉父进程那份 fd（核心持有自己那份，不关就每次连接泄漏一个） |
+
+**这一屏也是好消息**：错误出现在预检这一步，按 `connect_tun_flow` 的顺序，它之前已经走完
+「导入节点 → 选为当前节点 → 点启动 → 壳拉起 daemon → **连接特权助手（root 服务）** →
+**`DiscoverPhysical` 发现物理上行**」。所以特权助手的安装/授权/服务链路**至少走到了这一步**
+（这是按代码顺序的**推断**，不是我读到的日志 —— 用户机器上的日志我拿不到）。
+界面下方显示的 `daemon 日志：/Users/xbtg-/Library/Logs/XrayTun/xt-daemon.log` 正是 v1.2.2 加的
+「失败时给一手现场」，这一屏上它生效了。
+
+**仍然没验到的**：utun 接口是否真的被核心用起来、路由/DNS 提交是否生效、核心就绪与流量。
+这些要等下一次真机尝试。
+
+**教训（写进流程）**：预检的价值是「在 spawn 前抓住配置错误」；一旦预检本身需要 spawn 之后才存在的
+条件（fd、root、设备），它就从「守门」变成「说谎」。**凡是预检跑不到真实条件的地方，宁可不预检，
+让真正的执行者报错。**
