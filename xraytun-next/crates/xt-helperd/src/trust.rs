@@ -725,17 +725,27 @@ fn internal_error(message: impl Into<String>) -> ErrorBody {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::process::Command;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-    /// 真机路径的**最小复现**：一个 ad-hoc 签名的裸 Mach-O 进程，
-    /// 通过真实 AF_UNIX socket 连接，另一侧用 `LOCAL_PEERTOKEN` 取 audit token，
-    /// 再用 Security.framework 定位它的 `SecCode` 并把 cdhash 与磁盘文件逐字节比较。
+    /// 给「被复制的测试二进制」用的子进程入口：连上父进程的 socket 后永久 park。
     ///
-    /// 为什么必须用 `fork + execl`：`std::process::Command` 在 macOS 上可能走
-    /// `posix_spawn` 的 close-fds 语义，控制不了我们要继承的 socket fd；这里要的
-    /// 正是「进程 exec 后 socket fd 仍在」这个现场。
+    /// 正常测试时没有 `XT_TRUST_PEER_SOCKET`，直接返回；只有上面那个真机测试把
+    /// **当前测试二进制复制 + ad-hoc 签名**后，用 `--exact` 跑它并注入 socket 路径。
+    /// 这样对端就是一个真正的、非系统缓存的 ad-hoc 裸 Mach-O，
+    /// 和打包里的 `Contents/Resources/xt-daemon` 同类。
+    #[test]
+    fn peer_child_connects_and_parks() {
+        let Some(socket) = std::env::var_os("XT_TRUST_PEER_SOCKET") else {
+            return;
+        };
+        let _stream = UnixStream::connect(socket).expect("child 连不上父进程 socket");
+        std::thread::park();
+    }
+
     #[test]
     fn ad_hoc_signed_peer_is_located_by_audit_token_and_cdhash_matches() {
         let dir = std::env::temp_dir().join(format!(
@@ -748,8 +758,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("创建测试目录");
 
+        // 用**当前测试二进制**做对端：它能被复制、ad-hoc 签名并再次执行，
+        // 而且不是 /bin/sleep 那类可能由 dyld shared cache 提供的内核系统二进制
+        // （那类二进制复制后签名，动态身份仍可能来自缓存里的原件）。
+        let source = std::env::current_exe().expect("current_exe");
         let peer = dir.join("xt-adhoc-peer");
-        std::fs::copy("/bin/sleep", &peer).expect("复制 /bin/sleep");
+        std::fs::copy(&source, &peer).expect("复制测试二进制");
         let signed = Command::new("/usr/bin/codesign")
             .args(["--force", "--sign", "-"])
             .arg(&peer)
@@ -763,78 +777,40 @@ mod tests {
         );
         let want = static_cdhashes(&peer).expect("磁盘上的 ad-hoc 签名必须能读出 cdhash");
 
-        // socketpair：parent 端留在测试进程，child 端随 exec 继承。
-        let mut sockets = [0_i32; 2];
-        let rc = unsafe {
-            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr())
-        };
-        assert_eq!(rc, 0, "socketpair 失败：{}", std::io::Error::last_os_error());
+        let socket = dir.join("peer.sock");
+        let listener = UnixListener::bind(&socket).expect("绑定测试 socket");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let accepted = listener.accept();
+            let _ = tx.send(accepted);
+        });
 
-        // 一根 CLOEXEC 的 pipe：exec 成功时内核会自动关掉写端，父进程读到 EOF，
-        // 于是测试不需要 sleep/轮询就能确定「child 已经 exec 成 ad-hoc 二进制」。
-        let mut notify = [0_i32; 2];
-        let rc = unsafe { libc::pipe(notify.as_mut_ptr()) };
-        assert_eq!(rc, 0, "pipe 失败：{}", std::io::Error::last_os_error());
-        let flags = unsafe { libc::fcntl(notify[1], libc::F_GETFD) };
-        assert!(flags >= 0);
-        assert_eq!(
-            unsafe { libc::fcntl(notify[1], libc::F_SETFD, flags | libc::FD_CLOEXEC) },
-            0
-        );
+        let mut child = Command::new(&peer)
+            .args([
+                "--exact",
+                "trust::tests::peer_child_connects_and_parks",
+                "--nocapture",
+            ])
+            .env("XT_TRUST_PEER_SOCKET", &socket)
+            .spawn()
+            .expect("启动 ad-hoc 对端");
 
-        let c_path = CString::new(peer.as_os_str().as_bytes()).expect("peer path 不含 NUL");
-        let c_arg0 = CString::new("xt-adhoc-peer").expect("argv0 不含 NUL");
-        let c_arg1 = CString::new("30").expect("argv1 不含 NUL");
-        let parent_socket = sockets[0];
-        let child_socket = sockets[1];
-        let notify_read = notify[0];
-        let notify_write = notify[1];
-
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0, "fork 失败：{}", std::io::Error::last_os_error());
-        if pid == 0 {
-            // 子进程：只做 async-signal-safe 的系统调用，然后 exec。
-            unsafe {
-                libc::close(parent_socket);
-                libc::close(notify_read);
-                let _ = notify_write; // 保持打开，exec 时由 CLOEXEC 关闭
-                libc::execl(
-                    c_path.as_ptr(),
-                    c_arg0.as_ptr(),
-                    c_arg1.as_ptr(),
-                    std::ptr::null::<libc::c_char>(),
-                );
-                libc::_exit(127);
-            }
-        }
-
-        // 父进程：关掉 child 端与 pipe 写端，等 EOF 表示 exec 已经完成。
-        unsafe {
-            libc::close(child_socket);
-            libc::close(notify_write);
-        }
-        let mut byte = [0_u8; 1];
-        let read = unsafe { libc::read(notify_read, byte.as_mut_ptr() as *mut std::ffi::c_void, 1) };
-        unsafe { libc::close(notify_read) };
-        assert_eq!(read, 0, "child 未按预期 exec（pipe read={read}）");
-
-        let guest = peer_guest(parent_socket).expect("合法 ad-hoc 对端必须能被定位");
+        let (stream, _) = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("15 秒内没有等到对端连接")
+            .expect("accept 失败");
+        let guest = peer_guest(stream.as_raw_fd()).expect("合法 ad-hoc 对端必须能被定位");
         let got = code_cdhashes(guest).expect("对端 cdhash 必须可读");
         unsafe { CFRelease(guest) };
-        unsafe { libc::close(parent_socket) };
         assert!(
             got.iter().any(|hash| want.iter().any(|want_hash| cdhashes_match(hash, want_hash))),
-            "对端运行的切片必须属于已签名文件：got={:?} want={:?}",
-            got,
-            want
+            "对端运行的切片必须属于已签名文件：got={} want={}",
+            hex_all(&got),
+            hex_all(&want)
         );
 
-        // 清理：送 SIGKILL 并 reap；sleep 不会响应 SIGTERM 以外的信号？KILL 一定生效。
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-            let mut status = 0;
-            libc::waitpid(pid, &mut status, 0);
-        }
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -847,5 +823,4 @@ mod tests {
         assert!(static_cdhashes(&path).is_err(), "未签名文件不许读出 cdhash");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }
