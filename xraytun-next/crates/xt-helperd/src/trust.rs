@@ -52,6 +52,7 @@ use xt_contract::error::{ErrorBody, ErrorCode};
 
 type CFAllocatorRef = *const c_void;
 type CFDataRef = *const c_void;
+type CFArrayRef = *const c_void;
 type CFDictionaryRef = *const c_void;
 type CFRawStringRef = *const c_void;
 type CFURLRef = *const c_void;
@@ -93,6 +94,8 @@ extern "C" {
     fn CFDataCreate(allocator: CFAllocatorRef, bytes: *const u8, length: CFIndex) -> CFDataRef;
     fn CFDataGetBytePtr(data: CFDataRef) -> *const u8;
     fn CFDataGetLength(data: CFDataRef) -> CFIndex;
+    fn CFArrayGetCount(array: CFArrayRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(array: CFArrayRef, index: CFIndex) -> *const c_void;
     fn CFDictionaryCreate(
         allocator: CFAllocatorRef,
         keys: *const *const c_void,
@@ -135,6 +138,9 @@ extern "C" {
     /// `const CFStringRef kSecCodeInfoUnique`：签名信息里的 **cdhash**（`CFData`）。
     /// ad-hoc 签名同样有它，且由二进制的**实际字节**决定 —— 这是无证书身份绑定的锚。
     static kSecCodeInfoUnique: CFRawStringRef;
+    /// `const CFStringRef kSecCodeInfoCdHashes`：**每个架构各一个** cdhash 的 CFArray。
+    /// universal 二进制不能只比 `kSecCodeInfoUnique`（它挑的切片未必是进程正在跑的切片）。
+    static kSecCodeInfoCdHashes: CFRawStringRef;
 
     fn SecRequirementCreateWithString(
         text: CFRawStringRef,
@@ -167,7 +173,7 @@ extern "C" {
     fn SecStaticCodeCreateWithPath(
         path: CFURLRef,
         flags: SecCSFlags,
-        code: *mut SecCodeRef,
+        code: *mut SecStaticCodeRef,
     ) -> OSStatus;
     fn SecCodeCheckValidity(
         code: SecCodeRef,
@@ -613,6 +619,89 @@ fn code_cdhash_from_static(code: SecStaticCodeRef) -> Result<Vec<u8>, ErrorBody>
     }
 }
 
+/// 从一个静态 `SecStaticCode` 取**所有架构**的 cdhash。
+///
+/// `kSecCodeInfoUnique` 只给一个 cdhash；universal 二进制在 arm64 上运行时，
+/// 它未必是正在运行的那一切片。`kSecCodeInfoCdHashes` 给出每个架构的 cdhash，
+/// 授权时只要**交集非空**，就说明对端运行的切片确实属于这个已签名的文件。
+fn code_cdhashes_from_static(code: SecStaticCodeRef) -> Result<Vec<Vec<u8>>, ErrorBody> {
+    if code.is_null() {
+        return Err(internal_error("SecStaticCode 为空"));
+    }
+    // SAFETY: 标准 CoreFoundation / Security 生命周期；`info` 与 `unique` 都在
+    // 本函数作用域内被读取，复制出字节后 Release。
+    unsafe {
+        let mut info: CFDictionaryRef = std::ptr::null();
+        let status = SecCodeCopySigningInformation(
+            code,
+            K_SEC_CS_SIGNING_INFORMATION,
+            &mut info,
+        );
+        if status != 0 || info.is_null() {
+            return Err(unauthorized(format!(
+                "取签名信息失败（OSStatus {status}）——对端可能完全没有签名"
+            )));
+        }
+
+        let mut hashes = Vec::new();
+        let unique = CFDictionaryGetValue(info, kSecCodeInfoUnique) as CFDataRef;
+        if let Some(bytes) = cfdata_bytes(unique) {
+            hashes.push(bytes);
+        }
+        let array = CFDictionaryGetValue(info, kSecCodeInfoCdHashes) as CFArrayRef;
+        if !array.is_null() {
+            let count = CFArrayGetCount(array);
+            for index in 0..count {
+                let value = CFArrayGetValueAtIndex(array, index) as CFDataRef;
+                if let Some(bytes) = cfdata_bytes(value) {
+                    if !hashes.contains(&bytes) {
+                        hashes.push(bytes);
+                    }
+                }
+            }
+        }
+        CFRelease(info);
+        if hashes.is_empty() {
+            return Err(unauthorized(
+                "签名信息里没有 cdhash（kSecCodeInfoUnique / kSecCodeInfoCdHashes）",
+            ));
+        }
+        Ok(hashes)
+    }
+}
+
+/// 取磁盘文件的**全部架构** cdhash。
+fn static_cdhashes(path: &Path) -> Result<Vec<Vec<u8>>, ErrorBody> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: 标准 CoreFoundation / Security 生命周期。
+    unsafe {
+        let url = CFURLCreateFromFileSystemRepresentation(
+            std::ptr::null(),
+            bytes.as_ptr(),
+            bytes.len() as CFIndex,
+            false,
+        );
+        if url.is_null() {
+            return Err(internal_error("CFURLCreateFromFileSystemRepresentation 失败"));
+        }
+        let mut code: SecStaticCodeRef = std::ptr::null();
+        let status = SecStaticCodeCreateWithPath(url, K_SEC_CS_DEFAULT_FLAGS, &mut code);
+        CFRelease(url);
+        if status != 0 || code.is_null() {
+            return Err(unauthorized(format!(
+                "读不到 {} 的代码签名（OSStatus {status}）",
+                path.display()
+            )));
+        }
+        let hashes = code_cdhashes_from_static(code);
+        CFRelease(code);
+        hashes
+    }
+}
+
+/// 取**磁盘上**某个二进制的 cdhash（单值，测试与诊断用）。
 /// 取**磁盘上**某个二进制的 cdhash。
 fn static_cdhash(path: &Path) -> Result<Vec<u8>, ErrorBody> {
     use std::os::unix::ffi::OsStrExt;
@@ -630,7 +719,7 @@ fn static_cdhash(path: &Path) -> Result<Vec<u8>, ErrorBody> {
         if url.is_null() {
             return Err(internal_error("CFURLCreateFromFileSystemRepresentation 失败"));
         }
-        let mut code: SecCodeRef = std::ptr::null();
+        let mut code: SecStaticCodeRef = std::ptr::null();
         let status = SecStaticCodeCreateWithPath(url, K_SEC_CS_DEFAULT_FLAGS, &mut code);
         CFRelease(url);
         if status != 0 || code.is_null() {
@@ -654,20 +743,28 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 校验对端进程的 cdhash == 绑定二进制的 cdhash。
+fn hex_all(hashes: &[Vec<u8>]) -> String {
+    hashes.iter().map(|hash| hex(hash)).collect::<Vec<_>>().join(",")
+}
+
+/// 校验对端进程的 cdhash 与绑定二进制**至少有一个架构切片相同**。
+///
+/// 为什么不是只比 `kSecCodeInfoUnique`：安装文件与运行进程都可能是 universal；
+/// 前者返回的 Unique 未必就是当前进程正在跑的切片。逐架构取集合求交集，
+/// 既覆盖多架构，又保持「对端运行的确实是这个已签名文件里的一个切片」这个判据。
 fn verify_installed_app_cdhash(fd: RawFd, app_binary: &Path) -> Result<(), ErrorBody> {
     // 先读「应该是谁」：读不到就拒绝（fail-closed），不许因为读不到而放行。
-    let want = static_cdhash(app_binary)?;
+    let want = static_cdhashes(app_binary)?;
     let guest = peer_guest(fd)?;
     let got = code_cdhash(guest);
     // SAFETY: `peer_guest` 返回的是需要 Release 的 Security 对象。
     unsafe { CFRelease(guest) };
     let got = got?;
-    if !cdhashes_match(&got, &want) {
+    if !got.iter().any(|hash| want.iter().any(|want_hash| cdhashes_match(hash, want_hash))) {
         return Err(unauthorized(format!(
             "cdhash 不一致：对端 {}，已安装组件 {}（{}）",
-            hex(&got),
-            hex(&want),
+            hex_all(&got),
+            hex_all(&want),
             app_binary.display()
         )));
     }
@@ -725,7 +822,7 @@ mod tests {
             String::from_utf8_lossy(&signed.stdout),
             String::from_utf8_lossy(&signed.stderr)
         );
-        let want = static_cdhash(&peer).expect("磁盘上的 ad-hoc 签名必须能读出 cdhash");
+        let want = static_cdhashes(&peer).expect("磁盘上的 ad-hoc 签名必须能读出 cdhash");
 
         // socketpair：parent 端留在测试进程，child 端随 exec 继承。
         let mut sockets = [0_i32; 2];
@@ -786,7 +883,12 @@ mod tests {
         let got = code_cdhash(guest).expect("对端 cdhash 必须可读");
         unsafe { CFRelease(guest) };
         unsafe { libc::close(parent_socket) };
-        assert_eq!(got, want, "对端 cdhash 必须与磁盘文件逐字节相同");
+        assert!(
+            got.iter().any(|hash| want.iter().any(|want_hash| cdhashes_match(hash, want_hash))),
+            "对端运行的切片必须属于已签名文件：got={:?} want={:?}",
+            got,
+            want
+        );
 
         // 清理：送 SIGKILL 并 reap；sleep 不会响应 SIGTERM 以外的信号？KILL 一定生效。
         unsafe {
