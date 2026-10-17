@@ -58,11 +58,24 @@ type CFURLRef = *const c_void;
 type CFIndex = isize;
 type OSStatus = i32;
 type SecCodeRef = *const c_void;
+type SecStaticCodeRef = *const c_void;
 type SecRequirementRef = *const c_void;
 type SecCSFlags = u32;
 
+/// `audit_token_t`：8 个 `u32`，共 32 字节。必须 `#[repr(C)]` 且无填充 ——
+/// Security.framework 按 C 结构体原样读取这块内存。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AuditToken {
+    val: [u32; 8],
+}
+
 /// `kSecCSDefaultFlags`。
 const K_SEC_CS_DEFAULT_FLAGS: SecCSFlags = 0;
+/// `kSecCSSigningInformation`：`SecCodeCopySigningInformation` 取签名信息（含 cdhash）用。
+const K_SEC_CS_SIGNING_INFORMATION: SecCSFlags = 1 << 1;
+/// `kCFNumberSInt32Type`：`kSecGuestAttributePid` 的 value 类型。
+const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
 
 /// `kCFTypeDictionaryKeyCallBacks` / `...ValueCallBacks` 是 CoreFoundation 导出的
 /// **结构体变量**；我们只需要它的地址（把 `&...` 交给 `CFDictionaryCreate`），
@@ -103,6 +116,11 @@ extern "C" {
         encoding: u32,
         is_external: bool,
     ) -> CFRawStringRef;
+    fn CFNumberCreate(
+        allocator: CFAllocatorRef,
+        number_type: i32,
+        value_ptr: *const c_void,
+    ) -> *const c_void;
     fn CFRelease(cf: *const c_void);
 }
 
@@ -110,6 +128,9 @@ extern "C" {
 extern "C" {
     /// `const CFStringRef kSecGuestAttributeAudit`：用 audit token 定位对端进程。
     static kSecGuestAttributeAudit: CFRawStringRef;
+    /// `const CFStringRef kSecGuestAttributePid`：按 pid 定位对端进程（仅作
+    /// ``LOCAL_PEERTOKEN`` 路径在系统上不可用时的最后回退）。
+    static kSecGuestAttributePid: CFRawStringRef;
 
     /// `const CFStringRef kSecCodeInfoUnique`：签名信息里的 **cdhash**（`CFData`）。
     /// ad-hoc 签名同样有它，且由二进制的**实际字节**决定 —— 这是无证书身份绑定的锚。
@@ -126,8 +147,20 @@ extern "C" {
         flags: SecCSFlags,
         code: *mut SecCodeRef,
     ) -> OSStatus;
-    fn SecCodeCopySigningInformation(
+    /// 用内核给的 audit token 直接建 `SecCode`。这是 `securityd` 自己用的入口，
+    /// 比「自己拼 CFDictionary 再走 generic guest 查找」少一层对象组装。
+    fn SecCodeCreateWithAuditToken(
+        audit: *const AuditToken,
+        flags: SecCSFlags,
+        code: *mut SecCodeRef,
+    ) -> OSStatus;
+    fn SecCodeCopyStaticCode(
         code: SecCodeRef,
+        flags: SecCSFlags,
+        static_code: *mut SecStaticCodeRef,
+    ) -> OSStatus;
+    fn SecCodeCopySigningInformation(
+        code: SecStaticCodeRef,
         flags: SecCSFlags,
         information: *mut CFDictionaryRef,
     ) -> OSStatus;
@@ -301,18 +334,65 @@ fn identify(fd: RawFd) -> Result<PeerIdentity, ErrorBody> {
 // ---------------------------------------------------------------------------
 
 /// 取对端进程的 `SecCode`（**调用方负责 `CFRelease`**）。
+///
+/// 2026-10-17 真机第一份日志：`SecCodeCopyGuestWithAttributes` 返回
+/// `errSecCSBadObjectFormat (-67049)`，合法 App 也被拒。这里的策略是**先走
+/// `SecCodeCreateWithAuditToken`**（securityd 自己的入口，不做 generic host 查找）
+/// 再回退到旧的 CFDictionary 路径；两条都失败才按 pid 查一次。每一次失败都
+/// 把 OSStatus 留在错误串里，不再把「框架调用失败」与「签名不匹配」混成一句话。
 fn peer_guest(fd: RawFd) -> Result<SecCodeRef, ErrorBody> {
     let token = crate::fdpass::peer_audit_token(fd)
         .map_err(|e| unauthorized(format!("取对端 audit token 失败：{e}")))?;
 
+    let mut attempts = Vec::new();
+
+    match peer_guest_with_audit_token(&token) {
+        Ok(guest) => return Ok(guest),
+        Err(error) => attempts.push(format!("SecCodeCreateWithAuditToken：{error}")),
+    }
+    match peer_guest_with_audit_attributes(&token) {
+        Ok(guest) => return Ok(guest),
+        Err(error) => attempts.push(format!("SecCodeCopyGuestWithAttributes(audit)：{error}")),
+    }
+
+    // 最后回退：按 pid 查。只有上面两条都失败才会走到这里。
+    if let Some(pid) = crate::fdpass::peer_pid(fd) {
+        match peer_guest_with_pid(pid) {
+            Ok(guest) => return Ok(guest),
+            Err(error) => attempts.push(format!("SecCodeCopyGuestWithAttributes(pid={pid})：{error}")),
+        }
+    } else {
+        attempts.push("LOCAL_PEERPID 也不可读".to_string());
+    }
+
+    Err(unauthorized(format!(
+        "取对端 SecCode 失败（audit token 路径与 pid 回退都失败）：{}",
+        attempts.join("；")
+    )))
+}
+
+/// 首选路径：`SecCodeCreateWithAuditToken`。
+fn peer_guest_with_audit_token(token: &[u32; 8]) -> Result<SecCodeRef, ErrorBody> {
+    let audit = AuditToken { val: *token };
+    let mut guest: SecCodeRef = std::ptr::null();
+    // SAFETY: `audit` 在本调用期间存活；Security.framework 只读它，并写我们提供的 `guest`。
+    let status = unsafe { SecCodeCreateWithAuditToken(&audit, K_SEC_CS_DEFAULT_FLAGS, &mut guest) };
+    if status != 0 || guest.is_null() {
+        return Err(unauthorized(format!("OSStatus {status}")));
+    }
+    Ok(guest)
+}
+
+/// 兼容路径：自己构造 `{kSecGuestAttributeAudit: CFData(token)}` 再调 generic API。
+fn peer_guest_with_audit_attributes(token: &[u32; 8]) -> Result<SecCodeRef, ErrorBody> {
     // SAFETY: 全部是 CoreFoundation / Security 的标准对象生命周期操作。
-    // `token` 是栈上 32 字节数组，在 `CFDataCreate` 返回前一直存活；
-    // 创建出的 CFData / CFDictionary 在下面立即 Release；返回的 SecCode 由调用方 Release。
+    // `token` 在 `CFDataCreate` 返回前一直存活；创建出的 CFData / CFDictionary
+    // 在下面立即 Release；返回的 SecCode 由调用方 Release。
     unsafe {
         let token_data = CFDataCreate(
             std::ptr::null(),
             token.as_ptr() as *const u8,
-            std::mem::size_of_val(&token) as CFIndex,
+            std::mem::size_of_val(token) as CFIndex,
         );
         if token_data.is_null() {
             return Err(internal_error("CFDataCreate 失败"));
@@ -343,9 +423,57 @@ fn peer_guest(fd: RawFd) -> Result<SecCodeRef, ErrorBody> {
         CFRelease(attributes);
         CFRelease(token_data);
         if status != 0 || guest.is_null() {
-            return Err(unauthorized(format!(
-                "SecCodeCopyGuestWithAttributes 失败（OSStatus {status}）"
-            )));
+            return Err(unauthorized(format!("OSStatus {status}")));
+        }
+        Ok(guest)
+    }
+}
+
+/// 最后回退：按 pid 定位。只在上面的 audit token 路径失败时使用。
+///
+/// 这是**弱回退**：pid 有复用竞态。调用方仍会拿这个 SecCode 的 cdhash 与安装
+/// 文件逐字节比较，且授权只在连接建立时发生；但没有 audit token 的不可伪造性。
+/// 因此它必须留下 `warn`，不能悄悄降级。
+fn peer_guest_with_pid(pid: libc::pid_t) -> Result<SecCodeRef, ErrorBody> {
+    tracing::warn!(
+        pid,
+        "audit token 路径取不到对端 SecCode，回退到 pid 查找（弱身份绑定，仅作兼容）"
+    );
+    // SAFETY: 标准 CoreFoundation / Security 生命周期；数字与字典都在作用域内存活。
+    unsafe {
+        let number = CFNumberCreate(
+            std::ptr::null(),
+            K_CF_NUMBER_SINT32_TYPE,
+            &pid as *const libc::pid_t as *const c_void,
+        );
+        if number.is_null() {
+            return Err(internal_error("CFNumberCreate 失败"));
+        }
+        let keys: [*const c_void; 1] = [kSecGuestAttributePid];
+        let values: [*const c_void; 1] = [number];
+        let attributes = CFDictionaryCreate(
+            std::ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        );
+        if attributes.is_null() {
+            CFRelease(number);
+            return Err(internal_error("CFDictionaryCreate 失败"));
+        }
+        let mut guest: SecCodeRef = std::ptr::null();
+        let status = SecCodeCopyGuestWithAttributes(
+            std::ptr::null(),
+            attributes,
+            K_SEC_CS_DEFAULT_FLAGS,
+            &mut guest,
+        );
+        CFRelease(attributes);
+        CFRelease(number);
+        if status != 0 || guest.is_null() {
+            return Err(unauthorized(format!("OSStatus {status}")));
         }
         Ok(guest)
     }
@@ -432,15 +560,45 @@ fn cfdata_bytes(data: CFDataRef) -> Option<Vec<u8>> {
 }
 
 /// 从一个 `SecCode` 取 **cdhash**（签名信息里的 `kSecCodeInfoUnique`）。
+///
+/// 先把动态 `SecCode` 转成 `SecStaticCode`，再取签名信息：这是 Security.framework
+/// 文档给出的对象类型（`SecCodeCopySigningInformation` 的形参是 `SecStaticCodeRef`），
+/// 避免把动态对象硬塞给静态 API 的隐式转换。
 fn code_cdhash(code: SecCodeRef) -> Result<Vec<u8>, ErrorBody> {
     if code.is_null() {
         return Err(internal_error("SecCode 为空"));
+    }
+    // SAFETY: `SecCodeCopyStaticCode` 只读 `code`、写我们提供的 `static_code`；
+    // 返回的静态对象由我们 Release。
+    let mut static_code: SecStaticCodeRef = std::ptr::null();
+    let status = unsafe {
+        SecCodeCopyStaticCode(code, K_SEC_CS_DEFAULT_FLAGS, &mut static_code)
+    };
+    if status != 0 || static_code.is_null() {
+        return Err(unauthorized(format!(
+            "SecCodeCopyStaticCode 失败（OSStatus {status}）"
+        )));
+    }
+    let result = code_cdhash_from_static(static_code);
+    // SAFETY: `static_code` 是上面返回的、需要 Release 的 Security 对象。
+    unsafe { CFRelease(static_code) };
+    result
+}
+
+/// 从一个静态 `SecStaticCode` 取 cdhash。
+fn code_cdhash_from_static(code: SecStaticCodeRef) -> Result<Vec<u8>, ErrorBody> {
+    if code.is_null() {
+        return Err(internal_error("SecStaticCode 为空"));
     }
     // SAFETY: `SecCodeCopySigningInformation` 写一个我们提供的有效指针，返回的
     // 字典由我们 Release；`kSecCodeInfoUnique` 是 Security.framework 导出的常量。
     unsafe {
         let mut info: CFDictionaryRef = std::ptr::null();
-        let status = SecCodeCopySigningInformation(code, K_SEC_CS_DEFAULT_FLAGS, &mut info);
+        let status = SecCodeCopySigningInformation(
+            code,
+            K_SEC_CS_SIGNING_INFORMATION,
+            &mut info,
+        );
         if status != 0 || info.is_null() {
             return Err(unauthorized(format!(
                 "取签名信息失败（OSStatus {status}）——对端可能完全没有签名"
@@ -481,7 +639,7 @@ fn static_cdhash(path: &Path) -> Result<Vec<u8>, ErrorBody> {
                 path.display()
             )));
         }
-        let hash = code_cdhash(code);
+        let hash = code_cdhash_from_static(code);
         CFRelease(code);
         hash
     }
@@ -526,4 +684,127 @@ fn unauthorized(message: impl Into<String>) -> ErrorBody {
 
 fn internal_error(message: impl Into<String>) -> ErrorBody {
     ErrorBody::new(ErrorCode::Internal, message)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::Command;
+
+    /// 真机路径的**最小复现**：一个 ad-hoc 签名的裸 Mach-O 进程，
+    /// 通过真实 AF_UNIX socket 连接，另一侧用 `LOCAL_PEERTOKEN` 取 audit token，
+    /// 再用 Security.framework 定位它的 `SecCode` 并把 cdhash 与磁盘文件逐字节比较。
+    ///
+    /// 为什么必须用 `fork + execl`：`std::process::Command` 在 macOS 上可能走
+    /// `posix_spawn` 的 close-fds 语义，控制不了我们要继承的 socket fd；这里要的
+    /// 正是「进程 exec 后 socket fd 仍在」这个现场。
+    #[test]
+    fn ad_hoc_signed_peer_is_located_by_audit_token_and_cdhash_matches() {
+        let dir = std::env::temp_dir().join(format!(
+            "xt-trust-peer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("创建测试目录");
+
+        let peer = dir.join("xt-adhoc-peer");
+        std::fs::copy("/bin/sleep", &peer).expect("复制 /bin/sleep");
+        let signed = Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&peer)
+            .output()
+            .expect("执行 codesign");
+        assert!(
+            signed.status.success(),
+            "ad-hoc 签名失败：stdout={} stderr={}",
+            String::from_utf8_lossy(&signed.stdout),
+            String::from_utf8_lossy(&signed.stderr)
+        );
+        let want = static_cdhash(&peer).expect("磁盘上的 ad-hoc 签名必须能读出 cdhash");
+
+        // socketpair：parent 端留在测试进程，child 端随 exec 继承。
+        let mut sockets = [0_i32; 2];
+        let rc = unsafe {
+            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sockets.as_mut_ptr())
+        };
+        assert_eq!(rc, 0, "socketpair 失败：{}", std::io::Error::last_os_error());
+
+        // 一根 CLOEXEC 的 pipe：exec 成功时内核会自动关掉写端，父进程读到 EOF，
+        // 于是测试不需要 sleep/轮询就能确定「child 已经 exec 成 ad-hoc 二进制」。
+        let mut notify = [0_i32; 2];
+        let rc = unsafe { libc::pipe(notify.as_mut_ptr()) };
+        assert_eq!(rc, 0, "pipe 失败：{}", std::io::Error::last_os_error());
+        let flags = unsafe { libc::fcntl(notify[1], libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(notify[1], libc::F_SETFD, flags | libc::FD_CLOEXEC) },
+            0
+        );
+
+        let c_path = CString::new(peer.as_os_str().as_bytes()).expect("peer path 不含 NUL");
+        let c_arg0 = CString::new("xt-adhoc-peer").expect("argv0 不含 NUL");
+        let c_arg1 = CString::new("30").expect("argv1 不含 NUL");
+        let parent_socket = sockets[0];
+        let child_socket = sockets[1];
+        let notify_read = notify[0];
+        let notify_write = notify[1];
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork 失败：{}", std::io::Error::last_os_error());
+        if pid == 0 {
+            // 子进程：只做 async-signal-safe 的系统调用，然后 exec。
+            unsafe {
+                libc::close(parent_socket);
+                libc::close(notify_read);
+                let _ = notify_write; // 保持打开，exec 时由 CLOEXEC 关闭
+                libc::execl(
+                    c_path.as_ptr(),
+                    c_arg0.as_ptr(),
+                    c_arg1.as_ptr(),
+                    std::ptr::null::<libc::c_char>(),
+                );
+                libc::_exit(127);
+            }
+        }
+
+        // 父进程：关掉 child 端与 pipe 写端，等 EOF 表示 exec 已经完成。
+        unsafe {
+            libc::close(child_socket);
+            libc::close(notify_write);
+        }
+        let mut byte = [0_u8; 1];
+        let read = unsafe { libc::read(notify_read, byte.as_mut_ptr() as *mut std::ffi::c_void, 1) };
+        unsafe { libc::close(notify_read) };
+        assert_eq!(read, 0, "child 未按预期 exec（pipe read={read}）");
+
+        let guest = peer_guest(parent_socket).expect("合法 ad-hoc 对端必须能被定位");
+        let got = code_cdhash(guest).expect("对端 cdhash 必须可读");
+        unsafe { CFRelease(guest) };
+        unsafe { libc::close(parent_socket) };
+        assert_eq!(got, want, "对端 cdhash 必须与磁盘文件逐字节相同");
+
+        // 清理：送 SIGKILL 并 reap；sleep 不会响应 SIGTERM 以外的信号？KILL 一定生效。
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cdhash_reader_rejects_unsigned_file() {
+        let dir = std::env::temp_dir().join(format!("xt-unsigned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建测试目录");
+        let path = dir.join("plain.txt");
+        std::fs::write(&path, b"not a mach-o").expect("写测试文件");
+        assert!(static_cdhash(&path).is_err(), "未签名文件不许读出 cdhash");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }
