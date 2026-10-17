@@ -591,34 +591,6 @@ fn code_cdhashes(code: SecCodeRef) -> Result<Vec<Vec<u8>>, ErrorBody> {
     result
 }
 
-/// 从一个静态 `SecStaticCode` 取 cdhash。
-fn code_cdhash_from_static(code: SecStaticCodeRef) -> Result<Vec<u8>, ErrorBody> {
-    if code.is_null() {
-        return Err(internal_error("SecStaticCode 为空"));
-    }
-    // SAFETY: `SecCodeCopySigningInformation` 写一个我们提供的有效指针，返回的
-    // 字典由我们 Release；`kSecCodeInfoUnique` 是 Security.framework 导出的常量。
-    unsafe {
-        let mut info: CFDictionaryRef = std::ptr::null();
-        let status = SecCodeCopySigningInformation(
-            code,
-            K_SEC_CS_SIGNING_INFORMATION,
-            &mut info,
-        );
-        if status != 0 || info.is_null() {
-            return Err(unauthorized(format!(
-                "取签名信息失败（OSStatus {status}）——对端可能完全没有签名"
-            )));
-        }
-        let unique = CFDictionaryGetValue(info, kSecCodeInfoUnique) as CFDataRef;
-        let bytes = cfdata_bytes(unique);
-        CFRelease(info);
-        bytes.ok_or_else(|| {
-            unauthorized("签名信息里没有 cdhash（kSecCodeInfoUnique）——这个二进制没有可用签名")
-        })
-    }
-}
-
 /// 从一个静态 `SecStaticCode` 取**所有架构**的 cdhash。
 ///
 /// `kSecCodeInfoUnique` 只给一个 cdhash；universal 二进制在 arm64 上运行时，
@@ -698,39 +670,6 @@ fn static_cdhashes(path: &Path) -> Result<Vec<Vec<u8>>, ErrorBody> {
         let hashes = code_cdhashes_from_static(code);
         CFRelease(code);
         hashes
-    }
-}
-
-/// 取**磁盘上**某个二进制的 cdhash（单值，测试与诊断用）。
-/// 取**磁盘上**某个二进制的 cdhash。
-fn static_cdhash(path: &Path) -> Result<Vec<u8>, ErrorBody> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let bytes = path.as_os_str().as_bytes();
-    // SAFETY: 标准 CoreFoundation / Security 生命周期；CFURL 与 SecCode 都在
-    // 作用域内 Release，`bytes` 在 CFURL 创建前一直存活。
-    unsafe {
-        let url = CFURLCreateFromFileSystemRepresentation(
-            std::ptr::null(),
-            bytes.as_ptr(),
-            bytes.len() as CFIndex,
-            false,
-        );
-        if url.is_null() {
-            return Err(internal_error("CFURLCreateFromFileSystemRepresentation 失败"));
-        }
-        let mut code: SecStaticCodeRef = std::ptr::null();
-        let status = SecStaticCodeCreateWithPath(url, K_SEC_CS_DEFAULT_FLAGS, &mut code);
-        CFRelease(url);
-        if status != 0 || code.is_null() {
-            return Err(unauthorized(format!(
-                "读不到 {} 的代码签名（OSStatus {status}）",
-                path.display()
-            )));
-        }
-        let hash = code_cdhash_from_static(code);
-        CFRelease(code);
-        hash
     }
 }
 
@@ -905,7 +844,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("创建测试目录");
         let path = dir.join("plain.txt");
         std::fs::write(&path, b"not a mach-o").expect("写测试文件");
-        assert!(static_cdhash(&path).is_err(), "未签名文件不许读出 cdhash");
+        assert!(static_cdhashes(&path).is_err(), "未签名文件不许读出 cdhash");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
